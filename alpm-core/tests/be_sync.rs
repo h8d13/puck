@@ -110,9 +110,9 @@ fn fields() {
 	assert_eq!(foo.origin, Some(PkgFrom::SyncDb));
 	assert_eq!(foo.size, 10);
 	assert_eq!(foo.builddate, 30);
-	// alpm-types normalizes these two
-	assert_eq!(foo.desc.as_deref(), Some(&b"a b"[..]));
-	assert_eq!(foo.url.as_deref(), Some(&b"https://example.org/"[..]));
+	// as read like the C, alpm-types only normalizes their Display
+	assert_eq!(foo.desc.as_deref(), Some(&b"a  b"[..]));
+	assert_eq!(foo.url.as_deref(), Some(&b"https://example.org"[..]));
 	assert_eq!(foo.depends[0].name, b"bar");
 	assert_eq!(foo.depends[1].name, b"libx.so");
 	let files: Vec<&[u8]> =

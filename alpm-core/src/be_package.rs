@@ -223,8 +223,9 @@ macro_rules! apply_info {
 		pkg.name = Some(name);
 		pkg.base = Some(text(&v.pkgbase));
 		pkg.version = Some(text(&v.pkgver));
-		pkg.desc = Some(text(&v.pkgdesc));
-		pkg.url = Some(text(&v.url));
+		// as read, alpm-types normalizes their Display
+		pkg.desc = Some(text(&v.pkgdesc.as_original_str()));
+		pkg.url = Some(text(&v.url.as_original_str()));
 		pkg.builddate = v.builddate;
 		pkg.packager = Some(text(&v.packager));
 		pkg.arch = Some(text(&v.arch));

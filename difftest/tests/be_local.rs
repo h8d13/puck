@@ -157,8 +157,10 @@ fn assert_same(sb: &TempRoot, loads: Loads, what: &dyn Fn() -> String) {
 	}
 }
 
-// valid alpm-db generators. strings are built so that alpm-types prints
-// them back unchanged (no leading zeros, single spaces, normalized urls)
+// valid alpm-db generators. they include text alpm-types normalizes or
+// reads specially (pkgrel leading zeros, runs of spaces, urls without
+// path or in uppercase, ".so" in names, packagers without email), which
+// has to come out as the C reads it
 
 const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
 const ALNUM: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
@@ -172,23 +174,13 @@ fn pick<'a>(rng: &mut Rng, v: &[&'a str]) -> &'a str {
 	v[rng.below(v.len())]
 }
 
-// alpm-types reads ".so" inside a relation name as a soname, those are
-// left to odd_inputs
+// sometimes with ".so" inside, which alpm-types tries as a soname first
 fn pkgname(rng: &mut Rng) -> String {
-	loop {
-		let first =
-			rng.pick(b"abcdefghijklmnopqrstuvwxyz0123456789_@+");
-		let rest = word(
-			rng,
-			b"abcdefghijklmnopqrstuvwxyz0123456789@._+-",
-			0,
-			10,
-		);
-		let name = format!("{}{rest}", first as char);
-		if !name.contains(".so") {
-			return name;
-		}
-	}
+	let first = rng.pick(b"abcdefghijklmnopqrstuvwxyz0123456789_@+");
+	let rest =
+		word(rng, b"abcdefghijklmnopqrstuvwxyz0123456789@._+-", 0, 10);
+	let so = if rng.below(8) == 0 { ".so" } else { "" };
+	format!("{}{so}{rest}", first as char)
 }
 
 // positive integer without leading zero
@@ -201,10 +193,12 @@ fn pkgver(rng: &mut Rng) -> String {
 	format!("{first}{}", word(rng, b"0123456789abcxyz._+~", 0, 6))
 }
 
+// sometimes with a leading zero
 fn pkgrel(rng: &mut Rng) -> String {
+	let zero = if rng.below(4) == 0 { "0" } else { "" };
 	match rng.below(3) {
-		0 => format!("{}.{}", number(rng, 20), number(rng, 9)),
-		_ => number(rng, 30).to_string(),
+		0 => format!("{zero}{}.{}", number(rng, 20), number(rng, 9)),
+		_ => format!("{zero}{}", number(rng, 30)),
 	}
 }
 
@@ -251,12 +245,13 @@ fn relation_or_soname(rng: &mut Rng) -> String {
 	}
 }
 
+// words, sometimes apart by runs of blanks
 fn sentence(rng: &mut Rng, max_words: usize) -> String {
 	let n = rng.below(max_words + 1);
 	let words: Vec<String> = (0..n)
 		.map(|_| word(rng, b"abcXYZ019,.()'!-/#&", 1, 8))
 		.collect();
-	words.join(" ")
+	words.join(pick(rng, &[" ", " ", "  ", " \t"]))
 }
 
 fn optdepend(rng: &mut Rng) -> String {
@@ -266,19 +261,48 @@ fn optdepend(rng: &mut Rng) -> String {
 	};
 	match rng.below(2) {
 		0 => name,
-		_ => format!("{name}: {}", word(rng, ALNUM, 1, 6)),
+		// libalpm keeps the description after ": " as is
+		_ => format!(
+			"{name}: {}{}",
+			pick(rng, &["", "", " "]),
+			word(rng, ALNUM, 0, 6)
+		),
 	}
 }
 
 fn url(rng: &mut Rng) -> String {
-	match rng.below(5) {
+	match rng.below(6) {
 		0 => String::new(),
+		// url::Url adds a '/' path and lowercases
+		1 => format!(
+			"{}://{}.ORG",
+			pick(rng, &["HTTPS", "http"]),
+			word(rng, LOWER, 1, 8)
+		),
 		_ => format!(
 			"{}://{}.{}/{}",
 			pick(rng, &["https", "http", "ftp"]),
 			word(rng, LOWER, 1, 8),
 			pick(rng, &["org", "com", "io"]),
 			word(rng, b"abc012/_-~", 0, 10)
+		),
+	}
+}
+
+// a User ID, sometimes makepkg's default or an email address only
+fn packager(rng: &mut Rng) -> String {
+	let email = format!(
+		"<{}@{}.org>",
+		word(rng, LOWER, 1, 6),
+		word(rng, LOWER, 1, 6)
+	);
+	match rng.below(6) {
+		0 => "Unknown Packager".into(),
+		1 => email,
+		_ => format!(
+			"{} {} {email}",
+			word(rng, ALNUM, 1, 6),
+			word(rng, ALNUM, 1, 6)
 		),
 	}
 }
@@ -346,16 +370,7 @@ fn gen_desc(rng: &mut Rng, name: &str, version: &str) -> Desc {
 			one((rng.next_u64() % 4_000_000_000).to_string()),
 		),
 		("INSTALLDATE".into(), one((rng.next_u64() >> 1).to_string())),
-		(
-			"PACKAGER".into(),
-			one(format!(
-				"{} {} <{}@{}.org>",
-				word(rng, ALNUM, 1, 6),
-				word(rng, ALNUM, 1, 6),
-				word(rng, LOWER, 1, 6),
-				word(rng, LOWER, 1, 6)
-			)),
-		),
+		("PACKAGER".into(), one(packager(rng))),
 	];
 	let mut vals = vec!["none", "md5", "sha256", "pgp"];
 	let n = 1 + rng.below(vals.len());
@@ -846,7 +861,7 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 			"desc spaces",
 			desc(&|d| d.set("DESC", one(" a  b\tc "))),
 			base_f.clone(),
-			"desc",
+			"",
 		),
 		(
 			"desc empty",
@@ -935,7 +950,7 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				)
 			}),
 			base_f.clone(),
-			"xdata",
+			"",
 		),
 		(
 			"xdata no =",
@@ -988,19 +1003,19 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 			"unknown packager",
 			desc(&|d| d.set("PACKAGER", one("Unknown Packager"))),
 			base_f.clone(),
-			"ERR",
+			"",
 		),
 		(
 			"url normalized",
 			desc(&|d| d.set("URL", one("HTTPS://Example.ORG"))),
 			base_f.clone(),
-			"url",
+			"",
 		),
 		(
 			"url dot segment",
 			desc(&|d| d.set("URL", one("https://a.org/x/./y"))),
 			base_f.clone(),
-			"url",
+			"",
 		),
 		(
 			"url invalid",
@@ -1042,7 +1057,7 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 			"dep name with .so",
 			desc(&|d| d.set("DEPENDS", one("d1.so62r"))),
 			base_f.clone(),
-			"ERR",
+			"",
 		),
 		(
 			"dep with desc",
@@ -1060,7 +1075,7 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 			"optdep spaces",
 			desc(&|d| d.set("OPTDEPENDS", one("a:  two  words "))),
 			base_f.clone(),
-			"optdepends",
+			"",
 		),
 		(
 			"arch upper",
@@ -1375,4 +1390,6 @@ fn system_local_db() {
 		"  url only '/' appended: {url_slash}, backup only reordered: \
 		{bk_order}, backup \"(null)\" dropped: {bk_null}"
 	);
+	// alpm-types keeps the url as read (vendor/patches)
+	assert_eq!(url_slash, 0);
 }

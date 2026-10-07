@@ -337,9 +337,11 @@ fn apply_desc(pkg: &mut Package, desc: DbDescFile) {
 	};
 	// %NAME% and %VERSION% only feed the C's mismatch log
 	pkg.base = Some(text(&d.base));
-	pkg.desc = Some(text(&d.description));
+	// description and url as read, alpm-types normalizes their Display
+	pkg.desc = Some(text(&d.description.as_original_str()));
 	// %URL% is required, an empty value is alpm-db's None
-	pkg.url = Some(d.url.as_ref().map(text).unwrap_or_default());
+	let url = d.url.as_ref().map(|u| text(&u.as_original_str()));
+	pkg.url = Some(url.unwrap_or_default());
 	pkg.arch = Some(text(&d.arch));
 	pkg.builddate = d.builddate;
 	pkg.installdate = d.installdate;

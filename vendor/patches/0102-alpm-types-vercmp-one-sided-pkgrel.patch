@@ -1,0 +1,177 @@
+diff -ruN '--exclude=VENDORED' a/alpm-types/src/version/pkg_generic.rs b/alpm-types/src/version/pkg_generic.rs
+--- a/alpm-types/src/version/pkg_generic.rs
++++ b/alpm-types/src/version/pkg_generic.rs
+@@ -71,6 +71,8 @@
+     /// Compare two Versions and return a number
+     ///
+     /// The comparison algorithm is based on libalpm/ pacman's vercmp behavior.
++    /// Unlike [`Version::cmp`], the [`PackageRelease`] is only compared if both versions have
++    /// one, so `1.0` and `1.0-1` are considered to be the same version.
+     ///
+     /// * `1` if `a` is newer than `b`
+     /// * `0` if `a` and `b` are considered to be the same version
+@@ -96,16 +98,42 @@
+     ///     Version::vercmp(&Version::from_str("0.1.0")?, &Version::from_str("1.0.0")?),
+     ///     -1
+     /// );
++    /// assert_eq!(
++    ///     Version::vercmp(&Version::from_str("1.0.0")?, &Version::from_str("1.0.0-1")?),
++    ///     0
++    /// );
+     /// # Ok(())
+     /// # }
+     /// ```
+     pub fn vercmp(a: &Version, b: &Version) -> i8 {
+-        match a.cmp(b) {
++        match a.vercmp_ordering(b) {
+             Ordering::Less => -1,
+             Ordering::Equal => 0,
+             Ordering::Greater => 1,
+         }
+     }
++
++    /// The [`Ordering`] behind [`Version::vercmp`].
++    pub(crate) fn vercmp_ordering(&self, other: &Version) -> Ordering {
++        match (&self.pkgrel, &other.pkgrel) {
++            (Some(_), Some(_)) => self.cmp(other),
++            _ => self.cmp_without_pkgrel(other),
++        }
++    }
++
++    /// Compares the [`Epoch`] and [`PackageVersion`] of two versions.
++    fn cmp_without_pkgrel(&self, other: &Version) -> Ordering {
++        // An unset epoch is considered to be `0` (see alpm-epoch).
++        let epoch_cmp = self
++            .epoch
++            .unwrap_or_default()
++            .cmp(&other.epoch.unwrap_or_default());
++        if epoch_cmp.is_ne() {
++            return epoch_cmp;
++        }
++
++        self.pkgver.cmp(&other.pkgver)
++    }
+ }
+ 
+ impl AlpmParser for Version {
+@@ -193,21 +221,8 @@
+ 
+ impl Ord for Version {
+     fn cmp(&self, other: &Self) -> Ordering {
+-        // An unset epoch is considered to be `0` (see alpm-epoch).
+-        let epoch_cmp = self
+-            .epoch
+-            .unwrap_or_default()
+-            .cmp(&other.epoch.unwrap_or_default());
+-        if epoch_cmp.is_ne() {
+-            return epoch_cmp;
+-        }
+-
+-        let pkgver_cmp = self.pkgver.cmp(&other.pkgver);
+-        if pkgver_cmp.is_ne() {
+-            return pkgver_cmp;
+-        }
+-
+-        self.pkgrel.cmp(&other.pkgrel)
++        self.cmp_without_pkgrel(other)
++            .then_with(|| self.pkgrel.cmp(&other.pkgrel))
+     }
+ }
+ 
+@@ -427,4 +442,27 @@
+             reverse_vercmp_result
+         );
+     }
++
++    /// Ensure that [`Version::vercmp`] only compares the pkgrel if both versions have one, while
++    /// [`Version::cmp`] orders a version without pkgrel before one with it.
++    #[rstest]
++    #[case("1.0", "1.0-1", 0, Ordering::Less)]
++    #[case("1.0-5", "1.0", 0, Ordering::Greater)]
++    #[case("1.0-1", "1.0-2", -1, Ordering::Less)]
++    #[case("1.1", "1.0-2", 1, Ordering::Greater)]
++    #[case("1:1.0", "2.0-1", 1, Ordering::Greater)]
++    fn version_vercmp_one_sided_pkgrel(
++        #[case] version_a: &str,
++        #[case] version_b: &str,
++        #[case] vercmp: i8,
++        #[case] ordering: Ordering,
++    ) -> Result<(), Error> {
++        let version_a = Version::from_str(version_a)?;
++        let version_b = Version::from_str(version_b)?;
++
++        assert_eq!(Version::vercmp(&version_a, &version_b), vercmp);
++        assert_eq!(Version::vercmp(&version_b, &version_a), -vercmp);
++        assert_eq!(version_a.cmp(&version_b), ordering);
++        Ok(())
++    }
+ }
+diff -ruN '--exclude=VENDORED' a/alpm-types/src/version/requirement.rs b/alpm-types/src/version/requirement.rs
+--- a/alpm-types/src/version/requirement.rs
++++ b/alpm-types/src/version/requirement.rs
+@@ -98,6 +98,35 @@
+             .is_compatible_with(other_version.cmp(&self.version))
+     }
+ 
++    /// Returns `true` if the requirement is satisfied by the given package version, following
++    /// libalpm's dependency check.
++    ///
++    /// Delegates to [`Version::vercmp`], so the pkgrel is only compared if both the requirement
++    /// and `ver` have one.
++    /// Unlike [`VersionRequirement::is_satisfied_by`], a version without pkgrel satisfies a
++    /// requirement with one if the rest of the version satisfies it.
++    ///
++    /// ## Examples
++    ///
++    /// ```
++    /// use std::str::FromStr;
++    ///
++    /// use alpm_types::{Version, VersionRequirement};
++    ///
++    /// # fn main() -> Result<(), alpm_types::Error> {
++    /// let requirement = VersionRequirement::from_str(">=1.5-3")?;
++    ///
++    /// assert!(requirement.is_satisfied_by_vercmp(&Version::from_str("1.5")?));
++    /// assert!(!requirement.is_satisfied_by_vercmp(&Version::from_str("1.5-2")?));
++    /// assert!(!requirement.is_satisfied_by_vercmp(&Version::from_str("1.0")?));
++    /// # Ok(())
++    /// # }
++    /// ```
++    pub fn is_satisfied_by_vercmp(&self, ver: &Version) -> bool {
++        self.comparison
++            .is_compatible_with(ver.vercmp_ordering(&self.version))
++    }
++
+     /// Checks whether another [`VersionRequirement`] forms an intersection with this one.
+     ///
+     /// The intersection operation `∩` on versions simply checks if there is _any_ possible set of
+@@ -589,6 +618,29 @@
+         assert_eq!(requirement.is_satisfied_by(&version), result);
+     }
+ 
++    /// Check [`VersionRequirement::is_satisfied_by_vercmp`] where the pkgrel is present on one
++    /// side only, against [`VersionRequirement::is_satisfied_by`].
++    #[rstest]
++    #[case(">=1.5-3", "1.5", true, false)]
++    #[case(">=1.5-3", "1.5-2", false, false)]
++    #[case(">=1.5-3", "1.6", true, true)]
++    #[case("<1.5-3", "1.5", false, true)]
++    #[case("=1.5-3", "1.5", true, false)]
++    #[case("=1.5", "1.5-3", true, true)]
++    #[case("=0:1.5", "1.5-3", true, true)]
++    fn version_requirement_satisfied_vercmp(
++        #[case] requirement: &str,
++        #[case] version: &str,
++        #[case] vercmp: bool,
++        #[case] cmp: bool,
++    ) -> Result<(), Error> {
++        let requirement = VersionRequirement::from_str(requirement)?;
++        let version = Version::from_str(version)?;
++        assert_eq!(requirement.is_satisfied_by_vercmp(&version), vercmp);
++        assert_eq!(requirement.is_satisfied_by(&version), cmp);
++        Ok(())
++    }
++
+     #[rstest]
+     #[case::self_less_matching_other_less("<1", "<1")]
+     #[case::self_less_matching_other_less_or_equal("<1", "<=1")]

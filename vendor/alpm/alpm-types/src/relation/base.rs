@@ -9,7 +9,6 @@ use alpm_parsers::prelude::*;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use winnow::{
-    ascii::space1,
     combinator::{opt, peek, seq, terminated},
     error::ErrMode,
     token::{none_of, take_till},
@@ -311,12 +310,14 @@ impl AlpmParser for OptionalDependency {
     /// Due to this, the parser disambiguates the two cases as follows:
     ///
     /// - A `:` directly followed by a non-whitespace character is considered an epoch delimiter.
-    /// - A `:` followed by whitespace starts a description.
+    /// - A `:` followed by a space starts a description.
     ///
     /// As such, ambiguous input like `example>=1:foo bar` is treated as containing an epoch and
     /// rejected, as `foo bar` is not a valid version.
     /// Input like `example>=1: 3.2.1-5 foo bar` is successfully parsed with the version being `1`
     /// and the description being `3.2.1-5 foo bar`.
+    ///
+    /// The description is everything after the `: ` delimiter, as is (it may be empty).
     ///
     /// # Errors
     ///
@@ -377,8 +378,7 @@ impl AlpmParser for OptionalDependency {
             // Check if there's a `:`, which indicates the existence of a description.
             let delimiter = opt(":").parse_next(input)?;
             if delimiter.is_some() {
-                space1
-                    .label("dependency delimiter in optional dependency")
+                ' '.label("dependency delimiter in optional dependency")
                     .expected_text("A colon followed by a whitespace ': '")
                     .parse_next(input)?;
             }
@@ -389,14 +389,9 @@ impl AlpmParser for OptionalDependency {
                 // everything till newline or `eof`.
                 let description = take_till(0.., ('\n', '\r'))
                     .label("optional dependency description")
-                    .parse_next(input)?
-                    .trim_ascii();
+                    .parse_next(input)?;
 
-                if description.is_empty() {
-                    None
-                } else {
-                    Some(description.to_string())
-                }
+                Some(description.to_string())
             } else {
                 None
             };
@@ -505,21 +500,9 @@ mod tests {
             desc in DESCRIPTION_REGEX,
             use_desc in proptest::bool::ANY
         ) {
-            let desc_trimmed = desc.trim_ascii();
-            let desc_is_blank = desc_trimmed.is_empty();
-
+            // The description is kept as is, so the formatted output matches the input.
             let (raw_in, formatted_expected) = if use_desc {
-                // Raw input and expected formatted output.
-                // These are different because `desc` will be trimmed by the parser;
-                // if it is *only* ascii whitespace then it will be skipped altogether.
-                (
-                    format!("{name}: {desc}"),
-                    if !desc_is_blank {
-                        format!("{name}: {desc_trimmed}")
-                    } else {
-                        name.clone()
-                    }
-                )
+                (format!("{name}: {desc}"), format!("{name}: {desc}"))
             } else {
                 (name.clone(), name.clone())
             };
@@ -581,7 +564,7 @@ mod tests {
                 name: Name::new("example-two").unwrap(),
                 version_requirement: None,
             },
-            description: Some("a description with lots of whitespace padding".to_string())
+            description: Some("    a description with lots of whitespace padding     ".to_string())
         },
     )]
     #[case(
@@ -601,7 +584,7 @@ mod tests {
                 name: Name::new("dep_name").unwrap(),
                 version_requirement: None,
             },
-            description: None,
+            description: Some(String::new()),
         },
     )]
     #[case(
@@ -704,14 +687,14 @@ mod tests {
     )]
     #[case(
         "example-two:     a description with lots of whitespace padding     ",
-        "example-two: a description with lots of whitespace padding"
+        "example-two:     a description with lots of whitespace padding     "
     )]
     #[case(
-        "tabs:    a description with a tab directly after the colon",
-        "tabs: a description with a tab directly after the colon"
+        "tabs: \ta description with a tab after the delimiter",
+        "tabs: \ta description with a tab after the delimiter"
     )]
     #[case("dep_name", "dep_name")]
-    #[case("dep_name: ", "dep_name")]
+    #[case("dep_name: ", "dep_name: ")]
     #[case(
         "dep_name_with_special_chars-123: description with !@#$%^&*",
         "dep_name_with_special_chars-123: description with !@#$%^&*"
@@ -742,6 +725,7 @@ mod tests {
     #[case(": no_name_colon")]
     #[case("name:description with no leading whitespace")]
     #[case("dep-name>=10: \n\ndescription with\rnewlines")]
+    #[case("name:\tdescription after a tab")]
     fn opt_depend_invalid_string_parse_error(#[case] input: &str) {
         let (test_name, _guard) = configure_insta();
 

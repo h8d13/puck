@@ -365,10 +365,11 @@ fn fill_desc(pkg: &mut Package, data: &[u8]) -> Result<(), Reason> {
 	pkg.filename = Some(filename);
 	pkg.base = Some(text(&desc.base));
 	// an empty description is what alpm-repo-db gives for a missing one
-	let d = text(&desc.description);
+	// description and url as read, alpm-types normalizes their Display
+	let d = text(&desc.description.as_original_str());
 	pkg.desc = (!d.is_empty()).then_some(d);
 	pkg.groups = texts(&desc.groups);
-	pkg.url = desc.url.as_ref().map(text);
+	pkg.url = desc.url.as_ref().map(|u| text(&u.as_original_str()));
 	pkg.licenses = texts(&desc.license);
 	pkg.arch = Some(text(&desc.arch));
 	pkg.builddate = desc.build_date;

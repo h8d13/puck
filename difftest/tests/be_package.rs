@@ -494,7 +494,7 @@ fn fixed_minimal() {
 #[test]
 fn real_packages() {
 	let dir = std::env::var_os("DIFFTEST_PKG_CORPUS").map_or_else(
-		|| std::env::temp_dir().join("ratman-pkgfile-corpus"),
+		|| PathBuf::from("/tmp/ratman-pkgfile-corpus"),
 		PathBuf::from,
 	);
 	let Ok(rd) = fs::read_dir(&dir) else {
@@ -506,18 +506,21 @@ fn real_packages() {
 	let (mut same, mut diverged) = (0, Vec::new());
 	let mut paths: Vec<PathBuf> = rd.map(|e| e.unwrap().path()).collect();
 	paths.sort();
+	// url::Url adds the empty path's '/', alpm-types keeps the url as read
+	// (vendor/patches): counted, none expected
 	let mut url = 0;
 	for path in &paths {
 		for full in [false, true] {
-			let (mut c, r) =
+			let (c, r) =
 				(load_c(&h, path, full), load_rust(path, full));
-			// alpm-types Url adds the empty path's '/', see PORTING.md
-			if let (Ok((c, _)), Ok((r, _))) = (&mut c, &r)
-				&& c.url.as_ref()
-					.map(|u| [&u[..], b"/"].concat()) == r.url
-			{
-				c.url.clone_from(&r.url);
-				url += 1;
+			if let (Ok((c, _)), Ok((r, _))) = (&c, &r) {
+				let slash = c
+					.url
+					.as_ref()
+					.map(|u| [&u[..], b"/"].concat());
+				url += usize::from(
+					c.url != r.url && slash == r.url,
+				);
 			}
 			if c == r {
 				same += 1;
@@ -533,12 +536,13 @@ fn real_packages() {
 		}
 	}
 	eprintln!(
-		"real packages: {} files, {same} loads same ({url} after url \
-		normalisation), {} diverged",
+		"real packages: {} files, {same} loads same, {} diverged ({url} \
+		by url normalisation)",
 		paths.len(),
 		diverged.len()
 	);
 	assert!(diverged.is_empty());
+	assert_eq!(url, 0);
 }
 
 const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
@@ -570,18 +574,22 @@ fn full_version(rng: &mut Rng) -> String {
 		0 => format!("{}:", rng.below(30)),
 		_ => String::new(),
 	};
+	// a leading zero is kept as read
+	let zero = if rng.below(4) == 0 { "0" } else { "" };
 	let rel = match rng.below(4) {
-		0 => format!("{}.{}", 1 + rng.below(9), rng.below(9)),
-		_ => (1 + rng.below(20)).to_string(),
+		0 => format!("{zero}{}.{}", 1 + rng.below(9), rng.below(9)),
+		_ => format!("{zero}{}", 1 + rng.below(20)),
 	};
 	format!("{epoch}{}-{rel}", pkgver(rng))
 }
 
 // a relation alpm-types accepts: name, optionally an operator and a
-// version with optional epoch and pkgrel
+// version with optional epoch and pkgrel. names sometimes contain ".so",
+// which alpm-types tries as a soname first
 fn relation(rng: &mut Rng) -> String {
+	let so = if rng.below(8) == 0 { ".so" } else { "" };
 	let name = word(rng, b"abcxyz0189_+-", 1, 1).replace('-', "a")
-		+ &word(rng, LOWER, 0, 8);
+		+ so + &word(rng, LOWER, 0, 8);
 	if rng.below(2) == 0 {
 		return name;
 	}
@@ -597,10 +605,13 @@ fn optdepend(rng: &mut Rng) -> String {
 	let name = word(rng, LOWER, 1, 8);
 	match rng.below(2) {
 		0 => name,
+		// libalpm keeps the description after ": " as is
 		_ => format!(
-			"{name}: {} {}",
+			"{name}: {}{}{}{}",
+			pick(rng, &["", "", " "]),
 			word(rng, ALNUM, 1, 6),
-			word(rng, ALNUM, 1, 6)
+			pick(rng, &[" ", "  "]),
+			word(rng, ALNUM, 0, 6)
 		),
 	}
 }
@@ -627,23 +638,35 @@ fn gen_pkginfo(rng: &mut Rng, name: &str, version: &str) -> String {
 			}
 		),
 		format!("pkgver = {version}"),
+		// runs of blanks, urls url::Url normalizes and makepkg's
+		// default packager are kept as read
 		format!(
-			"pkgdesc = {} {}",
+			"pkgdesc = {}{}{}",
 			word(rng, ALNUM, 1, 8),
+			pick(rng, &[" ", " ", "  ", " \t"]),
 			word(rng, ALNUM, 1, 8)
 		),
-		format!(
-			"url = https://{}.org/{}",
-			word(rng, LOWER, 1, 6),
-			word(rng, LOWER, 0, 4)
-		),
+		match rng.below(4) {
+			0 => format!(
+				"url = HTTPS://{}.ORG",
+				word(rng, LOWER, 1, 6)
+			),
+			_ => format!(
+				"url = https://{}.org/{}",
+				word(rng, LOWER, 1, 6),
+				word(rng, LOWER, 0, 4)
+			),
+		},
 		format!("builddate = {}", rng.next_u64() % 4_000_000_000),
-		format!(
-			"packager = {} {} <{}@example.org>",
-			word(rng, LOWER, 1, 5),
-			word(rng, LOWER, 1, 5),
-			word(rng, LOWER, 1, 5)
-		),
+		match rng.below(6) {
+			0 => "packager = Unknown Packager".into(),
+			_ => format!(
+				"packager = {} {} <{}@example.org>",
+				word(rng, LOWER, 1, 5),
+				word(rng, LOWER, 1, 5),
+				word(rng, LOWER, 1, 5)
+			),
+		},
 		format!("size = {}", rng.next_u64() >> rng.below(64)),
 		format!(
 			"arch = {}",
@@ -1017,21 +1040,6 @@ fn fixed_pkginfo() {
 	non_utf8.insert(at + 3, 0xe9);
 	let cases: Vec<(&str, Vec<u8>, &str)> = vec![
 		// normalised values
-		(
-			"url without path",
-			w("url", "url = https://a.org"),
-			"fields url",
-		),
-		(
-			"url case",
-			w("url", "url = HTTPS://A.org/x?y#z"),
-			"fields url",
-		),
-		(
-			"desc whitespace",
-			w("pkgdesc", "pkgdesc = a  b \t c "),
-			"fields desc",
-		),
 		("size with '+'", w("size", "size = +5"), "fields isize"),
 		("xdata spaces", add("xdata = a = b "), "fields xdata"),
 		// alpm-pkginfo strictness
@@ -1044,7 +1052,6 @@ fn fixed_pkginfo() {
 			inv,
 		),
 		("xdata without pkgtype", w("xdata", "xdata = a=b"), inv),
-		("xdata empty value", add("xdata = a="), inv),
 		("unknown key", add("foo = bar"), inv),
 		("basever", add("basever = 1"), inv),
 		("pkgtype key", add("pkgtype = pkg"), inv),
@@ -1052,16 +1059,6 @@ fn fixed_pkginfo() {
 		("no url", drop("url"), inv),
 		("empty url", w("url", "url = "), inv),
 		("no packager", drop("packager"), inv),
-		(
-			"Unknown Packager",
-			w("packager", "packager = Unknown Packager"),
-			inv,
-		),
-		(
-			"packager without name",
-			w("packager", "packager = <a@b.c>"),
-			inv,
-		),
 		("no pkgdesc", drop("pkgdesc"), inv),
 		("no pkgbase", drop("pkgbase"), inv),
 		("no builddate", drop("builddate"), inv),
@@ -1082,6 +1079,28 @@ fn fixed_pkginfo() {
 		("indented key", add("  group = x"), "fields groups"),
 		// read alike
 		("empty pkgdesc", w("pkgdesc", "pkgdesc = "), "same"),
+		// alpm-types keeps these as read (vendor/patches)
+		("url without path", w("url", "url = https://a.org"), "same"),
+		("url case", w("url", "url = HTTPS://A.org/x?y#z"), "same"),
+		(
+			"desc whitespace",
+			w("pkgdesc", "pkgdesc = a  b \t c "),
+			"same",
+		),
+		("xdata empty value", add("xdata = a="), "same"),
+		(
+			"Unknown Packager",
+			w("packager", "packager = Unknown Packager"),
+			"same",
+		),
+		(
+			"packager without name",
+			w("packager", "packager = <a@b.c>"),
+			"same",
+		),
+		("depend with .so", add("depend = foo.sound"), "same"),
+		("depend pkgrel zero", add("depend = a=1-01"), "same"),
+		("optdepend spaces", add("optdepend = a:  x  y "), "same"),
 		("no xdata", drop("xdata"), "same"),
 		("uppercase arch", w("arch", "arch = X86_64"), "same"),
 		("unknown arch", w("arch", "arch = foo"), "same"),

@@ -50,7 +50,7 @@ awk -v members="$members" '
 
 for p in vendor/patches/*.patch; do
 	[ -e "$p" ] || continue
-	if ! patch -s -p1 -d "$tree" --no-backup-if-mismatch < "$p"; then
+	if ! patch -s -E -p1 -d "$tree" --no-backup-if-mismatch < "$p"; then
 		echo "patch failed: $p" >&2
 		exit 1
 	fi

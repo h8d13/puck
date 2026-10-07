@@ -1,0 +1,13 @@
+---
+source: alpm-types/src/openpgp.rs
+---
+Parser failed with the following error:
+error: invalid Email address
+ | 
+ | Foobar McFooface <foobar@mcfooface.org
+ |                                       ^ expected closing delimiter '>' of packager email address
+ | 
+ = while parsing:
+   alpm packager: (Foobar McFooface <fo…)
+   └ Email address: ()
+     → expected closing delimiter '>' of packager email address

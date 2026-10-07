@@ -1,0 +1,323 @@
+diff -ruN '--exclude=VENDORED' a/alpm-types/src/openpgp.rs b/alpm-types/src/openpgp.rs
+--- a/alpm-types/src/openpgp.rs
++++ b/alpm-types/src/openpgp.rs
+@@ -14,7 +14,7 @@
+ use serde_with::DeserializeFromStr;
+ use winnow::{
+     ascii::space0,
+-    combinator::{alt, not, peek, repeat_till},
++    combinator::{alt, not, opt, peek, preceded, repeat_till},
+     error::ErrMode,
+     token::any,
+ };
+@@ -390,8 +390,12 @@
+ /// A packager of a package
+ ///
+ /// A `Packager` is represented by a User ID (e.g. `"Foobar McFooFace <foobar@mcfooface.org>"`).
+-/// Internally this struct wraps a `String` for the name and an `EmailAddress` for a valid email
+-/// address.
++/// Internally this struct wraps a `String` for the name and an optional `EmailAddress` for a valid
++/// email address.
++///
++/// An OpenPGP User ID is conventionally composed of a name and an email address, but either may be
++/// missing: e.g. makepkg's default packager `Unknown Packager` has no email address.
++/// If a `<` or `>` is present, it must enclose a valid email address.
+ ///
+ /// ## Examples
+ /// ```
+@@ -407,16 +411,23 @@
+ /// assert_eq!("Foobar McFooface", packager.name());
+ ///
+ /// // get email
+-/// assert_eq!("foobar@mcfooface.org", packager.email().to_string());
++/// let email = packager.email().expect("an email address");
++/// assert_eq!("foobar@mcfooface.org", email.to_string());
+ ///
+ /// // get email domain
+-/// assert_eq!("mcfooface.org", packager.email().domain());
++/// assert_eq!("mcfooface.org", email.domain());
+ ///
+ /// // format as String
+ /// assert_eq!(
+ ///     "Foobar McFooface <foobar@mcfooface.org>",
+ ///     format!("{}", packager)
+ /// );
++///
++/// // a User ID without email address
++/// let packager = Packager::from_str("Unknown Packager")?;
++/// assert_eq!("Unknown Packager", packager.name());
++/// assert_eq!(None, packager.email());
++/// assert_eq!("Unknown Packager", format!("{}", packager));
+ /// # Ok(())
+ /// # }
+ /// ```
+@@ -424,23 +435,28 @@
+ #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+ pub struct Packager {
+     name: String,
+-    email: EmailAddress,
++    email: Option<EmailAddress>,
+ }
+ 
+ impl Packager {
+     /// Create a new Packager
+     pub fn new(name: String, email: EmailAddress) -> Packager {
+-        Packager { name, email }
++        Packager {
++            name,
++            email: Some(email),
++        }
+     }
+ 
+     /// Return the name of the Packager
++    ///
++    /// The name is empty for a User ID consisting of an email address only.
+     pub fn name(&self) -> &str {
+         &self.name
+     }
+ 
+-    /// Return the email of the Packager
+-    pub fn email(&self) -> &EmailAddress {
+-        &self.email
++    /// Return the email of the Packager, if the User ID has one
++    pub fn email(&self) -> Option<&EmailAddress> {
++        self.email.as_ref()
+     }
+ }
+ 
+@@ -462,23 +478,30 @@
+             // Consume any of those so we don't have to guess about them later on.
+             space0.parse_next(input)?;
+ 
+-            // Make sure the first character isn't a `<`, which may happen if the packager name is
+-            // missing.
+-            not("<")
+-                .expected_text("a packager name")
+-                .parse_next(input)?;
+-
+-            // The name that precedes the email address
+-            let name = repeat_till::<_, _, (), _, _, _, _>(
+-                1..,
+-                any,
+-                peek(alt(("<", delimiter_parser.by_ref()))),
+-            )
+-            .take()
+-            .map(|name: &str| name.trim().to_string())
++            // The name that precedes the email address, which may be missing (`<email>`).
++            let name = opt(preceded(
++                not("<"),
++                repeat_till::<_, _, (), _, _, _, _>(
++                    1..,
++                    any,
++                    peek(alt(("<", delimiter_parser.by_ref()))),
++                )
++                .take(),
++            ))
++            .map(|name: Option<&str>| name.map_or_else(String::new, |name| name.trim().to_string()))
+             .layer("packager name")
+             .parse_next(input)?;
+ 
++            // A User ID without email address, e.g. makepkg's default `Unknown Packager`.
++            if !name.is_empty()
++                && !name.contains('>')
++                && opt(peek(delimiter_parser.by_ref()))
++                    .parse_next(input)?
++                    .is_some()
++            {
++                return Ok(Self { name, email: None });
++            }
++
+             // The '<' delimiter that marks the start of the email string
+             '<'.expected_text("opening delimiter '<'")
+                 .layer("Email address")
+@@ -505,7 +528,10 @@
+                 .expected_text("end of input.")
+                 .parse_next(input)?;
+ 
+-            Ok(Self { name, email })
++            Ok(Self {
++                name,
++                email: Some(email),
++            })
+         };
+ 
+         parser.layer("alpm packager")
+@@ -528,7 +554,11 @@
+ 
+ impl Display for Packager {
+     fn fmt(&self, fmt: &mut Formatter) -> std::fmt::Result {
+-        write!(fmt, "{} <{}>", self.name, self.email)
++        match (self.name.is_empty(), &self.email) {
++            (_, None) => write!(fmt, "{}", self.name),
++            (true, Some(email)) => write!(fmt, "<{email}>"),
++            (false, Some(email)) => write!(fmt, "{} <{email}>", self.name),
++        }
+     }
+ }
+ 
+@@ -716,14 +746,35 @@
+         "Foobar McFooface (The Third) <foobar@mcfooface.org>",
+         Packager{
+             name: "Foobar McFooface (The Third)".to_string(),
+-            email: EmailAddress::from_str("foobar@mcfooface.org").unwrap()
++            email: EmailAddress::from_str("foobar@mcfooface.org").ok()
+         }
+     )]
+     #[case(
+         "Foobar McFooface <foobar@mcfooface.org>",
+         Packager{
+             name: "Foobar McFooface".to_string(),
+-            email: EmailAddress::from_str("foobar@mcfooface.org").unwrap()
++            email: EmailAddress::from_str("foobar@mcfooface.org").ok()
++        }
++    )]
++    #[case::no_name(
++        "<foobar@mcfooface.org>",
++        Packager{
++            name: String::new(),
++            email: EmailAddress::from_str("foobar@mcfooface.org").ok()
++        }
++    )]
++    #[case::no_wrapped_address(
++        "Unknown Packager",
++        Packager{
++            name: "Unknown Packager".to_string(),
++            email: None
++        }
++    )]
++    #[case::address_not_wrapped(
++        "foobar@mcfooface.org",
++        Packager{
++            name: "foobar@mcfooface.org".to_string(),
++            email: None
+         }
+     )]
+     fn valid_packager(#[case] from_str: &str, #[case] packager: Packager) {
+@@ -732,13 +783,15 @@
+ 
+     /// Test that invalid packager expressions are detected as such and throw the expected error.
+     #[rstest]
+-    #[case::no_name("<foobar@mcfooface.org>")]
+-    #[case::no_name_and_address_not_wrapped("foobar@mcfooface.org")]
+-    #[case::no_wrapped_address("Foobar McFooface")]
++    #[case::no_name("<>")]
++    #[case::no_name_and_address_not_wrapped("foobar@mcfooface.org>")]
++    #[case::no_wrapped_address("Foobar McFooface <>")]
+     #[case::two_wrapped_addresses(
+         "Foobar McFooface <foobar@mcfooface.org> <foobar@mcfoofacemcfooface.org>"
+     )]
+     #[case::address_without_local_part("Foobar McFooface <@mcfooface.org>")]
++    #[case::empty("")]
++    #[case::address_not_closed("Foobar McFooface <foobar@mcfooface.org")]
+     fn invalid_packager(#[case] input: &str) {
+         let (test_name, _guard) = configure_insta();
+ 
+@@ -754,6 +807,8 @@
+         Packager::from_str("Foobar McFooface <foobar@mcfooface.org>").unwrap(),
+         "Foobar McFooface <foobar@mcfooface.org>"
+     )]
++    #[case(Packager::from_str("<foobar@mcfooface.org>").unwrap(), "<foobar@mcfooface.org>")]
++    #[case(Packager::from_str("Unknown Packager").unwrap(), "Unknown Packager")]
+     fn packager_format_string(#[case] packager: Packager, #[case] packager_str: &str) {
+         assert_eq!(packager_str, format!("{packager}"));
+     }
+@@ -770,6 +825,6 @@
+         &EmailAddress::from_str("foobar@mcfooface.org").unwrap(),
+     )]
+     fn packager_email(#[case] packager: Packager, #[case] email: &EmailAddress) {
+-        assert_eq!(email, packager.email());
++        assert_eq!(Some(email), packager.email());
+     }
+ }
+diff -ruN '--exclude=VENDORED' a/alpm-types/src/snapshots/openpgp::invalid_packager@case_1_no_name.snap b/alpm-types/src/snapshots/openpgp::invalid_packager@case_1_no_name.snap
+--- a/alpm-types/src/snapshots/openpgp::invalid_packager@case_1_no_name.snap
++++ b/alpm-types/src/snapshots/openpgp::invalid_packager@case_1_no_name.snap
+@@ -2,7 +2,12 @@
+ source: alpm-types/src/openpgp.rs
+ ---
+ Parser failed with the following error:
+-error: invalid alpm packager
++error: invalid email address
+  | 
+- | <foobar@mcfooface.org>
+- | ^ expected a packager name
++ | <>
++ |  ^
++ | 
++ = while parsing:
++   alpm packager: (<>)
++   └ email address: (>)
++ = an error occurred: Missing separator character '@'.
+diff -ruN '--exclude=VENDORED' a/alpm-types/src/snapshots/openpgp::invalid_packager@case_2_no_name_and_address_not_wrapped.snap b/alpm-types/src/snapshots/openpgp::invalid_packager@case_2_no_name_and_address_not_wrapped.snap
+--- a/alpm-types/src/snapshots/openpgp::invalid_packager@case_2_no_name_and_address_not_wrapped.snap
++++ b/alpm-types/src/snapshots/openpgp::invalid_packager@case_2_no_name_and_address_not_wrapped.snap
+@@ -4,10 +4,10 @@
+ Parser failed with the following error:
+ error: invalid Email address
+  | 
+- | foobar@mcfooface.org
+- |                     ^ expected opening delimiter '<'
++ | foobar@mcfooface.org>
++ |                      ^ expected opening delimiter '<'
+  | 
+  = while parsing:
+-   alpm packager: (foobar@mcfooface.org)
++   alpm packager: (foobar@mcfooface.org…)
+    └ Email address: ()
+      → expected opening delimiter '<'
+diff -ruN '--exclude=VENDORED' a/alpm-types/src/snapshots/openpgp::invalid_packager@case_3_no_wrapped_address.snap b/alpm-types/src/snapshots/openpgp::invalid_packager@case_3_no_wrapped_address.snap
+--- a/alpm-types/src/snapshots/openpgp::invalid_packager@case_3_no_wrapped_address.snap
++++ b/alpm-types/src/snapshots/openpgp::invalid_packager@case_3_no_wrapped_address.snap
+@@ -2,12 +2,12 @@
+ source: alpm-types/src/openpgp.rs
+ ---
+ Parser failed with the following error:
+-error: invalid Email address
++error: invalid email address
+  | 
+- | Foobar McFooface
+- |                 ^ expected opening delimiter '<'
++ | Foobar McFooface <>
++ |                   ^
+  | 
+  = while parsing:
+-   alpm packager: (Foobar McFooface)
+-   └ Email address: ()
+-     → expected opening delimiter '<'
++   alpm packager: (Foobar McFooface <>)
++   └ email address: (>)
++ = an error occurred: Missing separator character '@'.
+diff -ruN '--exclude=VENDORED' a/alpm-types/src/snapshots/openpgp::invalid_packager@case_6_empty.snap b/alpm-types/src/snapshots/openpgp::invalid_packager@case_6_empty.snap
+--- a/alpm-types/src/snapshots/openpgp::invalid_packager@case_6_empty.snap
++++ b/alpm-types/src/snapshots/openpgp::invalid_packager@case_6_empty.snap
+@@ -0,0 +1,13 @@
++---
++source: alpm-types/src/openpgp.rs
++---
++Parser failed with the following error:
++error: invalid Email address
++ | 
++ | 
++ | ^ expected opening delimiter '<'
++ | 
++ = while parsing:
++   alpm packager: ()
++   └ Email address: ()
++     → expected opening delimiter '<'
+diff -ruN '--exclude=VENDORED' a/alpm-types/src/snapshots/openpgp::invalid_packager@case_7_address_not_closed.snap b/alpm-types/src/snapshots/openpgp::invalid_packager@case_7_address_not_closed.snap
+--- a/alpm-types/src/snapshots/openpgp::invalid_packager@case_7_address_not_closed.snap
++++ b/alpm-types/src/snapshots/openpgp::invalid_packager@case_7_address_not_closed.snap
+@@ -0,0 +1,13 @@
++---
++source: alpm-types/src/openpgp.rs
++---
++Parser failed with the following error:
++error: invalid Email address
++ | 
++ | Foobar McFooface <foobar@mcfooface.org
++ |                                       ^ expected closing delimiter '>' of packager email address
++ | 
++ = while parsing:
++   alpm packager: (Foobar McFooface <fo…)
++   └ Email address: ()
++     → expected closing delimiter '>' of packager email address

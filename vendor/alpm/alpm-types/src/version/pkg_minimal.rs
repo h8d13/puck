@@ -231,13 +231,13 @@ impl Ord for MinimalVersion {
     /// [alpm-package-version]: https://alpm.archlinux.page/specifications/alpm-package-version.7.html
     /// [alpm-pkgver]: https://alpm.archlinux.page/specifications/alpm-pkgver.7.html
     fn cmp(&self, other: &Self) -> Ordering {
-        match (self.epoch, other.epoch) {
-            (Some(self_epoch), Some(other_epoch)) if self_epoch.cmp(&other_epoch).is_ne() => {
-                return self_epoch.cmp(&other_epoch);
-            }
-            (Some(_), None) => return Ordering::Greater,
-            (None, Some(_)) => return Ordering::Less,
-            (_, _) => {}
+        // An unset epoch is considered to be `0` (see alpm-epoch).
+        let epoch_cmp = self
+            .epoch
+            .unwrap_or_default()
+            .cmp(&other.epoch.unwrap_or_default());
+        if epoch_cmp.is_ne() {
+            return epoch_cmp;
         }
 
         self.pkgver.cmp(&other.pkgver)
@@ -439,6 +439,7 @@ mod tests {
     #[case::minimal_with_epoch_less("1:1.0.0", "2:1.0.0", Ordering::Less)]
     #[case::minimal_with_epoch_greater("1:1.0.0", "1.0.0", Ordering::Greater)]
     #[case::minimal_with_epoch_greater("2:1.0.0", "1:1.0.0", Ordering::Greater)]
+    #[case::minimal_with_epoch_zero_equal("0:1.0.0", "1.0.0", Ordering::Equal)]
     fn minimal_version_comparison(
         #[case] version_a: &str,
         #[case] version_b: &str,

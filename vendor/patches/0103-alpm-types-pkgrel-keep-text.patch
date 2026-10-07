@@ -1,0 +1,99 @@
+diff -ruN '--exclude=VENDORED' a/alpm-types/src/version/base.rs b/alpm-types/src/version/base.rs
+--- a/alpm-types/src/version/base.rs
++++ b/alpm-types/src/version/base.rs
+@@ -106,6 +106,7 @@
+ ///
+ /// A [`PackageRelease`] wraps a [`usize`] for its `major` version and an optional [`usize`] for its
+ /// `minor` version.
++/// When parsed from a string with leading zeros (e.g. `01`), that string is kept for display.
+ ///
+ /// [`PackageRelease`] is used to indicate the build version of a package.
+ /// It is mostly useful in conjunction with a [`PackageVersion`] (see [`Version`]).
+@@ -132,6 +133,9 @@
+     pub major: usize,
+     /// The optional minor version of this package release.
+     pub minor: Option<usize>,
++    /// The parsed string, if it differs from the formatted numbers (leading zeros).
++    #[cfg_attr(feature = "serde", serde(skip))]
++    text: Option<String>,
+ }
+ 
+ impl PackageRelease {
+@@ -147,7 +151,11 @@
+     /// # }
+     /// ```
+     pub fn new(major: usize, minor: Option<usize>) -> Self {
+-        PackageRelease { major, minor }
++        PackageRelease {
++            major,
++            minor,
++            text: None,
++        }
+     }
+ }
+ 
+@@ -178,10 +186,20 @@
+                 None
+             };
+ 
+-            Ok(Self { major, minor })
++            Ok(Self::new(major, minor))
+         };
+ 
+-        parser.layer("alpm-pkgrel").parse_next(input)
++        parser
++            .with_taken()
++            .map(|(mut release, taken): (Self, &str)| {
++                // Keep e.g. `01` as is, its numbers would format as `1`.
++                if release.to_string() != taken {
++                    release.text = Some(taken.to_string());
++                }
++                release
++            })
++            .layer("alpm-pkgrel")
++            .parse_next(input)
+     }
+ 
+     fn delimiter_error_context<'a, O, P>(
+@@ -213,6 +231,9 @@
+ 
+ impl Display for PackageRelease {
+     fn fmt(&self, fmt: &mut Formatter) -> std::fmt::Result {
++        if let Some(text) = &self.text {
++            return write!(fmt, "{text}");
++        }
+         write!(fmt, "{}", self.major)?;
+         if let Some(minor) = self.minor {
+             write!(fmt, ".{minor}")?;
+@@ -424,6 +445,9 @@
+     #[case("1.0")]
+     #[case("10.5")]
+     #[case("0.1")]
++    #[case("01")]
++    #[case("1.01")]
++    #[case("00.010")]
+     fn valid_pkgrel(#[case] pkgrel: &str) {
+         let parsed = PackageRelease::from_str(pkgrel);
+         assert!(parsed.is_ok(), "Expected pkgrel {pkgrel} to be valid.");
+@@ -472,6 +496,9 @@
+     #[case("1.1", "1.0", Ordering::Greater)]
+     #[case("1.1", "0", Ordering::Greater)]
+     #[case("11", "1", Ordering::Greater)]
++    #[case("01", "1", Ordering::Equal)]
++    #[case("1.01", "1.1", Ordering::Equal)]
++    #[case("1.010", "1.9", Ordering::Greater)]
+     fn pkgrel_cmp(#[case] first: &str, #[case] second: &str, #[case] order: Ordering) {
+         let first = PackageRelease::from_str(first).unwrap();
+         let second = PackageRelease::from_str(second).unwrap();
+diff -ruN '--exclude=VENDORED' a/alpm-types/src/version/pkg_generic.rs b/alpm-types/src/version/pkg_generic.rs
+--- a/alpm-types/src/version/pkg_generic.rs
++++ b/alpm-types/src/version/pkg_generic.rs
+@@ -315,6 +315,8 @@
+     #[case(Version::from_str("1-1").unwrap(), "1-1")]
+     #[case(Version::from_str("1").unwrap(), "1")]
+     #[case(Version::from_str("1:1").unwrap(), "1:1")]
++    #[case(Version::from_str("1-01").unwrap(), "1-01")]
++    #[case(Version::from_str("1-1.01").unwrap(), "1-1.01")]
+     fn version_to_string(#[case] version: Version, #[case] to_str: &str) {
+         assert_eq!(format!("{version}"), to_str);
+     }

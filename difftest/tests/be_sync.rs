@@ -93,9 +93,11 @@ fn full_version(rng: &mut Rng) -> String {
 		0 => format!("{}:", 1 + rng.below(9)),
 		_ => String::new(),
 	};
+	// a leading zero is kept as read
+	let zero = if rng.below(4) == 0 { "0" } else { "" };
 	let rel = match rng.below(4) {
-		0 => format!("{}.{}", 1 + rng.below(9), rng.below(9)),
-		_ => format!("{}", 1 + rng.below(20)),
+		0 => format!("{zero}{}.{}", 1 + rng.below(9), rng.below(9)),
+		_ => format!("{zero}{}", 1 + rng.below(20)),
 	};
 	format!("{epoch}{}-{rel}", pkgver(rng))
 }
@@ -109,18 +111,15 @@ fn description(rng: &mut Rng) -> String {
 			_ => word(rng, ALNUM, 1, 8),
 		})
 		.collect();
-	words.join(" ")
+	// runs of blanks are kept as read
+	words.join(pick(rng, &[" ", " ", "  ", " \t"]))
 }
 
 // relation lines stay far below 512 bytes, the smallest first data block
 // libarchive hands out: READ_AND_SPLITDEP parses a stale `line` once a
 // longer line makes _alpm_archive_fgets reallocate its buffer
 fn relation(rng: &mut Rng) -> String {
-	// alpm-types refuses names like "foo.sound" here, see odd_inputs
-	let mut name = pkg_name(rng);
-	while name.contains(".so") {
-		name = pkg_name(rng);
-	}
+	let name = pkg_name(rng);
 	match rng.below(10) {
 		0 => format!("lib{}.so=1-64", word(rng, LOWER, 1, 6)),
 		1 => format!(
@@ -156,7 +155,12 @@ fn optdepend(rng: &mut Rng) -> String {
 	let name = pkg_name(rng);
 	match rng.below(3) {
 		0 => name,
-		_ => format!("{name}: {}", description(rng)),
+		// libalpm keeps the description after ": " as is
+		_ => format!(
+			"{name}: {}{}",
+			pick(rng, &["", "", " "]),
+			description(rng)
+		),
 	}
 }
 
@@ -256,13 +260,17 @@ fn gen_pkg(rng: &mut Rng, name: String, files_db: bool) -> Gen {
 		),
 		section(
 			"PACKAGER",
-			&one(format!(
-				"{} {} <{}@{}.org>",
-				word(rng, ALNUM, 1, 8),
-				word(rng, ALNUM, 1, 8),
-				word(rng, LOWER, 1, 8),
-				word(rng, LOWER, 1, 8)
-			)),
+			&one(match rng.below(6) {
+				// makepkg's default
+				0 => "Unknown Packager".into(),
+				_ => format!(
+					"{} {} <{}@{}.org>",
+					word(rng, ALNUM, 1, 8),
+					word(rng, ALNUM, 1, 8),
+					word(rng, LOWER, 1, 8),
+					word(rng, LOWER, 1, 8)
+				),
+			}),
 		),
 	];
 	if rng.below(4) != 0 {
@@ -272,10 +280,12 @@ fn gen_pkg(rng: &mut Rng, name: String, files_db: bool) -> Gen {
 		let path =
 			list(rng, 3, |r| word(r, b"abcz09_-", 1, 6)).join("/");
 		let host = word(rng, LOWER, 1, 8);
-		fixed.push(section(
-			"URL",
-			&one(format!("https://{host}.org/{path}")),
-		));
+		// url::Url adds the '/' of an empty path and lowercases
+		let url = match rng.below(4) {
+			0 => format!("HTTPS://{host}.ORG"),
+			_ => format!("https://{host}.org/{path}"),
+		};
+		fixed.push(section("URL", &one(url)));
 	}
 	match rng.below(5) {
 		0 => {}
@@ -529,8 +539,7 @@ fn diff_fields(c: &Package, r: &Package) -> Vec<&'static str> {
 }
 
 // copies of the real sync dbs, read only: counts of packages per
-// differing field. no assertion on the fields, the divergences are
-// listed in PORTING.md
+// differing field, none expected
 #[test]
 fn real_sync_dbs() {
 	let Ok(dir) = fs::read_dir("/var/lib/pacman/sync") else {
@@ -618,8 +627,9 @@ fn real_sync_dbs() {
 			eprintln!("  url {u}");
 		}
 		assert!(urls.is_empty(), "{name}: other url normalization");
-		let known = fields.keys().all(|&f| f == "url");
-		assert!(known, "{name}: new divergence {fields:?}");
+		// alpm-types keeps the url as read (vendor/patches)
+		assert_eq!(slash, 0, "{name}: url with '/' appended");
+		assert!(fields.is_empty(), "{name}: new divergence {fields:?}");
 	}
 }
 
@@ -661,7 +671,22 @@ fn odd_inputs() {
 	let long = format!("%DESC%\n{}\n\n", "x".repeat(600 * 1024));
 	let cases: Vec<(&str, Vec<TarEntry>, Expect)> = vec![
 		("minimal", foo(&base), Same),
-		("url no path", foo_with("%URL%\nhttps://a.org\n\n"), Diverge),
+		("url no path", foo_with("%URL%\nhttps://a.org\n\n"), Same),
+		(
+			"url upper, dot segment",
+			foo_with("%URL%\nHTTPS://A.org/x/./y\n\n"),
+			Same,
+		),
+		(
+			"unknown packager",
+			foo(&base.replace("A B <a@b.org>", "Unknown Packager")),
+			Same,
+		),
+		(
+			"packager email only",
+			foo(&base.replace("A B <a@b.org>", "<a@b.org>")),
+			Same,
+		),
 		(
 			"url with path",
 			foo_with("%URL%\nhttps://a.org/x\n\n"),
@@ -680,7 +705,7 @@ fn odd_inputs() {
 			Diverge,
 		),
 		("empty desc", foo(""), Diverge),
-		("desc spaces", foo_with("%DESC%\n a  b \n\n"), Diverge),
+		("desc spaces", foo_with("%DESC%\n a  b \n\n"), Same),
 		("desc empty value", foo_with("%DESC%\n\n"), Diverge),
 		("crlf", foo(&base.replace('\n', "\r\n")), Diverge),
 		(
@@ -728,11 +753,20 @@ fn odd_inputs() {
 			foo_with("%OPTDEPENDS%\na:b\n\n"),
 			Diverge,
 		),
-		// RelationOrSoname: SonameV1 fails without backtracking
 		(
 			"dep name with .so",
-			foo_with("%DEPENDS%\nfoo.sound\n\n"),
-			Diverge,
+			foo_with("%DEPENDS%\nfoo.sound\nd1.so62r\n\n"),
+			Same,
+		),
+		(
+			"dep pkgrel leading zero",
+			foo_with("%DEPENDS%\na=1-01\nb<2-1.01\n\n"),
+			Same,
+		),
+		(
+			"optdepend spaces",
+			foo_with("%OPTDEPENDS%\na:  x  y \nb: \n\n"),
+			Same,
 		),
 		("dep bad version", foo_with("%DEPENDS%\na>=\n\n"), Diverge),
 		("long line", foo_with(&long), Diverge),
