@@ -1,0 +1,12 @@
+---
+source: alpm-types/src/name.rs
+---
+error: invalid character in package name
+ | 
+ | package_name_'''
+ |              ^ expected one of: ASCII alphanumeric character, `_`, `@`, `+`, `-`, `.`
+ | 
+ = while parsing:
+   alpm-package-name: (''')
+   → invalid character in package name
+   → expected one of: ASCII alphanumeric character, `_`, `@`, `+`, `-`, `.`

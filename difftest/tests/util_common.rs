@@ -140,7 +140,11 @@ fn fgets_chunking() {
 // libalpm's be_local reads with a 1024 buffer, ini.c with PATH_MAX
 #[test]
 fn fgets_real_file_long_lines() {
-	let path = format!("/tmp/difftest-fgets-{}", std::process::id());
+	let path = format!(
+		"{}/difftest-fgets-{}",
+		std::env::temp_dir().display(),
+		std::process::id()
+	);
 	let mut data = Vec::new();
 	for n in [0, 1, 1022, 1023, 1024, 1025, 2047, 2048, 4095, 4096, 5000] {
 		data.extend(std::iter::repeat_n(b'x', n));
@@ -173,27 +177,37 @@ fn rust_llstat(p: &[u8]) -> Result<CStat, i32> {
 
 #[test]
 fn llstat_temp_tree() {
-	let base = format!("/tmp/difftest-llstat-{}", std::process::id());
+	// fuzz paths start 3 levels below base and use at most 3 components,
+	// so ".." never climbs past base: shared dirs like /tmp change their
+	// stat between the C and the Rust call
+	let base = format!(
+		"{}/difftest-llstat-{}",
+		std::env::temp_dir().display(),
+		std::process::id()
+	);
+	let root = format!("{base}/a/b/c");
 	let _ = std::fs::remove_dir_all(&base);
-	std::fs::create_dir(&base).unwrap();
-	std::fs::create_dir(format!("{base}/d")).unwrap();
-	std::fs::write(format!("{base}/f"), b"12345").unwrap();
-	symlink("d", format!("{base}/ld")).unwrap();
-	symlink("f", format!("{base}/lf")).unwrap();
-	symlink("nope", format!("{base}/dang")).unwrap();
+	std::fs::create_dir_all(&root).unwrap();
+	std::fs::create_dir(format!("{root}/d")).unwrap();
+	std::fs::write(format!("{root}/f"), b"12345").unwrap();
+	symlink("d", format!("{root}/ld")).unwrap();
+	symlink("f", format!("{root}/lf")).unwrap();
+	symlink("nope", format!("{root}/dang")).unwrap();
 
 	let check = |p: &[u8]| {
 		assert_eq!(c_llstat(p), rust_llstat(p), "{}", show(p));
 	};
-	for p in [&b""[..], b"/", b"//", b"///", b".", b"./", b"/tmp//"] {
+	let base_slashes = format!("{base}//");
+	for p in [&b""[..], b"/", b"//", b"///", b".", b"./"] {
 		check(p);
 	}
+	check(base_slashes.as_bytes());
 	let names: &[&[u8]] =
 		&[b"f", b"d", b"ld", b"lf", b"dang", b"nope", b"", b".", b".."];
 	let mut rng = Rng::new(0x115a);
 	let mut seen_ok = 0;
 	for _ in 0..iters() / 20 {
-		let mut p = base.as_bytes().to_vec();
+		let mut p = root.as_bytes().to_vec();
 		for _ in 0..1 + rng.below(3) {
 			p.extend(std::iter::repeat_n(b'/', 1 + rng.below(2)));
 			p.extend_from_slice(names[rng.below(names.len())]);

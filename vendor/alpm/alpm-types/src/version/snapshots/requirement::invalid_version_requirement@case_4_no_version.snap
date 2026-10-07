@@ -1,0 +1,14 @@
+---
+source: alpm-types/src/version/requirement.rs
+---
+error: invalid character
+ | 
+ | <=
+ |   ^ expected an ASCII character, except for ':', '/', '-', '<', '>', '=', or any whitespace characters
+ | 
+ = while parsing:
+   version requirement: (<=)
+   └ alpm-package-version: ()
+     └ alpm-pkgver: ()
+       → invalid character
+       → expected an ASCII character, except for ':', '/', '-', '<', '>', '=', or any whitespace characters

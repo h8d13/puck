@@ -24,6 +24,11 @@ fn line_breaks_and_rejects() {
 	assert_eq!(decode(b"Zg==="), Err(Error::InvalidCharacter));
 	assert_eq!(decode(b"Zg=a"), Err(Error::InvalidCharacter));
 	assert_eq!(decode(b"Zm9v\xc3"), Err(Error::InvalidCharacter));
-	// trailing partial group dropped
+	// trailing partial group dropped, the crate alone decodes or rejects it
 	assert_eq!(decode(b"Zm9vYg").unwrap(), b"foo");
+	assert_eq!(decode(b"Zm9vZ").unwrap(), b"foo");
+	assert_eq!(decode(b"Zm9vZg=").unwrap(), b"foo");
+	// bits past the kept bytes ignored
+	assert_eq!(decode(b"Zh==").unwrap(), b"f");
+	assert_eq!(decoded_len(b"Zm9v\r\nYg"), Ok(5));
 }

@@ -1,0 +1,8 @@
+---
+source: alpm-types/src/version/buildtool.rs
+---
+Parser failed with the following error:
+error: invalid buildtool version
+ | 
+ | 1.0.0-any
+ |      ^ expected one of: a minimal alpm-package-version, or a full alpm-package-version followed by a '-' and an alpm-architecture

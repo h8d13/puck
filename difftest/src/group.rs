@@ -6,9 +6,9 @@ use crate::{cstr, opt_ptr};
 
 // alpm_group_t, alpm.h
 #[repr(C)]
-struct CGroup {
-	name: *mut c_char,
-	packages: *mut CList,
+pub(crate) struct CGroup {
+	pub(crate) name: *mut c_char,
+	pub(crate) packages: *mut CList,
 }
 
 unsafe extern "C" {

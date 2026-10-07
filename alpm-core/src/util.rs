@@ -13,7 +13,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 // what a C string would see of these bytes
-pub(crate) fn until_nul(s: &[u8]) -> &[u8] {
+pub fn until_nul(s: &[u8]) -> &[u8] {
 	match s.iter().position(|&c| c == 0) {
 		Some(i) => &s[..i],
 		None => s,
@@ -564,4 +564,41 @@ pub fn files_in_directory(path: &[u8], full_count: bool) -> io::Result<usize> {
 	} else {
 		entries.take(1).count()
 	})
+}
+
+// md5_file/sha256_file + hex_representation through alpm-types (md-5,
+// sha2), lowercase hex. None when the file cannot be opened or a read
+// fails (EINTR retried like the C loop)
+fn file_digest<D: alpm_types::digests::Digest>(path: &[u8]) -> Option<Vec<u8>> {
+	let f = File::open(c_path(path)).ok()?;
+	let sum = alpm_types::Checksum::<D>::calculate_from_reader(f).ok()?;
+	Some(sum.to_string().into_bytes())
+}
+
+// alpm_compute_md5sum
+pub fn compute_md5sum(path: &[u8]) -> Option<Vec<u8>> {
+	file_digest::<alpm_types::digests::Md5>(path)
+}
+
+// alpm_compute_sha256sum
+pub fn compute_sha256sum(path: &[u8]) -> Option<Vec<u8>> {
+	file_digest::<alpm_types::digests::Sha256>(path)
+}
+
+// _alpm_test_checksum: kind is exactly PKG_VALIDATION_MD5SUM or
+// PKG_VALIDATION_SHA256SUM. Some(true) matches (C 0), Some(false) differs
+// (C 1), None for another kind, no expected value or no checksum (C -1).
+// expected is compared like strcmp
+pub fn test_checksum(
+	path: &[u8],
+	expected: Option<&[u8]>,
+	kind: std::ffi::c_int,
+) -> Option<bool> {
+	use crate::package::{PKG_VALIDATION_MD5SUM, PKG_VALIDATION_SHA256SUM};
+	let computed = match kind {
+		PKG_VALIDATION_MD5SUM => compute_md5sum(path),
+		PKG_VALIDATION_SHA256SUM => compute_sha256sum(path),
+		_ => return None,
+	};
+	Some(until_nul(expected?) == computed?)
 }

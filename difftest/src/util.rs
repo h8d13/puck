@@ -43,6 +43,13 @@ unsafe extern "C" {
 		full_count: c_int,
 	) -> isize;
 	fn umask(mask: c_uint) -> c_uint;
+	fn alpm_compute_md5sum(filename: *const c_char) -> *mut c_char;
+	fn alpm_compute_sha256sum(filename: *const c_char) -> *mut c_char;
+	fn _alpm_test_checksum(
+		filepath: *const c_char,
+		expected: *const c_char,
+		kind: c_int,
+	) -> c_int;
 }
 
 // alpm_errno_t values returned by _alpm_read_file, alpm.h
@@ -187,4 +194,29 @@ pub fn c_files_in_directory(path: &[u8], full_count: bool) -> isize {
 pub fn c_umask(mask: u32) -> u32 {
 	// SAFETY: umask cannot fail
 	unsafe { umask(mask) }
+}
+
+// hex digest, None where the C returns NULL
+pub fn c_compute_md5sum(path: &[u8]) -> Option<Vec<u8>> {
+	let p = cstr(path);
+	// SAFETY: valid C string, the result is malloc'd or NULL
+	take(unsafe { alpm_compute_md5sum(p.as_ptr()) })
+}
+
+pub fn c_compute_sha256sum(path: &[u8]) -> Option<Vec<u8>> {
+	let p = cstr(path);
+	// SAFETY: valid C string, the result is malloc'd or NULL
+	take(unsafe { alpm_compute_sha256sum(p.as_ptr()) })
+}
+
+// -1 error, 0 match, 1 mismatch. None expected maps to NULL
+pub fn c_test_checksum(
+	path: &[u8],
+	expected: Option<&[u8]>,
+	kind: c_int,
+) -> c_int {
+	let p = cstr(path);
+	let e = expected.map(cstr);
+	// SAFETY: valid C strings or NULL for expected, read only
+	unsafe { _alpm_test_checksum(p.as_ptr(), crate::opt_ptr(&e), kind) }
 }

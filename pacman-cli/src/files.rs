@@ -1,0 +1,325 @@
+// port of src/pacman/files.c: -F (owner search by file name or path),
+// -Fx (the same with POSIX EREs), -Fl (file lists), -Fq, and
+// --machinereadable, on the sync dbs. pacman reads those from the .files
+// dbs: the caller sets handle's dbext to ".files" before registering
+// them, like setup_libalpm does for -F.
+//
+// output goes into an Output like sync.rs, messages are the untranslated
+// msgids. -Fy (db download) is not ported, pacman_files returns
+// Unported::Refresh there.
+
+use alpm_core::handle::Handle;
+use alpm_core::package::Package;
+use alpm_core::regex::{Flags, Regex};
+use alpm_core::util::until_nul;
+
+use crate::check::Output;
+use crate::conf::{Config, cat};
+use crate::package::{print_groups, print_installed};
+use crate::sync::{Unported, cache_list, check_syncdbs, error};
+
+// print_line_machinereadable: repo, name, version, file, nul separated
+fn machine_line(out: &mut Vec<u8>, repo: &[u8], pkg: &Package, file: &[u8]) {
+	let version = pkg.version.as_deref().unwrap_or_default();
+	out.extend(cat(&[
+		repo,
+		b"\0",
+		pkg.name_bytes(),
+		b"\0",
+		until_nul(version),
+		b"\0",
+		until_nul(file),
+		b"\n",
+	]));
+}
+
+// a package with its matching files, printed once the db is searched
+struct Match {
+	pkg: Package,
+	files: Vec<Vec<u8>>,
+}
+
+// print_match
+fn print_match(
+	config: &Config,
+	handle: &mut Handle,
+	repo: &[u8],
+	m: &Match,
+	exact_file: bool,
+	out: &mut Vec<u8>,
+) {
+	let c = &config.colstr;
+	let pkg = &m.pkg;
+	if config.op_f_machinereadable != 0 {
+		for f in &m.files {
+			machine_line(out, repo, pkg, f);
+		}
+	} else if config.quiet != 0 {
+		out.extend(cat(&[repo, b"/", pkg.name_bytes(), b"\n"]));
+	} else if exact_file {
+		let version = pkg.version.as_deref().unwrap_or_default();
+		for f in &m.files {
+			out.extend(cat(&[
+				until_nul(f),
+				b" is owned by ",
+				c.repo,
+				repo,
+				b"/",
+				c.title,
+				pkg.name_bytes(),
+				b" ",
+				c.version,
+				until_nul(version),
+				c.nocolor,
+				b"\n",
+			]));
+		}
+	} else {
+		let version = pkg.version.as_deref().unwrap_or_default();
+		out.extend(cat(&[
+			c.repo,
+			repo,
+			b"/",
+			c.title,
+			pkg.name_bytes(),
+			b" ",
+			c.version,
+			until_nul(version),
+			c.nocolor,
+		]));
+		print_groups(out, pkg, c);
+		let dbext = handle.dbext().to_vec();
+		let local = handle
+			.localdb_mut()
+			.and_then(|l| l.get_pkg(&dbext, pkg.name_bytes()).ok());
+		print_installed(out, local, pkg, c);
+		out.push(b'\n');
+		for f in &m.files {
+			out.extend(cat(&[b"    ", until_nul(f), b"\n"]));
+		}
+	}
+}
+
+// struct filetarget
+struct FileTarget<'a> {
+	targ: &'a [u8],
+	exact_file: bool,
+	reg: Option<Regex>,
+}
+
+// the files of pkg that ftarg matches: a target with '/' is a path
+// (regex: matched against whole paths), else a file name compared with
+// the part after the last '/' (paths ending in '/' and top-level names
+// have none)
+fn matches(ftarg: &FileTarget, pkg: &Package) -> Vec<Vec<u8>> {
+	let files = &pkg.files;
+	if ftarg.exact_file && ftarg.reg.is_none() {
+		return match files.contains(ftarg.targ) {
+			Some(_) => vec![ftarg.targ.to_vec()],
+			None => Vec::new(),
+		};
+	}
+	let hit = |s: &[u8]| match &ftarg.reg {
+		Some(r) => r.is_match(s),
+		None => s == ftarg.targ,
+	};
+	let mut found = Vec::new();
+	for f in &files.files {
+		let name = until_nul(&f.name);
+		let s = match ftarg.exact_file {
+			true => name,
+			false => match name.iter().rposition(|&c| c == b'/') {
+				Some(i) if i + 1 < name.len() => &name[i + 1..],
+				_ => continue,
+			},
+		};
+		if hit(s) {
+			found.push(name.to_vec());
+		}
+	}
+	found
+}
+
+// files_search: every target compiled first (a bad regex reports and
+// fails the whole search), then searched in every db; 1 when one of
+// them matches nothing
+pub fn files_search<S: AsRef<[u8]>>(
+	config: &Config,
+	handle: &mut Handle,
+	targets: &[S],
+	regex: bool,
+	out: &mut Output,
+) -> i32 {
+	let mut ret = 0;
+	let mut ftargs = Vec::new();
+	for t in targets {
+		let mut targ = until_nul(t.as_ref());
+		let exact_file = targ.contains(&b'/');
+		if exact_file {
+			// leading '/' dropped, a lone "/" stays
+			while targ.len() > 1 && targ[0] == b'/' {
+				targ = &targ[1..];
+			}
+		}
+		let mut reg = None;
+		if regex {
+			let flags = Flags {
+				icase: true,
+				newline: true,
+			};
+			match Regex::new(targ, flags) {
+				Ok(r) => reg = Some(r),
+				Err(_) => {
+					let msg: [&[u8]; 3] = [
+						b"invalid regular expression '",
+						targ,
+						b"'\n",
+					];
+					error(out, config, &msg);
+					ret = 1;
+					continue;
+				}
+			}
+		}
+		ftargs.push(FileTarget {
+			targ,
+			exact_file,
+			reg,
+		});
+	}
+	if ret != 0 {
+		return ret;
+	}
+
+	let dbext = handle.dbext().to_vec();
+	for ftarg in &ftargs {
+		let mut found = false;
+		for i in 0..handle.syncdbs().len() {
+			let db = &mut handle.syncdbs_mut()[i];
+			let repo = db.name().to_vec();
+			let hits: Vec<Match> = cache_list(db, &dbext)
+				.into_iter()
+				.filter_map(|p| {
+					let files = matches(ftarg, p);
+					(!files.is_empty()).then(|| Match {
+						pkg: p.clone(),
+						files,
+					})
+				})
+				.collect();
+			found |= !hits.is_empty();
+			for m in &hits {
+				let exact = ftarg.exact_file;
+				let o = &mut out.stdout;
+				print_match(config, handle, &repo, m, exact, o);
+			}
+		}
+		if !found {
+			ret = 1;
+		}
+	}
+	ret
+}
+
+// dump_file_list, or dump_pkg_machinereadable when asked
+fn dump_files(config: &Config, repo: &[u8], pkg: &Package, out: &mut Vec<u8>) {
+	let c = &config.colstr;
+	for f in &pkg.files.files {
+		if config.op_f_machinereadable != 0 {
+			machine_line(out, repo, pkg, &f.name);
+			continue;
+		}
+		if config.quiet == 0 {
+			out.extend(cat(&[
+				c.title,
+				pkg.name_bytes(),
+				c.nocolor,
+				b" ",
+			]));
+		}
+		out.extend(cat(&[until_nul(&f.name), b"\n"]));
+	}
+}
+
+// files_list: "[repo/]name" targets, the first db holding the package
+// lists it. "repo/" is an invalid package; every miss is reported and
+// counted. without targets every package of every db
+pub fn files_list<S: AsRef<[u8]>>(
+	config: &Config,
+	handle: &mut Handle,
+	targets: &[S],
+	out: &mut Output,
+) -> i32 {
+	let dbext = handle.dbext().to_vec();
+	if targets.is_empty() {
+		for db in handle.syncdbs_mut() {
+			let repo = db.name().to_vec();
+			for pkg in cache_list(db, &dbext) {
+				dump_files(config, &repo, pkg, &mut out.stdout);
+			}
+		}
+		return 0;
+	}
+
+	let mut ret = 0;
+	for t in targets {
+		let full = until_nul(t.as_ref());
+		let (repo, targ) = match full.iter().position(|&c| c == b'/') {
+			Some(i) if i + 1 == full.len() => {
+				let msg: [&[u8]; 3] =
+					[b"invalid package: '", full, b"'\n"];
+				error(out, config, &msg);
+				ret += 1;
+				continue;
+			}
+			Some(i) => (Some(&full[..i]), &full[i + 1..]),
+			None => (None, full),
+		};
+		let mut found = false;
+		for db in handle.syncdbs_mut() {
+			if repo.is_some_and(|r| r != db.name()) {
+				continue;
+			}
+			let repo = db.name().to_vec();
+			// an empty name is WrongArgs, not found either
+			if let Ok(pkg) = db.get_pkg(&dbext, targ) {
+				dump_files(config, &repo, pkg, &mut out.stdout);
+				found = true;
+				break;
+			}
+		}
+		if !found {
+			let msg: [&[u8]; 3] =
+				[b"package '", full, b"' was not found\n"];
+			error(out, config, &msg);
+			ret += 1;
+		}
+	}
+	ret
+}
+
+// pacman_files: Ok is the C return value, Err(Refresh) for -Fy
+pub fn pacman_files<S: AsRef<[u8]>>(
+	config: &Config,
+	handle: &mut Handle,
+	targets: &[S],
+	out: &mut Output,
+) -> Result<i32, Unported> {
+	if check_syncdbs(config, handle, true, false, out) != 0 {
+		return Ok(1);
+	}
+	if config.op_s_sync != 0 {
+		return Err(Unported::Refresh);
+	}
+	if config.op_q_list != 0 {
+		return Ok(files_list(config, handle, targets, out));
+	}
+	if targets.is_empty() {
+		// op_s_sync returned above
+		let msg: &[u8] = b"no targets specified (use -h for help)\n";
+		error(out, config, &[msg]);
+		return Ok(1);
+	}
+	let regex = config.op_f_regex != 0;
+	Ok(files_search(config, handle, targets, regex, out))
+}

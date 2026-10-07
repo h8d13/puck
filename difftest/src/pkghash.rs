@@ -8,19 +8,9 @@ use std::ptr;
 
 use alpm_core::package::Package;
 
-use crate::CList;
 use crate::cstr;
+use crate::handle::CHash;
 use crate::package::{CPkg, CPkgBox, list_data};
-
-// alpm_pkghash_t, pkghash.h
-#[repr(C)]
-struct CHash {
-	hash_table: *mut *mut CList,
-	list: *mut CList,
-	buckets: c_uint,
-	entries: c_uint,
-	limit: c_uint,
-}
 
 unsafe extern "C" {
 	fn _alpm_pkghash_create(size: c_uint) -> *mut CHash;

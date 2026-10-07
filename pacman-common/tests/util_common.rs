@@ -1,5 +1,6 @@
 // unit tests for pacman_common::util_common
 use std::io::BufReader;
+use std::os::unix::ffi::OsStringExt;
 
 use pacman_common::util_common::*;
 
@@ -55,7 +56,9 @@ fn trim_and_split() {
 
 #[test]
 fn llstat_strips_trailing_slash() {
-	let m = llstat(b"/tmp///").unwrap();
+	let mut tmp = std::env::temp_dir().into_os_string().into_vec();
+	tmp.extend_from_slice(b"///");
+	let m = llstat(&tmp).unwrap();
 	assert!(m.is_dir());
 	assert_eq!(llstat(b"").unwrap_err().raw_os_error(), Some(2));
 }

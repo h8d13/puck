@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 alpm-core = { path = "../alpm-core" }
 pacman-common = { path = "../pacman-common" }
+time.workspace = true
+unicode-width.workspace = true
 
 [lints]
 workspace = true

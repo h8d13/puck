@@ -1,0 +1,447 @@
+// port of the read-only part of src/pacman/sync.c: -Si/-Sii (sync_info),
+// -Sl (sync_list), -Sg/-Sgg (sync_group), the pacman_sync dispatch up to
+// them, and util.c's check_syncdbs they rely on
+//
+// the C prints to stdout and through pm_printf to stderr, both go into an
+// Output. config is the C global, handle config->handle; cols is what
+// getcols() gives -Si (COLUMNS or the terminal width, 0 when neither).
+// packages shown are copies of the cache entries: the displays read the
+// local db and every sync db cache, which Handle only lends out one at a
+// time. messages are the untranslated msgids.
+//
+// not ported, returned as Unported where pacman_sync reaches them: -Sc
+// (trans_init takes the db lock, then interactive prompts and unlinks
+// in the cache dirs), -Sy (db download), -Ss (db search) and the
+// transaction of -S <targets>/-Su.
+
+use alpm_core::be_sync::get_validation;
+use alpm_core::db::Db;
+use alpm_core::error::Errno;
+use alpm_core::handle::Handle;
+use alpm_core::package::{DbCaches, Package};
+use alpm_core::util::until_nul;
+
+use crate::check::{Output, pm_printf};
+use crate::conf::{Config, LOG_ERROR, cat};
+use crate::package::{FileProbe, PkgEnv, dump_pkg_full, print_installed};
+use crate::util::SigResult;
+
+// a pacman_sync/pacman_files branch this port does not have yet
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unported {
+	// -Sc/-Scc: sync_cleancache, sync_cleandb_all
+	Clean,
+	// -Sy/-Fy: sync_syncdbs
+	Refresh,
+	// -Ss: sync_search
+	Search,
+	// sync_trans: -S <targets>, -Su
+	Transaction,
+}
+
+pub(crate) fn error(out: &mut Output, config: &Config, msg: &[&[u8]]) {
+	pm_printf(out, config, LOG_ERROR, &cat(msg));
+}
+
+// check_syncdbs (util.c): 1 without sync dbs when need_repos, or when
+// check_valid finds an invalid db (each one reported)
+pub fn check_syncdbs(
+	config: &Config,
+	handle: &Handle,
+	need_repos: bool,
+	check_valid: bool,
+	out: &mut Output,
+) -> i32 {
+	let dbs = handle.syncdbs();
+	if need_repos && dbs.is_empty() {
+		let msg: &[u8] =
+			b"no usable package repositories configured.\n";
+		error(out, config, &[msg]);
+		return 1;
+	}
+	let mut ret = 0;
+	if check_valid {
+		for db in dbs {
+			if let Err(e) = db.valid() {
+				let e = e.strerror().as_bytes();
+				let msg: [&[u8]; 5] = [
+					b"database '",
+					db.name(),
+					b"' is not valid (",
+					e,
+					b")\n",
+				];
+				error(out, config, &msg);
+				ret = 1;
+			}
+		}
+	}
+	ret
+}
+
+// alpm_db_get_pkgcache as the C list: empty when the cache cannot load
+pub(crate) fn cache_list<'a>(db: &'a mut Db, dbext: &[u8]) -> Vec<&'a Package> {
+	db.pkgcache(dbext)
+		.map(|c| c.iter().collect())
+		.unwrap_or_default()
+}
+
+// what dump_pkg_full asks of libalpm for a sync package of db_name
+struct SyncEnv<'a> {
+	handle: &'a mut Handle,
+	dbext: Vec<u8>,
+	db_name: Vec<u8>,
+	config: &'a Config,
+	stderr: Vec<u8>,
+}
+
+impl DbCaches for SyncEnv<'_> {
+	fn local_cache(&mut self) -> Vec<&Package> {
+		match self.handle.localdb_mut() {
+			Some(db) => cache_list(db, &self.dbext),
+			None => Vec::new(),
+		}
+	}
+
+	fn sync_caches(&mut self) -> Vec<Vec<&Package>> {
+		let dbext = &self.dbext;
+		self.handle
+			.syncdbs_mut()
+			.iter_mut()
+			.map(|db| cache_list(db, dbext))
+			.collect()
+	}
+}
+
+impl PkgEnv for SyncEnv<'_> {
+	fn db_name(&mut self, _: &Package) -> Option<Vec<u8>> {
+		Some(self.db_name.clone())
+	}
+
+	// alpm_decode_signature, then alpm_extract_keyid on the packets.
+	// extract_keyid is not ported yet (signing.c), so no keys. the C
+	// lists none either where the base64 does not decode
+	fn sig_keys(&mut self, _: &Package, _: &[u8]) -> Vec<Vec<u8>> {
+		Vec::new()
+	}
+
+	// file packages only, -Si never shows one
+	fn check_signature(
+		&mut self,
+		_: &Package,
+	) -> Result<Vec<SigResult>, Errno> {
+		Err(Errno::SigMissing)
+	}
+
+	fn root(&mut self) -> Vec<u8> {
+		self.handle.root().to_vec()
+	}
+
+	// local -ii backup states only, never reached for sync packages
+	fn probe_file(&mut self, _: &[u8]) -> FileProbe {
+		FileProbe::Failed
+	}
+
+	// -Qc only
+	fn changelog(&mut self, _: &Package) -> Option<Vec<u8>> {
+		None
+	}
+
+	fn error(&mut self, msg: &[u8]) {
+		let mut o = Output::default();
+		pm_printf(&mut o, self.config, LOG_ERROR, msg);
+		self.stderr.extend(o.stderr);
+	}
+}
+
+// dump_pkg_full of a copy of a cache entry of sync db db
+fn show_full(
+	config: &Config,
+	handle: &mut Handle,
+	db: usize,
+	mut pkg: Package,
+	cols: u16,
+	out: &mut Output,
+) {
+	// what alpm_pkg_get_validation computes on first use
+	pkg.validation = get_validation(&pkg);
+	let mut env = SyncEnv {
+		dbext: handle.dbext().to_vec(),
+		db_name: handle.syncdbs()[db].name().to_vec(),
+		handle,
+		config,
+		stderr: Vec::new(),
+	};
+	let extra = config.op_s_info > 1;
+	let colstr = &config.colstr;
+	dump_pkg_full(&mut out.stdout, &mut env, &pkg, extra, cols, colstr);
+	out.stderr.extend(env.stderr);
+}
+
+// sync_group: with targets each group's members per db ("<group> <pkg>",
+// the name only when quiet), an error for a group in no db. without,
+// every group name once (level 1) or every "<group> <pkg>" (level 2+),
+// 1 when no db has a group
+pub fn sync_group<S: AsRef<[u8]>>(
+	config: &Config,
+	handle: &mut Handle,
+	level: u16,
+	targets: &[S],
+	out: &mut Output,
+) -> i32 {
+	let dbext = handle.dbext().to_vec();
+	if targets.is_empty() {
+		let mut ret = 1;
+		let mut seen: Vec<Vec<u8>> = Vec::new();
+		for db in handle.syncdbs_mut() {
+			let groups = db.groupcache(&dbext).unwrap_or_default();
+			for grp in groups {
+				ret = 0;
+				if level > 1 {
+					for p in &grp.packages {
+						out.stdout.extend(cat(&[
+							&grp.name,
+							b" ",
+							p.name_bytes(),
+							b"\n",
+						]));
+					}
+				} else if !seen.contains(&grp.name) {
+					out.stdout.extend(cat(&[
+						&grp.name, b"\n",
+					]));
+					seen.push(grp.name);
+				}
+			}
+		}
+		return ret;
+	}
+
+	let mut ret = 0;
+	for t in targets {
+		let grpname = until_nul(t.as_ref());
+		let mut found = false;
+		for db in handle.syncdbs_mut() {
+			// an empty name is WrongArgs: no group either
+			let Ok(Some(grp)) = db.get_group(&dbext, grpname)
+			else {
+				continue;
+			};
+			found = true;
+			for p in &grp.packages {
+				let line: [&[u8]; 4] = match config.quiet {
+					0 => [
+						grpname,
+						b" ",
+						p.name_bytes(),
+						b"\n",
+					],
+					_ => [p.name_bytes(), b"\n", b"", b""],
+				};
+				out.stdout.extend(cat(&line));
+			}
+		}
+		if !found {
+			let msg: [&[u8]; 3] = [
+				b"package group '",
+				grpname,
+				b"' was not found\n",
+			];
+			error(out, config, &msg);
+			ret = 1;
+		}
+	}
+	ret
+}
+
+// sync_info: "[repo/]name" targets, the first package of that name in
+// each matching db shown. one error per missing repo or package, the
+// return value counts them. without targets every package of every db
+pub fn sync_info<S: AsRef<[u8]>>(
+	config: &Config,
+	handle: &mut Handle,
+	targets: &[S],
+	cols: u16,
+	out: &mut Output,
+) -> i32 {
+	let dbext = handle.dbext().to_vec();
+	let ndbs = handle.syncdbs().len();
+	if targets.is_empty() {
+		for i in 0..ndbs {
+			let db = &mut handle.syncdbs_mut()[i];
+			let pkgs: Vec<Package> = cache_list(db, &dbext)
+				.into_iter()
+				.cloned()
+				.collect();
+			for pkg in pkgs {
+				show_full(config, handle, i, pkg, cols, out);
+			}
+		}
+		return 0;
+	}
+
+	let mut ret = 0;
+	for t in targets {
+		let target = until_nul(t.as_ref());
+		// the first '/' splits off the repo, later ones stay
+		let (repo, pkgstr) = match target
+			.iter()
+			.position(|&c| c == b'/')
+		{
+			Some(i) => (Some(&target[..i]), &target[i + 1..]),
+			None => (None, target),
+		};
+		let (mut foundpkg, mut founddb) = (false, false);
+		for i in 0..ndbs {
+			let db = &mut handle.syncdbs_mut()[i];
+			if repo.is_some_and(|r| r != db.name()) {
+				continue;
+			}
+			founddb = true;
+			let pkg = cache_list(db, &dbext)
+				.into_iter()
+				.find(|p| p.name_bytes() == pkgstr)
+				.cloned();
+			if let Some(pkg) = pkg {
+				show_full(config, handle, i, pkg, cols, out);
+				foundpkg = true;
+			}
+		}
+		if !founddb {
+			// printf("%s", NULL) is "(null)" in glibc
+			let repo = repo.unwrap_or(b"(null)");
+			let msg: [&[u8]; 3] =
+				[b"repository '", repo, b"' does not exist\n"];
+			error(out, config, &msg);
+			ret += 1;
+		}
+		if !foundpkg {
+			let msg: [&[u8]; 3] =
+				[b"package '", target, b"' was not found\n"];
+			error(out, config, &msg);
+			ret += 1;
+		}
+	}
+	ret
+}
+
+// sync_list: "<repo> <name> <version>[ installed]" per package of the
+// named repos (every repo without targets), the name only when quiet.
+// unknown repos are reported first and listed as empty, 1 then
+pub fn sync_list<S: AsRef<[u8]>>(
+	config: &Config,
+	handle: &mut Handle,
+	targets: &[S],
+	out: &mut Output,
+) -> i32 {
+	let mut ret = 0;
+	let ls: Vec<Option<usize>> = if targets.is_empty() {
+		(0..handle.syncdbs().len()).map(Some).collect()
+	} else {
+		let mut ls = Vec::new();
+		for t in targets {
+			let repo = until_nul(t.as_ref());
+			let db = handle
+				.syncdbs()
+				.iter()
+				.position(|d| d.name() == repo);
+			if db.is_none() {
+				let msg: [&[u8]; 3] = [
+					b"repository \"",
+					repo,
+					b"\" was not found.\n",
+				];
+				error(out, config, &msg);
+				ret = 1;
+			}
+			// the C adds the NULL db too, its cache is empty
+			ls.push(db);
+		}
+		ls
+	};
+
+	let dbext = handle.dbext().to_vec();
+	let c = &config.colstr;
+	for i in ls.into_iter().flatten() {
+		let db = &mut handle.syncdbs_mut()[i];
+		let name = db.name().to_vec();
+		let pkgs: Vec<Package> =
+			cache_list(db, &dbext).into_iter().cloned().collect();
+		for pkg in &pkgs {
+			if config.quiet != 0 {
+				out.stdout.extend(cat(&[
+					pkg.name_bytes(),
+					b"\n",
+				]));
+				continue;
+			}
+			let version =
+				pkg.version.as_deref().unwrap_or_default();
+			out.stdout.extend(cat(&[
+				c.repo,
+				&name,
+				b" ",
+				c.title,
+				pkg.name_bytes(),
+				b" ",
+				c.version,
+				until_nul(version),
+				c.nocolor,
+			]));
+			let local = handle.localdb_mut().and_then(|l| {
+				l.get_pkg(&dbext, pkg.name_bytes()).ok()
+			});
+			print_installed(&mut out.stdout, local, pkg, c);
+			out.stdout.push(b'\n');
+		}
+	}
+	ret
+}
+
+// pacman_sync: the read-only operations, Err for the branches not ported
+// (in the order the C reaches them). Ok is the C return value
+pub fn pacman_sync<S: AsRef<[u8]>>(
+	config: &Config,
+	handle: &mut Handle,
+	targets: &[S],
+	cols: u16,
+	out: &mut Output,
+) -> Result<i32, Unported> {
+	if config.op_s_clean != 0 {
+		return Err(Unported::Clean);
+	}
+	if check_syncdbs(config, handle, true, false, out) != 0 {
+		return Ok(1);
+	}
+	if config.op_s_sync != 0 {
+		return Err(Unported::Refresh);
+	}
+	if check_syncdbs(config, handle, true, true, out) != 0 {
+		return Ok(1);
+	}
+	if config.op_s_search != 0 {
+		return Err(Unported::Search);
+	}
+	if config.group != 0 {
+		return Ok(sync_group(
+			config,
+			handle,
+			config.group,
+			targets,
+			out,
+		));
+	}
+	if config.op_s_info != 0 {
+		return Ok(sync_info(config, handle, targets, cols, out));
+	}
+	if config.op_q_list != 0 {
+		return Ok(sync_list(config, handle, targets, out));
+	}
+	if targets.is_empty() && config.op_s_upgrade == 0 {
+		// op_s_sync returned above
+		let msg: &[u8] = b"no targets specified (use -h for help)\n";
+		error(out, config, &[msg]);
+		return Ok(1);
+	}
+	Err(Unported::Transaction)
+}

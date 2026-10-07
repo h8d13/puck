@@ -1,5 +1,5 @@
-// port of lib/libalpm/package.c, the alpm_pkg_t data model and its pure
-// helpers.
+// port of lib/libalpm/package.c, the alpm_pkg_t data model, its pure
+// helpers, reverse dependencies and the ignore check.
 //
 // not modelled: handle, ops vtable, origin_data.db, removes and oldpkg.
 // the alpm_pkg_get_* accessors are plain field reads with default_pkg_ops;
@@ -10,9 +10,10 @@ use std::cmp::Ordering;
 use std::ffi::{c_int, c_ulong};
 
 use crate::backup::Backup;
-use crate::deps::Depend;
+use crate::deps::{Depend, depcmp};
 use crate::filelist::FileList;
-use crate::util::{hash_sdbm, until_nul};
+use crate::handle::Handle;
+use crate::util::{fnmatch, hash_sdbm, until_nul};
 use crate::version::vercmp;
 
 // alpm_pkg_xdata_t
@@ -20,17 +21,6 @@ use crate::version::vercmp;
 pub struct PkgXData {
 	pub name: Vec<u8>,
 	pub value: Vec<u8>,
-}
-
-// _alpm_pkg_parse_xdata: "name=value" split at the first '=', later '='
-// stay in the value. None without '=', empty name or value is accepted
-pub fn parse_xdata(s: &[u8]) -> Option<PkgXData> {
-	let s = until_nul(s);
-	let sep = s.iter().position(|&c| c == b'=')?;
-	Some(PkgXData {
-		name: s[..sep].to_vec(),
-		value: s[sep + 1..].to_vec(),
-	})
 }
 
 // alpm_pkgreason_t, discriminants as in alpm.h
@@ -154,4 +144,91 @@ where
 {
 	let (needle, hash) = (until_nul(needle), hash_sdbm(needle));
 	haystack.into_iter().find(|p| has_name(p, needle, hash))
+}
+
+// the db caches compute_requiredby walks, each in its pkgcache list
+// order. packages must have their depends/optdepends loaded (the C getters
+// lazy-load local entries). a cache that does not load is a NULL list in
+// the C, an empty one here
+pub trait DbCaches {
+	// handle->db_local
+	fn local_cache(&mut self) -> Vec<&Package>;
+	// handle->dbs_sync, registration order
+	fn sync_caches(&mut self) -> Vec<Vec<&Package>>;
+}
+
+// find_requiredby: names of packages in cache with a (opt)depend pkg
+// satisfies, first occurrence kept
+fn find_requiredby(
+	pkg: &Package,
+	cache: &[&Package],
+	optional: bool,
+	reqs: &mut Vec<Vec<u8>>,
+) {
+	for cachepkg in cache {
+		let deps = match optional {
+			false => &cachepkg.depends,
+			true => &cachepkg.optdepends,
+		};
+		let name = cachepkg.name_bytes();
+		for dep in deps {
+			if depcmp(pkg, dep) && !reqs.iter().any(|r| r == name) {
+				reqs.push(name.to_vec());
+			}
+		}
+	}
+}
+
+// compute_requiredby: file and local packages search the local db in
+// cache order, sync packages every sync db, then sorted like strcmp. the
+// C reads origin_data.db for an unset origin, None gives nothing here
+fn compute(
+	pkg: &Package,
+	caches: &mut impl DbCaches,
+	optional: bool,
+) -> Vec<Vec<u8>> {
+	let mut reqs = Vec::new();
+	match pkg.origin {
+		None => {}
+		Some(PkgFrom::File(_) | PkgFrom::LocalDb) => {
+			let cache = caches.local_cache();
+			find_requiredby(pkg, &cache, optional, &mut reqs);
+		}
+		Some(PkgFrom::SyncDb) => {
+			for cache in caches.sync_caches() {
+				find_requiredby(
+					pkg, &cache, optional, &mut reqs,
+				);
+			}
+			reqs.sort();
+		}
+	}
+	reqs
+}
+
+// alpm_pkg_compute_requiredby
+pub fn compute_requiredby(
+	pkg: &Package,
+	caches: &mut impl DbCaches,
+) -> Vec<Vec<u8>> {
+	compute(pkg, caches, false)
+}
+
+// alpm_pkg_compute_optionalfor
+pub fn compute_optionalfor(
+	pkg: &Package,
+	caches: &mut impl DbCaches,
+) -> Vec<Vec<u8>> {
+	compute(pkg, caches, true)
+}
+
+// alpm_pkg_should_ignore: the name or one of the groups matches an
+// ignorepkg/ignoregroup entry as an fnmatch pattern (alpm_list_find with
+// _alpm_fnmatch, so no '!' negation). groups as given, the C getter
+// lazy-loads them for local packages
+pub fn pkg_should_ignore(handle: &Handle, pkg: &Package) -> bool {
+	let matches =
+		|pats: &[Vec<u8>], s: &[u8]| pats.iter().any(|p| fnmatch(p, s));
+	matches(handle.ignorepkgs(), pkg.name_bytes())
+		|| pkg.groups.iter().any(|g| matches(handle.ignoregroups(), g))
 }

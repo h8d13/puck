@@ -25,6 +25,13 @@ Every finding states who controls the input that triggers it:
 |---|---|
 | `_alpm_filelist_pathcmp` signed `char` | real (rare) |
 | `_alpm_pkg_dup` copies a subset | real, long-lived API users |
+| local db lines over 1023 bytes split | real (rare) |
+| Include matching nothing is fatal | real |
+| `READ_AND_SPLITDEP` reads a freed buffer | packager |
+| `-Qii` crashes on a backup path that is now a directory | local |
+| `-Si`/`-Qip` crash on huge build dates | packager |
+| `.pacsave` rotation regex built from an unescaped file name | real (rare) |
+| `-Fx -l` conflict check is dead | real |
 | `_alpm_pkg_check_meta` name check swapped | packager |
 | `string_length` buffer one byte short | packager |
 | `_alpm_splitname` precondition | packager / local |
@@ -64,6 +71,85 @@ by `_alpm_db_add_pkgincache` (db.c:622).
 
 - port: `dup()` mirrors the subset, `Clone` is complete
 
+## local db lines over 1023 bytes split
+
+Practice: **real (rare)**. Needs a description or a file path over 1023
+bytes in an installed package; long paths exist in some packages.
+
+be_local.c:713 reads `desc`/`files` through `line[1024]`: a long desc is
+truncated and its tail parsed as an unknown key (swallowing lines up to
+the next blank line), a long path becomes two file entries, which then
+take part in ownership queries and conflict checks.
+
+- port: `alpm-db` keeps lines whole (listed as a divergence)
+
+## Include matching nothing is fatal
+
+Practice: **real**. `Include = /etc/pacman.d/*.conf` with no match.
+
+conf.c:1237-1254: with `GLOB_NOCHECK` and no errfunc, the GLOB_NOMATCH and
+GLOB_ABORTED branches are dead and the "Ignore include failures" comment
+is wrong: the pattern comes back verbatim and fails with "could not be
+read".
+
+## `READ_AND_SPLITDEP` reads a freed buffer
+
+Practice: **packager**. Needs a relation line in a sync db longer than
+`_alpm_archive_fgets`'s buffer (about one archive block); repo-add output
+never has lines that long, a crafted db can.
+
+be_sync.c:552-555 parses `line`, captured at the section header
+(be_sync.c:599), instead of `buf.line`. When a longer line makes
+`_alpm_archive_fgets` grow its buffer (util.c:1283-1291) the old one is
+freed, so `alpm_dep_from_string(line)` reads freed memory. Applies to
+every relation section. Fix idea: use `buf.line` like READ_AND_STORE_ALL.
+
+- difftest: relation lines kept far below the buffer size
+
+## `-Qii` crashes on a backup path that is now a directory
+
+Practice: **local**. A backup file (e.g. under `/etc`) replaced by a
+directory, or a read error on it.
+
+src/pacman/package.c:394-415, 430: `access(R_OK)` passes on a directory,
+`alpm_compute_md5sum` fails, `get_backup_file_status` logs and returns
+NULL, and `dump_pkg_backups` calls `strlen(NULL)`.
+
+- port: logs the error and skips the entry
+- difftest: no backup path is a directory
+
+## `-Si`/`-Qip` crash on huge build dates
+
+Practice: **packager**. A `%BUILDDATE%`/builddate around 7e16 or more;
+`_alpm_parsedate` accepts any long long.
+
+src/pacman/package.c:202-209 passes `localtime()`'s NULL (year past int)
+to `strftime`.
+
+- port: prints "None"
+- difftest: only dates `localtime` accepts
+
+## `.pacsave` rotation regex built from an unescaped file name
+
+Practice: **real (rare)**: a backup file whose name contains ERE
+metacharacters.
+
+remove.c:371-372 (used at 547) builds a regex from the basename without
+escaping. `+`, `*`, `{}` change which files match, and `strtoul` (390)
+reads the number at a fixed offset. A name that fails to compile (`[`, a
+lone `{`) jumps to cleanup without shifting, then the caller renames the
+file to `.pacsave`, overwriting an existing `.pacsave`: an older saved
+config is lost. Error paths after a successful regcomp (375, 402, 410)
+skip `regfree`. **env** for the leak.
+
+## `-Fx -l` conflict check is dead
+
+Practice: **real**. Ordinary flags reach it; the effect is missing
+validation only.
+
+pacman.c:878 `checkargs_files` tests `op_q_search`, which -F never sets
+(should be `op_f_regex`), so `--regex --list` is never rejected.
+
 ## `_alpm_pkg_check_meta` name check swapped
 
 Practice: **packager**. makepkg refuses invalid package names, so only a
@@ -74,7 +160,9 @@ package.c:843 calls `_alpm_fnmatch(pkg->name, "[![:alnum:]+_.@-]")`, but
 `_alpm_fnmatch` is `fnmatch(pattern, string, 0)` (util.c:1557): the name is
 used as the pattern. The invalid-character check effectively never fires
 (and the bracket would only match a one-character string anyway).
-Found independently by two port units (package model, util.c).
+Found independently by four port units (package model, util.c,
+be_sync, be_local); it runs as a hard error in be_sync.c:360 and
+be_package.c:667.
 
 ## `src/pacman/util.c` `string_length` buffer one byte short
 
@@ -226,5 +314,241 @@ declarations. No existing MR found for it.
 - `_alpm_greedy_grow` returns `data` instead of `*data` when no growth is
   needed (1600); callers only NULL-check. **none**
 
+## `be_sync.c` / `be_local.c` minor
+
+- duplicate single-value sections overwrite without freeing (be_sync.c
+  READ_AND_STORE 539-542, be_local.c:690), a second file list leaks the
+  first (be_sync.c:694). **packager / local**
+- same package name in two sync db dirs is merged into one package; any
+  non-directory entry creates a package before its file name is checked,
+  a top-level `README` invalidates the whole db (be_sync.c:587).
+  **packager**
+- `_alpm_archive_fgets` ends a line at NUL only when the block has no
+  '\n', so results depend on block boundaries (util.c:1263-1266).
+  **packager**
+- `_alpm_strtoofft` does not range-check: 2^63..2^64-1 become negative
+  (util.c:1435). **packager**
+- `HAVE_STRUCT_DIRENT_D_TYPE` is never defined by meson, the d_type
+  shortcut is dead and a symlink to a dir in `local/` becomes a package
+  (be_local.c:392). **local**
+- `local_db_read(pkg, INFRQ_BASE)` in populate loads nothing, the
+  "corrupted database entry" path is dead (be_local.c:627). **none**
+- `local_db_add_version` failing inside `local_db_create` returns without
+  setting pm_errno: `alpm_initialize` fails with `ALPM_ERR_OK`
+  (be_local.c:422-424, 449-451). **env**
+- `is_dir` truncates paths at PATH_MAX (be_local.c:399); the version file
+  is read with fscanf `%zu`, so `+9`, ` 9junk` read as 9 (be_local.c:507).
+  **local**
+- stale comment "between 3 and PATH_MAX characters" (be_sync.c:506), no
+  zstd case in `estimate_package_count` (be_sync.c:387-412). **none**
+
+## `db.c` / `handle.c` minor
+
+- the group cache built while a pkgcache load failed stays empty after a
+  later successful load: `load_grpcache` marks it loaded anyway (db.c:700,
+  735) and `_alpm_db_free_pkgcache` returns early on a NULL pkgcache
+  (db.c:566), so neither reload nor `alpm_db_update` (be_sync.c:239) clears
+  it. pacman updates before touching groups. **api** (long-lived users)
+- a package listing the same group twice creates two groups of that name
+  (db.c:714-731), `-Qg`/`-Sg` show it twice. **packager**
+- `canonicalize_path("")` indexes `path[len - 1]` with len 0
+  (handle.c:424, 429), reachable through `add_cachedir("")`,
+  `add_hookdir("")`, `set_gpgdir("")`. **api**
+- `alpm_db_get_valid` reports DB_INVALID_SIG for any invalid sync db,
+  content errors included (be_sync.c:79-81, 475). **none**
+- `sanitize_url("/")` stores an empty server URL (db.c:181). **local**
+- `_alpm_db_path` caches the path with the dbext of registration time,
+  `sync_db_populate` divides the size estimate by 4 on the dbext of load
+  time (db.c:402-432, be_sync.c:450): changing dbext in between sizes the
+  table for the wrong file. pacman sets dbext before registering.
+  **api**
+- `alpm_db_set_servers`/`set_cache_servers` free the old list before
+  validating, a bad URL leaves a partial list (db.c:144, 164);
+  `alpm_option_set_logfile` dereferences the handle before CHECK_HANDLE
+  (handle.c:572); `alpm_option_add_architecture` has no CHECK_HANDLE and
+  pushes an unchecked strdup (handle.c:819). **api / env**
+
+## `src/pacman/package.c` / `signing.c` minor
+
+- uninitialized `siglist` freed when the package file is gone between load
+  and display (package.c:365-378, signing.c:550-552). **env**
+- `alpm_extract_keyid` bounds allow reading one byte past the signature
+  and `blen - hlen - 8` can underflow (signing.c:1159-1170). **packager**
+  (crafted `%PGPSIG%`)
+- the `-1` "unset date" check never matches, missing dates print as
+  1970-01-01 instead of "None" (package.c:202, 206). **packager / local**,
+  cosmetic
+- "Extended Data   :" is a literal, not translated or aligned
+  (package.c:363); Installed Size reuses the download size unit
+  (package.c:318-326). **real**, cosmetic
+- `dump_pkg_backups` (exported) uses titles only filled by
+  `dump_pkg_full` (package.c:189-196, 383-386); `printf(_("None"))` uses a
+  translation as format string (package.c:241). **none**
+
+## `package.c` / `util.c` follow-up minor
+
+- an uppercase `%SHA256SUM%` fails package validation in C
+  (`_alpm_test_checksum` strcmp, util.c:1198-1218, be_package.c:321);
+  alpm-repo-db lowercases, so the Rust path accepts the same db.
+  **packager** (repo-add writes lowercase)
+- IgnorePkg/IgnoreGroup use `alpm_list_find` + `_alpm_fnmatch`, so a
+  leading '!' is a literal, while NoUpgrade/NoExtract negate with it
+  (package.c:795-812). **local**, inconsistency
+- `compute_requiredby` dereferences `origin_data.db` for unset origins
+  (package.c:507-508); pm_errno after success reflects the last db searched
+  (package.c:470-490). **api**
+
+## `be_package.c` minor
+
+- metadata-only load misses `.INSTALL` after `.PKGINFO` unless it is in
+  the dotfile run right after it: the `.PKGINFO`/`.MTREE` branches
+  `continue` before the break check (be_package.c:606-607, 613).
+  makepkg puts `.INSTALL` first. **packager**
+- a second `.PKGINFO` entry is parsed into the same package, overwriting
+  without freeing and appending lists (be_package.c:192-215). **packager**
+- a `./.INSTALL` mtree line before a later mtree parse error leaves
+  `scriptlet` set while the file list falls back (be_package.c:497).
+  **packager**
+- a failed mtree build sets pm_errno LIBARCHIVE, the load still succeeds
+  (be_package.c:454-509, 612). **api**
+- hard links in the archive-scan path get mode 0644 without type bits
+  (be_package.c:419, from libarchive). **packager**, cosmetic
+- the swapped `_alpm_pkg_check_meta` check lets `pkgname = f*` load
+  (be_package.c:667). See above. **packager**
+
+## `src/pacman/check.c` minor
+
+- `strcmp(link, archive_entry_symlink(entry))` gets NULL for a link entry
+  without `link=` (check.c:145). **packager** (makepkg writes `link=`)
+- `archive_entry_digest` never returns NULL, so "checksum information not
+  available" is dead and a missing sha256 shows as a mismatch
+  (check.c:183-197, 226). **packager / real (old mtrees)**
+- `_cache_mtree_next` turns ARCHIVE_WARN into -1, so `-Qkk` stops silently
+  at the first warning and prints totals as if complete (be_local.c:296-
+  309). **packager**
+- NoExtract for `.INSTALL`/`.CHANGELOG` is matched at `filepath + rootlen`
+  of a dbpath-based path: wrong string, and uninitialized bytes when that
+  path is shorter than root (check.c:34, 351). **local**
+- any top-level packaged dotfile is skipped by `-Qkk`, not only metadata
+  (check.c:333-347). **packager**
+- fast type-mismatch warning ignores `-q` (check.c:275); "path too long"
+  unreachable with a normal root (check.c:264). **none**
+- VLA sized from `lstat` `st_size + 1` (check.c:135-136). **env**
+
+## `src/pacman/pacman.c` minor
+
+- -F falls back to `parsearg_trans`, accepting `-d`, `-p`, `--dbonly`,
+  `--noscriptlet`, `--print-format`, ... that do nothing for -F
+  (pacman.c:847); usage shows `--sysroot` without `<path>` (217). **real**,
+  cosmetic
+- `--config`/`--logfile` cut at PATH_MAX by strndup (432, 495). **local**
+- `-Qs`/`-Qo` conflict message names `--upgrade` (677); `{"force",
+  OP_FORCE}` has no handler and widens abbreviation ambiguity (1019);
+  `--ask=-1` wraps (396); only the first `-` target reads stdin (~1232).
+  **none**
+- with POSIXLY_CORRECT set getopt stops at the first non-option, `pacman
+  pkg -S` fails. **env**
+
+## regex (glibc, as pacman uses it)
+
+- search results depend on the locale (pacman.c:266 `setlocale(LC_ALL,
+  "")`, db.c:465, files.c:127): in C.UTF-8 `pacman -Ss '[à-ü]'` fails with
+  an invalid-regex error. **env**
+- escaped letters never match under REG_ICASE (the escaped byte keeps its
+  case, the text is upper-cased): `pacman -Ss 'python\d'` finds nothing.
+  **real** (user search terms)
+- REG_ICASE loses matches after characters whose upper case has another
+  UTF-8 length (`B` vs "ɐb"). **real (rare)**
+- `(a*)\1+*` overflows the regexec stack, `(.)**{1,2}\1` is
+  exponential: `-Ss`/`-Fx` with such a term crashes or hangs (user's own
+  process). **none**
+- backrefs to repeated groups miss matches, anchors inside `{m,n}` copies
+  only count once. **none**
+
+## `src/pacman/conf.c` minor
+
+- CacheServer `file://` URLs do not get the sysroot, Server ones do
+  (conf.c:1344). **real (rare)**, with `--sysroot`
+- `resolve_path` message has a stray leading quote and no `_()`
+  (util.c:1977). **real**, cosmetic
+- Include order follows the locale (glibc glob sorts with strcoll).
+  **real (rare)**
+- repeated XferCommand leaks the old argv/string; a wordsplit failure
+  keeps the old command and a stale argc (conf.c:727, 737). **local**
+- on an invalid value `process_usage` and CleanMethod keep the valid
+  bits, `process_siglevel` drops everything (conf.c:548, 573-580, 1051).
+  **local**
+- `setdefaults` truncates at PATH_MAX (conf.c:1382, 1392) **local**;
+  indexes `rootdir[len-1]` without a length check (conf.c:1373-1377),
+  unreachable through realpath **none**; unchecked strdup/calloc
+  (conf.c:600, 717, 722, 1073, 1076, 1287-1288) and ignored
+  `prepend_sysroot` result (conf.c:1429) **env**
+- `config_free` frees the global's repos instead of its argument's
+  (conf.c:142-143); pacman always passes the global. **none**
+- `section->name` dangles after an include with a header, only ever
+  NULL-checked (conf.c:1282, 1300); `replace_server_vars` reads the
+  global instead of its parameter (conf.c:823). **none**
+
 To be written up and reported through pacman's usual channels by the
 maintainer of this repo, not from here.
+
+# ALPM findings
+
+Issues in the ALPM crates (`alpm/` at `0eedcb8`) met while using them for
+pacman's formats. Same practice labels, judged against real databases.
+
+- alpm-types `Version`/`FullVersion` Ord treats an explicit epoch 0 as
+  greater than no epoch (pkg_generic.rs:195-201, pkg_full.rs `cmp`), while
+  libalpm treats a missing epoch as "0" (version.c:54-62). **packager**
+- alpm-types `Version` Ord counts a pkgrel present on one side only, where
+  libalpm skips the release (pkg_generic.rs:211, version.c:251):
+  `foo>=1.5-3` is satisfied by `foo=1.5` in libalpm, not in ALPM
+  (requirement.rs:86-98). **packager**
+- alpm-types `OptionalDependency` starts the description at ':' + any
+  whitespace and trims it, empty becomes None (relation/base.rs:380-397);
+  libalpm splits at the first ": " and keeps the raw text. **packager**
+- alpm-types prints pkgrel without leading zeros (`1.0-01` -> `1.0-1`).
+  **none**
+- alpm-types `Packager` rejects `Unknown Packager`, makepkg's default,
+  so the whole desc becomes unreadable. **real** (1 of 804 local packages)
+- alpm-db files: backups sorted by path, entries with hash `(null)`
+  dropped (real local db: 15 and 2 of 804). **real**
+- alpm-types `Url` normalizes (empty path gets '/'), no round trip.
+  **real** (82/804 local, 1330/15334 sync)
+- alpm-types `RelationOrSoname` rejects valid relation names with 2+
+  chars before `.so` followed by a letter (`foo.sound`, `d1.so62r`): the
+  SonameV1 branch fails without backtracking (relation/composite.rs:46-50).
+  **packager** (no such name in current repos). Found by both db units.
+- alpm-types `ExtraDataEntry::parser_until`: an empty value swallows the
+  next line (`a=\nb=c` -> key `a`, value `b=c`). **packager**
+- alpm-db desc v2 detected by `contains("%XDATA%")` anywhere
+  (desc/schema.rs:64), so a v1 desc mentioning it in a text field fails.
+  **packager**
+- alpm-db files: spec says empty lines are ignored, the parser ends
+  `%FILES%` at the first blank line and errors on the rest. **local**
+- alpm-repo-db has no `%DATA%` (xdata) section, which pacman 7 reads.
+  **real** once repos ship xdata
+- alpm-repo-db `RepoFilesV1` dedups/sorts paths as `PathBuf` components,
+  `usr` and `usr/` count as duplicates. **packager**
+- alpm-mtree sorts entries by path (`paths_from_parsed_content`,
+  `sort_unstable`): file order lost on 386/804 real mtrees, duplicates
+  kept. **real** (output order)
+- alpm-mtree `mode` parser takes 3-4 digits (docs: 3-5); bsdtar writes
+  `mode=%o`, so permissions 0000 or below 0100 (`mode=0`, `mode=44`)
+  reject the whole mtree. **real (rare)**
+- alpm-mtree `PathType` has no `PartialEq`. **api**
+- alpm-mtree drops `size` for dirs/links, refuses char/block/fifo types
+  and file lines without `size`, which libarchive reads. **packager**
+- alpm-pkginfo needs `pkgtype` as first xdata, refuses unknown keys
+  (incl. `basever`, ignored by pacman) and `url = `. **packager**; an
+  empty `$url` in a PKGBUILD would make it **real** (0 of 1250 cached
+  packages have one)
+- alpm-package `PackageReader` needs a valid file name, parses
+  `.BUILDINFO`, needs UTF-8 `.INSTALL`. **api**
+- alpm-mtree's gzip helper is private, reading `.MTREE` from bytes needs
+  the `alpm_common::MetadataFile` trait. **api**
+- tar (via alpm-compress) refuses the `S` type without a GNU header.
+  **packager**
+- alpm-compress gzip uses `GzDecoder`, reads only the first member
+  (libarchive and gzip read all; `MultiGzDecoder` would match).
+  **packager**

@@ -1,0 +1,556 @@
+// port of lib/libalpm/conflict.c: dependency conflicts between targets and
+// against the local db, and file conflicts between targets and against the
+// filesystem.
+//
+// handle state comes in as parameters: the local db as its package cache
+// (pkghash order is the C's cache list order), root and the overwrite
+// globs through FileCheck. the C getters lazy-load local packages, here
+// the caller loads them first (INFRQ_DESC for dependency conflicts,
+// INFRQ_FILES for file conflicts, INFRQ_ALL where a conflict copies them).
+// logging is not modelled, it never changes the result. allocation
+// failures are not modelled (the C returns NULL or drops entries).
+// progress goes through ProgressCb, handle->progresscb in the C.
+
+use std::borrow::Borrow;
+use std::cmp::Ordering;
+use std::ffi::{OsStr, c_int};
+use std::fs::{self, Metadata};
+use std::io;
+use std::os::unix::ffi::OsStrExt;
+
+use crate::backup::needbackup;
+use crate::be_local::INFRQ_ERROR;
+use crate::deps::{Depend, depcmp};
+use crate::package::{Package, PkgFrom, has_name, pkg_cmp};
+use crate::pkghash::PkgHash;
+use crate::util::{fnmatch_patterns, until_nul};
+
+// limits.h on linux, the snprintf buffers of the C
+const PATH_MAX: usize = 4096;
+
+// alpm_conflict_t. the C dups both packages and points reason into the
+// conflicts list of the package that declares it, cloned here
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Conflict {
+	pub package1: Package,
+	pub package2: Package,
+	pub reason: Depend,
+}
+
+// alpm_fileconflicttype_t, discriminants as in alpm.h
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileConflictType {
+	Target = 1,
+	Filesystem,
+}
+
+// alpm_fileconflict_t
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileConflict {
+	// name of the package installing file
+	pub target: Vec<u8>,
+	pub conflict_type: FileConflictType,
+	// root + path, the trailing '/' of a directory dropped when the
+	// filesystem has something else there
+	pub file: Vec<u8>,
+	// owner of file, empty when unowned
+	pub ctarget: Vec<u8>,
+}
+
+// alpm_progress_t, discriminants as in alpm.h
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Progress {
+	AddStart,
+	UpgradeStart,
+	DowngradeStart,
+	ReinstallStart,
+	RemoveStart,
+	ConflictsStart,
+	DiskspaceStart,
+	IntegrityStart,
+	LoadStart,
+	KeyringStart,
+}
+
+// alpm_cb_progress with its context. () is a handle without a callback
+pub trait ProgressCb {
+	fn progress(
+		&mut self,
+		progress: Progress,
+		pkg: &[u8],
+		percent: c_int,
+		howmany: usize,
+		current: usize,
+	);
+}
+
+impl ProgressCb for () {
+	fn progress(
+		&mut self,
+		_: Progress,
+		_: &[u8],
+		_: c_int,
+		_: usize,
+		_: usize,
+	) {
+	}
+}
+
+fn same_name(a: &Package, b: &Package) -> bool {
+	has_name(a, b.name_bytes(), b.name_hash)
+}
+
+// conflict_new: _alpm_pkg_dup force-loads a local package and fails when
+// that fails (INFRQ_ERROR), the conflict is then dropped
+fn dup_fails(pkg: &Package) -> bool {
+	pkg.origin == Some(PkgFrom::LocalDb) && pkg.infolevel & INFRQ_ERROR != 0
+}
+
+// add_conflict: pairs already listed (by both names) are not added again
+fn add_conflict(
+	baddeps: &mut Vec<Conflict>,
+	pkg1: &Package,
+	pkg2: &Package,
+	reason: &Depend,
+) {
+	if dup_fails(pkg1) || dup_fails(pkg2) {
+		return;
+	}
+	let isin = baddeps.iter().any(|c| {
+		same_name(&c.package1, pkg1) && same_name(&c.package2, pkg2)
+	});
+	if !isin {
+		baddeps.push(Conflict {
+			package1: pkg1.dup(),
+			package2: pkg2.dup(),
+			reason: reason.clone(),
+		});
+	}
+}
+
+// check_conflict: the conflicts of each list1 package against every list2
+// package of another name. reversed puts the list2 package first (the
+// C's order < 0)
+fn check_conflict(
+	list1: &[&Package],
+	list2: &[&Package],
+	baddeps: &mut Vec<Conflict>,
+	reversed: bool,
+) {
+	for pkg1 in list1 {
+		for conflict in &pkg1.conflicts {
+			for pkg2 in list2 {
+				if same_name(pkg1, pkg2)
+					|| !depcmp(pkg2, conflict)
+				{
+					continue;
+				}
+				let (a, b) = match reversed {
+					false => (pkg1, pkg2),
+					true => (pkg2, pkg1),
+				};
+				add_conflict(baddeps, a, b, conflict);
+			}
+		}
+	}
+}
+
+// _alpm_innerconflicts: targets against targets
+pub fn innerconflicts(packages: &[&Package]) -> Vec<Conflict> {
+	let mut baddeps = Vec::new();
+	check_conflict(packages, packages, &mut baddeps, false);
+	baddeps
+}
+
+// alpm_checkconflicts: the handle is only checked for NULL
+pub fn checkconflicts(packages: &[&Package]) -> Vec<Conflict> {
+	innerconflicts(packages)
+}
+
+// alpm_list_diff with _alpm_pkg_cmp: both sides msorted by name (stable),
+// then the lhs entries left after pairing each rhs entry with one lhs
+// entry of the same name
+fn pkg_diff<'a>(lhs: &[&'a Package], rhs: &[&Package]) -> Vec<&'a Package> {
+	let (mut l, mut r) = (lhs.to_vec(), rhs.to_vec());
+	l.sort_by(|a, b| pkg_cmp(a, b));
+	r.sort_by(|a, b| pkg_cmp(a, b));
+	let (mut i, mut j) = (0, 0);
+	let mut out = Vec::new();
+	while i < l.len() && j < r.len() {
+		match pkg_cmp(l[i], r[j]) {
+			Ordering::Less => {
+				out.push(l[i]);
+				i += 1;
+			}
+			Ordering::Greater => j += 1,
+			Ordering::Equal => {
+				i += 1;
+				j += 1;
+			}
+		}
+	}
+	out.extend(&l[i..]);
+	out
+}
+
+// _alpm_outerconflicts: targets against the local packages of other
+// names (sorted by name), then those against the targets with the local
+// package first
+pub fn outerconflicts<P: Borrow<Package>>(
+	local: &PkgHash<P>,
+	packages: &[&Package],
+) -> Vec<Conflict> {
+	let cache: Vec<&Package> = local.iter().map(Borrow::borrow).collect();
+	let dblist = pkg_diff(&cache, packages);
+	let mut baddeps = Vec::new();
+	check_conflict(packages, &dblist, &mut baddeps, false);
+	check_conflict(&dblist, packages, &mut baddeps, true);
+	baddeps
+}
+
+// result of _alpm_db_find_fileconflicts
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FileConflicts {
+	pub conflicts: Vec<FileConflict>,
+	// paths appended to handle->trans->skip_remove, files changing
+	// hands between two targets
+	pub skip_remove: Vec<Vec<u8>>,
+}
+
+// the handle state _alpm_db_find_fileconflicts reads
+pub struct FileCheck<'a, P> {
+	// handle->root, ends in '/'
+	pub root: &'a [u8],
+	// handle->db_local's cache, files loaded
+	pub local: &'a PkgHash<P>,
+	// handle->overwrite_files
+	pub overwrite: &'a [Vec<u8>],
+}
+
+fn os(path: &[u8]) -> &OsStr {
+	OsStr::from_bytes(path)
+}
+
+// snprintf into a PATH_MAX buffer: cut to PATH_MAX - 1 bytes
+fn cat(parts: &[&[u8]]) -> Vec<u8> {
+	let mut p = parts.concat();
+	p.truncate(PATH_MAX - 1);
+	p
+}
+
+// llstat (src/common): lstat with trailing '/' stripped (not a lone
+// "/"), so "dirsymlink/" describes the link
+fn llstat(path: &[u8]) -> io::Result<Metadata> {
+	let slashes = path.iter().rev().take_while(|&&c| c == b'/').count();
+	let len = (path.len() - slashes).max(1).min(path.len());
+	fs::symlink_metadata(os(&path[..len]))
+}
+
+fn has_file(pkg: &Package, path: &[u8]) -> bool {
+	pkg.files.contains(path).is_some()
+}
+
+// add_fileconflict: a local owner makes it a filesystem conflict too
+fn fileconflict(
+	file: Vec<u8>,
+	pkg1: &Package,
+	pkg2: Option<&Package>,
+) -> FileConflict {
+	let (conflict_type, ctarget) = match pkg2 {
+		None => (FileConflictType::Filesystem, &[][..]),
+		Some(p) if p.origin == Some(PkgFrom::LocalDb) => {
+			(FileConflictType::Filesystem, p.name_bytes())
+		}
+		Some(p) => (FileConflictType::Target, p.name_bytes()),
+	};
+	FileConflict {
+		target: pkg1.name_bytes().to_vec(),
+		conflict_type,
+		file,
+		ctarget: ctarget.to_vec(),
+	}
+}
+
+// dir_belongsto_pkgs: every entry under root + dirpath, recursively, is
+// in the file list of one of pkgs. lstat decides what is a directory, so
+// a symlink to one is checked as a file. readdir order does not matter,
+// any unowned entry or lstat failure answers no. a readdir error ends
+// the walk like the end of the directory
+fn dir_belongsto_pkgs(root: &[u8], dirpath: &[u8], pkgs: &[&Package]) -> bool {
+	let Ok(dir) = fs::read_dir(os(&cat(&[root, dirpath]))) else {
+		return false;
+	};
+	for ent in dir {
+		let Ok(ent) = ent else {
+			break;
+		};
+		let name = ent.file_name();
+		let name = name.as_bytes();
+		let full = cat(&[root, dirpath, name]);
+		let Ok(meta) = fs::symlink_metadata(os(&full)) else {
+			return false;
+		};
+		let is_dir = meta.is_dir();
+		let slash: &[u8] = if is_dir { b"/" } else { b"" };
+		let path = cat(&[dirpath, name, slash]);
+		if !pkgs.iter().any(|p| has_file(p, &path)) {
+			return false;
+		}
+		if is_dir && !dir_belongsto_pkgs(root, &path, pkgs) {
+			return false;
+		}
+	}
+	true
+}
+
+// the entries after newfiles[j] inside directory filestr: the C moves j
+// to the last of them, the walk goes on after it
+fn skip_inside(newfiles: &[&[u8]], j: &mut usize, filestr: &[u8]) {
+	while newfiles
+		.get(*j + 1)
+		.is_some_and(|next| next.starts_with(filestr))
+	{
+		*j += 1;
+	}
+}
+
+impl<P: Borrow<Package>> FileCheck<'_, P> {
+	fn cache(&self) -> impl Iterator<Item = &Package> {
+		self.local.iter().map(Borrow::borrow)
+	}
+
+	// _alpm_db_get_pkgfromcache on db_local
+	fn local_pkg(&self, name: &[u8]) -> Option<&Package> {
+		self.local.find(name).map(Borrow::borrow)
+	}
+
+	// _alpm_find_file_owner: first local package in cache order
+	fn file_owner(&self, path: &[u8]) -> Option<&Package> {
+		self.cache().find(|p| has_file(p, path))
+	}
+
+	// _alpm_can_overwrite_file: a non-negated glob matches the path as
+	// packaged or with root prepended
+	fn can_overwrite(&self, path: &[u8], rootedpath: &[u8]) -> bool {
+		let ok = |s| fnmatch_patterns(self.overwrite, s) == Some(false);
+		ok(path) || ok(rootedpath)
+	}
+
+	// CHECK 1: p1 against the targets after it, through the pathcmp
+	// intersection. overwrite only skips paths p2 has in the same form
+	// (file-file), so dir-file pairs stay conflicts
+	fn check_targets(
+		&self,
+		p1: &Package,
+		rest: &[&Package],
+		out: &mut FileConflicts,
+	) {
+		for p2 in rest {
+			for filename in p1.files.intersection(&p2.files) {
+				let path = cat(&[self.root, filename]);
+				if self.can_overwrite(filename, &path)
+					&& has_file(p2, filename)
+				{
+					continue;
+				}
+				out.conflicts.push(fileconflict(
+					path,
+					p1,
+					Some(p2),
+				));
+			}
+		}
+	}
+
+	// the directory at relative_path (no trailing '/') is owned only by
+	// dbpkg and rem, and every entry below it by those owners
+	fn dir_is_replaced(
+		&self,
+		relative_path: &[u8],
+		dbpkg: Option<&Package>,
+		rem: &[&Package],
+	) -> bool {
+		let dir = [relative_path, b"/"].concat();
+		let owners: Vec<&Package> =
+			self.cache().filter(|p| has_file(p, &dir)).collect();
+		if owners.is_empty() {
+			return false;
+		}
+		let pkgs: Vec<&Package> =
+			dbpkg.into_iter().chain(rem.iter().copied()).collect();
+		if !pkg_diff(&owners, &pkgs).is_empty() {
+			return false;
+		}
+		dir_belongsto_pkgs(self.root, &dir, &owners)
+	}
+
+	// CHECK 2: files of p1 new to the installed version (all of them
+	// when not installed) that exist under root, minus the cases where
+	// the transaction takes care of what is there
+	fn check_filesystem(
+		&self,
+		p1: &Package,
+		upgrade: &[&Package],
+		rem: &[&Package],
+		out: &mut FileConflicts,
+	) {
+		let rootlen = self.root.len();
+		let dbpkg = self.local_pkg(p1.name_bytes());
+		let newfiles: Vec<&[u8]> = match dbpkg {
+			Some(db) => p1.files.difference(&db.files),
+			None => {
+				p1.files.files
+					.iter()
+					.map(|f| until_nul(&f.name))
+					.collect()
+			}
+		};
+		let mut j = 0;
+		while j < newfiles.len() {
+			let filestr = newfiles[j];
+			let mut path = cat(&[self.root, filestr]);
+			let Ok(lsbuf) = llstat(&path) else {
+				j += 1;
+				continue;
+			};
+			let is_dir = lsbuf.is_dir();
+			let mut resolved = false;
+			// the C reads path[pathlen - 1] with the untruncated length,
+			// past the buffer for paths over PATH_MAX; the cut path here
+			let pfile_isdir = path.last() == Some(&b'/');
+			if pfile_isdir {
+				if is_dir {
+					j += 1;
+					continue;
+				}
+				// compared without the '/' from here on, a file in
+				// the old version may become a directory
+				path.pop();
+				let relative_path =
+					path.get(rootlen..).unwrap_or_default();
+				if dbpkg.is_some_and(|db| {
+					has_file(db, relative_path)
+				}) {
+					resolved = true;
+					skip_inside(&newfiles, &mut j, filestr);
+				}
+			}
+			let relative_path =
+				path.get(rootlen..).unwrap_or_default();
+
+			// a removed package owns what is there
+			for rempkg in rem {
+				if resolved {
+					break;
+				}
+				if has_file(rempkg, relative_path) {
+					resolved = true;
+					if pfile_isdir {
+						skip_inside(
+							&newfiles, &mut j,
+							filestr,
+						);
+					}
+				}
+			}
+
+			// the installed version of another target owns it: the
+			// file changes hands, its removal is skipped
+			for p2 in upgrade {
+				if resolved {
+					break;
+				}
+				if std::ptr::eq(*p2, p1) {
+					continue;
+				}
+				let Some(localp2) =
+					self.local_pkg(p2.name_bytes())
+				else {
+					continue;
+				};
+				if has_file(localp2, relative_path) {
+					out.skip_remove
+						.push(relative_path.to_vec());
+					resolved = true;
+					if filestr.last() == Some(&b'/') {
+						skip_inside(
+							&newfiles, &mut j,
+							filestr,
+						);
+					}
+				}
+			}
+
+			if !resolved && is_dir {
+				resolved = self.dir_is_replaced(
+					relative_path,
+					dbpkg,
+					rem,
+				);
+			}
+
+			// unowned and in the new package's backup list
+			if !resolved
+				&& needbackup(relative_path, p1).is_some()
+				&& self.file_owner(relative_path).is_none()
+			{
+				resolved = true;
+			}
+
+			if !is_dir && self.can_overwrite(filestr, &path) {
+				resolved = true;
+			}
+
+			if !resolved {
+				let owner = self.file_owner(relative_path);
+				out.conflicts.push(fileconflict(
+					path.clone(),
+					p1,
+					owner,
+				));
+			}
+			j += 1;
+		}
+	}
+
+	// _alpm_db_find_fileconflicts: every target against the targets
+	// after it, then against the filesystem. progress before each target
+	// and once at 100 after the last, nothing for no targets
+	pub fn find_fileconflicts(
+		&self,
+		upgrade: &[&Package],
+		rem: &[&Package],
+		progress: &mut impl ProgressCb,
+	) -> FileConflicts {
+		let mut out = FileConflicts::default();
+		let numtargs = upgrade.len();
+		if numtargs == 0 {
+			return out;
+		}
+		for (current, p1) in upgrade.iter().enumerate() {
+			// size_t arithmetic, the quotient fits an int
+			let percent = (current * 100 / numtargs) as c_int;
+			progress.progress(
+				Progress::ConflictsStart,
+				b"",
+				percent,
+				numtargs,
+				current,
+			);
+			self.check_targets(
+				p1,
+				&upgrade[current + 1..],
+				&mut out,
+			);
+			self.check_filesystem(p1, upgrade, rem, &mut out);
+		}
+		progress.progress(
+			Progress::ConflictsStart,
+			b"",
+			100,
+			numtargs,
+			numtargs,
+		);
+		out
+	}
+}

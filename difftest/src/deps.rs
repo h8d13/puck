@@ -1,10 +1,13 @@
-// C side of lib/libalpm/deps.c, dependency strings and provides matching
+// C side of lib/libalpm/deps.c, dependency strings, provides matching
+// and satisfiers in package lists
 use std::ffi::{CStr, CString, c_char, c_int, c_ulong};
 use std::ptr;
 
-use crate::{CList, cstr, opt_ptr, take};
+use crate::package::{CPkg, CPkgBox};
+use crate::{CList, alpm_list_add, alpm_list_free, cstr, opt_ptr, take};
 
 use alpm_core::deps::{DepMod, Depend};
+use alpm_core::package::Package;
 
 // alpm_depend_t, alpm.h
 #[repr(C)]
@@ -25,6 +28,12 @@ unsafe extern "C" {
 		dep: *mut CDepend,
 		provisions: *mut CList,
 	) -> c_int;
+	fn _alpm_depcmp_literal(pkg: *mut CPkg, dep: *mut CDepend) -> c_int;
+	fn _alpm_depcmp(pkg: *mut CPkg, dep: *mut CDepend) -> c_int;
+	pub(crate) fn alpm_find_satisfier(
+		pkgs: *mut CList,
+		depstring: *const c_char,
+	) -> *mut CPkg;
 }
 
 fn depmod_from_c(m: c_int) -> DepMod {
@@ -176,4 +185,50 @@ pub fn c_depcmp_provides(dep: &Depend, provisions: &[Depend]) -> bool {
 	// SAFETY: c and every node/mirror point into d, owned, mirrors and
 	// nodes, all alive and unmoved for the call; the C only reads them
 	unsafe { _alpm_depcmp_provides(&mut c, head) != 0 }
+}
+
+// C precondition of both: a NULL package name is only read when the
+// stored hashes match (strcmp)
+fn with_pkg_dep(
+	pkg: &Package,
+	dep: &Depend,
+	f: unsafe extern "C" fn(*mut CPkg, *mut CDepend) -> c_int,
+) -> bool {
+	assert!(
+		pkg.name.is_some() || pkg.name_hash != dep.name_hash,
+		"strcmp on a NULL name"
+	);
+	let b = CPkgBox::new(pkg);
+	let d = Owned::new(dep);
+	let mut c = d.mirror(dep.name_hash, dep.depmod as c_int);
+	// SAFETY: b.0 is a live package, c points into d, both alive for
+	// the call; the C only reads them
+	unsafe { f(b.0, &mut c) != 0 }
+}
+
+pub fn c_depcmp_literal(pkg: &Package, dep: &Depend) -> bool {
+	with_pkg_dep(pkg, dep, _alpm_depcmp_literal)
+}
+
+pub fn c_depcmp(pkg: &Package, dep: &Depend) -> bool {
+	with_pkg_dep(pkg, dep, _alpm_depcmp)
+}
+
+// position of the package alpm_find_satisfier returns. C precondition:
+// names set (strcmp after a hash match)
+pub fn c_find_satisfier(pkgs: &[Package], depstring: &[u8]) -> Option<usize> {
+	assert!(pkgs.iter().all(|p| p.name.is_some()), "NULL name");
+	let boxes: Vec<CPkgBox> = pkgs.iter().map(CPkgBox::new).collect();
+	let mut list = ptr::null_mut();
+	for b in &boxes {
+		// SAFETY: list is NULL or built by alpm_list_add, the packages
+		// stay owned by boxes
+		list = unsafe { alpm_list_add(list, b.0.cast()) };
+	}
+	let s = cstr(depstring);
+	// SAFETY: list holds live packages for the call, s a valid C string
+	let found = unsafe { alpm_find_satisfier(list, s.as_ptr()) };
+	// SAFETY: nodes malloc'd by alpm_list_add, data owned by boxes
+	unsafe { alpm_list_free(list) };
+	boxes.iter().position(|b| b.0 == found)
 }

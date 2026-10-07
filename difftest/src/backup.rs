@@ -1,8 +1,10 @@
 // C side of lib/libalpm/backup.c, internal symbols from the static archive
-use std::ffi::{c_char, c_int};
+use std::ffi::c_char;
 
 use alpm_core::backup::Backup;
+use alpm_core::package::Package;
 
+use crate::package::{CPkg, CPkgBox, alpm_pkg_get_backup, list_data};
 use crate::{c_free, cstr, opt_ptr, take};
 
 // alpm_backup_t
@@ -13,27 +15,11 @@ struct CBackup {
 }
 
 unsafe extern "C" {
-	fn _alpm_split_backup(
-		s: *const c_char,
-		backup: *mut *mut CBackup,
-	) -> c_int;
 	fn _alpm_backup_dup(backup: *const CBackup) -> *mut CBackup;
-}
-
-// None maps to NULL. returns rc and the name/hash the C stored
-pub fn c_split_backup(
-	s: Option<&[u8]>,
-) -> (i32, Option<Vec<u8>>, Option<Vec<u8>>) {
-	let s = s.map(cstr);
-	let mut b = CBackup {
-		name: std::ptr::null_mut(),
-		hash: std::ptr::null_mut(),
-	};
-	let mut bp: *mut CBackup = &mut b;
-	// SAFETY: s is NULL or a valid C string, bp points to a live struct
-	// the C fills with malloc'd strings or NULL
-	let rc = unsafe { _alpm_split_backup(opt_ptr(&s), &mut bp) };
-	(rc, take(b.name), take(b.hash))
+	fn _alpm_needbackup(
+		file: *const c_char,
+		pkg: *mut CPkg,
+	) -> *mut CBackup;
 }
 
 pub fn c_backup_dup(backup: &Backup) -> Backup {
@@ -55,4 +41,30 @@ pub fn c_backup_dup(backup: &Backup) -> Backup {
 	};
 	c_free(d.cast());
 	out
+}
+
+// position in pkg.backup of the entry _alpm_needbackup returns
+pub fn c_needbackup(file: &[u8], pkg: &Package) -> Option<usize> {
+	let b = CPkgBox::new(pkg);
+	let f = cstr(file);
+	// SAFETY: b.0 is live, f a valid C string; the result points into
+	// b.0's backup list, read as a pointer only
+	let found = unsafe { _alpm_needbackup(f.as_ptr(), b.0) };
+	// SAFETY: b.0 is live, the list stays owned by it
+	let list = unsafe { alpm_pkg_get_backup(b.0) };
+	list_data(list).iter().position(|&p| p == found.cast())
+}
+
+// contract for the C ABI shim: NULL file or package gives NULL
+pub fn c_needbackup_null() -> (bool, bool) {
+	let b = CPkgBox::new(&Package::default());
+	let f = cstr(b"x");
+	// SAFETY: NULL arguments return before any dereference
+	unsafe {
+		(
+			_alpm_needbackup(std::ptr::null(), b.0).is_null(),
+			_alpm_needbackup(f.as_ptr(), std::ptr::null_mut())
+				.is_null(),
+		)
+	}
 }

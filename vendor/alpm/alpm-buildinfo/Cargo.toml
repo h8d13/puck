@@ -1,0 +1,46 @@
+[package]
+authors.workspace = true
+description = "Library and command line interface for the parsing and writing of BUILDINFO files"
+edition.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+license.workspace = true
+name = "alpm-buildinfo"
+readme = "README.md"
+repository.workspace = true
+rust-version.workspace = true
+version = "0.5.4"
+
+[[bin]]
+name = "alpm-buildinfo"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+_winnow-debug = ["alpm-parsers/_winnow-debug"]
+cli = ["dep:clap", "dep:serde_json"]
+default = []
+
+[dependencies]
+alpm-common.workspace = true
+alpm-parsers = { workspace = true, features = ["serde"] }
+alpm-types.workspace = true
+clap = { workspace = true, optional = true }
+fluent-i18n.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, optional = true }
+serde_more = "0.1.4"
+serde_with.workspace = true
+strum.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+insta.workspace = true
+rstest.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+testresult.workspace = true
+
+[lints]
+workspace = true

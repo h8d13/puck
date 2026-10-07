@@ -1,0 +1,493 @@
+// port of src/pacman/check.c: -Qk (check_pkg_fast, the files list
+// against the filesystem) and -Qkk (check_pkg_full, the local mtree
+// against the filesystem)
+//
+// what the C asks libalpm through config->handle (root, dbpath, NoExtract
+// matching, the package's mtree) goes through CheckEnv; files are looked
+// at with plain std calls on root + path, like the C. the C prints to
+// stdout and, through pm_printf, to stderr: both are appended to an
+// Output. messages are the untranslated msgids, _n() picks the singular
+// for 1 like ngettext without a catalog.
+//
+// mtree entries come from alpm-mtree (be_local::read_mtree), which only
+// knows dir/file/link entries, so the C's "file type not recognized"
+// branch has no input here. data alpm-mtree rejects checks no entries,
+// where the C checks those before the first bad one.
+
+use std::fs::{self, File, Metadata};
+use std::io;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
+
+use alpm_core::be_local::{
+	LocalDb, MtreeEntry, MtreeError, MtreeType, Sha256Checksum,
+};
+use alpm_core::handle::Handle;
+use alpm_core::package::Package;
+use alpm_core::util::until_nul;
+use pacman_common::util_common::llstat;
+
+use crate::conf::{self, Config, LOG_ERROR, LOG_WARNING, cat};
+
+// limits.h, the filepath buffers of check.c
+const PATH_MAX: usize = 4096;
+
+// the libalpm calls of check.c
+pub trait CheckEnv {
+	// alpm_option_get_root, ends in '/'
+	fn root(&self) -> &[u8];
+	// alpm_option_get_dbpath, ends in '/'
+	fn dbpath(&self) -> &[u8];
+	// alpm_option_match_noextract: None nothing matched (C -1),
+	// Some(false) a pattern matched (C 0), Some(true) a negated one
+	fn match_noextract(&self, path: &[u8]) -> Option<bool>;
+	// alpm_pkg_mtree_open + alpm_pkg_mtree_next until the end
+	fn mtree(&self, pkg: &Package) -> Result<Vec<MtreeEntry>, MtreeError>;
+}
+
+// the env of a handle and its local db
+pub struct HandleEnv<'a> {
+	pub handle: &'a Handle,
+	pub db: &'a LocalDb,
+}
+
+impl CheckEnv for HandleEnv<'_> {
+	fn root(&self) -> &[u8] {
+		self.handle.root()
+	}
+
+	fn dbpath(&self) -> &[u8] {
+		self.handle.dbpath()
+	}
+
+	fn match_noextract(&self, path: &[u8]) -> Option<bool> {
+		self.handle.match_noextract(path)
+	}
+
+	fn mtree(&self, pkg: &Package) -> Result<Vec<MtreeEntry>, MtreeError> {
+		self.db.mtree(pkg)
+	}
+}
+
+// what the C writes to stdout and stderr
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Output {
+	pub stdout: Vec<u8>,
+	pub stderr: Vec<u8>,
+}
+
+// pm_printf(level, ...) to stderr: logmask filter, then the prefix
+pub(crate) fn pm_printf(
+	o: &mut Output,
+	config: &Config,
+	level: u16,
+	msg: &[u8],
+) {
+	if config.logmask & level == 0 {
+		return;
+	}
+	let c = &config.colstr;
+	let prefix: &[&[u8]] = match level {
+		LOG_ERROR => &[c.err, b"error: ", c.nocolor],
+		_ => &[c.warn, b"warning: ", c.nocolor],
+	};
+	o.stderr.extend(prefix.concat());
+	o.stderr.extend_from_slice(msg);
+}
+
+// strerror(errno) of an io::Error, errors without errno as std prints them
+fn strerror(e: &io::Error) -> Vec<u8> {
+	e.raw_os_error()
+		.map_or_else(|| e.to_string().into_bytes(), conf::strerror)
+}
+
+// _n(singular, plural, n) without a catalog
+fn plural(n: usize, one: &str, many: &str) -> String {
+	if n == 1 { one } else { many }.to_string()
+}
+
+fn os(path: &[u8]) -> &Path {
+	Path::new(std::ffi::OsStr::from_bytes(path))
+}
+
+fn quiet_line(o: &mut Output, pkgname: &[u8], filepath: &[u8]) {
+	o.stdout.extend(cat(&[pkgname, b" ", filepath, b"\n"]));
+}
+
+fn warn(o: &mut Output, c: &Config, pkgname: &[u8], fp: &[u8], what: &[u8]) {
+	let msg = cat(&[pkgname, b": ", fp, b" (", what, b")\n"]);
+	pm_printf(o, c, LOG_WARNING, &msg);
+}
+
+// the "backup file: " note check.c prints instead of a warning
+fn backup_note(
+	o: &mut Output,
+	c: &Config,
+	pkgname: &[u8],
+	fp: &[u8],
+	what: &[u8],
+) {
+	let cs = &c.colstr;
+	o.stdout.extend(cat(&[cs.title, b"backup file", cs.nocolor, b": "]));
+	o.stdout.extend(cat(&[pkgname, b": ", fp, b" (", what, b")\n"]));
+}
+
+enum Exists {
+	Yes(Metadata),
+	// matched by NoExtract, not counted
+	NoExtract,
+	Missing,
+}
+
+// check_file_exists: llstat, a missing file is reported unless its path
+// below the root matches NoExtract. the C matches filepath + rootlen,
+// for db files (.INSTALL) an offset into the dbpath string; past its
+// end the C reads stale buffer bytes, here nothing matches
+fn file_exists(
+	o: &mut Output,
+	c: &Config,
+	env: &impl CheckEnv,
+	pkgname: &[u8],
+	filepath: &[u8],
+	rootlen: usize,
+) -> Exists {
+	match llstat(filepath) {
+		Ok(st) => Exists::Yes(st),
+		Err(e) => {
+			if let Some(rel) = filepath.get(rootlen..)
+				&& env.match_noextract(rel) == Some(false)
+			{
+				return Exists::NoExtract;
+			}
+			if c.quiet != 0 {
+				quiet_line(o, pkgname, filepath);
+			} else {
+				warn(o, c, pkgname, filepath, &strerror(&e));
+			}
+			Exists::Missing
+		}
+	}
+}
+
+// check_pkg_fast: every files list entry exists, directories (trailing
+// '/') are directories. returns the C's 0/1
+pub fn check_pkg_fast(
+	o: &mut Output,
+	c: &Config,
+	env: &impl CheckEnv,
+	pkg: &Package,
+) -> i32 {
+	let root = until_nul(env.root());
+	let rootlen = root.len();
+	if rootlen + 1 > PATH_MAX {
+		let msg = cat(&[b"path too long: ", root, b"\n"]);
+		pm_printf(o, c, LOG_ERROR, &msg);
+		return 1;
+	}
+	let pkgname = until_nul(pkg.name.as_deref().unwrap_or_default());
+	let files = &pkg.files.files;
+	let mut errors = 0usize;
+	for file in files {
+		let path = until_nul(&file.name);
+		if rootlen + 1 + path.len() > PATH_MAX {
+			let msg = cat(&[b"path too long: ", root, path, b"\n"]);
+			pm_printf(o, c, LOG_WARNING, &msg);
+			continue;
+		}
+		let filepath = cat(&[root, path]);
+		match file_exists(o, c, env, pkgname, &filepath, rootlen) {
+			Exists::Yes(st) => {
+				// the C reads path[plen - 1], files lists never
+				// hold empty names
+				let expect_dir = path.last() == Some(&b'/');
+				if expect_dir != st.is_dir() {
+					let what = b"File type mismatch";
+					warn(o, c, pkgname, &filepath, what);
+					errors += 1;
+				}
+			}
+			Exists::Missing => errors += 1,
+			Exists::NoExtract => {}
+		}
+	}
+	if c.quiet == 0 {
+		let n = files.len();
+		let s = plural(n, "total file", "total files");
+		o.stdout.extend(cat(&[pkgname, b": "]));
+		o.stdout.extend(format!("{n} {s}, ").into_bytes());
+		let s = plural(errors, "missing file", "missing files");
+		o.stdout.extend(format!("{errors} {s}\n").into_bytes());
+	}
+	i32::from(errors != 0)
+}
+
+// check_file_type: lstat type against the entry type
+fn type_matches(kind: MtreeType, st: &Metadata) -> bool {
+	let t = st.file_type();
+	match kind {
+		MtreeType::File => t.is_file(),
+		MtreeType::Dir => t.is_dir(),
+		MtreeType::Link => t.is_symlink(),
+	}
+}
+
+// check_file_permissions: uid, gid and the mode bits, one warning each,
+// counted once
+fn permissions(
+	o: &mut Output,
+	c: &Config,
+	pkgname: &[u8],
+	fp: &[u8],
+	st: &Metadata,
+	e: &MtreeEntry,
+) -> usize {
+	let q = c.quiet != 0;
+	let checks: [(bool, &[u8]); 3] = [
+		(st.uid() != e.uid, b"UID mismatch"),
+		(st.gid() != e.gid, b"GID mismatch"),
+		// S_ISUID | S_ISGID | S_ISVTX | S_IRWXU | S_IRWXG | S_IRWXO
+		(st.mode() & 0o7777 != e.mode, b"Permissions mismatch"),
+	];
+	let mut errors = 0;
+	for (bad, what) in checks {
+		if bad {
+			errors += 1;
+			if !q {
+				warn(o, c, pkgname, fp, what);
+			}
+		}
+	}
+	usize::from(errors != 0)
+}
+
+// check_file_link: readlink must return st_size bytes, then the target
+// is compared like strcmp
+fn link(
+	o: &mut Output,
+	c: &Config,
+	pkgname: &[u8],
+	fp: &[u8],
+	st: &Metadata,
+	e: &MtreeEntry,
+) -> usize {
+	let target = fs::read_link(os(fp))
+		.map(|t| t.into_os_string().into_vec())
+		.ok()
+		.filter(|t| t.len() as u64 == st.size());
+	let Some(target) = target else {
+		let msg =
+			cat(&[b"unable to read symlink contents: ", fp, b"\n"]);
+		pm_printf(o, c, LOG_ERROR, &msg);
+		return 1;
+	};
+	let want = until_nul(e.link.as_deref().unwrap_or_default());
+	if until_nul(&target) != want {
+		if c.quiet == 0 {
+			warn(o, c, pkgname, fp, b"Symlink path mismatch");
+		}
+		return 1;
+	}
+	0
+}
+
+// the shape of check_file_time, check_file_size and the checksum
+// mismatch: a backup file gets a note on stdout and no error
+fn mismatch(
+	o: &mut Output,
+	c: &Config,
+	pkgname: &[u8],
+	fp: &[u8],
+	backup: bool,
+	what: &[u8],
+) -> usize {
+	if backup {
+		if c.quiet == 0 {
+			backup_note(o, c, pkgname, fp, what);
+		}
+		return 0;
+	}
+	if c.quiet == 0 {
+		warn(o, c, pkgname, fp, what);
+	}
+	1
+}
+
+// alpm_compute_sha256sum: None where the file cannot be opened or read
+fn sha256_file(fp: &[u8]) -> Option<Sha256Checksum> {
+	let f = File::open(os(fp)).ok()?;
+	Sha256Checksum::calculate_from_reader(f).ok()
+}
+
+// check_file_sha256sum + check_file_cksum
+fn sha256(
+	o: &mut Output,
+	c: &Config,
+	pkgname: &[u8],
+	fp: &[u8],
+	e: &MtreeEntry,
+	backup: bool,
+) -> usize {
+	let q = c.quiet != 0;
+	let Some(calc) = sha256_file(fp) else {
+		if !q {
+			let what = b"failed to calculate SHA256 checksum";
+			warn(o, c, pkgname, fp, what);
+		}
+		return 1;
+	};
+	let Some(want) = &e.sha256 else {
+		if !q {
+			let what = b"SHA256 checksum information not available";
+			warn(o, c, pkgname, fp, what);
+		}
+		return 1;
+	};
+	if calc != *want {
+		let what = b"SHA256 checksum mismatch";
+		return mismatch(o, c, pkgname, fp, backup, what);
+	}
+	0
+}
+
+// where an mtree entry is looked for: "./" stripped, top-level dot
+// files skipped except .INSTALL and .CHANGELOG, which are the db copies.
+// None skips the entry (after a warning when the path is too long)
+fn entry_filepath(
+	o: &mut Output,
+	c: &Config,
+	env: &impl CheckEnv,
+	pkg: &Package,
+	path: &[u8],
+) -> Option<Vec<u8>> {
+	let root = until_nul(env.root());
+	if path.first() != Some(&b'.') {
+		let fp = cat(&[root, path]);
+		if fp.len() >= PATH_MAX {
+			let msg = cat(&[b"path too long: ", root, path, b"\n"]);
+			pm_printf(o, c, LOG_WARNING, &msg);
+			return None;
+		}
+		return Some(fp);
+	}
+	let dbfile: &[u8] = match path {
+		b".INSTALL" => b"install",
+		b".CHANGELOG" => b"changelog",
+		_ => return None,
+	};
+	// _alpm_local_db_pkgpath spelled out like the C: dbpath is absolute,
+	// the root is not prepended
+	let name = until_nul(pkg.name.as_deref().unwrap_or_default());
+	let version = until_nul(pkg.version.as_deref().unwrap_or_default());
+	let dbpath = until_nul(env.dbpath());
+	let parts: [&[u8]; 7] =
+		[dbpath, b"local/", name, b"-", version, b"/", dbfile];
+	let fp = parts.concat();
+	if fp.len() >= PATH_MAX {
+		let msg = cat(&[b"path too long: ", &fp, b"\n"]);
+		pm_printf(o, c, LOG_WARNING, &msg);
+		return None;
+	}
+	Some(fp)
+}
+
+// the checks after the type: file_errors of one entry
+fn entry_errors(
+	o: &mut Output,
+	c: &Config,
+	pkg: &Package,
+	path: &[u8],
+	fp: &[u8],
+	st: &Metadata,
+	e: &MtreeEntry,
+) -> usize {
+	let pkgname = until_nul(pkg.name.as_deref().unwrap_or_default());
+	let mut errors = permissions(o, c, pkgname, fp, st, e);
+	if e.kind == MtreeType::Link {
+		errors += link(o, c, pkgname, fp, st, e);
+	}
+	// expected to fail when a backup file was modified
+	let backup = pkg.backup.iter().any(|b| until_nul(&b.name) == path);
+	if e.kind != MtreeType::Dir && st.mtime() != e.mtime {
+		let what = b"Modification time mismatch";
+		errors += mismatch(o, c, pkgname, fp, backup, what);
+	}
+	if e.kind == MtreeType::File {
+		if st.size() != e.size {
+			let what = b"Size mismatch";
+			errors += mismatch(o, c, pkgname, fp, backup, what);
+		}
+		errors += sha256(o, c, pkgname, fp, e, backup);
+	}
+	errors
+}
+
+// check_pkg_full: every mtree entry against the filesystem. returns
+// the C's 0/1
+pub fn check_pkg_full(
+	o: &mut Output,
+	c: &Config,
+	env: &impl CheckEnv,
+	pkg: &Package,
+) -> i32 {
+	let root = until_nul(env.root());
+	let rootlen = root.len();
+	if rootlen + 1 > PATH_MAX {
+		let msg = cat(&[b"path too long: ", root, b"\n"]);
+		pm_printf(o, c, LOG_ERROR, &msg);
+		return 1;
+	}
+	let pkgname = until_nul(pkg.name.as_deref().unwrap_or_default());
+	let entries = match env.mtree(pkg) {
+		Ok(entries) => entries,
+		Err(MtreeError::Parse(_)) => Vec::new(),
+		Err(MtreeError::Missing | MtreeError::Read(_)) => {
+			if c.quiet == 0 {
+				o.stdout.extend(cat(&[
+					pkgname,
+					b": no mtree file\n",
+				]));
+			}
+			return 0;
+		}
+	};
+	let (mut errors, mut file_count) = (0usize, 0usize);
+	for e in &entries {
+		let path = until_nul(&e.path);
+		let path = path.strip_prefix(b"./").unwrap_or(path);
+		let Some(fp) = entry_filepath(o, c, env, pkg, path) else {
+			continue;
+		};
+		file_count += 1;
+		let st = match file_exists(o, c, env, pkgname, &fp, rootlen) {
+			Exists::Yes(st) => st,
+			Exists::Missing => {
+				errors += 1;
+				continue;
+			}
+			Exists::NoExtract => continue,
+		};
+		if !type_matches(e.kind, &st) {
+			if c.quiet != 0 {
+				quiet_line(o, pkgname, &fp);
+			} else {
+				warn(o, c, pkgname, &fp, b"File type mismatch");
+			}
+			errors += 1;
+			continue;
+		}
+		let file_errors = entry_errors(o, c, pkg, path, &fp, &st, e);
+		if c.quiet != 0 && file_errors != 0 {
+			quiet_line(o, pkgname, &fp);
+		}
+		errors += usize::from(file_errors != 0);
+	}
+	if c.quiet == 0 {
+		let s = plural(file_count, "total file", "total files");
+		o.stdout.extend(cat(&[pkgname, b": "]));
+		o.stdout.extend(format!("{file_count} {s}, ").into_bytes());
+		let s = plural(errors, "altered file", "altered files");
+		o.stdout.extend(format!("{errors} {s}\n").into_bytes());
+	}
+	i32::from(errors != 0)
+}

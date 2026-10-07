@@ -3,29 +3,62 @@
 use std::ffi::{CStr, CString, c_char, c_void};
 
 mod backup;
+mod be_local;
+mod be_package;
+mod be_sync;
+mod check;
 mod cli_util;
+mod conf;
+mod conflict;
+mod db;
 mod deps;
+mod deps_graph;
+mod deps_resolve;
+mod diskspace;
 mod error;
 mod filelist;
+mod files_op;
+mod fixtures;
+mod getopt;
 mod group;
+mod handle;
 mod ini;
 mod package;
+mod pkg_show;
 mod pkghash;
+mod regex;
 mod signing;
+mod sync_ro;
 mod util;
 mod util_common;
 mod version;
 
 pub use backup::*;
+pub use be_local::*;
+pub use be_package::*;
+pub use be_sync::*;
+pub use check::*;
 pub use cli_util::*;
+pub use conf::*;
+pub use conflict::*;
+pub use db::*;
 pub use deps::*;
+pub use deps_graph::*;
+pub use deps_resolve::*;
+pub use diskspace::*;
 pub use error::*;
 pub use filelist::*;
+pub use files_op::*;
+pub use fixtures::*;
+pub use getopt::*;
 pub use group::*;
 pub use ini::*;
 pub use package::*;
+pub use pkg_show::*;
 pub use pkghash::*;
+pub use regex::*;
 pub use signing::*;
+pub use sync_ro::*;
 pub use util::*;
 pub use util_common::*;
 pub use version::*;
@@ -55,6 +88,21 @@ unsafe extern "C" {
 	) -> *mut CList;
 	pub(crate) fn alpm_list_free(list: *mut CList);
 	pub(crate) fn fclose(f: *mut CFile) -> std::ffi::c_int;
+	pub(crate) fn fflush(f: *mut CFile) -> std::ffi::c_int;
+	pub(crate) fn open_memstream(
+		buf: *mut *mut c_char,
+		size: *mut usize,
+	) -> *mut CFile;
+	pub(crate) fn strdup(s: *const c_char) -> *mut c_char;
+	pub(crate) static mut stdout: *mut CFile;
+	pub(crate) static mut stderr: *mut CFile;
+	// va_list passed as a pointer: valid on x86_64 and aarch64
+	pub(crate) fn vsnprintf(
+		s: *mut c_char,
+		n: usize,
+		fmt: *const c_char,
+		ap: *mut c_void,
+	) -> std::ffi::c_int;
 }
 
 // interior nul panics, the C could not see past it anyway

@@ -5,13 +5,13 @@ use alpm_core::backup::Backup;
 use alpm_core::deps::{DepMod, Depend};
 use alpm_core::filelist::{File, FileList};
 use alpm_core::package::{
-	Package, PkgFrom, PkgReason, PkgXData, parse_xdata, pkg_cmp,
-	pkg_compare_versions, pkg_find,
+	Package, PkgFrom, PkgReason, PkgXData, pkg_cmp, pkg_compare_versions,
+	pkg_find,
 };
 use alpm_core::util::hash_sdbm;
 use difftest::{
-	Rng, c_parse_xdata, c_pkg_cmp, c_pkg_compare_versions, c_pkg_dup,
-	c_pkg_find, c_pkg_getters, c_pkg_roundtrip, iters,
+	Rng, c_pkg_cmp, c_pkg_compare_versions, c_pkg_dup, c_pkg_find,
+	c_pkg_getters, c_pkg_roundtrip, iters,
 };
 
 // 0xc3 sorts last for strcmp, '-' and '.' below letters
@@ -258,34 +258,9 @@ fn find_fuzz() {
 	}
 }
 
-fn assert_xdata(s: &[u8]) {
-	assert_eq!(
-		c_parse_xdata(Some(s)),
-		parse_xdata(s),
-		"{:?}",
-		String::from_utf8_lossy(s)
-	);
-}
-
-#[test]
-fn parse_xdata_edge_cases() {
-	for s in [&b""[..], b"=", b"==", b"a=", b"=a", b"a=b=c", b"a"] {
-		assert_xdata(s);
-	}
-}
-
-#[test]
-fn parse_xdata_fuzz() {
-	let mut rng = Rng::new(0x8da7a);
-	for _ in 0..iters() {
-		assert_xdata(&rng.bytes(b"ab==_ \t\xc3\n", 12));
-	}
-}
-
 // contract the future C ABI shim has to keep
 #[test]
 fn c_null_contract() {
-	assert_eq!(c_parse_xdata(None), None);
 	// NULL needle and empty list find nothing, NULL entries are skipped
 	let a = named(b"a");
 	assert_eq!(c_pkg_find(&[Some(&a)], None), None);

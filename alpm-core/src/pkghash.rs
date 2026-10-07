@@ -113,6 +113,16 @@ impl<P: Borrow<Package>> PkgHash<P> {
 		self.list.iter().map(|&i| self.entry(i))
 	}
 
+	// pkghash->list order, for loading cached packages in place. name
+	// and name_hash must not change, the buckets are not rehashed
+	pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut P> {
+		let mut slots: Vec<Option<&mut P>> =
+			self.slab.iter_mut().map(Option::as_mut).collect();
+		self.list.iter().map(move |&i| {
+			slots[i].take().expect("slab index points at a hole")
+		})
+	}
+
 	fn entry(&self, i: usize) -> &P {
 		self.slab[i].as_ref().expect("slab index points at a hole")
 	}
@@ -187,19 +197,30 @@ impl<P: Borrow<Package>> PkgHash<P> {
 		self.add_pkg(pkg, true)
 	}
 
-	// _alpm_pkghash_find
-	pub fn find(&self, name: &[u8]) -> Option<&P> {
+	// _alpm_pkghash_find: slab index of the first entry in probe order
+	fn find_index(&self, name: &[u8]) -> Option<usize> {
 		let (name, hash) = (until_nul(name), hash_sdbm(name));
 		let n = self.buckets();
 		let mut pos = (hash % n as c_ulong) as usize;
 		while let Some(i) = self.table[pos] {
-			let p = self.entry(i);
-			if has_name(p.borrow(), name, hash) {
-				return Some(p);
+			if has_name(self.entry(i).borrow(), name, hash) {
+				return Some(i);
 			}
 			pos = (pos + 1) % n;
 		}
 		None
+	}
+
+	// _alpm_pkghash_find
+	pub fn find(&self, name: &[u8]) -> Option<&P> {
+		self.find_index(name).map(|i| self.entry(i))
+	}
+
+	// the entry find returns, for loading it in place. name and
+	// name_hash must not change
+	pub fn find_mut(&mut self, name: &[u8]) -> Option<&mut P> {
+		let i = self.find_index(name)?;
+		self.slab[i].as_mut()
 	}
 
 	// _alpm_pkghash_remove: drops the first entry in probe order with

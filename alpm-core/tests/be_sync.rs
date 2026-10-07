@@ -1,0 +1,166 @@
+// unit tests for alpm_core::be_sync, on uncompressed dbs written here
+use std::fs;
+use std::path::PathBuf;
+
+use alpm_core::be_sync::{Error, Reason, db_path, get_validation, populate};
+use alpm_core::error::Errno;
+use alpm_core::package::{
+	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
+	PKG_VALIDATION_SIGNATURE, Package, PkgFrom,
+};
+
+// <tmp>/db/sync/, removed on drop
+struct Db(PathBuf);
+
+impl Db {
+	fn new(name: &str) -> Self {
+		let dir = std::env::temp_dir().join(format!(
+			"alpm-core-be-sync-{}-{name}",
+			std::process::id()
+		));
+		if dir.exists() {
+			fs::remove_dir_all(&dir).unwrap();
+		}
+		fs::create_dir_all(dir.join("sync")).unwrap();
+		Db(dir)
+	}
+
+	fn dbpath(&self) -> Vec<u8> {
+		let mut p =
+			self.0.clone().into_os_string().into_encoded_bytes();
+		p.push(b'/');
+		p
+	}
+
+	fn write(&self, tar: &[u8]) {
+		fs::write(self.0.join("sync/repo.db"), tar).unwrap();
+	}
+
+	fn path(&self) -> Vec<u8> {
+		db_path(&self.dbpath(), b"repo", b".db")
+	}
+
+	fn load(&self) -> Result<Vec<Package>, Error> {
+		let cache = populate(&self.path(), b".db")?;
+		Ok(cache.iter().cloned().collect())
+	}
+}
+
+impl Drop for Db {
+	fn drop(&mut self) {
+		fs::remove_dir_all(&self.0).unwrap();
+	}
+}
+
+// ustar with regular files only, short names
+fn tar(files: &[(&str, &str)]) -> Vec<u8> {
+	let mut out = Vec::new();
+	for (name, data) in files {
+		let mut h = [0u8; 512];
+		h[..name.len()].copy_from_slice(name.as_bytes());
+		let size = format!("{:011o}\0", data.len());
+		h[124..136].copy_from_slice(size.as_bytes());
+		h[156] = b'0';
+		h[257..263].copy_from_slice(b"ustar\0");
+		h[148..156].fill(b' ');
+		let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+		h[148..155].copy_from_slice(format!("{sum:06o}\0").as_bytes());
+		out.extend_from_slice(&h);
+		out.extend_from_slice(data.as_bytes());
+		out.resize(out.len().next_multiple_of(512), 0);
+	}
+	out.resize(out.len() + 1024, 0);
+	out
+}
+
+const DESC: &str = "%FILENAME%\nfoo-1-1-any.pkg.tar.zst\n\n\
+	%NAME%\nfoo\n\n%BASE%\nfoo\n\n%VERSION%\n1-1\n\n\
+	%DESC%\na  b\n\n%CSIZE%\n10\n\n%ISIZE%\n20\n\n\
+	%SHA256SUM%\n0123456789abcdef0123456789abcdef\
+	0123456789abcdef0123456789abcdef\n\n\
+	%URL%\nhttps://example.org\n\n%ARCH%\nany\n\n\
+	%BUILDDATE%\n30\n\n%PACKAGER%\nA B <a@b.org>\n\n\
+	%DEPENDS%\nbar>=2\nlibx.so=1-64\n\n";
+
+#[test]
+fn path() {
+	assert_eq!(db_path(b"/db/", b"core", b".db"), b"/db/sync/core.db");
+}
+
+#[test]
+fn missing_and_empty() {
+	let db = Db::new("missing");
+	assert!(matches!(db.load(), Err(Error::NotFound)));
+	db.write(b"");
+	assert_eq!(db.load().unwrap(), vec![]);
+}
+
+#[test]
+fn fields() {
+	let db = Db::new("fields");
+	db.write(&tar(&[
+		("zed-2-1/desc", &DESC.replace("foo", "zed")),
+		("foo-1-1/desc", DESC),
+		("foo-1-1/files", "%FILES%\nusr/\nusr/b\nusr/a\n"),
+	]));
+	let pkgs = db.load().unwrap();
+	let names: Vec<&[u8]> = pkgs.iter().map(Package::name_bytes).collect();
+	assert_eq!(names, [&b"foo"[..], b"zed"]);
+	let foo = &pkgs[0];
+	assert_eq!(foo.origin, Some(PkgFrom::SyncDb));
+	assert_eq!(foo.size, 10);
+	assert_eq!(foo.builddate, 30);
+	// alpm-types normalizes these two
+	assert_eq!(foo.desc.as_deref(), Some(&b"a b"[..]));
+	assert_eq!(foo.url.as_deref(), Some(&b"https://example.org/"[..]));
+	assert_eq!(foo.depends[0].name, b"bar");
+	assert_eq!(foo.depends[1].name, b"libx.so");
+	let files: Vec<&[u8]> =
+		foo.files.files.iter().map(|f| &f.name[..]).collect();
+	assert_eq!(files, [&b"usr/"[..], b"usr/a", b"usr/b"]);
+	// version comes from the entry name, not %VERSION%
+	assert_eq!(pkgs[1].version.as_deref(), Some(&b"2-1"[..]));
+}
+
+#[test]
+fn invalid_entries() {
+	let db = Db::new("invalid");
+	for name in ["foo/desc", "-foo-1-1/desc", "*-1-1/desc"] {
+		db.write(&tar(&[(name, "")]));
+		let e = db.load().unwrap_err();
+		assert_eq!(e.errno(), Errno::DbInvalid, "{name}");
+	}
+	db.write(&tar(&[("foo-1-1/desc", "%FOO%\nx\n")]));
+	let e = db.load().unwrap_err();
+	assert!(matches!(
+		e,
+		Error::Invalid {
+			reason: Reason::Desc(_),
+			..
+		}
+	));
+}
+
+#[test]
+fn validation() {
+	let mut p = Package::default();
+	assert_eq!(get_validation(&p), PKG_VALIDATION_NONE);
+	p.sha256sum = Some(b"x".to_vec());
+	p.base64_sig = Some(b"y".to_vec());
+	let both = PKG_VALIDATION_SHA256SUM | PKG_VALIDATION_SIGNATURE;
+	assert_eq!(get_validation(&p), both);
+}
+
+// the size estimate reads the dbext passed in, not the file name: a 3015
+// byte uncompressed db per package, divided by 4 for ".files"
+#[test]
+fn estimate_follows_dbext() {
+	let db = Db::new("estimate");
+	db.write(&vec![0u8; 3015 * 40]);
+	let buckets = |ext: &[u8]| populate(&db.path(), ext).unwrap().buckets();
+	// 41 / 0.58 + 1 = 71 gives 73, 10 / 0.58 + 1 = 18 gives 19
+	assert_eq!(buckets(b".db"), 73);
+	assert_eq!(buckets(b".files"), 19);
+	assert_eq!(buckets(b".files\0x"), 19);
+	assert_eq!(buckets(b""), 73);
+}

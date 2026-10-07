@@ -9,51 +9,14 @@ use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::ptr;
 use std::sync::{Mutex, Once};
 
-use crate::{CFile as File, CList, c_free, cstr, fclose, opt_ptr, take};
+use crate::conf::{ColStrC, ConfigC};
+use crate::{CList, c_free, cstr, fclose, opt_ptr, take};
+use crate::{fflush, open_memstream, stdout};
 
 use pacman_cli::util::{ColStr, SigResult, SigStatus, SigValidity};
 
 // glibc locale.h
 const LC_ALL: c_int = 6;
-
-#[repr(C)]
-struct ColStrC {
-	colon: *const c_char,
-	title: *const c_char,
-	repo: *const c_char,
-	version: *const c_char,
-	groups: *const c_char,
-	meta: *const c_char,
-	warn: *const c_char,
-	err: *const c_char,
-	faint: *const c_char,
-	nocolor: *const c_char,
-}
-
-// config_t of conf.h, only colstr is touched
-#[repr(C)]
-struct Config {
-	flags_a: [u16; 15],
-	paths: [*mut c_char; 8],
-	path_lists: [*mut c_void; 3],
-	op_flags: [u16; 22],
-	ask: c_uint,
-	flags: c_int,
-	siglevels: [c_int; 6],
-	chomp: u16,
-	verbosepkglists: u16,
-	parallel_downloads: c_uint,
-	cleanmethod: u16,
-	lists: [*mut c_void; 7],
-	xfercommand: *mut c_char,
-	xfercommand_argv: *mut *mut c_char,
-	xfercommand_argc: usize,
-	handle: *mut c_void,
-	explicit_adds: *mut c_void,
-	explicit_removes: *mut c_void,
-	colstr: ColStrC,
-	repos: *mut c_void,
-}
 
 #[repr(C)]
 struct PgpKey {
@@ -82,13 +45,9 @@ struct SigList {
 }
 
 unsafe extern "C" {
-	static mut config: *mut Config;
-	static mut stdout: *mut File;
-	fn config_new() -> *mut Config;
+	pub(crate) static mut config: *mut ConfigC;
+	pub(crate) fn config_new() -> *mut ConfigC;
 	fn setlocale(category: c_int, locale: *const c_char) -> *mut c_char;
-	fn open_memstream(buf: *mut *mut c_char, size: *mut usize)
-	-> *mut File;
-	fn fflush(f: *mut File) -> c_int;
 	// wchar_t is a 32-bit int, passed and stored as u32 here
 	fn wcwidth(c: u32) -> c_int;
 	fn mbstowcs(dst: *mut u32, src: *const c_char, n: usize) -> usize;
@@ -123,9 +82,9 @@ unsafe extern "C" {
 	fn console_erase_line();
 }
 
-static FRONTEND: Mutex<()> = Mutex::new(());
+pub(crate) static FRONTEND: Mutex<()> = Mutex::new(());
 
-fn init() {
+pub(crate) fn init() {
 	static ONCE: Once = Once::new();
 	ONCE.call_once(|| {
 		// SAFETY: runs once, before any other C call of this module,
@@ -145,7 +104,7 @@ fn init() {
 }
 
 // runs f with config->colstr from colstr and C stdout captured
-fn capture(colstr: &ColStr, f: impl FnOnce()) -> Vec<u8> {
+pub(crate) fn capture(colstr: &ColStr, f: impl FnOnce()) -> Vec<u8> {
 	init();
 	let _guard = FRONTEND.lock().unwrap_or_else(|e| e.into_inner());
 	let c = [
@@ -279,6 +238,15 @@ pub fn c_wcwidth(c: u32) -> i32 {
 	init();
 	// SAFETY: plain value, locale set by init
 	unsafe { wcwidth(c) }
+}
+
+// true where glibc and the port (unicode-width) give every character of
+// s the same wcwidth. the lossy decode holds every char mbstowcs can
+// return; its U+FFFD and the 5/6 byte forms (-1) agree
+pub fn widths_agree(s: &[u8]) -> bool {
+	String::from_utf8_lossy(s).chars().all(|c| {
+		c_wcwidth(c as u32) == pacman_cli::util::wcwidth(c as u32)
+	})
 }
 
 // decoded prefix and whether all of s decoded

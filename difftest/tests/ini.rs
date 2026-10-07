@@ -55,16 +55,21 @@ fn check(path: &str, stop_at: Option<usize>, what: &str) {
 }
 
 fn tmp(name: &str) -> String {
-	format!("/tmp/difftest-ini-{name}-{}", std::process::id())
+	format!(
+		"{}/difftest-ini-{name}-{}",
+		std::env::temp_dir().display(),
+		std::process::id()
+	)
 }
 
 #[test]
 fn open_and_read_errors() {
 	for stop_at in [None, Some(0)] {
-		check("/tmp/difftest-ini-does-not-exist/x", stop_at, "missing");
+		check(&tmp("does-not-exist/x"), stop_at, "missing");
 		check("", stop_at, "empty path");
 		// fopen of a directory works, the first read fails (EISDIR)
-		check("/tmp", stop_at, "directory");
+		let dir = std::env::temp_dir();
+		check(&dir.to_string_lossy(), stop_at, "directory");
 	}
 }
 

@@ -94,3 +94,30 @@ fn borrowed_entries() {
 fn names2<'a>(h: &'a PkgHash<&Package>) -> Vec<&'a [u8]> {
 	h.iter().map(|p| p.name_bytes()).collect()
 }
+
+#[test]
+fn mutable_access() {
+	let mut h = PkgHash::new(0).unwrap();
+	for n in [&b"b"[..], b"a", b"b"] {
+		h.add(named(n)).unwrap();
+	}
+	// find_mut hits the entry find returns, the first in probe order
+	h.find_mut(b"b").unwrap().size = 7;
+	assert_eq!(h.find(b"b").unwrap().size, 7);
+	assert_eq!(h.iter().map(|p| p.size).collect::<Vec<_>>(), [7, 0, 0]);
+	assert!(h.find_mut(b"c").is_none());
+	// iter_mut walks the list order
+	for (i, p) in h.iter_mut().enumerate() {
+		p.isize = i as i64;
+	}
+	let sizes: Vec<i64> = h.iter().map(|p| p.isize).collect();
+	assert_eq!(sizes, [0, 1, 2]);
+	assert_eq!(names(&h), [&b"b"[..], b"a", b"b"]);
+	let mut a = named(b"a");
+	a.isize = 9;
+	// merged before the first "b", then the first "b" in probe order goes
+	h.add_sorted(a).unwrap();
+	h.remove(&named(b"b")).unwrap();
+	let order: Vec<i64> = h.iter_mut().map(|p| p.isize).collect();
+	assert_eq!(order, [9, 1, 2]);
+}

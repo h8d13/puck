@@ -1,0 +1,34 @@
+[package]
+authors.workspace = true
+description = "Various parsers for parsing Arch Linux package formats"
+edition.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+license.workspace = true
+name = "alpm-parsers"
+readme = "README.md"
+repository.workspace = true
+rust-version.workspace = true
+version = "0.4.2"
+
+[features]
+_winnow-debug = ["winnow/debug"]
+default = ["serde"]
+# Enable the ini-style parser helpers used in `alpm-buildinfo` and `alpm-pkginfo`.
+# This module will soon be removed once those parsers are rewritten in winnow.
+serde = ["dep:serde"]
+
+[dependencies]
+colored.workspace = true
+serde = { workspace = true, optional = true }
+testresult.workspace = true
+unicode-width.workspace = true
+winnow.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+rstest.workspace = true
+testresult.workspace = true
+
+[lints]
+workspace = true

@@ -14,6 +14,9 @@ fn width_cases() {
 	assert_eq!(wcwidth('\t' as u32), -1);
 	assert_eq!(wcwidth(0x301), 0);
 	assert_eq!(wcwidth(0x3042), 2);
+	// C1 controls, surrogates, past U+10FFFF: -1 like glibc
+	assert_eq!(wcwidth(0x85), -1);
+	assert_eq!(wcwidth(0xd800), -1);
 	assert_eq!(wcwidth(0x11_0000), -1);
 	assert_eq!(string_length(b"abc"), 3);
 	assert_eq!(string_length("\u{3042}e\u{301}".as_bytes()), 3);

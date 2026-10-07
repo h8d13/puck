@@ -1,0 +1,34 @@
+[package]
+authors.workspace = true
+description = "Library and command line tool for the creation of ALPM based packages"
+edition.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+license.workspace = true
+name = "alpm-package"
+readme = "README.md"
+repository.workspace = true
+rust-version.workspace = true
+version = "0.4.3"
+
+[dependencies]
+alpm-buildinfo.workspace = true
+alpm-common.workspace = true
+alpm-compress.workspace = true
+alpm-mtree.workspace = true
+alpm-pkginfo.workspace = true
+alpm-types.workspace = true
+fluent-i18n.workspace = true
+log.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+filetime.workspace = true
+rstest.workspace = true
+simplelog.workspace = true
+tempfile.workspace = true
+testresult.workspace = true
+
+[lints]
+workspace = true

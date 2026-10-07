@@ -1,0 +1,85 @@
+[workspace.package]
+authors = [
+    "Arne Beer <contact@arne.beer>",
+    "David Runge <dvzrv@archlinux.org>",
+    "Jagoda Ślązak <j-g00da@archlinux.org>",
+    "Orhun Parmaksız <orhun@archlinux.org>",
+]
+edition = "2024"
+homepage = "https://alpm.archlinux.page"
+keywords = ["alpm", "arch", "linux", "packaging"]
+license = "Apache-2.0 OR MIT"
+repository = "https://gitlab.archlinux.org/archlinux/alpm/alpm"
+rust-version = "1.95.0"
+
+[workspace]
+members = [
+    "alpm-types",
+    "alpm-parsers",
+    "alpm-common",
+    "alpm-db",
+    "alpm-repo-db",
+    "alpm-pkginfo",
+    "alpm-mtree",
+    "alpm-buildinfo",
+    "alpm-compress",
+    "alpm-package",
+]
+resolver = "3"
+
+[workspace.dependencies]
+alpm-buildinfo = { path = "./alpm-buildinfo", version = "0.5.4" }
+alpm-common = { path = "./alpm-common", version = "0.2.2" }
+alpm-compress = { path = "./alpm-compress", version = "0.1.4" }
+alpm-lint-config = { path = "./alpm-lint-config", version = "0.1.2" }
+alpm-mtree = { path = "./alpm-mtree", version = "0.3.4" }
+alpm-package = { path = "./alpm-package", version = "0.4.3" }
+alpm-parsers = { path = "./alpm-parsers", version = "0.4.2", default-features = false }
+alpm-pkgbuild = { path = "./alpm-pkgbuild", version = "0.2.5" }
+alpm-pkginfo = { path = "./alpm-pkginfo", version = "0.6.3" }
+alpm-srcinfo = { path = "./alpm-srcinfo", version = "0.6.4" }
+alpm-types = { path = "./alpm-types", version = "0.12.0" }
+assert_cmd = "2.0.11"
+clap = { version = "4.5.19", features = [
+    "derive",
+    "env",
+    "string",
+    "wrap_help",
+] }
+clap-verbosity-flag = "3.0.4"
+colored = "3"
+filetime = "0.2.25"
+flate2 = "1"
+fluent-i18n = "0.1.0"
+insta = "1.40.0"
+log = "0.4.27"
+pretty_assertions = "1.4.1"
+proptest = "1.4.0"
+rstest = "0.27.0"
+semver = "1.0.17"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_with = "3.11.0"
+simplelog = "0.12.2"
+strum = { version = "0.28.0", features = ["derive"] }
+tar = "0.4.44"
+tempfile = "3"
+testresult = "0.4.1"
+thiserror = "2.0.0"
+toml = "1.0.1"
+unicode-width = "0.2"
+which = "8.0.0"
+winnow = "1.0.0"
+
+[workspace.lints.rust]
+missing_debug_implementations = "deny"
+missing_docs = "deny"
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+enum_variant_names = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"

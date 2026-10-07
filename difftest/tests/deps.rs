@@ -1,13 +1,16 @@
 // alpm_core::deps against deps.c: alpm_dep_from_string,
-// alpm_dep_compute_string, and dep_vercmp via _alpm_depcmp_provides
+// alpm_dep_compute_string, dep_vercmp via _alpm_depcmp_provides,
+// _alpm_depcmp(_literal) and alpm_find_satisfier on mirror packages
 use alpm_core::deps::{
-	DepMod, Depend, dep_compute_string, dep_from_string, depcmp_provides,
+	DepMod, Depend, dep_compute_string, dep_from_string, depcmp,
+	depcmp_literal, depcmp_provides, find_satisfier,
 };
+use alpm_core::package::Package;
 use alpm_core::util::hash_sdbm;
 use difftest::{
 	Rng, c_dep_compute_string, c_dep_compute_string_null,
 	c_dep_compute_string_raw, c_dep_from_string, c_dep_from_string_null,
-	c_depcmp_provides, iters,
+	c_depcmp, c_depcmp_literal, c_depcmp_provides, c_find_satisfier, iters,
 };
 
 // operators, ": " pieces, epoch ':', a byte >= 0x80
@@ -173,4 +176,62 @@ fn provides_parsed() {
 			"{dep:?} in {provs:?}"
 		);
 	}
+}
+
+// names from the dep alphabet, a stale name_hash now and then (the C
+// compares hashes first), random provisions
+fn random_pkg(rng: &mut Rng) -> Package {
+	let name = rng.bytes(b"ab", 3);
+	let name_hash = match rng.below(8) {
+		0 => hash_sdbm(&rng.bytes(b"ab", 3)),
+		_ => hash_sdbm(&name),
+	};
+	Package {
+		name_hash,
+		name: Some(name),
+		version: opt_bytes(rng, VER_ALPHABET, 6),
+		provides: (0..rng.below(4)).map(|_| random_dep(rng)).collect(),
+		..Package::default()
+	}
+}
+
+#[test]
+fn depcmp_fuzz() {
+	let mut rng = Rng::new(0xdc4b);
+	let n = iters();
+	let (mut literal, mut provided) = (0usize, 0usize);
+	for _ in 0..n {
+		let pkg = random_pkg(&mut rng);
+		let dep = random_dep(&mut rng);
+		let lit = c_depcmp_literal(&pkg, &dep);
+		assert_eq!(lit, depcmp_literal(&pkg, &dep), "{pkg:?} {dep:?}");
+		let any = c_depcmp(&pkg, &dep);
+		assert_eq!(any, depcmp(&pkg, &dep), "{pkg:?} {dep:?}");
+		literal += usize::from(lit);
+		provided += usize::from(any && !lit);
+	}
+	assert!(literal >= n / 20, "literal {literal}/{n}");
+	assert!(provided >= n / 20, "provided {provided}/{n}");
+}
+
+// first satisfier in list order: duplicates by name and provisions make
+// several candidates
+#[test]
+fn find_satisfier_fuzz() {
+	let mut rng = Rng::new(0x5a71);
+	let n = iters() / 10;
+	let (mut found, mut later) = (0usize, 0usize);
+	for _ in 0..n {
+		let pkgs: Vec<Package> = (0..rng.below(6))
+			.map(|_| random_pkg(&mut rng))
+			.collect();
+		let s = rng.bytes(DEP_ALPHABET, 8);
+		let c = c_find_satisfier(&pkgs, &s);
+		let r = find_satisfier(&pkgs, &s);
+		let r = r.map(|p| pkgs.iter().position(|q| std::ptr::eq(p, q)));
+		assert_eq!(c, r.flatten(), "{:?} in {pkgs:?}", show(&s));
+		found += usize::from(c.is_some());
+		later += usize::from(c.is_some_and(|i| i > 0));
+	}
+	assert!(found >= n / 10 && later >= n / 20, "{found} {later}/{n}");
 }

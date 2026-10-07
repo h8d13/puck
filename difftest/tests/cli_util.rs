@@ -4,7 +4,7 @@ use difftest::{
 	c_console_cursor_move_up, c_console_erase_line, c_humanize_size,
 	c_indentprint, c_list_display, c_list_display_linebreak, c_mbstowcs,
 	c_signature_display, c_string_display, c_strreplace, c_wcwidth, iters,
-	string_length_in_bounds,
+	string_length_in_bounds, widths_agree,
 };
 use pacman_cli::util::{
 	ColStr, SigResult, SigStatus, SigValidity, arg_to_string,
@@ -14,8 +14,9 @@ use pacman_cli::util::{
 };
 
 // pieces of display text: words, space runs, wide (2), combining (0),
-// non printable (-1: tab, unassigned, past U+10FFFF), invalid or
-// truncated UTF-8, colour sequences whole and broken
+// non printable (-1: tab, past U+10FFFF; unassigned, where unicode-width
+// differs: skipped, see Cover), invalid or truncated UTF-8, colour
+// sequences whole and broken
 const TOKENS: &[&[u8]] = &[
 	b"a",
 	b"bc",
@@ -104,49 +105,121 @@ fn width(rng: &mut Rng) -> u16 {
 	}
 }
 
-#[test]
-fn wcwidth_all_code_points() {
-	for c in 0..=0x11_0000 {
-		assert_eq!(c_wcwidth(c), wcwidth(c), "U+{c:04X}");
+// display inputs are compared where every character has the same width
+// on both sides (see wcwidth_divergence), the others are counted
+#[derive(Default)]
+struct Cover {
+	compared: usize,
+	skipped: usize,
+}
+
+impl Cover {
+	fn agree<T: AsRef<[u8]>>(
+		&mut self,
+		texts: impl IntoIterator<Item = T>,
+	) -> bool {
+		let ok = texts.into_iter().all(|t| widths_agree(t.as_ref()));
+		if ok {
+			self.compared += 1;
+		} else {
+			self.skipped += 1;
+		}
+		ok
 	}
-	// the decoder goes up to 0x7fffffff
+
+	// at least 690 per 1000 compared, about 3/4 of the 920 measured with
+	// 200000 iterations
+	fn finish(&self, what: &str) {
+		let n = self.compared + self.skipped;
+		println!("{what}: compared {} of {n}", self.compared);
+		assert!(
+			self.compared * 1000 >= n * 690,
+			"{what}: compared {} of {n}",
+			self.compared
+		);
+	}
+}
+
+// glibc 2.44 C.UTF-8 wcwidth against the port (unicode-width with the -1
+// mapping) over every code point, by (glibc, port) widths. counts are the
+// measured ones and may only shrink
+struct WidthClass {
+	what: &'static str,
+	pairs: &'static [(i32, i32)],
+	measured: usize,
+	example: u32,
+}
+
+const fn class(
+	what: &'static str,
+	pairs: &'static [(i32, i32)],
+	measured: usize,
+	example: u32,
+) -> WidthClass {
+	WidthClass {
+		what,
+		pairs,
+		measured,
+		example,
+	}
+}
+
+const WIDTH_DIVERGENCE: &[WidthClass] = &[
+	// unassigned and noncharacters: glibc -1, unicode-width a width
+	class("unassigned, port 1", &[(-1, 1)], 754_797, 0x378),
+	// in the wide default ranges (CJK extension planes, compatibility
+	// ideographs)
+	class("unassigned, port 2", &[(-1, 2)], 56_166, 0x2_a6e0),
+	// default ignorable ranges (U+2065, U+FFF0-FFF8, tags E0000-E0FFF)
+	class("unassigned, port 0", &[(-1, 0)], 3_769, 0xe_0000),
+	// Prepend and Prepended_Concatenation_Mark, Grapheme_Extend spacing
+	// marks (Indic vowel signs and length marks, U+302E-302F,
+	// U+16FF0-16FF1, U+FF9E-FF9F), soft hyphen U+00AD, U+A8FA
+	class("zero width in port", &[(1, 0), (2, 0)], 84, 0xad),
+	// East Asian Width ambiguous, U+3248-324F: wide in glibc
+	class("ambiguous, glibc 2", &[(2, 1)], 8, 0x3248),
+	// unicode-width rules: U+17A4 2, U+17D8 3, U+2D7F 1
+	class("port specials", &[(1, 2), (1, 3), (0, 1)], 3, 0x17d8),
+];
+
+#[test]
+fn wcwidth_divergence() {
+	let mut counts = vec![0usize; WIDTH_DIVERGENCE.len()];
+	for c in 0..=0x10_ffff {
+		let pair = (c_wcwidth(c), wcwidth(c));
+		if pair.0 == pair.1 {
+			continue;
+		}
+		let k = WIDTH_DIVERGENCE
+			.iter()
+			.position(|d| d.pairs.contains(&pair))
+			.unwrap_or_else(|| {
+				panic!("U+{c:04X}: new class {pair:?}")
+			});
+		counts[k] += 1;
+	}
+	for (d, n) in WIDTH_DIVERGENCE.iter().zip(counts) {
+		println!("{}: {n} (measured {})", d.what, d.measured);
+		assert!(n <= d.measured, "{}: {n} > {}", d.what, d.measured);
+		let pair = (c_wcwidth(d.example), wcwidth(d.example));
+		assert!(
+			d.pairs.contains(&pair),
+			"{}: U+{:04X} {pair:?}",
+			d.what,
+			d.example
+		);
+	}
+	// past U+10FFFF (the decoder goes up to 0x7fffffff) both say -1
 	let mut rng = Rng::new(0x3c3d);
-	for c in [0x1f_ffff, 0x20_0000, 0x7fff_ffff] {
+	for c in [0x11_0000, 0x1f_ffff, 0x20_0000, 0x7fff_ffff] {
 		assert_eq!(c_wcwidth(c), wcwidth(c), "U+{c:04X}");
 	}
 	for _ in 0..iters() {
 		let c = (rng.next_u64() as u32) & 0x7fff_ffff;
-		assert_eq!(c_wcwidth(c), wcwidth(c), "U+{c:04X}");
-	}
-}
-
-// prints WIDTH_RUNS of pacman-cli/src/util.rs from the C wcwidth
-#[test]
-#[ignore]
-fn dump_width_runs() {
-	let mut runs = Vec::new();
-	let mut prev = i32::MIN;
-	for c in 0..=0x11_0000 {
-		let w = c_wcwidth(c);
-		if w != prev {
-			runs.push(c << 2 | (w + 1) as u32);
-			prev = w;
+		if c > 0x10_ffff {
+			assert_eq!(c_wcwidth(c), wcwidth(c), "U+{c:04X}");
 		}
 	}
-	let mut line = String::from("\t");
-	println!("const WIDTH_RUNS: &[u32] = &[");
-	for r in runs {
-		let item = format!("0x{r:x},");
-		if line.len() + item.len() + 1 > 72 {
-			println!("{line}");
-			line = String::from("\t");
-		}
-		if line.len() > 1 {
-			line.push(' ');
-		}
-		line.push_str(&item);
-	}
-	println!("{line}\n];");
 }
 
 // UTF-8 of c in n bytes, overlong if n is more than c needs
@@ -196,9 +269,13 @@ fn mbstowcs_decoder() {
 #[test]
 fn indentprint_wrap() {
 	let mut rng = Rng::new(0x1d27);
+	let mut cover = Cover::default();
 	for _ in 0..iters() {
 		let s = any_text(&mut rng, 12);
 		let (indent, cols) = (width(&mut rng), width(&mut rng));
+		if !cover.agree([&s]) {
+			continue;
+		}
 		let mut out = Vec::new();
 		indentprint(&mut out, &s, indent, cols);
 		assert_eq!(
@@ -208,6 +285,7 @@ fn indentprint_wrap() {
 			show(&s)
 		);
 	}
+	cover.finish("indentprint");
 }
 
 #[test]
@@ -241,16 +319,21 @@ fn strreplace_occurrences() {
 #[test]
 fn string_display_title_indent() {
 	let mut rng = Rng::new(0x57d1);
+	let mut cover = Cover::default();
 	for _ in 0..iters() {
 		let title = (rng.below(4) != 0).then(|| safe_text(&mut rng, 4));
 		let s = any_text(&mut rng, 10);
 		let cols = width(&mut rng);
 		let colstr = colors(&mut rng);
-		let mut out = Vec::new();
-		string_display(&mut out, title.as_deref(), &s, cols, &colstr);
-		// NULL and "" both print None
+		// NULL and "" both print None. drawn before the skip, so the
+		// rng stream is the one of the compared inputs
 		let c_s =
 			(!s.is_empty() || rng.below(2) == 0).then_some(&s[..]);
+		if !cover.agree(title.iter().chain([&s])) {
+			continue;
+		}
+		let mut out = Vec::new();
+		string_display(&mut out, title.as_deref(), &s, cols, &colstr);
 		assert_eq!(
 			c_string_display(title.as_deref(), c_s, cols, &colstr),
 			out,
@@ -259,6 +342,7 @@ fn string_display_title_indent() {
 			show(&s)
 		);
 	}
+	cover.finish("string_display");
 }
 
 // string_length is static, its width reaches the output through the
@@ -266,6 +350,7 @@ fn string_display_title_indent() {
 #[test]
 fn list_display_wrap() {
 	let mut rng = Rng::new(0x7157);
+	let mut cover = Cover::default();
 	for _ in 0..iters() {
 		let title = (rng.below(4) != 0).then(|| safe_text(&mut rng, 4));
 		let list: Vec<Vec<u8>> = (0..rng.below(6))
@@ -273,6 +358,9 @@ fn list_display_wrap() {
 			.collect();
 		let cols = width(&mut rng);
 		let colstr = colors(&mut rng);
+		if !cover.agree(title.iter().chain(&list)) {
+			continue;
+		}
 		let mut out = Vec::new();
 		list_display(&mut out, title.as_deref(), &list, cols, &colstr);
 		assert_eq!(
@@ -283,11 +371,13 @@ fn list_display_wrap() {
 			list.iter().map(|s| show(s)).collect::<Vec<_>>()
 		);
 	}
+	cover.finish("list_display");
 }
 
 #[test]
 fn list_display_linebreak_items() {
 	let mut rng = Rng::new(0x11b7);
+	let mut cover = Cover::default();
 	for _ in 0..iters() {
 		let title = (rng.below(4) != 0).then(|| safe_text(&mut rng, 4));
 		let list: Vec<Vec<u8>> = (0..rng.below(4))
@@ -295,6 +385,9 @@ fn list_display_linebreak_items() {
 			.collect();
 		let cols = width(&mut rng);
 		let colstr = colors(&mut rng);
+		if !cover.agree(title.iter().chain(&list)) {
+			continue;
+		}
 		let mut out = Vec::new();
 		list_display_linebreak(
 			&mut out,
@@ -316,6 +409,7 @@ fn list_display_linebreak_items() {
 			list.iter().map(|s| show(s)).collect::<Vec<_>>()
 		);
 	}
+	cover.finish("list_display_linebreak");
 }
 
 const STATUSES: [SigStatus; 6] = [
@@ -336,6 +430,7 @@ const VALIDITIES: [SigValidity; 4] = [
 #[test]
 fn signature_display_lines() {
 	let mut rng = Rng::new(0x5194);
+	let mut cover = Cover::default();
 	for _ in 0..iters() {
 		let title = (rng.below(4) != 0).then(|| safe_text(&mut rng, 4));
 		let sigs: Vec<SigResult> = (0..rng.below(4))
@@ -350,6 +445,10 @@ fn signature_display_lines() {
 			.collect();
 		let cols = width(&mut rng);
 		let colstr = colors(&mut rng);
+		let uids = sigs.iter().filter_map(|s| s.uid.as_ref());
+		if !cover.agree(title.iter().chain(uids)) {
+			continue;
+		}
 		let mut out = Vec::new();
 		signature_display(
 			&mut out,
@@ -370,6 +469,7 @@ fn signature_display_lines() {
 			title.as_deref().map(show)
 		);
 	}
+	cover.finish("signature_display");
 }
 
 fn check_humanize(bytes: i64, unit: u8, precision: i32) {

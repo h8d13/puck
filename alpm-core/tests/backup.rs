@@ -9,14 +9,18 @@ fn backup(name: &[u8], hash: Option<&[u8]>) -> Backup {
 }
 
 #[test]
-fn split_backup_cases() {
-	assert_eq!(
-		split_backup(b"etc/pacman.conf\tabc123"),
-		backup(b"etc/pacman.conf", Some(b"abc123"))
-	);
-	assert_eq!(split_backup(b"etc/fstab"), backup(b"etc/fstab", None));
-	assert_eq!(split_backup(b"a\tb\tc"), backup(b"a", Some(b"b\tc")));
-	assert_eq!(split_backup(b"\t"), backup(b"", Some(b"")));
-	assert_eq!(split_backup(b""), backup(b"", None));
-	assert_eq!(split_backup(b"a\0\tb"), backup(b"a", None));
+fn needbackup_cases() {
+	let pkg = alpm_core::package::Package {
+		backup: vec![
+			backup(b"etc/a", Some(b"1")),
+			backup(b"etc/b", None),
+			backup(b"etc/a", Some(b"2")),
+		],
+		..Default::default()
+	};
+	let found = needbackup(b"etc/a", &pkg).unwrap();
+	assert!(std::ptr::eq(found, &pkg.backup[0]));
+	assert_eq!(needbackup(b"etc/b\0x", &pkg), Some(&pkg.backup[1]));
+	assert_eq!(needbackup(b"etc/c", &pkg), None);
+	assert_eq!(needbackup(b"etc", &pkg), None);
 }

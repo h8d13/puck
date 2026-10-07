@@ -1,0 +1,13 @@
+---
+source: alpm-types/src/checksum.rs
+---
+error: invalid hash digest
+ | 
+ | 0cf9180a764aba863a67b6d72f0918bca
+ | ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^ expected ASCII hex digit
+ | 
+ = while parsing:
+   checksum: (0cf9180a764aba863a67…)
+   → invalid hash digest
+   → Expected a hex SHA-512 hash digest consisting of 64 bytes.
+   → expected ASCII hex digit

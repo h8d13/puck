@@ -1,8 +1,8 @@
 // port of lib/libalpm/backup.c
 //
-// _alpm_needbackup searches alpm_pkg_t, waits for package.c.
 // _alpm_backup_dup and _alpm_backup_free are Clone and Drop.
 
+use crate::package::Package;
 use crate::util::until_nul;
 
 // alpm_backup_t
@@ -14,18 +14,9 @@ pub struct Backup {
 	pub hash: Option<Vec<u8>>,
 }
 
-// _alpm_split_backup: "file\thash" split at the first tab, later tabs stay
-// in the hash. allocation is the only way the C fails, so no Result
-pub fn split_backup(s: &[u8]) -> Backup {
-	let s = until_nul(s);
-	match s.iter().position(|&c| c == b'\t') {
-		Some(i) => Backup {
-			name: s[..i].to_vec(),
-			hash: Some(s[i + 1..].to_vec()),
-		},
-		None => Backup {
-			name: s.to_vec(),
-			hash: None,
-		},
-	}
+// _alpm_needbackup: first backup entry of pkg named file (strcmp). the
+// C's NULL checks belong to the C ABI layer
+pub fn needbackup<'a>(file: &[u8], pkg: &'a Package) -> Option<&'a Backup> {
+	let file = until_nul(file);
+	pkg.backup.iter().find(|b| until_nul(&b.name) == file)
 }

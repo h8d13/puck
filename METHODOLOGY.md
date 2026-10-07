@@ -13,6 +13,8 @@ whoever writes it.
 
 - Module name = C file stem (`lib/libalpm/deps.c` -> `deps.rs`).
 - No `#[cfg(test)]` modules inside port source.
+- Test helpers (binaries, probe programs, fixture writers) live in
+  difftest, never in port crates, even when only used by hand.
 - Port source comments explain translation (C locale, nul termination,
   buffer semantics). Upstream bugs or oddities never go in port source:
   report them back, they land in `UPSTREAM.md`.
@@ -36,8 +38,36 @@ whoever writes it.
   `alpm-buildinfo`, `alpm-package`, `alpm-compress`; types, versions,
   relations, checksums: `alpm-types`). If it does, use the ALPM crate
   instead of translating, and difftest ALPM against the C on the inputs
-  ALPM accepts. Differences go in `PORTING.md` as divergences, they are
-  not patched around.
+  ALPM accepts. Where ALPM differs from pacman, correct it: one patch per
+  divergence in `vendor/patches/` (applied to the pristine `alpm/`
+  submodule by `scripts/vendor-alpm.sh` into `vendor/alpm`, which the
+  workspace builds against), with the difftest flipped from "pinned
+  divergence" to "equal". pacman bugs recorded in `UPSTREAM.md` are not
+  copied. Crates ALPM itself depends on count as precedent
+  too (base64, md-5, sha2, time, unicode-width, url, tar, compression,
+  winnow): never hand-write what one of them implements. Keeping a port
+  next to a precedent needs a stated reason (e.g. pacman semantics the
+  crate cannot express) in `PORTING.md`.
+
+## System-level decisions
+
+Where pacman needs things the 10 core ALPM crates do not cover, the choice
+follows the wider ALPM workspace, then parity:
+
+| Need | Choice | Why |
+|---|---|---|
+| HTTP downloads (`dload.c`) | `reqwest` 0.13, blocking, rustls | ALPM `dev-scripts` uses exactly this |
+| OpenPGP verification and keys (`signing.c`) | drive `gpg` over `--status-fd` like gpgme does | same engine, keyring (`/etc/pacman.d/gnupg`) and trust model as pacman; ALPM's VOA/rpgp stack cannot read gnupg keyboxes or trustdb |
+| `statvfs` (`diskspace.c`), `umask` | `rustix` safe API | in ALPM's lockfile |
+| chroot exec (scriptlets, hooks, ldconfig) | spawn `chroot(8)` via `std::process::Command` | no `pre_exec` (unsafe); works under fakechroot like the C's `chroot()` |
+| run downloads as DownloadUser | spawned helper process, `CommandExt::uid`/`gid` | safe std, instead of the C's fork + setuid |
+| landlock (`sandbox_fs.c`) | `landlock` crate | the Landlock maintainers' binding |
+| seccomp (`sandbox_syscalls.c`) | `libseccomp` crate | binding to the same C library pacman links |
+| lock file | `OpenOptions::create_new` | safe std (O_CREAT\|O_EXCL) |
+
+No `unsafe` outside difftest: when something seems to need it, look for the
+std/rustix safe API or an established binding crate first (the ALPM
+pattern), and record the choice here before use.
 
 ## Equivalence testing (difftest)
 
@@ -50,7 +80,9 @@ whoever writes it.
   `#[repr(C)]` mirrors declared in that same module. libc/stdio items
   used by several modules (`CFile`, `CList`, `fclose`, `free`,
   `alpm_list_add`, `alpm_list_free`) are declared once
-  in `difftest/src/lib.rs`; rustc flags clashing extern signatures.
+  in `difftest/src/lib.rs`, handle/db items (`CHash`, `CDb`,
+  `alpm_initialize`, the `ALPM` lock, ...) in `difftest/src/handle.rs`;
+  rustc flags clashing extern signatures.
 - Tests in `difftest/tests/<cfile>.rs`:
   - fixed edge cases, then fuzz with `difftest::Rng` and `difftest::iters()`
   - alphabets built from the characters the C special-cases
@@ -74,7 +106,14 @@ order.
 
 ## Done means
 
+- nothing left behind in /tmp: fixtures, logs and probe programs created
+  for the unit are removed (corpora meant to be reused are named in the
+  report)
 - `cargo test --release` green for the whole workspace
+- `scripts/check-separation.sh` passes (no test modules, C access or
+  difftest in port crates)
+- `scripts/check-externs.py` passes (one declaration per C symbol in
+  difftest; rustc only flags duplicates whose signatures differ)
 - `DIFFTEST_ITERS=2000000 cargo test --release -p difftest --test <cfile>`
 - mutation check done
 - `PORTING.md` row(s) and notes updated

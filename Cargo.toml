@@ -2,7 +2,7 @@
 resolver = "3"
 members = ["alpm-core", "pacman-common", "pacman-cli", "vercmp", "difftest"]
 # submodules: C reference and ALPM (its own workspace)
-exclude = ["pacman", "alpm"]
+exclude = ["pacman", "alpm", "vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,19 +10,27 @@ edition = "2024"
 # derived from pacman sources, same license
 license = "GPL-2.0-or-later"
 
-# official Arch ALPM crates, alpm/ (submodule), used instead of re-porting
+# official Arch ALPM crates, vendored (vendor/alpm = alpm/ submodule +
+# vendor/patches, scripts/vendor-alpm.sh), used instead of re-porting
 # what they already implement
 [workspace.dependencies]
-alpm-buildinfo = { path = "alpm/alpm-buildinfo" }
-alpm-common = { path = "alpm/alpm-common" }
-alpm-compress = { path = "alpm/alpm-compress" }
-alpm-db = { path = "alpm/alpm-db" }
-alpm-mtree = { path = "alpm/alpm-mtree" }
-alpm-package = { path = "alpm/alpm-package" }
-alpm-parsers = { path = "alpm/alpm-parsers" }
-alpm-pkginfo = { path = "alpm/alpm-pkginfo" }
-alpm-repo-db = { path = "alpm/alpm-repo-db" }
-alpm-types = { path = "alpm/alpm-types" }
+alpm-buildinfo = { path = "vendor/alpm/alpm-buildinfo" }
+alpm-common = { path = "vendor/alpm/alpm-common" }
+alpm-compress = { path = "vendor/alpm/alpm-compress" }
+alpm-db = { path = "vendor/alpm/alpm-db" }
+alpm-mtree = { path = "vendor/alpm/alpm-mtree" }
+alpm-package = { path = "vendor/alpm/alpm-package" }
+alpm-parsers = { path = "vendor/alpm/alpm-parsers" }
+alpm-pkginfo = { path = "vendor/alpm/alpm-pkginfo" }
+alpm-repo-db = { path = "vendor/alpm/alpm-repo-db" }
+alpm-types = { path = "vendor/alpm/alpm-types" }
+# crates ALPM itself depends on, same versions
+base64 = "0.23.0"
+time = "0.3.47"
+unicode-width = "0.2"
+# system-level, see METHODOLOGY.md
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+rustix = { version = "1.1", features = ["fs"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

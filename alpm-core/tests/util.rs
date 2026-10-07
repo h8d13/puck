@@ -133,3 +133,52 @@ fn fs_helpers() {
 	assert!(makepath(&t.path("g")).is_ok());
 	assert!(makepath(&t.path("g/x")).is_err());
 }
+
+#[test]
+fn checksum_cases() {
+	use alpm_core::package::{
+		PKG_VALIDATION_MD5SUM, PKG_VALIDATION_SHA256SUM,
+	};
+	let t = TmpDir::new("checksum");
+	std::fs::write(t.0.join("foo"), b"foo\n").unwrap();
+	let md5 = b"d3b07384d113edec49eaa6238ad5ff00";
+	let sha = b"b5bb9d8014a0f9b1d61e21e796d78dccdf1352f23cd32812f4850b878ae4944c";
+	assert_eq!(compute_md5sum(&t.path("foo")).as_deref(), Some(&md5[..]));
+	assert_eq!(
+		compute_sha256sum(&t.path("foo")).as_deref(),
+		Some(&sha[..])
+	);
+	// a directory opens, its read fails
+	assert_eq!(compute_md5sum(&t.path("")), None);
+	assert_eq!(compute_sha256sum(&t.path("none")), None);
+	let f = t.path("foo");
+	assert_eq!(
+		test_checksum(&f, Some(md5), PKG_VALIDATION_MD5SUM),
+		Some(true)
+	);
+	assert_eq!(
+		test_checksum(&f, Some(sha), PKG_VALIDATION_SHA256SUM),
+		Some(true)
+	);
+	// strcmp: case matters, the expected value is cut at a nul
+	let upper = md5.to_ascii_uppercase();
+	assert_eq!(
+		test_checksum(&f, Some(&upper), PKG_VALIDATION_MD5SUM),
+		Some(false)
+	);
+	let cut = [&md5[..], b"\0x"].concat();
+	assert_eq!(
+		test_checksum(&f, Some(&cut), PKG_VALIDATION_MD5SUM),
+		Some(true)
+	);
+	assert_eq!(test_checksum(&f, None, PKG_VALIDATION_MD5SUM), None);
+	assert_eq!(test_checksum(&f, Some(md5), 0), None);
+	assert_eq!(
+		test_checksum(
+			&t.path("none"),
+			Some(md5),
+			PKG_VALIDATION_MD5SUM
+		),
+		None
+	);
+}

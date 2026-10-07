@@ -1,9 +1,26 @@
-// port of lib/libalpm/deps.c, dependency strings and version matching.
-// resolving (needing a handle or packages) is not ported yet.
+// port of lib/libalpm/deps.c: dependency strings, version matching,
+// satisfiers, checkdeps, sorting by dependencies, the resolver and the
+// -Rs cascade.
+//
+// handle state comes in as a DepsEnv (ignore lists through the Handle,
+// assumeinstalled, the NODEPVERSION trans flag, db caches and usage).
+// QUESTION and _alpm_log go to the caller's Questions/Log impls, pm_errno
+// comes back as Err. alpm_dep_free, depmiss_new/alpm_depmissing_free and
+// _alpm_dep_dup are Drop and Clone.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::ffi::c_ulong;
+use std::ffi::{c_int, c_ulong};
+use std::ptr;
 
+use crate::db::{DB_USAGE_INSTALL, DB_USAGE_UPGRADE};
+use crate::error::Errno;
+use crate::graph::{Graph, State};
+use crate::handle::Handle;
+use crate::package::{
+	Package, PkgReason, has_name, pkg_cmp, pkg_find, pkg_should_ignore,
+};
+use crate::pkghash::PkgHash;
 use crate::util::{hash_sdbm, until_nul};
 use crate::version::vercmp;
 
@@ -93,6 +110,39 @@ pub fn depcmp_provides(dep: &Depend, provisions: &[Depend]) -> bool {
 	})
 }
 
+// _alpm_depcmp_literal: pkg is dep by name (hash first, like the C),
+// and its version satisfies dep's
+pub fn depcmp_literal(pkg: &Package, dep: &Depend) -> bool {
+	has_name(pkg, until_nul(&dep.name), dep.name_hash)
+		&& dep_vercmp(
+			pkg.version.as_deref(),
+			dep.depmod,
+			dep.version.as_deref(),
+		)
+}
+
+// _alpm_depcmp: the package itself or one of its provisions
+pub fn depcmp(pkg: &Package, dep: &Depend) -> bool {
+	depcmp_literal(pkg, dep) || depcmp_provides(dep, &pkg.provides)
+}
+
+// alpm_find_satisfier: first package in list order satisfying depstring
+pub fn find_satisfier<'a, I>(pkgs: I, depstring: &[u8]) -> Option<&'a Package>
+where
+	I: IntoIterator<Item = &'a Package>,
+{
+	find_dep_satisfier(pkgs, &dep_from_string(depstring))
+}
+
+// find_dep_satisfier (static in C): first package in list order
+// satisfying dep
+pub fn find_dep_satisfier<'a, I>(pkgs: I, dep: &Depend) -> Option<&'a Package>
+where
+	I: IntoIterator<Item = &'a Package>,
+{
+	pkgs.into_iter().find(|p| depcmp(p, dep))
+}
+
 // alpm_dep_from_string: "name[op version][: desc]". the first ": "
 // starts the description (a bare ':' is an epoch), the operator is
 // searched before it, '<' first, then '>', then '='
@@ -150,4 +200,705 @@ pub fn dep_compute_string(dep: &Depend) -> Vec<u8> {
 		out.extend_from_slice(until_nul(desc));
 	}
 	out
+}
+
+// alpm_depmissing_t. causingpkg is set by reverse dependency checks only
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DepMissing {
+	pub target: Vec<u8>,
+	pub depend: Depend,
+	pub causingpkg: Option<Vec<u8>>,
+}
+
+// alpm_question_t for the two questions deps.c asks. the answer fields
+// start at the C defaults: a callback that leaves them acts like no
+// questioncb
+#[derive(Debug)]
+pub enum Question<'q> {
+	// ALPM_QUESTION_INSTALL_IGNOREPKG: nonzero installs pkg anyway
+	InstallIgnorepkg {
+		install: c_int,
+		pkg: &'q Package,
+	},
+	// ALPM_QUESTION_SELECT_PROVIDER: position in providers, out of
+	// range picks none
+	SelectProvider {
+		use_index: c_int,
+		providers: &'q [&'q Package],
+		depend: &'q Depend,
+	},
+}
+
+// handle->questioncb
+pub trait Questions {
+	fn question(&mut self, q: &mut Question<'_>);
+}
+
+impl Questions for () {
+	fn question(&mut self, _: &mut Question<'_>) {}
+}
+
+// alpm_loglevel_t, discriminants as in alpm.h
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogLevel {
+	Error = 1,
+	Warning = 2,
+	Debug = 4,
+	Function = 8,
+}
+
+// handle->logcb, one formatted message per _alpm_log call. translated
+// messages are their msgids (gettext without a locale)
+pub trait Log {
+	fn log(&mut self, level: LogLevel, msg: &[u8]);
+}
+
+impl Log for () {
+	fn log(&mut self, _: LogLevel, _: &[u8]) {}
+}
+
+// a db as the resolver reads it: alpm_db_t usage and the loaded cache
+// (list order for scans, the hash for lookups by name)
+#[derive(Clone, Copy, Debug)]
+pub struct DbPkgs<'a> {
+	pub usage: c_int,
+	pub cache: &'a PkgHash<Package>,
+}
+
+// the handle state deps.c reads. packages need depends, provides, groups
+// and reason loaded (the C getters lazy-load local entries)
+#[derive(Clone, Copy, Debug)]
+pub struct DepsEnv<'a> {
+	// ignorepkg/ignoregroup, through pkg_should_ignore
+	pub handle: &'a Handle,
+	// handle->assumeinstalled
+	pub assumeinstalled: &'a [Depend],
+	// handle->trans->flags & ALPM_TRANS_FLAG_NODEPVERSION, false without
+	// a transaction
+	pub nodepversion: bool,
+	// handle->db_local
+	pub local: DbPkgs<'a>,
+	// handle->dbs_sync, registration order
+	pub sync: &'a [DbPkgs<'a>],
+}
+
+fn logv(log: &mut impl Log, level: LogLevel, parts: &[&[u8]]) {
+	log.log(level, &parts.concat());
+}
+
+// a string field through printf %s: glibc prints NULL as "(null)"
+fn opt_str(s: &Option<Vec<u8>>) -> &[u8] {
+	s.as_deref().map_or(b"(null)", until_nul)
+}
+
+fn name_of(pkg: &Package) -> &[u8] {
+	opt_str(&pkg.name)
+}
+
+// _alpm_pkg_depends_on (static in C): pkg2 satisfies a depend of pkg1
+fn depends_on(pkg1: &Package, pkg2: &Package) -> bool {
+	pkg1.depends.iter().any(|d| depcmp(pkg2, d))
+}
+
+fn satisfied_in(pkgs: &[&Package], dep: &Depend) -> bool {
+	find_dep_satisfier(pkgs.iter().copied(), dep).is_some()
+}
+
+fn find_name<'a>(pkgs: &[&'a Package], name: &[u8]) -> Option<&'a Package> {
+	pkg_find(pkgs.iter().copied(), name)
+}
+
+// alpm_list_diff with _alpm_pkg_cmp: both sides merge sorted by name
+// (stable), an equal name cancels one entry on each side. the result is
+// in name order
+fn list_diff<'a>(lhs: &[&'a Package], rhs: &[&Package]) -> Vec<&'a Package> {
+	let mut left = lhs.to_vec();
+	left.sort_by(|a, b| pkg_cmp(a, b));
+	let mut right = rhs.to_vec();
+	right.sort_by(|a, b| pkg_cmp(a, b));
+	let (mut l, mut r, mut out) = (0, 0, Vec::new());
+	while l < left.len() && r < right.len() {
+		match pkg_cmp(left[l], right[r]) {
+			Ordering::Less => {
+				out.push(left[l]);
+				l += 1;
+			}
+			Ordering::Greater => r += 1,
+			Ordering::Equal => (l, r) = (l + 1, r + 1),
+		}
+	}
+	out.extend_from_slice(&left[l..]);
+	out
+}
+
+// NODEPVERSION: the C sets depend->mod to ANY in place and restores it
+// afterwards, so missing entries and log lines carry the ANY copy
+fn effective(dep: &Depend, nodepversion: bool) -> Cow<'_, Depend> {
+	match nodepversion {
+		false => Cow::Borrowed(dep),
+		true => Cow::Owned(Depend {
+			depmod: DepMod::Any,
+			..dep.clone()
+		}),
+	}
+}
+
+// alpm_checkdeps: pkglist entries named in rem or upgrade are the
+// modified ones, the rest the untouched db. upgrade depends need a
+// satisfier in upgrade, the untouched db or assumeinstalled. with
+// reversedeps, untouched packages whose depend only a modified package
+// satisfied are broken
+pub fn checkdeps(
+	env: &DepsEnv,
+	pkglist: &[&Package],
+	rem: &[&Package],
+	upgrade: &[&Package],
+	reversedeps: bool,
+	log: &mut impl Log,
+) -> Vec<DepMissing> {
+	let touched = |p: &&Package| {
+		let n = p.name_bytes();
+		find_name(rem, n).is_some() || find_name(upgrade, n).is_some()
+	};
+	let (modified, dblist): (Vec<&Package>, Vec<&Package>) =
+		pkglist.iter().copied().partition(touched);
+	let satisfied = |dep: &Depend| {
+		satisfied_in(upgrade, dep)
+			|| satisfied_in(&dblist, dep)
+			|| depcmp_provides(dep, env.assumeinstalled)
+	};
+	let mut baddeps = Vec::new();
+
+	for tp in upgrade {
+		let (name, ver) = (name_of(tp), opt_str(&tp.version));
+		let line: [&[u8]; 5] =
+			[b"checkdeps: package ", name, b"-", ver, b"\n"];
+		logv(log, LogLevel::Debug, &line);
+		for d in &tp.depends {
+			let dep = effective(d, env.nodepversion);
+			if satisfied(&dep) {
+				continue;
+			}
+			let s = dep_compute_string(&dep);
+			let line: [&[u8]; 5] = [
+				b"checkdeps: missing dependency '",
+				&s,
+				b"' for package '",
+				name,
+				b"'\n",
+			];
+			logv(log, LogLevel::Debug, &line);
+			baddeps.push(DepMissing {
+				target: tp.name_bytes().to_vec(),
+				depend: dep.into_owned(),
+				causingpkg: None,
+			});
+		}
+	}
+
+	if !reversedeps {
+		return baddeps;
+	}
+	for lp in &dblist {
+		for d in &lp.depends {
+			let dep = effective(d, env.nodepversion);
+			let causing = find_dep_satisfier(
+				modified.iter().copied(),
+				&dep,
+			);
+			let Some(causing) = causing else { continue };
+			if satisfied(&dep) {
+				continue;
+			}
+			let s = dep_compute_string(&dep);
+			let line: [&[u8]; 5] = [
+				b"checkdeps: transaction would break '",
+				&s,
+				b"' dependency of '",
+				name_of(lp),
+				b"'\n",
+			];
+			logv(log, LogLevel::Debug, &line);
+			baddeps.push(DepMissing {
+				target: lp.name_bytes().to_vec(),
+				depend: dep.into_owned(),
+				causingpkg: Some(causing.name_bytes().to_vec()),
+			});
+		}
+	}
+	baddeps
+}
+
+// dep_graph_init (static in C): a vertex per target, an edge for each
+// dependency. local packages not among targets/ignore (by name) join
+// lazily when a vertex depends on them, so their own deps are followed
+fn dep_graph_init<'a>(
+	local: &[&'a Package],
+	targets: &[&'a Package],
+	ignore: &[&Package],
+) -> Vec<Graph<&'a Package>> {
+	let mut localpkgs = list_diff(local, targets);
+	if !ignore.is_empty() {
+		localpkgs = list_diff(&localpkgs, ignore);
+	}
+	let mut vertices: Vec<_> =
+		targets.iter().map(|&p| Graph::new(p)).collect();
+	// vertices appended below are visited too
+	let mut i = 0;
+	while i < vertices.len() {
+		let p_i = vertices[i].data;
+		for j in 0..vertices.len() {
+			if depends_on(p_i, vertices[j].data) {
+				vertices[i].children.push(j);
+			}
+		}
+		let mut j = 0;
+		while j < localpkgs.len() {
+			if !depends_on(p_i, localpkgs[j]) {
+				j += 1;
+				continue;
+			}
+			vertices.push(Graph::new(localpkgs.remove(j)));
+			let id = vertices.len() - 1;
+			vertices[i].children.push(id);
+		}
+		i += 1;
+	}
+	vertices
+}
+
+// the C's alpm_list_find_ptr on targets
+fn is_target(targets: &[&Package], pkg: &Package) -> bool {
+	targets.iter().any(|t| ptr::eq(*t, pkg))
+}
+
+// _alpm_warn_dep_cycle (static in C): vertex is being processed and a
+// child of ancestor. only logged when vertex is a target and a target
+// ancestor other than vertex itself exists
+fn warn_dep_cycle(
+	log: &mut impl Log,
+	vertices: &[Graph<&Package>],
+	targets: &[&Package],
+	ancestor: usize,
+	vertex: usize,
+	reverse: bool,
+) {
+	if !is_target(targets, vertices[vertex].data) {
+		return;
+	}
+	let mut a = Some(ancestor);
+	while let Some(x) = a {
+		if is_target(targets, vertices[x].data) {
+			break;
+		}
+		a = vertices[x].parent;
+	}
+	let Some(a) = a.filter(|&a| a != vertex) else {
+		return;
+	};
+	let (anc, child) = (vertices[a].data, vertices[vertex].data);
+	logv(log, LogLevel::Debug, &[b"dependency cycle detected:\n"]);
+	let what: &[u8] = match reverse {
+		true => b" will be removed after its ",
+		false => b" will be installed before its ",
+	};
+	let line: [&[u8]; 4] =
+		[name_of(anc), what, name_of(child), b" dependency\n"];
+	logv(log, LogLevel::Debug, &line);
+}
+
+// _alpm_sortbydeps: targets reordered so dependencies come first
+// (reverse: last), by an iterative DFS over dep_graph_init's vertices in
+// creation order. local packages only link indirect dependencies, ignore
+// keeps some out. targets are matched by identity like the C pointers
+pub fn sortbydeps<'a>(
+	env: &DepsEnv<'a>,
+	targets: &[&'a Package],
+	ignore: &[&Package],
+	reverse: bool,
+	log: &mut impl Log,
+) -> Vec<&'a Package> {
+	if targets.is_empty() {
+		return Vec::new();
+	}
+	logv(log, LogLevel::Debug, &[b"started sorting dependencies\n"]);
+	let local: Vec<&Package> = env.local.cache.iter().collect();
+	let mut vertices = dep_graph_init(&local, targets, ignore);
+	let mut newtargs = Vec::new();
+
+	// i: the top-level vertex, v: the one being visited
+	let (mut i, mut v) = (0, 0);
+	while i < vertices.len() {
+		vertices[v].state = State::Processing;
+		let mut switched = false;
+		while !switched && let Some(next) = vertices[v].next_child() {
+			match vertices[next].state {
+				State::Unprocessed => {
+					switched = true;
+					vertices[next].parent = Some(v);
+					v = next;
+				}
+				State::Processing => warn_dep_cycle(
+					log, &vertices, targets, v, next,
+					reverse,
+				),
+				State::Processed => {}
+			}
+		}
+		if switched {
+			continue;
+		}
+		if is_target(targets, vertices[v].data) {
+			newtargs.push(vertices[v].data);
+		}
+		vertices[v].state = State::Processed;
+		match vertices[v].parent {
+			Some(p) => v = p,
+			None => {
+				i += 1;
+				while i < vertices.len()
+					&& vertices[i].state
+						!= State::Unprocessed
+				{
+					i += 1;
+				}
+				v = i;
+			}
+		}
+	}
+
+	logv(log, LogLevel::Debug, &[b"sorting dependencies finished\n"]);
+	if reverse {
+		newtargs.reverse();
+	}
+	newtargs
+}
+
+// _alpm_select_depends (static in C): moves the packages of from that
+// pkg depends on to the end of to, keeping explicitly installed ones
+// unless explicit
+fn select_depends<'a>(
+	from: &mut Vec<&'a Package>,
+	to: &mut Vec<&'a Package>,
+	pkg: &Package,
+	explicit: bool,
+) {
+	let mut i = 0;
+	while i < from.len() {
+		let deppkg = from[i];
+		let reason_ok = explicit || deppkg.reason == PkgReason::Depend;
+		if reason_ok && depends_on(pkg, deppkg) {
+			to.push(from.remove(i));
+		} else {
+			i += 1;
+		}
+	}
+}
+
+// _alpm_recursedeps: appends to targs a dup of every package of db only
+// needed by targs (transitively). packages of db with a target's name
+// never count; explicitly installed ones only with include_explicit.
+// db is the cache of the db (remove.c passes the local one)
+pub fn recursedeps(
+	db: &PkgHash<Package>,
+	targs: &mut Vec<Package>,
+	include_explicit: bool,
+	log: &mut impl Log,
+) {
+	let mut keep: Vec<&Package> = db.iter().collect();
+	for t in targs.iter() {
+		let i = keep.iter().position(|k| pkg_cmp(k, t).is_eq());
+		if let Some(i) = i {
+			keep.remove(i);
+		}
+	}
+
+	let mut rem = Vec::new();
+	for t in targs.iter() {
+		select_depends(&mut keep, &mut rem, t, include_explicit);
+	}
+	// rem grows while it is walked
+	let mut i = 0;
+	while i < rem.len() {
+		let p = rem[i];
+		select_depends(&mut keep, &mut rem, p, include_explicit);
+		i += 1;
+	}
+	// still needed by a kept package: back to keep, walked as well
+	let mut i = 0;
+	while i < keep.len() && !rem.is_empty() {
+		let p = keep[i];
+		select_depends(&mut rem, &mut keep, p, true);
+		i += 1;
+	}
+
+	for pkg in rem {
+		let line: [&[u8]; 3] =
+			[b"adding '", name_of(pkg), b"' to the targets\n"];
+		logv(log, LogLevel::Debug, &line);
+		targs.push(pkg.dup());
+	}
+}
+
+// the ignored-package branch of resolvedep: with prompt the question,
+// else a warning and the default (skip). true installs anyway
+fn install_ignored(
+	cb: &mut (impl Questions + Log),
+	pkg: &Package,
+	prompt: bool,
+) -> bool {
+	let mut q = Question::InstallIgnorepkg { install: 0, pkg };
+	if prompt {
+		cb.question(&mut q);
+	} else {
+		let (name, ver) = (name_of(pkg), opt_str(&pkg.version));
+		let line: [&[u8]; 5] =
+			[b"ignoring package ", name, b"-", ver, b"\n"];
+		logv(cb, LogLevel::Warning, &line);
+	}
+	match q {
+		Question::InstallIgnorepkg { install, .. } => install != 0,
+		Question::SelectProvider { .. } => unreachable!(),
+	}
+}
+
+// resolvedep (static in C): a satisfier of dep in the dbs used for
+// install/upgrade, skipping packages named in excluding. first a
+// package named dep in db order, then providers over every db in cache
+// order: an installed provider wins at once, more than one asks the
+// select question. ignored packages are skipped unless installed anyway
+fn resolvedep<'a>(
+	env: &DepsEnv<'a>,
+	dep: &Depend,
+	dbs: &[DbPkgs<'a>],
+	excluding: &[&Package],
+	prompt: bool,
+	cb: &mut (impl Questions + Log),
+) -> Result<&'a Package, Errno> {
+	let usable = |db: &&DbPkgs<'a>| {
+		db.usage & (DB_USAGE_INSTALL | DB_USAGE_UPGRADE) != 0
+	};
+	let excluded =
+		|p: &Package| find_name(excluding, p.name_bytes()).is_some();
+	let mut ignored = false;
+
+	for db in dbs.iter().filter(usable) {
+		let Some(pkg) = db.cache.find(&dep.name) else {
+			continue;
+		};
+		if !depcmp_literal(pkg, dep) || excluded(pkg) {
+			continue;
+		}
+		if pkg_should_ignore(env.handle, pkg)
+			&& !install_ignored(cb, pkg, prompt)
+		{
+			ignored = true;
+			continue;
+		}
+		return Ok(pkg);
+	}
+
+	let name = until_nul(&dep.name);
+	let mut providers = Vec::new();
+	for db in dbs.iter().filter(usable) {
+		for pkg in db.cache.iter() {
+			if has_name(pkg, name, dep.name_hash)
+				|| !depcmp_provides(dep, &pkg.provides)
+				|| excluded(pkg)
+			{
+				continue;
+			}
+			if pkg_should_ignore(env.handle, pkg)
+				&& !install_ignored(cb, pkg, prompt)
+			{
+				ignored = true;
+				continue;
+			}
+			let line: [&[u8]; 5] = [
+				b"provider found (",
+				name_of(pkg),
+				b" provides ",
+				name,
+				b")\n",
+			];
+			logv(cb, LogLevel::Debug, &line);
+			if env.local.cache.find(pkg.name_bytes()).is_some() {
+				return Ok(pkg);
+			}
+			providers.push(pkg);
+		}
+	}
+
+	if !providers.is_empty() {
+		let mut q = Question::SelectProvider {
+			use_index: 0,
+			providers: &providers,
+			depend: dep,
+		};
+		if providers.len() > 1 {
+			cb.question(&mut q);
+		}
+		let Question::SelectProvider { use_index, .. } = q else {
+			unreachable!()
+		};
+		let chosen = usize::try_from(use_index).ok();
+		if let Some(&pkg) = chosen.and_then(|i| providers.get(i)) {
+			return Ok(pkg);
+		}
+	}
+	Err(match ignored {
+		true => Errno::PkgIgnored,
+		false => Errno::PkgNotFound,
+	})
+}
+
+// alpm_find_dbs_satisfier: resolvedep over dbs, asking about ignored
+// packages. an empty dbs is the C's NULL list (WRONG_ARGS)
+pub fn find_dbs_satisfier<'a>(
+	env: &DepsEnv<'a>,
+	dbs: &[DbPkgs<'a>],
+	depstring: &[u8],
+	cb: &mut (impl Questions + Log),
+) -> Result<&'a Package, Errno> {
+	if dbs.is_empty() {
+		return Err(Errno::WrongArgs);
+	}
+	let dep = dep_from_string(depstring);
+	resolvedep(env, &dep, dbs, &[], true, cb)
+}
+
+// _alpm_resolvedeps: adds pkg and the sync packages resolving its missing
+// dependencies (depth first) to packages. satisfiers already in packages
+// or preferred come first, then the sync dbs; a dependency an installed
+// package (not in rem) satisfies is fine. on failure packages is restored
+// and the unresolvable entries are appended to data (the C appends only
+// with a data list, here the caller drops them). Err is always
+// UNSATISFIED_DEPS: the pm_errno the C leaves behind is overwritten by
+// later lookups and by its caller (sync.c)
+#[allow(clippy::too_many_arguments)]
+pub fn resolvedeps<'a>(
+	env: &DepsEnv<'a>,
+	localpkgs: &[&'a Package],
+	pkg: &'a Package,
+	preferred: &[&'a Package],
+	packages: &mut Vec<&'a Package>,
+	rem: &[&'a Package],
+	data: &mut Vec<DepMissing>,
+	cb: &mut (impl Questions + Log),
+) -> Result<(), Errno> {
+	let r = Resolve {
+		env,
+		localpkgs,
+		preferred,
+		rem,
+	};
+	match r.resolve(pkg, packages, data, cb) {
+		true => Ok(()),
+		false => Err(Errno::UnsatisfiedDeps),
+	}
+}
+
+// the arguments _alpm_resolvedeps passes down unchanged
+struct Resolve<'r, 'a> {
+	env: &'r DepsEnv<'a>,
+	localpkgs: &'r [&'a Package],
+	preferred: &'r [&'a Package],
+	rem: &'r [&'a Package],
+}
+
+impl<'a> Resolve<'_, 'a> {
+	fn lookup(
+		&self,
+		dep: &Depend,
+		dbs: &[DbPkgs<'a>],
+		excluding: &[&Package],
+		cb: &mut (impl Questions + Log),
+	) -> Option<&'a Package> {
+		resolvedep(self.env, dep, dbs, excluding, false, cb).ok()
+	}
+
+	fn resolve(
+		&self,
+		pkg: &'a Package,
+		packages: &mut Vec<&'a Package>,
+		data: &mut Vec<DepMissing>,
+		cb: &mut (impl Questions + Log),
+	) -> bool {
+		if find_name(packages, pkg.name_bytes()).is_some() {
+			return true;
+		}
+		let copy = packages.clone();
+		packages.push(pkg);
+
+		logv(
+			cb,
+			LogLevel::Debug,
+			&[b"started resolving dependencies\n"],
+		);
+		let deps = checkdeps(
+			self.env,
+			self.localpkgs,
+			self.rem,
+			&[pkg],
+			false,
+			cb,
+		);
+		let mut ok = true;
+		for miss in deps {
+			let dep = &miss.depend;
+			if find_dep_satisfier(packages.iter().copied(), dep)
+				.is_some()
+			{
+				continue;
+			}
+			let preferred = self.preferred.iter().copied();
+			let spkg = match find_dep_satisfier(preferred, dep) {
+				Some(p) => Some(p),
+				None => self.lookup(
+					dep,
+					self.env.sync,
+					packages,
+					cb,
+				),
+			};
+			if let Some(spkg) = spkg
+				&& self.resolve(spkg, packages, data, cb)
+			{
+				let line: [&[u8]; 5] = [
+					b"pulling dependency ",
+					name_of(spkg),
+					b" (needed by ",
+					name_of(pkg),
+					b")\n",
+				];
+				logv(cb, LogLevel::Debug, &line);
+				continue;
+			}
+			let local = std::slice::from_ref(&self.env.local);
+			if self.lookup(dep, local, self.rem, cb).is_some() {
+				continue;
+			}
+			let s = dep_compute_string(dep);
+			let line: [&[u8]; 5] = [
+				b"cannot resolve \"",
+				&s,
+				b"\", a dependency of \"",
+				name_of(pkg),
+				b"\"\n",
+			];
+			logv(cb, LogLevel::Warning, &line);
+			data.push(miss);
+			ok = false;
+		}
+
+		if !ok {
+			*packages = copy;
+		}
+		logv(
+			cb,
+			LogLevel::Debug,
+			&[b"finished resolving dependencies\n"],
+		);
+		ok
+	}
 }

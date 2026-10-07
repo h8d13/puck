@@ -1,0 +1,17 @@
+---
+source: alpm-db/tests/parse_errors.rs
+description: "%NAME%\nfoo bar!\n\n%VERSION%\n1.0.0-1\n\n%BASE%\nfoo\n\n%DESC%\nPackage with an invalid name\n\n%ARCH%\nx86_64\n\n%BUILDDATE%\n1733737242\n\n%INSTALLDATE%\n1733737243\n\n%PACKAGER%\nFoobar <foo@example.org>\n\n%SIZE%\n123\n"
+expression: error
+---
+Parser failed with the following error:
+error: invalid character in package name
+  | 
+1 | %NAME%
+2 | foo bar!
+  |    ^ expected one of: ASCII alphanumeric character, `_`, `@`, `+`, `-`, `.`
+  | 
+  = while parsing:
+    alpm-repo-desc file value section: (%NAME%)
+    └ alpm-package-name: ( bar!)
+      → invalid character in package name
+      → expected one of: ASCII alphanumeric character, `_`, `@`, `+`, `-`, `.`

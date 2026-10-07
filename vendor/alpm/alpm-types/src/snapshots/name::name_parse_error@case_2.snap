@@ -1,0 +1,12 @@
+---
+source: alpm-types/src/name.rs
+---
+error: invalid first character of package name
+ | 
+ | -package_with_leading_hyphen
+ | ^ expected one of: ASCII alphanumeric character, `_`, `@`, `+`
+ | 
+ = while parsing:
+   alpm-package-name: (-package_with_leadin…)
+   → invalid first character of package name
+   → expected one of: ASCII alphanumeric character, `_`, `@`, `+`

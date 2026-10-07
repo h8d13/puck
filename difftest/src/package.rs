@@ -7,6 +7,8 @@ use std::cmp::Ordering;
 use std::ffi::{CStr, c_char, c_int, c_ulong, c_void};
 use std::ptr;
 
+use crate::handle::{alpm_option_set_ignoregroups, alpm_option_set_ignorepkgs};
+use crate::strdup;
 use crate::{CList, alpm_list_add, alpm_list_free, cstr, opt_ptr, take};
 
 use alpm_core::backup::Backup;
@@ -48,7 +50,7 @@ struct CFile {
 
 // alpm_filelist_t
 #[repr(C)]
-struct CFileList {
+pub(crate) struct CFileList {
 	count: usize,
 	files: *mut CFile,
 }
@@ -73,7 +75,7 @@ pub(crate) struct CPkg {
 	size: i64,
 	isize: i64,
 	download_size: i64,
-	handle: *mut c_void,
+	pub(crate) handle: *mut c_void,
 	licenses: *mut CList,
 	replaces: *mut CList,
 	groups: *mut CList,
@@ -88,7 +90,7 @@ pub(crate) struct CPkg {
 	oldpkg: *mut CPkg,
 	ops: *const c_void,
 	files: CFileList,
-	origin_data: *mut c_void,
+	pub(crate) origin_data: *mut c_void,
 	origin: c_int,
 	reason: c_int,
 	scriptlet: c_int,
@@ -104,12 +106,11 @@ const _: () = assert!(size_of::<CPkg>() == 296);
 unsafe extern "C" {
 	static default_pkg_ops: u8;
 
-	fn strdup(s: *const c_char) -> *mut c_char;
 	fn calloc(n: usize, size: usize) -> *mut c_void;
 	fn _alpm_handle_new() -> *mut c_void;
 
 	fn _alpm_pkg_new() -> *mut CPkg;
-	fn _alpm_pkg_free(pkg: *mut CPkg);
+	pub(crate) fn _alpm_pkg_free(pkg: *mut CPkg);
 	fn _alpm_pkg_dup(pkg: *mut CPkg, new_ptr: *mut *mut CPkg) -> c_int;
 	fn _alpm_pkg_cmp(p1: *const c_void, p2: *const c_void) -> c_int;
 	fn _alpm_pkg_compare_versions(
@@ -120,15 +121,13 @@ unsafe extern "C" {
 		haystack: *mut CList,
 		needle: *const c_char,
 	) -> *mut CPkg;
-	fn _alpm_pkg_parse_xdata(s: *const c_char) -> *mut CPkgXData;
-	fn _alpm_pkg_xdata_free(pd: *mut CPkgXData);
 
 	fn alpm_pkg_get_filename(pkg: *mut CPkg) -> *const c_char;
 	fn alpm_pkg_get_base(pkg: *mut CPkg) -> *const c_char;
-	fn alpm_pkg_get_name(pkg: *mut CPkg) -> *const c_char;
+	pub(crate) fn alpm_pkg_get_name(pkg: *mut CPkg) -> *const c_char;
 	fn alpm_pkg_get_version(pkg: *mut CPkg) -> *const c_char;
 	fn alpm_pkg_get_origin(pkg: *mut CPkg) -> c_int;
-	fn alpm_pkg_get_desc(pkg: *mut CPkg) -> *const c_char;
+	pub(crate) fn alpm_pkg_get_desc(pkg: *mut CPkg) -> *const c_char;
 	fn alpm_pkg_get_url(pkg: *mut CPkg) -> *const c_char;
 	fn alpm_pkg_get_builddate(pkg: *mut CPkg) -> i64;
 	fn alpm_pkg_get_installdate(pkg: *mut CPkg) -> i64;
@@ -139,7 +138,7 @@ unsafe extern "C" {
 	fn alpm_pkg_get_size(pkg: *mut CPkg) -> i64;
 	fn alpm_pkg_get_isize(pkg: *mut CPkg) -> i64;
 	fn alpm_pkg_get_reason(pkg: *mut CPkg) -> c_int;
-	fn alpm_pkg_get_validation(pkg: *mut CPkg) -> c_int;
+	pub(crate) fn alpm_pkg_get_validation(pkg: *mut CPkg) -> c_int;
 	fn alpm_pkg_get_licenses(pkg: *mut CPkg) -> *mut CList;
 	fn alpm_pkg_get_groups(pkg: *mut CPkg) -> *mut CList;
 	fn alpm_pkg_get_depends(pkg: *mut CPkg) -> *mut CList;
@@ -149,10 +148,20 @@ unsafe extern "C" {
 	fn alpm_pkg_get_conflicts(pkg: *mut CPkg) -> *mut CList;
 	fn alpm_pkg_get_provides(pkg: *mut CPkg) -> *mut CList;
 	fn alpm_pkg_get_replaces(pkg: *mut CPkg) -> *mut CList;
-	fn alpm_pkg_get_files(pkg: *mut CPkg) -> *mut CFileList;
-	fn alpm_pkg_get_backup(pkg: *mut CPkg) -> *mut CList;
+	pub(crate) fn alpm_pkg_get_files(pkg: *mut CPkg) -> *mut CFileList;
+	pub(crate) fn alpm_pkg_get_backup(pkg: *mut CPkg) -> *mut CList;
 	fn alpm_pkg_get_xdata(pkg: *mut CPkg) -> *mut CList;
-	fn alpm_pkg_has_scriptlet(pkg: *mut CPkg) -> c_int;
+	pub(crate) fn alpm_pkg_has_scriptlet(pkg: *mut CPkg) -> c_int;
+
+	pub(crate) fn alpm_pkg_compute_requiredby(pkg: *mut CPkg)
+	-> *mut CList;
+	pub(crate) fn alpm_pkg_compute_optionalfor(
+		pkg: *mut CPkg,
+	) -> *mut CList;
+	pub(crate) fn alpm_pkg_should_ignore(
+		handle: *mut c_void,
+		pkg: *mut CPkg,
+	) -> c_int;
 }
 
 thread_local! {
@@ -321,7 +330,7 @@ impl CPkgBox {
 }
 
 // copies a C string out, NULL is None
-fn field(p: *const c_char) -> Option<Vec<u8>> {
+pub(crate) fn field(p: *const c_char) -> Option<Vec<u8>> {
 	// SAFETY: p is NULL or a nul-terminated string owned by the package
 	(!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_bytes().to_vec())
 }
@@ -349,7 +358,7 @@ fn read_list<T, R>(head: *const CList, f: impl Fn(&T) -> R) -> Vec<R> {
 		.collect()
 }
 
-fn read_strs(head: *const CList) -> Vec<Vec<u8>> {
+pub(crate) fn read_strs(head: *const CList) -> Vec<Vec<u8>> {
 	list_data(head)
 		.into_iter()
 		.map(|p| field(p.cast()).unwrap())
@@ -392,7 +401,7 @@ fn read_xdata(head: *const CList) -> Vec<PkgXData> {
 	})
 }
 
-fn read_files(fl: *const CFileList) -> FileList {
+pub(crate) fn read_files(fl: *const CFileList) -> FileList {
 	// SAFETY: fl points into a live package
 	let fl = unsafe { &*fl };
 	let read = |i: usize| {
@@ -430,7 +439,7 @@ fn origin_from_c(origin: c_int, data: *mut c_void) -> Option<PkgFrom> {
 }
 
 // every modelled field straight through the mirror
-fn read_pkg(p: *const CPkg) -> Package {
+pub(crate) fn read_pkg(p: *const CPkg) -> Package {
 	// SAFETY: p is a live package built by CPkgBox or _alpm_pkg_dup
 	let c = unsafe { &*p };
 	Package {
@@ -571,24 +580,60 @@ pub fn c_pkg_find(
 	ptrs.iter().position(|&p| p == r)
 }
 
-// None maps to NULL
-pub fn c_parse_xdata(s: Option<&[u8]>) -> Option<PkgXData> {
-	let s = s.map(cstr);
-	// SAFETY: s is NULL or a valid C string, result is calloc'd or NULL
-	let pd = unsafe { _alpm_pkg_parse_xdata(opt_ptr(&s)) };
-	if pd.is_null() {
-		return None;
-	}
-	// SAFETY: pd is a valid struct, take frees the strings and the
-	// fields are nulled before the struct itself is freed
-	unsafe {
-		let out = PkgXData {
-			name: take((*pd).name).unwrap(),
-			value: take((*pd).value).unwrap(),
+// copies out a list of malloc'd strings, frees list and strings
+pub(crate) fn take_strs(list: *mut CList) -> Vec<Vec<u8>> {
+	let out = list_data(list)
+		.into_iter()
+		.map(|p| take(p.cast()).unwrap())
+		.collect();
+	// SAFETY: the strings were freed by take, the nodes go here
+	unsafe { alpm_list_free(list) };
+	out
+}
+
+// a Rust-owned list of C strings for the call of f, the C only reads it
+pub(crate) fn with_strs<R>(
+	strs: &[Vec<u8>],
+	f: impl FnOnce(*mut CList) -> R,
+) -> R {
+	let owned: Vec<_> = strs.iter().map(|s| cstr(s)).collect();
+	let mut list = ptr::null_mut();
+	for s in &owned {
+		// SAFETY: list is NULL or built by alpm_list_add, data stays
+		// owned by `owned`
+		list = unsafe {
+			alpm_list_add(list, s.as_ptr().cast_mut().cast())
 		};
-		(*pd).name = ptr::null_mut();
-		(*pd).value = ptr::null_mut();
-		_alpm_pkg_xdata_free(pd);
-		Some(out)
 	}
+	let r = f(list);
+	// SAFETY: nodes malloc'd by alpm_list_add, data not owned by the list
+	unsafe { alpm_list_free(list) };
+	r
+}
+
+// alpm_pkg_should_ignore with the thread's handle holding these
+// ignorepkg/ignoregroup lists (cleared again after). C precondition: name
+// set when ignorepkg is not empty (fnmatch on NULL)
+pub fn c_pkg_should_ignore(
+	ignorepkg: &[Vec<u8>],
+	ignoregroup: &[Vec<u8>],
+	pkg: &Package,
+) -> bool {
+	assert!(pkg.name.is_some() || ignorepkg.is_empty(), "NULL name");
+	let h = HANDLE.with(|h| *h);
+	// SAFETY: h is the thread's live handle, the set calls dup the
+	// strings, NULL clears
+	unsafe {
+		with_strs(ignorepkg, |l| alpm_option_set_ignorepkgs(h, l));
+		with_strs(ignoregroup, |l| alpm_option_set_ignoregroups(h, l));
+	}
+	let b = CPkgBox::new(pkg);
+	// SAFETY: b.0 is live with h as its handle
+	let r = unsafe { alpm_pkg_should_ignore(h, b.0) } != 0;
+	// SAFETY: as above
+	unsafe {
+		alpm_option_set_ignorepkgs(h, ptr::null_mut());
+		alpm_option_set_ignoregroups(h, ptr::null_mut());
+	}
+	r
 }

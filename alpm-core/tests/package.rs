@@ -1,24 +1,6 @@
 // unit tests for alpm_core::package
 use alpm_core::package::*;
 
-fn xdata(name: &[u8], value: &[u8]) -> Option<PkgXData> {
-	Some(PkgXData {
-		name: name.to_vec(),
-		value: value.to_vec(),
-	})
-}
-
-#[test]
-fn parse_xdata_cases() {
-	assert_eq!(parse_xdata(b"pkgtype=split"), xdata(b"pkgtype", b"split"));
-	assert_eq!(parse_xdata(b"a=b=c"), xdata(b"a", b"b=c"));
-	assert_eq!(parse_xdata(b"=x"), xdata(b"", b"x"));
-	assert_eq!(parse_xdata(b"x="), xdata(b"x", b""));
-	assert_eq!(parse_xdata(b"noeq"), None);
-	assert_eq!(parse_xdata(b""), None);
-	assert_eq!(parse_xdata(b"a\0=b"), None);
-}
-
 fn named(name: &[u8]) -> Package {
 	Package {
 		name_hash: alpm_core::util::hash_sdbm(name),
@@ -85,4 +67,88 @@ fn find_checks_hash_then_name() {
 	assert!(std::ptr::eq(pkg_find(&pkgs, b"b\0c").unwrap(), &pkgs[1]));
 	assert!(pkg_find(&pkgs, b"c").is_none());
 	assert!(pkg_find(&[Package::default()], b"").is_none());
+}
+
+// local cache, sync caches; names as given (already cache ordered)
+struct Caches(Vec<Package>, Vec<Vec<Package>>);
+
+impl DbCaches for Caches {
+	fn local_cache(&mut self) -> Vec<&Package> {
+		self.0.iter().collect()
+	}
+
+	fn sync_caches(&mut self) -> Vec<Vec<&Package>> {
+		self.1.iter().map(|c| c.iter().collect()).collect()
+	}
+}
+
+fn user(name: &[u8], dep: &[u8], opt: bool) -> Package {
+	let d = vec![alpm_core::deps::dep_from_string(dep)];
+	match opt {
+		false => Package {
+			depends: d,
+			..named(name)
+		},
+		true => Package {
+			optdepends: d,
+			..named(name)
+		},
+	}
+}
+
+#[test]
+fn requiredby_cases() {
+	let mut caches = Caches(
+		vec![user(b"z", b"foo", false), user(b"b", b"foo", false)],
+		vec![
+			vec![
+				user(b"y", b"foo", false),
+				user(b"c", b"foo", true),
+			],
+			vec![
+				user(b"x", b"foo", false),
+				user(b"y", b"foo", false),
+			],
+		],
+	);
+	let mut p = named(b"foo");
+	// local and file origins: local cache order, no sort
+	p.origin = Some(PkgFrom::LocalDb);
+	assert_eq!(compute_requiredby(&p, &mut caches), [b"z", b"b"]);
+	p.origin = Some(PkgFrom::File(b"/x".to_vec()));
+	assert_eq!(compute_requiredby(&p, &mut caches), [b"z", b"b"]);
+	assert!(compute_optionalfor(&p, &mut caches).is_empty());
+	// sync: every sync db, deduped, sorted
+	p.origin = Some(PkgFrom::SyncDb);
+	assert_eq!(compute_requiredby(&p, &mut caches), [b"x", b"y"]);
+	assert_eq!(compute_optionalfor(&p, &mut caches), [b"c"]);
+	p.origin = None;
+	assert!(compute_requiredby(&p, &mut caches).is_empty());
+}
+
+#[test]
+fn should_ignore_cases() {
+	let dir = std::env::temp_dir().join(format!(
+		"alpm-core-package-{}-ignore",
+		std::process::id()
+	));
+	std::fs::create_dir_all(dir.join("db")).unwrap();
+	let path = |s: &str| {
+		use std::os::unix::ffi::OsStrExt;
+		dir.join(s).as_os_str().as_bytes().to_vec()
+	};
+	let mut h =
+		alpm_core::handle::Handle::initialize(&path(""), &path("db"))
+			.unwrap();
+	let mut p = named(b"foo");
+	p.groups = vec![b"kde-apps".to_vec()];
+	assert!(!pkg_should_ignore(&h, &p));
+	h.set_ignorepkgs(&[b"f*"]);
+	assert!(pkg_should_ignore(&h, &p));
+	// no '!' negation: a literal pattern here
+	h.set_ignorepkgs(&[b"!foo"]);
+	assert!(!pkg_should_ignore(&h, &p));
+	h.set_ignoregroups(&[b"kde*"]);
+	assert!(pkg_should_ignore(&h, &p));
+	std::fs::remove_dir_all(&dir).unwrap();
 }

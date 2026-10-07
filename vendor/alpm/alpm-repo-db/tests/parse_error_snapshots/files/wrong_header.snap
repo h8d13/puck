@@ -1,0 +1,16 @@
+---
+source: alpm-repo-db/tests/parse_errors.rs
+description: "%WRONG%\nusr/\nusr/bin/\nusr/bin/foo\n"
+expression: error.to_string()
+---
+Parser failed with the following error:
+error: invalid section header
+  | 
+1 | %WRONG%
+  | ^ expected '%FILES%'
+2 | usr/
+  | 
+  = while parsing:
+    files section: (%WRONG%)
+    └ section header: (%WRONG%)
+      → expected '%FILES%'
