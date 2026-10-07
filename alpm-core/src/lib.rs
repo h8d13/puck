@@ -8,6 +8,7 @@ pub mod conflict;
 pub mod db;
 pub mod deps;
 pub mod diskspace;
+pub mod dload;
 pub mod error;
 pub mod filelist;
 pub mod graph;

@@ -542,6 +542,38 @@ declarations. No existing MR found for it.
 - every helper failure, corrupt `.sig` included, reports PKG_INVALID_SIG
   (be_package.c:341). **real**, message only
 
+## `dload.c` minor
+
+- `ASSERT(chown(...), return)` returns when chown succeeds
+  (dload.c:1194): with DownloadUser set (Arch's pacman.conf sets it),
+  later payloads lose If-Modified-Since (dbs re-downloaded) and their
+  `.part` files are not moved (resume lost). **real**
+- "delete zero length downloads" fstats an unflushed FILE (dload.c:599-
+  601): a last failed attempt under one stdio block unlinks a `.part`
+  that has data. **real**, harmless
+- the `dload_interrupted` static is set when a resumed download passes
+  max_size and never cleared (dload.c:253, 268, 281, 560-562, 717): every
+  later download in the process fails. **real (rare)**
+- queueing a `.sig` runs `alpm_option_get_dbext`, whose CHECK_HANDLE
+  resets pm_errno: with parallel downloads an earlier failure can end as
+  -1 with ALPM_ERR_OK, "unexpected error" (dload.c:620). **real**, not
+  verified end to end
+- a `.part` with `max_size == initial_size` is neither started nor
+  renamed, stays `.part` forever (dload.c:785-789). **real (rare)**
+- with the sandbox, the mkdtemp'd `download-XXXXXX` dir is left behind on
+  early error paths, e.g. `-Sy` while the db is locked (be_sync.c:156,
+  163, 271; sync.c:783, 885; dload.c:1283-1295; util.c:996-1002). **real**
+- `_alpm_filecache_setup` tests `stat(tmpdir) && S_ISDIR` inverted, a valid
+  TMPDIR is never used (util.c:944) **env**; a CacheDir that is a regular
+  file is accepted (util.c:911-916) **local**
+- only the first URL is validated, a retry server without "//" leaves the
+  hostname buffer uninitialized for "failed retrieving file"
+  (dload.c:451-455, 517, 535, 778) **local**; the .sig `curl_add_payload`
+  result is ignored (669-670) and `alpm_fetch_pkgurl` fails without
+  pm_errno when `create_tempfile` fails (1396-1399) **env**; server
+  errors persist for the handle's lifetime (136-222) **api**; warning
+  format puts "\n" before strerror (util.c:875) **none**
+
 ## `src/pacman/conf.c` minor
 
 - CacheServer `file://` URLs do not get the sysroot, Server ones do

@@ -345,3 +345,51 @@ unsafe extern "C" {
 		gpgdir: *const c_char,
 	) -> c_int;
 }
+
+// download callbacks and options (dload)
+unsafe extern "C" {
+	pub(crate) fn alpm_option_set_dlcb(
+		handle: *mut c_void,
+		cb: Option<
+			unsafe extern "C" fn(
+				*mut c_void,
+				*const c_char,
+				c_int,
+				*mut c_void,
+			),
+		>,
+		ctx: *mut c_void,
+	) -> c_int;
+	pub(crate) fn alpm_option_set_fetchcb(
+		handle: *mut c_void,
+		cb: Option<
+			unsafe extern "C" fn(
+				*mut c_void,
+				*const c_char,
+				*const c_char,
+				c_int,
+			) -> c_int,
+		>,
+		ctx: *mut c_void,
+	) -> c_int;
+	pub(crate) fn alpm_option_set_eventcb(
+		handle: *mut c_void,
+		cb: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+		ctx: *mut c_void,
+	) -> c_int;
+	pub(crate) fn alpm_option_add_cachedir(
+		handle: *mut c_void,
+		cachedir: *const c_char,
+	) -> c_int;
+	pub(crate) fn alpm_option_get_cachedirs(
+		handle: *mut c_void,
+	) -> *mut CList;
+	pub(crate) fn alpm_option_set_parallel_downloads(
+		handle: *mut c_void,
+		num_streams: c_uint,
+	) -> c_int;
+	pub(crate) fn alpm_option_set_disable_dl_timeout(
+		handle: *mut c_void,
+		disable_dl_timeout: std::ffi::c_ushort,
+	) -> c_int;
+}
