@@ -3,6 +3,7 @@
 // pattern sizes stay small (a few tokens, {m,n} bounds up to 3): glibc's
 // back-reference matcher and its node duplication grow fast, the fuzz
 // keeps out of the inputs where glibc itself takes seconds or gigabytes
+use std::collections::HashMap;
 use std::ffi::c_int;
 
 use alpm_core::regex::{Flags, Regex};
@@ -228,7 +229,7 @@ fn fixed_matches() {
 			&[b"1", b"\xe9", b"\xc3\xa9", b"\xe2\x82\xac"],
 		),
 		(b"[[:punct:]]", &[b"!", b"\xe2\x82\xac", b"\xc2\xa7"]),
-		(b"[[:space:]]", &[b"\xe3\x80\x80", b"\xc2\xa0", b"\t"]),
+		(b"[[:space:]]", &[b"\xe3\x80\x80", b"\xc2\xa7", b"\t"]),
 		(b"[a-\xff]", &[b"b", b"\xc3\xa9", b"\xff", b"\xc4\x80"]),
 		(b"[\xe9]", &[b"\xe9", b"\xc3\xa9"]),
 		(b"[^\xe9]", &[b"\xe9", b"\xc3\xa9"]),
@@ -389,40 +390,129 @@ fn divergence_icase_resized_upper() {
 	let _ = check(b"B|\xc9\x90", f, &[b"\xc9\x90b"]);
 }
 
-// wide classes code point by code point, through [[:class:]]
-#[test]
-fn classes_exhaustive() {
-	let names: &[&[u8]] = &[
-		b"alnum", b"alpha", b"blank", b"cntrl", b"digit", b"graph",
-		b"lower", b"print", b"punct", b"space", b"upper", b"xdigit",
-	];
+const CLASSES: [&[u8]; 12] = [
+	b"alnum", b"alpha", b"blank", b"cntrl", b"digit", b"graph", b"lower",
+	b"print", b"punct", b"space", b"upper", b"xdigit",
+];
+
+const PLAIN: Flags = Flags {
+	icase: false,
+	newline: false,
+};
+
+const ICASE: Flags = Flags {
+	icase: true,
+	newline: false,
+};
+
+// glibc 2.44 C.UTF-8 iswctype against the port's std classes over every
+// code point, through [[:class:]] in the port. counts are the measured
+// ones and may only shrink, any other difference is a new class
+struct ClassDiv {
+	class: &'static [u8],
+	glibc: bool,
+	measured: usize,
+	example: u32,
+}
+
+const fn div(
+	class: &'static [u8],
+	glibc: bool,
+	measured: usize,
+	example: u32,
+) -> ClassDiv {
+	ClassDiv {
+		class,
+		glibc,
+		measured,
+		example,
+	}
+}
+
+const CLASS_DIVERGENCE: &[ClassDiv] = &[
+	// decimal digits past ASCII (Nd, U+0660 ...): alpha in glibc, not
+	// Alphabetic in std
+	div(b"alpha", true, 760, 0x660),
+	div(b"alnum", true, 760, 0x660),
+	// no-break spaces U+00A0, U+2007, U+202F: White_Space in std, graph
+	// and punct in glibc
+	div(b"blank", false, 3, 0xa0),
+	div(b"graph", true, 3, 0xa0),
+	div(b"punct", true, 3, 0x202f),
+	// the no-break spaces and U+0085 (NEL, White_Space)
+	div(b"space", false, 4, 0x85),
+	// unassigned code points: std has no general category, the port
+	// takes them as graph (so print, and punct as they are not alnum)
+	div(b"graph", false, 814_730, 0x378),
+	div(b"print", false, 814_730, 0x10_fffe),
+	// the unassigned ones and the Nd digits (graph, not alnum)
+	div(b"punct", false, 815_490, 0x660),
+	// U+2028/2029 (Zl, Zp): cntrl in glibc, not Cc
+	div(b"cntrl", true, 2, 0x2029),
+	// titlecase letters (Lt, U+01C5, U+1F88 ...): upper in glibc, lower
+	// too for the four Latin digraphs, neither in std
+	div(b"upper", true, 31, 0x1f88),
+	div(b"lower", true, 4, 0x1c5),
+];
+
+// every character as one-character texts, the C string end left out
+fn all_chars() -> (Vec<u32>, Vec<Vec<u8>>) {
 	let wcs: Vec<u32> = (1..0x11_0000)
 		.filter(|wc| !(0xd800..=0xdfff).contains(wc))
 		.collect();
-	let texts: Vec<Vec<u8>> = wcs.iter().map(|&wc| utf8(wc)).collect();
+	let texts = wcs.iter().map(|&wc| utf8(wc)).collect();
+	(wcs, texts)
+}
+
+fn class_pattern(name: &[u8]) -> Vec<u8> {
+	[&b"[[:"[..], name, b":]]"].concat()
+}
+
+#[test]
+fn class_divergence() {
+	let (wcs, texts) = all_chars();
 	let refs: Vec<&[u8]> = texts.iter().map(|t| &t[..]).collect();
-	let plain = Flags {
-		icase: false,
-		newline: false,
-	};
-	for name in names {
-		let p = [&b"[[:"[..], name, b":]]"].concat();
-		let r = rust(&p, plain, &refs).unwrap();
+	let mut counts = vec![0usize; CLASS_DIVERGENCE.len()];
+	for name in CLASSES {
+		let p = class_pattern(name);
+		let r = rust(&p, PLAIN, &refs).unwrap();
 		for (i, &wc) in wcs.iter().enumerate() {
-			assert_eq!(
-				r[i],
-				c_iswctype(name, wc),
-				"{} U+{wc:04X}",
-				show(name)
-			);
+			let glibc = c_iswctype(name, wc);
+			if r[i] == glibc {
+				continue;
+			}
+			assert!(wc >= 0x80, "{} U+{wc:04X}", show(name));
+			let k = CLASS_DIVERGENCE
+				.iter()
+				.position(|d| {
+					d.class == name && d.glibc == glibc
+				})
+				.unwrap_or_else(|| {
+					panic!(
+						"{} U+{wc:04X}: glibc {glibc}",
+						show(name)
+					)
+				});
+			counts[k] += 1;
 		}
-		// and the C regex agrees with iswctype
-		let c = c_regex(&p, cflags(plain, true), &refs).unwrap();
-		assert_eq!(c, r, "{}", show(name));
+		// the C regex takes iswctype, the reference above
+		let c = c_regex(&p, cflags(PLAIN, true), &refs).unwrap();
+		for (i, &wc) in wcs.iter().enumerate() {
+			assert_eq!(c[i], c_iswctype(name, wc), "U+{wc:04X}");
+		}
+	}
+	for (d, n) in CLASS_DIVERGENCE.iter().zip(counts) {
+		let what = format!("{} glibc {}", show(d.class), d.glibc);
+		println!("{what}: {n} (measured {})", d.measured);
+		assert!(n <= d.measured, "{what}: {n} > {}", d.measured);
+		let t = utf8(d.example);
+		let r = rust(&class_pattern(d.class), PLAIN, &[&t]).unwrap();
+		assert_eq!(c_iswctype(d.class, d.example), d.glibc, "{what}");
+		assert_eq!(r, [!d.glibc], "{what} U+{:04X}", d.example);
 	}
 	// iswctype is false past U+10FFFF, 4 to 6 byte forms there
 	for wc in [0x11_0000, 0x1f_ffff, 0x20_0000, 0x400_0000, 0x7fff_ffff] {
-		for name in names {
+		for name in CLASSES {
 			assert!(!c_iswctype(name, wc));
 		}
 		let t = utf8(wc);
@@ -431,42 +521,100 @@ fn classes_exhaustive() {
 	}
 }
 
-// towupper code point by code point: a REG_ICASE pattern of the expected
-// upper-case bytes, kept apart by "()" so they are not decoded again,
-// must match the character exactly
-#[test]
-fn towupper_exhaustive() {
-	let f = Flags {
-		icase: true,
-		newline: false,
-	};
-	let mut mapped = 0;
-	for wc in 1..0x11_0000 {
-		if (0xd800..=0xdfff).contains(&wc) {
-			continue;
+// a REG_ICASE pattern of the upper-case bytes, kept apart by "()" so they
+// are not decoded (and upper-cased) again: matches the character exactly
+// when the port upper-cases it to up
+fn upper_pattern(up: u32) -> Vec<u8> {
+	let mut p = b"^".to_vec();
+	let lit = utf8(up);
+	if lit[0].is_ascii_punctuation() && !b"<>`'".contains(&lit[0]) {
+		p.push(b'\\');
+	}
+	for (i, &b) in lit.iter().enumerate() {
+		if i > 0 {
+			p.extend(b"()");
 		}
+		p.push(b);
+	}
+	p.push(b'$');
+	p
+}
+
+fn port_upper_is(wc: u32, up: u32) -> bool {
+	Regex::new(&upper_pattern(up), ICASE)
+		.unwrap()
+		.is_match(&utf8(wc))
+}
+
+// towupper against the port code point by code point. glibc takes the
+// simple mapping where std's full upper case is several chars and the
+// port keeps the char: the Greek letters with ypogegrammeni (U+1F80-1FAF
+// lowercase, U+1FB3, U+1FC3, U+1FF3 -> U+1FBC ...). ß, ŉ, ǰ and the
+// ligatures have no simple mapping, unchanged on both sides
+const UPPER_MULTI: usize = 27;
+
+#[test]
+fn towupper_divergence() {
+	let (mut mapped, mut multi) = (0, 0);
+	for wc in all_chars().0 {
 		let up = c_towupper(wc);
 		mapped += usize::from(up != wc);
-		let t = utf8(wc);
-		let mut p = b"^".to_vec();
-		let lit = utf8(up);
-		if lit[0].is_ascii_punctuation() && !b"<>`'".contains(&lit[0]) {
-			p.push(b'\\');
+		if port_upper_is(wc, up) {
+			continue;
 		}
-		for (i, &b) in lit.iter().enumerate() {
-			if i > 0 {
-				p.extend(b"()");
-			}
-			p.push(b);
-		}
-		p.push(b'$');
-		let re = Regex::new(&p, f).unwrap();
-		assert!(re.is_match(&t), "U+{wc:04X} -> U+{up:04X}");
+		let c = char::from_u32(wc).unwrap();
+		assert!(
+			port_upper_is(wc, wc) && c.to_uppercase().len() > 1,
+			"U+{wc:04X}: glibc U+{up:04X}, new class"
+		);
+		multi += 1;
 	}
+	println!("towupper: {multi} (measured {UPPER_MULTI})");
+	assert!(multi <= UPPER_MULTI, "{multi} > {UPPER_MULTI}");
 	assert!(mapped > 1000, "{mapped}");
+	assert_eq!(c_towupper(0x1fb3), 0x1fbc);
+	assert!(port_upper_is(0x1fb3, 0x1fb3));
 	for wc in [0x11_0000, 0x7fff_ffff] {
 		assert_eq!(c_towupper(wc), wc);
 	}
+}
+
+// the divergent classes in regexes: the C on glibc's tables, the port on
+// std's. the fuzz keeps these characters out where the pattern asks
+#[test]
+fn divergence_classes_pinned() {
+	// pattern, flags, text, glibc's match; the port's is the opposite
+	let cases: &[(&[u8], Flags, &str, bool)] = &[
+		(b"[[:alpha:]]", PLAIN, "\u{660}", true),
+		(b"\\w", PLAIN, "\u{660}", true),
+		(b"\\bx", PLAIN, "\u{660}x", false),
+		(b"[[:punct:]]", PLAIN, "\u{660}", false),
+		(b"[[:space:]]", PLAIN, "\u{a0}", false),
+		(b"\\s", ICASE, "\u{202f}", false),
+		(b"[[:blank:]]", PLAIN, "\u{2007}", false),
+		(b"[[:punct:]]", PLAIN, "\u{a0}", true),
+		(b"[[:space:]]", PLAIN, "\u{85}", false),
+		(b"[[:graph:]]", PLAIN, "\u{378}", false),
+		(b"[^[:print:]]", PLAIN, "\u{378}", true),
+		(b"[[:cntrl:]]", PLAIN, "\u{2028}", true),
+		(b"[[:upper:]]", PLAIN, "\u{1c5}", true),
+		(b"[[:lower:]]", PLAIN, "\u{1c8}", true),
+		(b"[[:upper:]]", PLAIN, "\u{1fbc}", true),
+		(b"\xe1\xbe\xbc", ICASE, "\u{1fb3}", true),
+		(b"\xe1\xbe\xb3", ICASE, "\u{1fbc}", true),
+	];
+	for &(p, f, t, c) in cases {
+		let t = t.as_bytes();
+		let what = format!("{} {f:?} {}", show(p), show(t));
+		assert_eq!(
+			c_regex(p, cflags(f, true), &[t]),
+			Ok(vec![c]),
+			"{what}"
+		);
+		assert_eq!(rust(p, f, &[t]), Ok(vec![!c]), "{what}");
+	}
+	// U+1F80 keeps its case in the port, so still matches itself
+	let _ = check("\u{1f80}".as_bytes(), ICASE, &["\u{1f80}".as_bytes()]);
 }
 
 // glibc UTF-8, 5 and 6 byte forms included
@@ -512,6 +660,8 @@ const TOKENS: &[&[u8]] = &[
 	b"\xc4\xb1",
 	b"\xc5\xbf",
 	b"\xe2\x82\xac",
+	b"\xd9\xa0",
+	b"\xe1\xbe\xb3",
 	b"\xe9",
 	b"\xc3",
 	b"\xa9",
@@ -631,6 +781,15 @@ const TEXT_TOKENS: &[&[u8]] = &[
 	b"\xc2\xa7",
 	b"\xf4\x90\x80\x80",
 	b"\xf8\x88\x80\x80\x80",
+	// classes or towupper differ (class_divergence, towupper_divergence):
+	// U+0660, U+0085, U+2028, U+0378, U+01C5, U+1FB3, U+1FBC
+	b"\xd9\xa0",
+	b"\xc2\x85",
+	b"\xe2\x80\xa8",
+	b"\xcd\xb8",
+	b"\xc7\x85",
+	b"\xe1\xbe\xb3",
+	b"\xe1\xbe\xbc",
 ];
 
 // upper case changes the UTF-8 length: dotless i, long s, U+1C80, U+1FBE,
@@ -651,10 +810,77 @@ fn join(rng: &mut Rng, tokens: &[&[u8]], max: usize) -> Vec<u8> {
 		.collect()
 }
 
+// per character, cached: the port and glibc agree on every class (of the
+// character and of its glibc upper case) and on towupper. lone invalid
+// bytes are left out: classes only take characters of 2 bytes or more,
+// and as word context the Latin-1 values agree (U+0085, U+00A0 are no
+// word characters on either side)
+#[derive(Default)]
+struct Agree {
+	seen: HashMap<u32, (bool, bool)>,
+	compared: usize,
+	skipped: usize,
+}
+
+impl Agree {
+	fn char(&mut self, wc: u32) -> (bool, bool) {
+		*self.seen.entry(wc).or_insert_with(|| {
+			let up = c_towupper(wc);
+			let classes = [wc, up].iter().all(|&w| {
+				let t = utf8(w);
+				CLASSES.iter().all(|name| {
+					let p = class_pattern(name);
+					rust(&p, PLAIN, &[&t]).unwrap()[0]
+						== c_iswctype(name, w)
+				})
+			});
+			(classes, port_upper_is(wc, up))
+		})
+	}
+
+	// what p asks of the characters of s: classes where it names one or
+	// has an escape (\w \s \b, or an escaped long s, upper-cased to \S),
+	// towupper under REG_ICASE
+	fn holds(&mut self, p: &[u8], f: Flags, s: &[u8]) -> bool {
+		let classes = contains(p, b"[:") || p.contains(&b'\\');
+		String::from_utf8_lossy(s).chars().all(|c| {
+			let (cl, up) = self.char(u32::from(c));
+			(cl || !classes) && (up || !f.icase)
+		})
+	}
+
+	// the texts p may be compared on, the pattern's own characters first
+	fn filter(&mut self, p: &[u8], f: Flags, texts: &mut Vec<Vec<u8>>) {
+		let n = texts.len();
+		if self.holds(p, f, p) {
+			texts.retain(|t| self.holds(p, f, t));
+		} else {
+			texts.clear();
+		}
+		self.compared += texts.len();
+		self.skipped += n - texts.len();
+	}
+
+	// at least 560 per 1000 texts compared, about 3/4 of the lowest
+	// share measured with 2000000 iterations (756 in fuzz_backrefs, up
+	// to 928 in fuzz_raw_syntax)
+	fn finish(&self, seed: u64) {
+		const FLOOR: usize = 560;
+		let n = self.compared + self.skipped;
+		println!("fuzz {seed:x}: compared {} of {n}", self.compared);
+		assert!(
+			self.compared * 1000 >= n * FLOOR,
+			"fuzz {seed:x}: compared {} of {n}",
+			self.compared
+		);
+	}
+}
+
 // one pattern against several texts per flag set, counts compiled
 // patterns and matches so a broken generator shows
 fn fuzz(seed: u64, gen_pattern: impl Fn(&mut Rng) -> Vec<u8>) {
 	let mut rng = Rng::new(seed);
+	let mut agree = Agree::default();
 	let (mut compiled, mut matched, mut texts_run) = (0, 0, 0);
 	let text_tokens: Vec<&[u8]> = TEXT_TOKENS.to_vec();
 	let plain_tokens: Vec<&[u8]> = [TEXT_TOKENS, RESIZED].concat();
@@ -673,6 +899,7 @@ fn fuzz(seed: u64, gen_pattern: impl Fn(&mut Rng) -> Vec<u8>) {
 		if !f.icase || !RESIZED.iter().any(|g| contains(&p, g)) {
 			texts.push(p.clone());
 		}
+		agree.filter(&p, f, &mut texts);
 		let refs: Vec<&[u8]> = texts.iter().map(|t| &t[..]).collect();
 		if let Ok(r) = check(&p, f, &refs) {
 			compiled += 1;
@@ -680,6 +907,7 @@ fn fuzz(seed: u64, gen_pattern: impl Fn(&mut Rng) -> Vec<u8>) {
 			matched += r.iter().filter(|&&m| m).count();
 		}
 	}
+	agree.finish(seed);
 	let n = iters() / 4;
 	assert!(compiled > n / 10, "only {compiled} of {n} compiled");
 	assert!(
@@ -811,6 +1039,9 @@ fn fuzz_brackets() {
 		b"\xe9",
 		b"\xff",
 		b"\xe2\x82\xac",
+		b"\xd9\xa0",
+		b"\xc2\xa0",
+		b"\xe2\x80\xa8",
 		b"a-z",
 		b"A-Z",
 		b"0-9",

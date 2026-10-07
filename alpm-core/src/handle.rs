@@ -15,8 +15,10 @@ use std::ffi::{OsStr, c_int};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 
+use crate::be_local::INFRQ_DESC;
 use crate::db::{Db, SIG_USE_DEFAULT};
 use crate::error::Errno;
+use crate::package::{DbCaches, Package};
 use crate::util::{fnmatch_patterns, until_nul};
 
 // limits.h on linux, the realpath buffer of _alpm_set_directory_option
@@ -344,5 +346,30 @@ impl Handle {
 
 	pub fn remove_ignoregroup(&mut self, grp: &[u8]) -> bool {
 		remove_str(&mut self.ignoregroup, grp)
+	}
+}
+
+// the caches compute_requiredby/optionalfor walk: alpm_db_get_pkgcache,
+// with alpm_pkg_get_depends/optdepends loading each local desc in place.
+// a db whose cache does not load (or no local db) gives an empty list
+impl DbCaches for Handle {
+	fn local_cache(&mut self) -> Vec<&Package> {
+		let Some(db) = &mut self.db_local else {
+			return Vec::new();
+		};
+		match db.load_all(&self.dbext, INFRQ_DESC) {
+			Ok(cache) => cache.iter().collect(),
+			Err(_) => Vec::new(),
+		}
+	}
+
+	fn sync_caches(&mut self) -> Vec<Vec<&Package>> {
+		let dbext = &self.dbext;
+		let caches = self.dbs_sync.iter_mut().map(|db| {
+			db.pkgcache(dbext)
+				.map(|c| c.iter().collect())
+				.unwrap_or_default()
+		});
+		caches.collect()
 	}
 }

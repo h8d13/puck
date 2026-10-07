@@ -1,6 +1,6 @@
 // C side of regex(3): glibc regcomp/regexec/regfree as pacman calls them
 // (lib/libalpm/db.c, remove.c, src/pacman/files.c), plus the wide char
-// functions behind the port's C.UTF-8 tables.
+// functions the port's std classes and upper case are measured against.
 //
 // the results depend on the locale: every call first runs cli_util's
 // init, the one place setting LC_ALL=C.UTF-8 (pacman itself runs

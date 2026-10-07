@@ -465,6 +465,58 @@ declarations. No existing MR found for it.
 - backrefs to repeated groups miss matches, anchors inside `{m,n}` copies
   only count once. **none**
 
+## `conflict.c` / `diskspace.c` / `deps.c` / query / sync minor
+
+- conflict: on `ALPM_ERR_MEMORY` (or a stale one, never reset) the file
+  conflict list is freed with `alpm_conflict_free`, passing strings as
+  packages (conflict.c:470-472, 653-655). **env**
+- conflict: a conflict is silently dropped when the local package's
+  metadata cannot load (`_alpm_pkg_dup` fails, conflict.c:52-53). **local**
+- conflict: `pathlen` from snprintf is the untruncated length, root + path
+  >= PATH_MAX with an existing cut prefix reads/writes past the stack
+  buffer (conflict.c:516, 529, 540). **packager**; unchecked malloc
+  (608-609) **env**
+- diskspace: `_alpm_check_downloadspace` rounds with `+ 1` instead of `- 1`
+  (diskspace.c:415), one or two extra blocks per file. **real**, small
+  and conservative
+- diskspace: dotfiles are charged to `root + dbpath` with an absolute
+  dbpath ("//var/lib/pacman/"), never matching a separate `/var` mount
+  (diskspace.c:319-322). **real** (/var on its own partition), small
+- diskspace: freed space credited from `st_size`, so hard-linked or sparse
+  files over-credit and the check can pass before the disk fills
+  (diskspace.c:285). **real (rare)**
+- diskspace: f_blocks/f_bavail (f_frsize units) mixed with f_bsize, and
+  division by f_bsize without a zero check (diskspace.c:285, 344, 355-360);
+  empty table returns -1 without pm_errno (390, 444). **env**
+- diskspace: empty `mount_dir` under-reads (diskspace.c:216, hand-edited
+  regular-file mtab) **local**; signed block sums can overflow on absurd
+  sizes (286, 345) **packager**; `mnt_dir == NULL` check dead (114) **none**
+- deps: a nested `_alpm_resolvedeps` failure leaves depmissing entries in
+  `*data` after the local fallback recovers (deps.c:836, 845-846); sync.c
+  later appends `alpm_conflict_t` to the same list and the frontend reads
+  every entry as a conflict (sync.c:552, 624; src/pacman/sync.c:789-790).
+  **packager** (crafted repo metadata)
+- deps: NODEPVERSION overwrites `depend->mod` in place on cached packages
+  and the report loses the version constraint (deps.c:330-381) **api**;
+  pm_errno after a failed `_alpm_resolvedeps` can be OK (309, 811, 839),
+  cycles only logged at DEBUG (184-193) **none**
+- query: `search_path` strips trailing '/' with `plen == 0`, touching the
+  byte before the PATH copy for an empty or all-slash first component
+  (query.c:60-61). **env**
+- query: `-Qo` resolves into `char rpath[PATH_MAX]` with unbounded
+  strcpy/strcat before the length check (query.c:124-128, 158, 190-192,
+  205). **local** (own command line)
+- db search returns 0 with pm_errno left set when a cache fails to load
+  (db.c:452). **api**
+- files: name search uses `strrchr(name, '/')`, so top-level package
+  files never match `-F`/`-Fx` (files.c:183). **packager**
+- signing: `parse_subpacket` reads `sig[spos]` with `spos == len` after
+  the length check (signing.c:1055), 1-byte over-read on a crafted
+  `%PGPSIG%` via -Sii (suspected, not probed). **packager**
+- sync: NULL repo to `printf("%s")` and NULL db in `sync_list`, both
+  unreachable through `check_syncdbs` (sync.c:443, 487-493) **none**;
+  unchecked malloc/strdup (files.c:135, sync.c:409) **env**
+
 ## `src/pacman/conf.c` minor
 
 - CacheServer `file://` URLs do not get the sysroot, Server ones do
@@ -509,6 +561,10 @@ pacman's formats. Same practice labels, judged against real databases.
   libalpm splits at the first ": " and keeps the raw text. **packager**
 - alpm-types prints pkgrel without leading zeros (`1.0-01` -> `1.0-1`).
   **none**
+- regex classes via std vs glibc: unassigned code points graph/print/
+  punct in std (814730), non-ASCII Nd digits alpha in glibc only (760),
+  no-break spaces, U+0085, U+2028/9, titlecase letters, 27 Greek
+  ypogegrammeni letters under icase. **real (rare)** for -Ss/-Qs
 - alpm-types `Packager` rejects `Unknown Packager`, makepkg's default,
   so the whole desc becomes unreadable. **real** (1 of 804 local packages)
 - alpm-db files: backups sorted by path, entries with hash `(null)`

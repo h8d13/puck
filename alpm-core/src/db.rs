@@ -6,22 +6,25 @@
 // the package cache take handle->dbext as it is at call time, for the sync
 // populate size estimate. pm_errno is not modelled: every call returns
 // the alpm_errno_t it would leave as Err, Ok where it leaves ALPM_ERR_OK.
-// logging is not modelled. not ported: alpm_db_search/_alpm_db_search,
-// alpm_db_update, signature validation of sync dbs (sync_db_validate
-// with ALPM_SIG_DATABASE set) and db->ops (Backend picks the backend).
+// logging is not modelled. not ported: alpm_db_update, signature
+// validation of sync dbs (sync_db_validate with ALPM_SIG_DATABASE set)
+// and db->ops (Backend picks the backend).
 
 use std::cmp::Ordering;
 use std::ffi::{OsStr, c_int};
 use std::fs;
 use std::io::ErrorKind;
+use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 
 use crate::be_local::{DbError, INFRQ_DESC, LocalDb};
 use crate::be_sync;
+use crate::deps::{dep_from_string, depcmp_literal, depcmp_provides};
 use crate::error::Errno;
 use crate::group::Group;
 use crate::package::{Package, PkgFrom};
 use crate::pkghash::PkgHash;
+use crate::regex::{Flags, Regex};
 use crate::util::until_nul;
 
 // alpm_db_usage_t
@@ -145,6 +148,26 @@ fn lazy_load(backend: &Backend, pkg: &mut Package, inforeq: c_int) {
 	if let Backend::Local(local) = backend {
 		let _ = local.read(pkg, inforeq);
 	}
+}
+
+// strstr(hay, needle) != NULL: an empty needle is found everywhere
+fn strstr(hay: &[u8], needle: &[u8]) -> bool {
+	needle.is_empty() || hay.windows(needle.len()).any(|w| w == needle)
+}
+
+// one package of _alpm_db_search: the name as regex or as plain text
+// (strstr, case sensitive), else the description, else any provide
+// name, else any group
+fn search_match(reg: &Regex, targ: &[u8], pkg: &Package) -> bool {
+	let name = pkg.name.as_deref().map(until_nul);
+	if name.is_some_and(|n| reg.is_match(n) || strstr(n, targ)) {
+		return true;
+	}
+	if pkg.desc.as_deref().is_some_and(|d| reg.is_match(d)) {
+		return true;
+	}
+	pkg.provides.iter().any(|p| reg.is_match(&p.name))
+		|| pkg.groups.iter().any(|g| reg.is_match(g))
 }
 
 // load_grpcache over the cache list: a group takes the package when it
@@ -397,6 +420,129 @@ impl Db {
 		let (backend, pkg) = self.find_pkg(dbext, name)?;
 		lazy_load(backend, pkg, inforeq);
 		Ok(pkg)
+	}
+
+	// the cache entry at position i of the list, with the INFRQ_*
+	// sections of inforeq loaded in place. None past the end or when
+	// the cache does not load
+	pub fn load_pkg_at(
+		&mut self,
+		dbext: &[u8],
+		i: usize,
+		inforeq: c_int,
+	) -> Option<&Package> {
+		self.load_pkgcache(dbext).ok()?;
+		let pkg = self.pkgcache.as_mut()?.iter_mut().nth(i)?;
+		lazy_load(&self.backend, pkg, inforeq);
+		Some(pkg)
+	}
+
+	// alpm_db_get_pkgcache, then the getters of inforeq on every
+	// entry in list order, loaded in place
+	pub fn load_all(
+		&mut self,
+		dbext: &[u8],
+		inforeq: c_int,
+	) -> Result<&PkgHash<Package>, Errno> {
+		self.load_pkgcache(dbext)?;
+		let cache = self.pkgcache.as_mut().expect("cache just loaded");
+		for pkg in cache.iter_mut() {
+			lazy_load(&self.backend, pkg, inforeq);
+		}
+		Ok(cache)
+	}
+
+	// a C loop over the cache list calling a getter per package: each
+	// entry gets the sections of inforeq loaded just before f sees it
+	// (with its list position), entries after a Break stay untouched.
+	// Ok(None) when f never breaks, Err when the cache does not load
+	pub fn walk<B>(
+		&mut self,
+		dbext: &[u8],
+		inforeq: c_int,
+		mut f: impl FnMut(usize, &Package) -> ControlFlow<B>,
+	) -> Result<Option<B>, Errno> {
+		self.load_pkgcache(dbext)?;
+		let cache = self.pkgcache.as_mut().expect("cache just loaded");
+		for (i, pkg) in cache.iter_mut().enumerate() {
+			lazy_load(&self.backend, pkg, inforeq);
+			if let ControlFlow::Break(b) = f(i, pkg) {
+				return Ok(Some(b));
+			}
+		}
+		Ok(None)
+	}
+
+	// alpm_find_satisfier over the cache list with the getters' loads:
+	// a package matching by name and version is taken as it is, the
+	// others get their desc loaded for the provides. the list position
+	// of the first satisfier
+	pub fn find_satisfier(
+		&mut self,
+		dbext: &[u8],
+		depstring: &[u8],
+	) -> Option<usize> {
+		let dep = dep_from_string(depstring);
+		self.load_pkgcache(dbext).ok()?;
+		let cache = self.pkgcache.as_mut()?;
+		for (i, pkg) in cache.iter_mut().enumerate() {
+			if depcmp_literal(pkg, &dep) {
+				return Some(i);
+			}
+			lazy_load(&self.backend, pkg, INFRQ_DESC);
+			if depcmp_provides(&dep, &pkg.provides) {
+				return Some(i);
+			}
+		}
+		None
+	}
+
+	// the local backend (desc/files/mtree/changelog paths), None for a
+	// sync db
+	pub fn local(&self) -> Option<&LocalDb> {
+		match &self.backend {
+			Backend::Local(local) => Some(local),
+			Backend::Sync => None,
+		}
+	}
+
+	// _alpm_db_search: the packages matching every needle (AND), in
+	// cache list order. needles are EREs with REG_ICASE|REG_NEWLINE,
+	// the first one that does not compile is InvalidRegex. a db without
+	// DB_USAGE_SEARCH or no needles give nothing, a cache that does not
+	// load an empty list to search (the C returns 0 with the load's
+	// pm_errno left set). each package searched gets its desc loaded
+	pub fn search<S: AsRef<[u8]>>(
+		&mut self,
+		dbext: &[u8],
+		needles: &[S],
+	) -> Result<Vec<&Package>, Errno> {
+		if self.usage & DB_USAGE_SEARCH == 0 || needles.is_empty() {
+			return Ok(Vec::new());
+		}
+		let _ = self.load_pkgcache(dbext);
+		let mut pkgs: Vec<&mut Package> = match &mut self.pkgcache {
+			Some(c) => c.iter_mut().collect(),
+			None => Vec::new(),
+		};
+		let mut list: Vec<usize> = (0..pkgs.len()).collect();
+		let flags = Flags {
+			icase: true,
+			newline: true,
+		};
+		for needle in needles {
+			let targ = until_nul(needle.as_ref());
+			let reg = Regex::new(targ, flags)
+				.map_err(|_| Errno::InvalidRegex)?;
+			list.retain(|&i| {
+				let pkg = &mut *pkgs[i];
+				lazy_load(&self.backend, pkg, INFRQ_DESC);
+				search_match(&reg, targ, pkg)
+			});
+		}
+		let pkgs: Vec<&Package> =
+			pkgs.into_iter().map(|p| &*p).collect();
+		Ok(list.into_iter().map(|i| pkgs[i]).collect())
 	}
 
 	// the cache entry alpm_db_get_pkg returns, with the backend that

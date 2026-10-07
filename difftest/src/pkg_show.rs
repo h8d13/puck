@@ -76,7 +76,7 @@ pub const SYNC_DBS: [&str; 2] = ["core", "extra"];
 
 // TZ for localtime, set once before any date is formatted. callers hold
 // FRONTEND (inside capture)
-fn utc() {
+pub(crate) fn utc() {
 	static ONCE: Once = Once::new();
 	ONCE.call_once(|| {
 		// SAFETY: FRONTEND is held, no C code reads the environment

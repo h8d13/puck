@@ -94,3 +94,21 @@ fn no_blowup() {
 	let p = [&b"(a?){30}"[..], &[b'a'; 30]].concat();
 	assert!(m(&p, PACSAVE, &[b'a'; 30]));
 }
+
+// classes and upper case on std's Unicode properties
+#[test]
+fn std_classes() {
+	assert!(m(b"^[[:alpha:]]$", PACSAVE, "\u{3b1}".as_bytes()));
+	assert!(!m(b"[[:digit:]]", PACSAVE, "\u{660}".as_bytes()));
+	assert!(m(b"^[[:punct:]]$", PACSAVE, "\u{20ac}".as_bytes()));
+	assert!(m(b"^\\s$", PACSAVE, "\u{3000}".as_bytes()));
+	assert!(m(b"^[[:blank:]]$", PACSAVE, "\u{a0}".as_bytes()));
+	assert!(!m(b"[[:blank:]]", PACSAVE, "\u{2028}".as_bytes()));
+	assert!(m(b"^[[:cntrl:]]$", PACSAVE, "\u{85}".as_bytes()));
+	assert!(m(b"^[[:print:]]$", PACSAVE, "\u{a0}".as_bytes()));
+	assert!(!m(b"[[:graph:]]", PACSAVE, "\u{a0}".as_bytes()));
+	// upper case only where std gives one char: ß and U+1FB3 stay
+	assert!(m("\u{3a3}".as_bytes(), SEARCH, "\u{3c3}".as_bytes()));
+	assert!(!m(b"SS", SEARCH, "\u{df}".as_bytes()));
+	assert!(!m("\u{1fbc}".as_bytes(), SEARCH, "\u{1fb3}".as_bytes()));
+}

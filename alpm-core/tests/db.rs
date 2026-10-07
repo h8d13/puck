@@ -5,7 +5,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use alpm_core::be_local::{INFRQ_DESC, INFRQ_ERROR, INFRQ_FILES};
-use alpm_core::db::{CacheError, DB_USAGE_ALL, Db, db_cmp};
+use alpm_core::db::{CacheError, DB_USAGE_ALL, DB_USAGE_SEARCH, Db, db_cmp};
 use alpm_core::error::Errno;
 use alpm_core::package::{Package, PkgFrom};
 use alpm_core::util::hash_sdbm;
@@ -284,4 +284,80 @@ fn sync_load_reads_current_dbext() {
 	db.free_pkgcache();
 	assert_eq!(db.pkgcache(b".db").unwrap().buckets(), 73);
 	assert_eq!(db.path(), [&t.dbpath()[..], b"sync/core.db"].concat());
+}
+
+fn found(r: Result<Vec<&Package>, Errno>) -> Result<Vec<Vec<u8>>, Errno> {
+	r.map(|v| v.iter().map(|p| p.name_bytes().to_vec()).collect())
+}
+
+fn strs(v: &[&str]) -> Vec<Vec<u8>> {
+	v.iter().map(|s| s.as_bytes().to_vec()).collect()
+}
+
+// _alpm_db_search: name as regex or plain text, desc, groups; AND over
+// needles in cache order; errors and usage
+#[test]
+fn search() {
+	let t = Tmp::new("search");
+	t.local_pkg("a+b", &[]);
+	t.local_pkg("zed", &["devel"]);
+	t.local_pkg("abc", &["Devel"]);
+	let mut db = t.local();
+	let none: [&str; 0] = [];
+	assert_eq!(found(db.search(DBEXT, &none)), Ok(vec![]));
+	// regex a+b misses "a+b" (strstr finds it) and matches "abc"; the
+	// strstr is case sensitive, the regex not
+	let ab = found(db.search(DBEXT, &["a+b"]));
+	assert_eq!(ab, Ok(strs(&["a+b", "abc"])));
+	assert_eq!(found(db.search(DBEXT, &["A+B"])), Ok(strs(&["abc"])));
+	assert_eq!(
+		found(db.search(DBEXT, &["DEVEL"])),
+		Ok(strs(&["abc", "zed"]))
+	);
+	assert_eq!(
+		found(db.search(DBEXT, &["devel", "z"])),
+		Ok(strs(&["zed"]))
+	);
+	// every desc is "d": the list order is the cache's
+	assert_eq!(
+		found(db.search(DBEXT, &["^d$"])),
+		Ok(strs(&["a+b", "abc", "zed"]))
+	);
+	assert_eq!(
+		found(db.search(DBEXT, &["a", "("])),
+		Err(Errno::InvalidRegex)
+	);
+	// the desc load stuck in the cache entries
+	let zed = db.get_pkg(DBEXT, b"zed").unwrap();
+	assert_eq!(zed.infolevel & INFRQ_DESC, INFRQ_DESC);
+	db.set_usage(DB_USAGE_ALL & !DB_USAGE_SEARCH);
+	assert_eq!(found(db.search(DBEXT, &["("])), Ok(vec![]));
+}
+
+// a cache that does not load is an empty list, the regex still compiles
+#[test]
+fn search_failed_cache() {
+	let t = Tmp::new("search-missing");
+	let mut db = Db::register_sync(&t.dbpath(), DBEXT, b"core", 0);
+	assert_eq!(found(db.search(DBEXT, &["a"])), Ok(vec![]));
+	assert_eq!(found(db.search(DBEXT, &["["])), Err(Errno::InvalidRegex));
+}
+
+// load_all and load_pkg_at load in place, by list position
+#[test]
+fn load_all_and_at() {
+	let t = Tmp::new("load-all");
+	t.local_pkg("b", &["g"]);
+	t.local_pkg("a", &[]);
+	let mut db = t.local();
+	assert!(db.local().is_some());
+	let a = db.load_pkg_at(DBEXT, 0, 0).unwrap();
+	assert_eq!((a.name_bytes(), a.desc.as_deref()), (&b"a"[..], None));
+	let b = db.load_pkg_at(DBEXT, 1, INFRQ_DESC).unwrap();
+	assert_eq!(b.groups, [b"g".to_vec()]);
+	assert!(db.load_pkg_at(DBEXT, 2, INFRQ_DESC).is_none());
+	let cache = db.load_all(DBEXT, INFRQ_DESC).unwrap();
+	assert!(cache.iter().all(|p| p.desc.as_deref() == Some(&b"d"[..])));
+	let sync = Db::register_sync(&t.dbpath(), DBEXT, b"core", 0);
+	assert!(sync.local().is_none());
 }
