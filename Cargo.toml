@@ -31,6 +31,8 @@ unicode-width = "0.2"
 # system-level, see METHODOLOGY.md
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 rustix = { version = "1.1", features = ["fs"] }
+landlock = "0.4"
+libseccomp = "0.4"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
