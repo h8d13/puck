@@ -1,0 +1,7 @@
+[submodule "pacman"]
+	path = pacman
+	url = https://gitlab.archlinux.org/pacman/pacman.git
+	ignore = untracked
+[submodule "alpm"]
+	path = alpm
+	url = https://gitlab.archlinux.org/archlinux/alpm/alpm.git

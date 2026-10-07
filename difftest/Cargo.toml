@@ -1,0 +1,17 @@
+[package]
+name = "difftest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# no workspace lints: this crate is the one place allowed to call C
+
+[dependencies]
+alpm-core = { path = "../alpm-core" }
+pacman-common = { path = "../pacman-common" }
+pacman-cli = { path = "../pacman-cli" }
+alpm-compress.workspace = true
+alpm-db.workspace = true
+alpm-repo-db.workspace = true
+alpm-types.workspace = true

@@ -1,0 +1,567 @@
+// port of lib/libalpm/util.c, filled in as callers get ported
+//
+// inputs are byte strings as the C would see them, cut at the first nul.
+// _alpm_str_cmp is not ported: byte slices already order like strcmp.
+// _alpm_realloc, _alpm_greedy_grow, _alpm_alloc_fail are not ported: Vec
+// grows and zero-fills itself.
+
+use std::ffi::{OsStr, c_char, c_ulong};
+use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
+use std::io::{self, ErrorKind, Read, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::path::Path;
+
+// what a C string would see of these bytes
+pub(crate) fn until_nul(s: &[u8]) -> &[u8] {
+	match s.iter().position(|&c| c == 0) {
+		Some(i) => &s[..i],
+		None => s,
+	}
+}
+
+// _alpm_strip_newline: trailing '\n' only, '\r' stays
+pub fn strip_newline(s: &[u8]) -> &[u8] {
+	let s = until_nul(s);
+	let n = s.iter().rev().take_while(|&&c| c == b'\n').count();
+	&s[..s.len() - n]
+}
+
+// _alpm_get_fullpath
+pub fn get_fullpath(path: &[u8], filename: &[u8], suffix: &[u8]) -> Vec<u8> {
+	[until_nul(path), until_nul(filename), until_nul(suffix)].concat()
+}
+
+// _alpm_hash_sdbm. C feeds plain char into the sum, signed on x86_64 and
+// unsigned on aarch64, c_char keeps the same hash per platform
+pub fn hash_sdbm(s: &[u8]) -> c_ulong {
+	until_nul(s).iter().fold(0, |hash: c_ulong, &c| {
+		let c = c as c_char as i64 as c_ulong;
+		c.wrapping_add(hash.wrapping_mul(65599))
+	})
+}
+
+// _alpm_strtoofft: bare decimal digits only, no sign or whitespace
+pub fn strtoofft(s: &[u8]) -> Option<u64> {
+	let s = until_nul(s);
+	if s.is_empty() || !s.iter().all(u8::is_ascii_digit) {
+		return None;
+	}
+	s.iter().try_fold(0u64, |acc, &c| {
+		acc.checked_mul(10)?.checked_add(u64::from(c - b'0'))
+	})
+}
+
+// _alpm_parsedate: strtoll base 10 in the C locale, whole string must parse
+pub fn parsedate(s: &[u8]) -> Option<i64> {
+	let s = until_nul(s);
+	// isspace in the C locale
+	let ws =
+		s.iter().take_while(|c| {
+			matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+		})
+		.count();
+	let s = &s[ws..];
+	let (neg, digits) = match s.first() {
+		Some(b'-') => (true, &s[1..]),
+		Some(b'+') => (false, &s[1..]),
+		_ => (false, s),
+	};
+	if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+		return None;
+	}
+	// accumulate negative so i64::MIN parses without overflow
+	let n = digits.iter().try_fold(0i64, |acc, &c| {
+		acc.checked_mul(10)?.checked_sub(i64::from(c - b'0'))
+	})?;
+	if neg { Some(n) } else { n.checked_neg() }
+}
+
+// _alpm_splitname: "name-ver-rel[/anything]" split at the second-last '-'
+// before the first '/', name must not be empty
+pub fn splitname(target: &[u8]) -> Option<(&[u8], &[u8])> {
+	let target = until_nul(target);
+	let end = target
+		.iter()
+		.position(|&c| c == b'/')
+		.unwrap_or(target.len());
+	let head = &target[..end];
+	let rel = head.iter().rposition(|&c| c == b'-')?;
+	let ver = head[..rel].iter().rposition(|&c| c == b'-')?;
+	if ver == 0 {
+		return None;
+	}
+	Some((&head[..ver], &head[ver + 1..]))
+}
+
+// _alpm_fnmatch: glibc fnmatch(3) with flags 0 in the C locale (byte
+// based, MB_CUR_MAX 1, no collation rules). '*' and '?' match '/' and a
+// leading '.', backslash escapes, ranges compare byte values. '^' negates
+// like '!' (POSIXLY_CORRECT unset, as glibc decides per process).
+pub fn fnmatch(pattern: &[u8], string: &[u8]) -> bool {
+	let (p, s) = (until_nul(pattern), until_nul(string));
+	matches!(fnmatch_at(p, 0, s, 0, false), Fnm::Match)
+}
+
+// _alpm_fnmatch_patterns: last matching pattern wins, a leading '!'
+// inverts it, a leading '\' is dropped so "\!x" matches "!x".
+// None: nothing matched (C -1), Some(inverted) (C 0 or 1)
+pub fn fnmatch_patterns<P: AsRef<[u8]>>(
+	patterns: &[P],
+	string: &[u8],
+) -> Option<bool> {
+	patterns.iter().rev().find_map(|pat| {
+		let pat = until_nul(pat.as_ref());
+		let inverted = pat.first() == Some(&b'!');
+		let pat = match pat.first() {
+			Some(b'!' | b'\\') => &pat[1..],
+			_ => pat,
+		};
+		fnmatch(pat, string).then_some(inverted)
+	})
+}
+
+// glibc CHAR_CLASS_MAX_LENGTH, CHARCLASS_NAME_MAX
+const CHAR_CLASS_MAX: usize = 2048;
+
+enum Fnm {
+	Match,
+	NoMatch,
+	// nested call reached a '*' at (pattern, string): the caller commits
+	// to this position, a later '*' covers whatever an earlier one could
+	Star(usize, usize),
+}
+
+enum Bracket {
+	// one byte consumed, pattern continues here
+	Hit(usize),
+	// unterminated '[': matched as a literal, pattern continues after it
+	Literal,
+	Fail,
+}
+
+// the C reads past the end as the terminating nul
+fn at(p: &[u8], i: usize) -> u8 {
+	p.get(i).copied().unwrap_or(0)
+}
+
+// glibc internal_fnmatch; nested is the `ends` pointer of a recursive call
+fn fnmatch_at(
+	p: &[u8],
+	mut pi: usize,
+	s: &[u8],
+	mut ni: usize,
+	nested: bool,
+) -> Fnm {
+	while pi < p.len() {
+		let c = p[pi];
+		pi += 1;
+		match c {
+			b'?' if ni == s.len() => return Fnm::NoMatch,
+			b'?' => {}
+			b'\\' => {
+				// trailing backslash never matches
+				let c = at(p, pi);
+				if c == 0 || s.get(ni) != Some(&c) {
+					return Fnm::NoMatch;
+				}
+				pi += 1;
+			}
+			b'*' if nested => return Fnm::Star(pi - 1, ni),
+			b'*' => match star(p, pi, s, ni) {
+				Fnm::Star(np, nn) => {
+					(pi, ni) = (np, nn);
+					continue;
+				}
+				r => return r,
+			},
+			b'[' => match bracket(p, pi, s.get(ni).copied()) {
+				Bracket::Hit(next) => pi = next,
+				Bracket::Literal
+					if s.get(ni) == Some(&b'[') => {}
+				_ => return Fnm::NoMatch,
+			},
+			_ if s.get(ni) != Some(&c) => return Fnm::NoMatch,
+			_ => {}
+		}
+		ni += 1;
+	}
+	if ni == s.len() {
+		Fnm::Match
+	} else {
+		Fnm::NoMatch
+	}
+}
+
+// '*' at p[pi - 1]: runs of '*' and '?' collapse, then the rest is tried
+// at each string position, Star hands the outer loop where to resume
+fn star(p: &[u8], mut pi: usize, s: &[u8], mut ni: usize) -> Fnm {
+	let mut c = at(p, pi);
+	while c == b'?' || c == b'*' {
+		if c == b'?' {
+			if ni == s.len() {
+				return Fnm::NoMatch;
+			}
+			ni += 1;
+		}
+		pi += 1;
+		c = at(p, pi);
+	}
+	if c == 0 {
+		return Fnm::Match;
+	}
+	// a literal first byte filters candidate positions, a bracket tries all
+	let lit = match c {
+		b'[' => None,
+		b'\\' => Some(at(p, pi + 1)),
+		_ => Some(c),
+	};
+	for n in ni..s.len() {
+		if lit.is_some_and(|l| s[n] != l) {
+			continue;
+		}
+		match fnmatch_at(p, pi, s, n, true) {
+			Fnm::NoMatch => {}
+			r => return r,
+		}
+	}
+	Fnm::NoMatch
+}
+
+// C locale ctype classes known to wctype(3)
+fn char_class(name: &[u8]) -> Option<fn(&u8) -> bool> {
+	Some(match name {
+		b"alnum" => u8::is_ascii_alphanumeric,
+		b"alpha" => u8::is_ascii_alphabetic,
+		b"blank" => |c| matches!(c, b' ' | b'\t'),
+		b"cntrl" => u8::is_ascii_control,
+		b"digit" => u8::is_ascii_digit,
+		b"graph" => u8::is_ascii_graphic,
+		b"lower" => u8::is_ascii_lowercase,
+		b"print" => |c| c.is_ascii_graphic() || *c == b' ',
+		b"punct" => u8::is_ascii_punctuation,
+		// isspace includes '\v', is_ascii_whitespace does not
+		b"space" => |c| c.is_ascii_whitespace() || *c == 0x0b,
+		b"upper" => u8::is_ascii_uppercase,
+		b"xdigit" => u8::is_ascii_hexdigit,
+		_ => return None,
+	})
+}
+
+// "[.x.]" starting at p[pi] == '.': the end of it and its single byte,
+// None if unterminated or not one byte (no collating names in C locale)
+fn collating(p: &[u8], mut pi: usize) -> Option<(usize, u8)> {
+	let start = pi;
+	loop {
+		pi += 1;
+		let c = at(p, pi);
+		if c == b'.' && at(p, pi + 1) == b']' {
+			break;
+		}
+		if c == 0 {
+			return None;
+		}
+	}
+	(pi - start == 2).then(|| (pi + 2, p[start + 1]))
+}
+
+// one bracket expression, pi is just past '['. a matching item jumps to
+// the skip of the rest; the item that starts with ']' is a literal
+fn bracket(p: &[u8], mut pi: usize, ch: Option<u8>) -> Bracket {
+	let Some(fc) = ch else {
+		return Bracket::Fail;
+	};
+	let not = matches!(at(p, pi), b'!' | b'^');
+	if not {
+		pi += 1;
+	}
+	let mut c = at(p, pi);
+	pi += 1;
+	loop {
+		// start byte of a possible range and whether it came from [.x.]
+		let mut item = None;
+		if c == b'\\' {
+			c = at(p, pi);
+			if c == 0 {
+				return Bracket::Fail;
+			}
+			pi += 1;
+			item = Some((c, false));
+		} else if c == b'[' && at(p, pi) == b':' {
+			match class_item(p, pi, fc) {
+				Item::Matched(next) => {
+					return skip(p, next, not);
+				}
+				Item::Next(next) => {
+					c = at(p, next);
+					pi = next + 1;
+				}
+				Item::Normal => item = Some((b'[', false)),
+				Item::Fail => return Bracket::Fail,
+			}
+		} else if c == b'[' && at(p, pi) == b'=' {
+			let (e, close) = (at(p, pi + 1), at(p, pi + 2));
+			if e == 0 || close != b'=' || at(p, pi + 3) != b']' {
+				item = Some((b'[', false));
+			} else if fc == e {
+				return skip(p, pi + 4, not);
+			} else {
+				c = at(p, pi + 4);
+				pi += 5;
+			}
+		} else if c == 0 {
+			return Bracket::Literal;
+		} else if c == b'[' && at(p, pi) == b'.' {
+			let Some((next, b)) = collating(p, pi) else {
+				return Bracket::Fail;
+			};
+			pi = next;
+			item = Some((b, true));
+		} else {
+			item = Some((c, false));
+		}
+		if let Some((cold, seq)) = item {
+			// a range needs '-' and an end byte; a plain start also
+			// refuses ']' as end, [.x.] does not
+			let dash = at(p, pi) == b'-' && at(p, pi + 1) != 0;
+			let is_range = dash && (seq || at(p, pi + 1) != b']');
+			if !is_range && cold == fc {
+				return skip(p, pi, not);
+			}
+			c = at(p, pi);
+			pi += 1;
+			if c == b'-' && at(p, pi) != b']' {
+				let mut cend = at(p, pi);
+				pi += 1;
+				if cend == b'[' && at(p, pi) == b'.' {
+					let Some((next, b)) = collating(p, pi)
+					else {
+						return Bracket::Fail;
+					};
+					(pi, cend) = (next, b);
+				} else {
+					if cend == b'\\' {
+						cend = at(p, pi);
+						pi += 1;
+					}
+					if cend == 0 {
+						return Bracket::Fail;
+					}
+				}
+				if cold <= fc && fc <= cend {
+					return skip(p, pi, not);
+				}
+				c = at(p, pi);
+				pi += 1;
+			}
+		}
+		if c == b']' {
+			break;
+		}
+	}
+	if not { Bracket::Hit(pi) } else { Bracket::Fail }
+}
+
+enum Item {
+	Matched(usize),
+	// class did not match, next item starts here
+	Next(usize),
+	// not a class name, '[' is an ordinary byte
+	Normal,
+	Fail,
+}
+
+// "[:name:]" with p[pi] == ':'. names are 'a'..'y' only, as in glibc
+fn class_item(p: &[u8], mut pi: usize, fc: u8) -> Item {
+	let start = pi;
+	loop {
+		if pi - start == CHAR_CLASS_MAX {
+			return Item::Fail;
+		}
+		pi += 1;
+		let c = at(p, pi);
+		if c == b':' && at(p, pi + 1) == b']' {
+			break;
+		}
+		if !matches!(c, b'a'..=b'y') {
+			return Item::Normal;
+		}
+	}
+	match char_class(&p[start + 1..pi]) {
+		None => Item::Fail,
+		Some(f) if f(&fc) => Item::Matched(pi + 2),
+		Some(_) => Item::Next(pi + 2),
+	}
+}
+
+// rest of a bracket after a matching item, up to and past ']'. a missing
+// ']' still makes '[' literal; a bad [=x=] fails here, where the item loop
+// reads it as a plain '['
+fn skip(p: &[u8], mut pi: usize, not: bool) -> Bracket {
+	loop {
+		let c = at(p, pi);
+		pi += 1;
+		match c {
+			0 => return Bracket::Literal,
+			b'\\' if at(p, pi) == 0 => return Bracket::Fail,
+			b'\\' => pi += 1,
+			b'[' if at(p, pi) == b':' => {
+				let start = pi;
+				let mut len = 0;
+				loop {
+					pi += 1;
+					len += 1;
+					if len == CHAR_CLASS_MAX {
+						return Bracket::Fail;
+					}
+					let c = at(p, pi);
+					if c == b':' && at(p, pi + 1) == b']' {
+						break;
+					}
+					if !matches!(c, b'a'..=b'y') {
+						break;
+					}
+				}
+				if at(p, pi) == b':' && at(p, pi + 1) == b']' {
+					pi += 2;
+				} else {
+					// rescan from the ':', bypassing the ']' test
+					pi = start;
+					continue;
+				}
+			}
+			b'[' if at(p, pi) == b'=' => {
+				if at(p, pi + 1) == 0
+					|| at(p, pi + 2) != b'=' || at(p, pi + 3)
+					!= b']'
+				{
+					return Bracket::Fail;
+				}
+				pi += 4;
+			}
+			b'[' if at(p, pi) == b'.' => {
+				loop {
+					pi += 1;
+					let c = at(p, pi);
+					if c == 0 {
+						return Bracket::Fail;
+					}
+					if c == b'.' && at(p, pi + 1) == b']' {
+						break;
+					}
+				}
+				pi += 2;
+			}
+			b']' => break,
+			_ => {}
+		}
+	}
+	if not { Bracket::Fail } else { Bracket::Hit(pi) }
+}
+
+// C path from bytes, cut at the first nul
+fn c_path(path: &[u8]) -> &Path {
+	Path::new(OsStr::from_bytes(until_nul(path)))
+}
+
+// _alpm_makepath
+pub fn makepath(path: &[u8]) -> io::Result<()> {
+	makepath_mode(path, 0o755)
+}
+
+// _alpm_makepath_mode: mkdir -p. every prefix ending before a '/' that
+// follows a non-'/' byte, then the whole path; EEXIST is fine at any step,
+// even for a non-directory
+pub fn makepath_mode(path: &[u8], mode: u32) -> io::Result<()> {
+	let path = until_nul(path);
+	for i in 1..path.len() {
+		if path[i] == b'/' && path[i - 1] != b'/' {
+			mkdir_exact(&path[..i], mode)?;
+		}
+	}
+	mkdir_exact(path, mode)
+}
+
+// the C runs mkdir under umask(0), which is process wide. chmod after
+// mkdir gives the same bits: mkdir keeps mode & 01777 and the setgid bit
+// inherited from the parent
+fn mkdir_exact(path: &[u8], mode: u32) -> io::Result<()> {
+	let path = c_path(path);
+	match DirBuilder::new().mode(mode).create(path) {
+		Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(()),
+		r => r?,
+	}
+	let got = fs::metadata(path)?.permissions().mode();
+	let want = (mode & 0o1777) | (got & 0o2000);
+	if got & 0o7777 != want {
+		fs::set_permissions(path, Permissions::from_mode(want))?;
+	}
+	Ok(())
+}
+
+// _alpm_copyfile: dest is opened even if src fails (created mode 0000),
+// without O_TRUNC so a longer dest keeps its tail, then gets src's mode.
+// a read error ends the copy like EOF and still counts as success
+pub fn copyfile(src: &[u8], dest: &[u8]) -> io::Result<()> {
+	let input = File::open(c_path(src));
+	let output = OpenOptions::new()
+		.write(true)
+		.create(true)
+		.truncate(false)
+		.mode(0o000)
+		.open(c_path(dest));
+	let (mut input, mut output) = (input?, output?);
+	let mode = input.metadata()?.permissions().mode();
+	output.set_permissions(Permissions::from_mode(mode))?;
+	let mut buf = vec![0; 8192];
+	loop {
+		match input.read(&mut buf) {
+			Ok(0) => break,
+			Ok(n) => output.write_all(&buf[..n])?,
+			Err(e) if e.kind() == ErrorKind::Interrupted => {}
+			Err(_) => break,
+		}
+	}
+	Ok(())
+}
+
+// _alpm_read_file errors, the matching alpm_errno_t
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadFileError {
+	// ALPM_ERR_NOT_A_FILE: open or fstat failed
+	NotAFile,
+	// ALPM_ERR_MEMORY: st_size bytes could not be allocated
+	Memory,
+	// ALPM_ERR_SYSTEM: fewer than st_size bytes read
+	System,
+}
+
+// _alpm_read_file: exactly st_size bytes. an empty file is an error, as
+// fread of one 0-byte item returns 0
+pub fn read_file(path: &[u8]) -> Result<Vec<u8>, ReadFileError> {
+	let f = File::open(c_path(path))
+		.map_err(|_| ReadFileError::NotAFile)?;
+	let size = f.metadata().map_err(|_| ReadFileError::NotAFile)?.len();
+	let mut data = Vec::new();
+	usize::try_from(size)
+		.ok()
+		.and_then(|n| data.try_reserve_exact(n).ok())
+		.ok_or(ReadFileError::Memory)?;
+	// a file grown since fstat is cut at st_size, like the one fread
+	match f.take(size).read_to_end(&mut data) {
+		Ok(n) if size != 0 && n as u64 == size => Ok(data),
+		_ => Err(ReadFileError::System),
+	}
+}
+
+// _alpm_files_in_directory without the handle, used for debug logging
+// only. entries other than "." and "..", counting stops at the first
+// unless full_count. a readdir error ends the count like end of directory
+pub fn files_in_directory(path: &[u8], full_count: bool) -> io::Result<usize> {
+	let entries = fs::read_dir(c_path(path))?.map_while(Result::ok);
+	Ok(if full_count {
+		entries.count()
+	} else {
+		entries.take(1).count()
+	})
+}

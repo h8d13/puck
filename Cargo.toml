@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["alpm-core", "pacman-common", "pacman-cli", "vercmp", "difftest"]
+# submodules: C reference and ALPM (its own workspace)
+exclude = ["pacman", "alpm"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# derived from pacman sources, same license
+license = "GPL-2.0-or-later"
+
+# official Arch ALPM crates, alpm/ (submodule), used instead of re-porting
+# what they already implement
+[workspace.dependencies]
+alpm-buildinfo = { path = "alpm/alpm-buildinfo" }
+alpm-common = { path = "alpm/alpm-common" }
+alpm-compress = { path = "alpm/alpm-compress" }
+alpm-db = { path = "alpm/alpm-db" }
+alpm-mtree = { path = "alpm/alpm-mtree" }
+alpm-package = { path = "alpm/alpm-package" }
+alpm-parsers = { path = "alpm/alpm-parsers" }
+alpm-pkginfo = { path = "alpm/alpm-pkginfo" }
+alpm-repo-db = { path = "alpm/alpm-repo-db" }
+alpm-types = { path = "alpm/alpm-types" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
