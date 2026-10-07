@@ -1,6 +1,8 @@
-// port of lib/libalpm/be_package.c without gpgme: _alpm_pkg_load_internal,
-// alpm_pkg_load at signature level 0, the checksum part of
+// port of lib/libalpm/be_package.c: _alpm_pkg_load_internal,
+// alpm_pkg_load (with read_sigfile and the key import),
 // _alpm_pkg_validate_internal, and the changelog ops of file packages.
+// signatures go through signing.rs, the keyring and callbacks are taken
+// as parameters until the handle carries them.
 //
 // the archive walk follows the C loop. libarchive is replaced by
 // alpm-compress (gzip, bzip2, xz, zstd, none, picked by magic bytes like
@@ -11,7 +13,7 @@
 //
 // file packages have no mtree stream: default_pkg_ops.mtree_open returns
 // NULL, nothing to port. logging is not modelled, it never changes the
-// result.
+// result; the signature messages go through SigCallbacks.
 
 use std::ffi::{OsStr, c_int};
 use std::fmt::Display;
@@ -28,6 +30,7 @@ use alpm_mtree::Mtree;
 use alpm_mtree::mtree::v2::Path as MtreePath;
 use alpm_pkginfo::PackageInfo;
 use alpm_types::Sha256Checksum;
+use rustix::fs::{Access, AtFlags, CWD, accessat};
 
 use crate::backup::Backup;
 use crate::be_local::{INFRQ_BASE, INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET};
@@ -35,13 +38,21 @@ use crate::deps::{Depend, dep_from_string};
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
 use crate::package::{
-	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM, Package, PkgFrom,
-	PkgXData,
+	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
+	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, PkgXData,
+};
+use crate::signing::{
+	Keyring, LogLevel, NoCallbacks, SIG_PACKAGE, SIG_PACKAGE_MARGINAL_OK,
+	SIG_PACKAGE_OPTIONAL, SIG_PACKAGE_UNKNOWN_OK, SigCallbacks, SigResult,
+	check_pgp_helper, extract_keyid, key_import, key_in_keychain, sigpath,
 };
 use crate::util::{fnmatch, hash_sdbm, until_nul};
 
 // limits.h on linux
 const NAME_MAX: usize = 255;
+
+// read_sigfile's limit, adopted from repo-add
+const MAX_SIGFILE_SIZE: u64 = 16384;
 
 // mode_t file type bits, archive_entry.h AE_IF*
 const AE_IFMT: u32 = 0o170000;
@@ -86,10 +97,23 @@ pub enum Error {
 	Archive(io::Error),
 	// sha256 of the file differs, ALPM_ERR_PKG_INVALID_CHECKSUM
 	Checksum,
+	// the level wants a signature and there is none,
+	// ALPM_ERR_PKG_MISSING_SIG
+	MissingSig,
+	// _alpm_check_pgp_helper refused, ALPM_ERR_PKG_INVALID_SIG. the
+	// results are what the C passes back in sigdata
+	InvalidSig(Vec<SigResult>),
+	// alpm_pkg_load: "failed to read signature file", pm_errno untouched
+	SigFile,
+	// alpm_pkg_load: "required key missing from keyring". pm_errno is
+	// what the last failed _alpm_pkg_load_internal of the import loop
+	// left, untouched when none failed
+	KeyMissing(Option<Errno>),
 }
 
 impl Error {
-	// pm_errno the C leaves
+	// pm_errno the C leaves, Ok where it is untouched (alpm_pkg_load's
+	// CHECK_HANDLE resets it on entry)
 	pub fn errno(&self) -> Errno {
 		match self {
 			Error::WrongArgs => Errno::WrongArgs,
@@ -99,6 +123,10 @@ impl Error {
 			Error::Invalid(_) => Errno::PkgInvalid,
 			Error::Archive(_) => Errno::Libarchive,
 			Error::Checksum => Errno::PkgInvalidChecksum,
+			Error::MissingSig => Errno::PkgMissingSig,
+			Error::InvalidSig(_) => Errno::PkgInvalidSig,
+			Error::SigFile => Errno::Ok,
+			Error::KeyMissing(e) => e.unwrap_or(Errno::Ok),
 		}
 	}
 }
@@ -405,41 +433,172 @@ fn sha256_hex(path: &[u8]) -> Option<Vec<u8>> {
 	Some(text(&sum))
 }
 
-// _alpm_pkg_validate_internal at level 0 (no signature): the file must be
-// readable, a syncpkg with a sha256sum must match it. the validation bits
-// done, PKG_VALIDATION_NONE when none
-pub fn pkg_validate_internal(
+// _alpm_access(path, R_OK)
+fn readable(path: &[u8]) -> bool {
+	let nofollow = AtFlags::SYMLINK_NOFOLLOW;
+	accessat(CWD, path, Access::READ_OK, nofollow).is_ok()
+}
+
+// a validation that passed: the validation bits (PKG_VALIDATION_NONE
+// when none) and the signature results when the check ran (sigdata)
+#[derive(Debug)]
+pub struct Validated {
+	pub validation: c_int,
+	pub siglist: Option<Vec<SigResult>>,
+}
+
+// _alpm_pkg_validate_internal: the file must be readable. a syncpkg's
+// sha256sum is checked unless the level verifies its base64 signature;
+// with SIG_PACKAGE the signature (base64 from syncpkg, else "<file>.sig")
+// must pass _alpm_check_pgp_helper, a missing one only when optional
+pub fn pkg_validate(
+	kr: &mut Keyring,
+	cb: &mut dyn SigCallbacks,
 	pkgfile: &[u8],
 	syncpkg: Option<&Package>,
-) -> Result<c_int, Error> {
+	level: c_int,
+) -> Result<Validated, Error> {
 	let pkgfile = until_nul(pkgfile);
 	if pkgfile.is_empty() {
 		return Err(Error::WrongArgs);
 	}
 	// access(R_OK): opening for reading checks the same permission
 	File::open(os(pkgfile)).map_err(open_err)?;
+	let b64 = syncpkg.and_then(|p| p.base64_sig.as_deref());
+	let wants_sig = level & SIG_PACKAGE != 0;
+	let has_sig =
+		wants_sig && (b64.is_some() || readable(&sigpath(pkgfile)));
 	let mut validation = 0;
-	if let Some(expected) = syncpkg.and_then(|p| p.sha256sum.as_deref()) {
+	let expected = syncpkg.and_then(|p| p.sha256sum.as_deref());
+	if let Some(expected) = expected.filter(|_| !has_sig || b64.is_none()) {
 		// _alpm_test_checksum: strcmp with the lowercase hex
 		if sha256_hex(pkgfile).as_deref() != Some(until_nul(expected)) {
 			return Err(Error::Checksum);
 		}
 		validation |= PKG_VALIDATION_SHA256SUM;
 	}
-	Ok(if validation == 0 {
-		PKG_VALIDATION_NONE
-	} else {
-		validation
+	let mut siglist = None;
+	if wants_sig {
+		let optional = level & SIG_PACKAGE_OPTIONAL != 0;
+		if !has_sig && !optional {
+			return Err(Error::MissingSig);
+		}
+		let marginal = level & SIG_PACKAGE_MARGINAL_OK != 0;
+		let unknown = level & SIG_PACKAGE_UNKNOWN_OK != 0;
+		let path = Some(pkgfile);
+		let (ok, list) = check_pgp_helper(
+			kr, cb, path, b64, optional, marginal, unknown,
+		);
+		if ok.is_err() {
+			return Err(Error::InvalidSig(list));
+		}
+		if has_sig {
+			validation |= PKG_VALIDATION_SIGNATURE;
+		}
+		siglist = Some(list);
+	}
+	if validation == 0 {
+		validation = PKG_VALIDATION_NONE;
+	}
+	Ok(Validated {
+		validation,
+		siglist,
 	})
 }
 
-// alpm_pkg_load with level 0: no .sig handling, validation from
-// pkg_validate_internal without a sync package
-pub fn pkg_load(filename: &[u8], full: bool) -> Result<Package, Error> {
-	let validation = pkg_validate_internal(filename, None)?;
+// pkg_validate at level 0, no keyring reached: the validation bits
+pub fn pkg_validate_internal(
+	pkgfile: &[u8],
+	syncpkg: Option<&Package>,
+) -> Result<c_int, Error> {
+	let mut kr = Keyring::new(b"");
+	pkg_validate(&mut kr, &mut NoCallbacks, pkgfile, syncpkg, 0)
+		.map(|v| v.validation)
+}
+
+// read_sigfile: the whole .sig, refused when empty (fread of 0 bytes
+// reads no item) or over MAX_SIGFILE_SIZE
+fn read_sigfile(sigpath: &[u8]) -> Option<Vec<u8>> {
+	let mut file = File::open(os(sigpath)).ok()?;
+	let size = file.metadata().ok()?.len();
+	if size == 0 || size > MAX_SIGFILE_SIZE {
+		return None;
+	}
+	let mut sig = vec![0; size as usize];
+	file.read_exact(&mut sig).ok()?;
+	Some(sig)
+}
+
+// alpm_pkg_load's key step: each issuer key id of a readable .sig the
+// keychain lacks is offered for import. a failed extraction skips it
+fn import_missing_keys(
+	kr: &mut Keyring,
+	cb: &mut dyn SigCallbacks,
+	filename: &[u8],
+	full: bool,
+) -> Result<(), Error> {
+	let sigfile = sigpath(filename);
+	if !readable(&sigfile) {
+		return Ok(());
+	}
+	let Some(sig) = read_sigfile(&sigfile) else {
+		let msg = [
+			b"failed to read signature file: ",
+			&sigfile[..],
+			b"\n",
+		];
+		cb.log(LogLevel::Error, &msg.concat());
+		return Err(Error::SigFile);
+	};
+	let mut keys = Vec::new();
+	if extract_keyid(cb, filename, &sig, &mut keys).is_err() {
+		return Ok(());
+	}
+	let (mut fail, mut errno) = (false, None);
+	for key in &keys {
+		if key_in_keychain(kr, cb, key) != Some(false) {
+			continue;
+		}
+		// the C loads the package here and frees it unused, only its
+		// pm_errno stays
+		if let Err(e) = pkg_load_internal(filename, full) {
+			errno = Some(e.errno());
+		}
+		if !key_import(kr, cb, None, key) {
+			fail = true;
+		}
+	}
+	if fail {
+		cb.log(LogLevel::Error, b"required key missing from keyring\n");
+		return Err(Error::KeyMissing(errno));
+	}
+	Ok(())
+}
+
+// alpm_pkg_load: with SIG_PACKAGE missing keys offered for import, the
+// file validated at level (no sync package), then loaded with the
+// validation bits
+pub fn pkg_load_level(
+	kr: &mut Keyring,
+	cb: &mut dyn SigCallbacks,
+	filename: &[u8],
+	full: bool,
+	level: c_int,
+) -> Result<Package, Error> {
+	let filename = until_nul(filename);
+	if level & SIG_PACKAGE != 0 {
+		import_missing_keys(kr, cb, filename, full)?;
+	}
+	let validated = pkg_validate(kr, cb, filename, None, level)?;
 	let mut pkg = pkg_load_internal(filename, full)?;
-	pkg.validation = validation;
+	pkg.validation = validated.validation;
 	Ok(pkg)
+}
+
+// alpm_pkg_load at level 0
+pub fn pkg_load(filename: &[u8], full: bool) -> Result<Package, Error> {
+	let mut kr = Keyring::new(b"");
+	pkg_load_level(&mut kr, &mut NoCallbacks, filename, full, 0)
 }
 
 // _package_changelog_open/read/close in one: the .CHANGELOG entry of the

@@ -9,9 +9,10 @@
 // alpm-compress (gzip, bzip2, xz, zstd, none) picked by magic bytes, as
 // the db file name carries no compression suffix.
 //
-// not ported: alpm_db_update (dload), get_sync_dir, and the signature
-// part of sync_db_validate (gpgme). its "no verification" path is what
-// populate sees here: a db file that does not exist is NotFound.
+// sync_db_validate without the status bits db.c keeps: the missing file
+// and the signature check (signing.rs). not ported: alpm_db_update
+// (dload), get_sync_dir. populate on a db file that does not exist is
+// NotFound.
 
 use std::collections::HashMap;
 use std::ffi::c_int;
@@ -25,6 +26,7 @@ use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
 use alpm_compress::tarball::{TarballEntry, TarballReader};
 use alpm_repo_db::desc::{RepoDescFile, RepoDescFileV2};
 use alpm_repo_db::files::RepoFiles;
+use rustix::fs::{Access, AtFlags, CWD, accessat};
 
 use crate::deps::{Depend, dep_from_string};
 use crate::error::Errno;
@@ -34,6 +36,11 @@ use crate::package::{
 	PKG_VALIDATION_SIGNATURE, Package, PkgFrom,
 };
 use crate::pkghash::PkgHash;
+use crate::signing::{
+	Keyring, SIG_DATABASE, SIG_DATABASE_MARGINAL_OK, SIG_DATABASE_OPTIONAL,
+	SIG_DATABASE_UNKNOWN_OK, SigCallbacks, check_pgp_helper,
+	process_siglist,
+};
 use crate::util::{fnmatch, hash_sdbm, splitname, until_nul};
 
 // limits.h on linux
@@ -96,6 +103,54 @@ pub fn db_path(dbpath: &[u8], treename: &[u8], dbext: &[u8]) -> Vec<u8> {
 		until_nul(dbext),
 	]
 	.concat()
+}
+
+// sync_db_validate on a db neither valid nor invalid yet: Ok(false) when
+// the file at path (its _alpm_db_path) is missing (DB_STATUS_MISSING,
+// the C sends ALPM_EVENT_DATABASE_MISSING), Ok(true) when it exists and
+// passed. siglevel is alpm_db_get_siglevel; with SIG_DATABASE the
+// "<path>.sig" check runs, and again while an offered key import works.
+// Err(DbInvalidSig) marks the db invalid
+pub fn sync_db_validate(
+	kr: &mut Keyring,
+	cb: &mut dyn SigCallbacks,
+	path: &[u8],
+	treename: &[u8],
+	siglevel: c_int,
+) -> Result<bool, Errno> {
+	let path = until_nul(path);
+	// _alpm_access(R_OK) failing with ENOENT, a dangling link exists
+	let nofollow = AtFlags::SYMLINK_NOFOLLOW;
+	let access = accessat(CWD, path, Access::READ_OK, nofollow);
+	if access == Err(rustix::io::Errno::NOENT) {
+		return Ok(false);
+	}
+	if siglevel & SIG_DATABASE == 0 {
+		return Ok(true);
+	}
+	let optional = siglevel & SIG_DATABASE_OPTIONAL != 0;
+	let marginal = siglevel & SIG_DATABASE_MARGINAL_OK != 0;
+	let unknown = siglevel & SIG_DATABASE_UNKNOWN_OK != 0;
+	loop {
+		let (ok, siglist) = check_pgp_helper(
+			kr,
+			cb,
+			Some(path),
+			None,
+			optional,
+			marginal,
+			unknown,
+		);
+		if ok.is_ok() {
+			return Ok(true);
+		}
+		let retry = process_siglist(
+			kr, cb, treename, &siglist, optional, marginal, unknown,
+		);
+		if !retry {
+			return Err(Errno::DbInvalidSig);
+		}
+	}
 }
 
 // _sync_get_validation, what alpm_pkg_get_validation computes on first

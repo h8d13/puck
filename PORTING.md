@@ -83,7 +83,7 @@ read-only copy of a real system db; byte-identical stdout, stderr, exit.
 | Part | State |
 |---|---|
 | downloads (`dload.c`): parallel, resume, mirrors, sandbox user | in progress (`reqwest`; sandbox wiring later) |
-| signature verification (`signing.c`) | in progress (`gpg` over `--status-fd` like gpgme) |
+| signature verification (`signing.c`) | done (`gpg` over `--status-fd`, argv checked against gpgme's); Handle/db wiring pending |
 | db update/validation (`be_sync.c` writing side) | todo |
 
 Gate: pactest sync/download tests against the Rust binary.
@@ -192,13 +192,13 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `lib/libalpm/error.c` | 166 | `alpm-core::error` | strerror, all 56 values + out of range: difftest; alpm_errno waits for handle |
 | `lib/libalpm/log.c` | 112 | - | |
 | `lib/libalpm/package.c` | 868 | `alpm-core::package` (partial) | data model (`Package`, `PkgFrom`, `PkgReason`), dup, pkg_cmp, compare_versions, find, compute_requiredby/optionalfor (`DbCaches`), should_ignore (fixture handles + mirror fuzz): difftest via `#[repr(C)]` mirror (offsets checked through the C getters); handle/db/archive parts pending |
-| `lib/libalpm/be_package.c` | 778 | `alpm-core::be_package` (partial) | pkg_load_internal (full and metadata-only walk, .PKGINFO via alpm-pkginfo, .MTREE via alpm-mtree with archive fallback, file list, check_meta), pkg_load and pkg_validate_internal at level 0 (sha256 via alpm-types), changelog: difftest on generated packages (gz/bz2/xz/zst/none, full on/off, every field + changelog), 82 pinned odd inputs, real cached packages (`DIFFTEST_PKG_CORPUS`); gpgme/.sig pending |
+| `lib/libalpm/be_package.c` | 778 | `alpm-core::be_package` (partial) | pkg_load_internal (full and metadata-only walk, .PKGINFO via alpm-pkginfo, .MTREE via alpm-mtree with archive fallback, file list, check_meta), pkg_load/pkg_validate at every level (.sig, base64 sig, sha256 skip), key import question, changelog: difftest on generated packages (gz/bz2/xz/zst/none, full on/off, every field + changelog), 82 pinned odd inputs, real cached packages (`DIFFTEST_PKG_CORPUS`); gpgme/.sig pending |
 | `lib/libalpm/be_local.c` | 1232 | `alpm-core::be_local` (partial) | register/validate (ALPM_DB_VERSION, creation), populate, local_db_read via `alpm-db`: difftest on random v1/v2 dbs (every field, cache counts), version-file fuzz, 69 pinned odd inputs, /var/lib/pacman read-only; writing, remove, mtree, changelog pending |
-| `lib/libalpm/be_sync.c` | 762 | `alpm-core::be_sync` (partial) | populate (tar walk, load_pkg_for_entry, check_meta subset, validate_filename, error ranking), get_validation, db_path via `alpm-repo-db` + `alpm-compress`: difftest on generated .db/.files in gz/bz2/xz/zst/none (fields, cache order, table counts), real sync db copies; download, gpgme validation, db update pending |
+| `lib/libalpm/be_sync.c` | 762 | `alpm-core::be_sync` (partial) | populate (tar walk, load_pkg_for_entry, check_meta subset, validate_filename, error ranking), get_validation, db_path, sync_db_validate (missing file, signature, import retry) via `alpm-repo-db` + `alpm-compress`: difftest on generated .db/.files in gz/bz2/xz/zst/none (fields, cache order, table counts), real sync db copies; download, gpgme validation, db update pending |
 | `lib/libalpm/db.c` | 773 | `alpm-core::db` (partial) | register/unregister, servers (sanitize_url), usage, siglevel, get_valid, pkgcache/get_pkg, groupcache/get_group (load_grpcache order), add/remove pkg in cache, load_pkg (lazy loads in place), dbext read at load, db_path, db_cmp: difftest op-sequence fuzz (results, errno, db state each step); search (difftest fuzz), load_all/walk/find_satisfier; update pending |
 | `lib/libalpm/handle.c` | 1017 | `alpm-core::handle` (partial) | alpm_initialize path checks/normalisation, dbext, architectures, siglevels, ignore/noupgrade/noextract lists + match: difftest; callbacks, lock, cachedirs, hookdirs, gpgdir, logfile, sandbox, downloads pending |
 | `lib/libalpm/alpm.c` | 132 | - | |
-| `lib/libalpm/signing.c` | 1201 | `alpm-core::signing` (partial) | `alpm_decode_signature`: difftest fuzz |
+| `lib/libalpm/signing.c` | 1201 | `alpm-core::signing` | decode_signature, checksig (.sig and base64), check_pgp_helper, process_siglist, key_in_keychain, key_import (keyring/question part; WKD/keyserver failure only), pkg/db_check_pgp_signature, extract_keyid: difftest vs gpgme-backed C on throwaway keyrings (all status/validity pairs, bad/garbage/truncated/armored sigs), results, rc, pm_errno, questions, logs; gpg argv vs gpgme's; extract_keyid fuzz |
 | `lib/libalpm/dload.c` | 1474 | - | |
 | `lib/libalpm/deps.c` | 926 | `alpm-core::deps` (partial) | dep_from_string, dep_compute_string, depcmp_provides (+ static dep_vercmp through it), depcmp_literal, depcmp, find_satisfier, checkdeps, sortbydeps, resolvedep/resolvedeps, find_dbs_satisfier, recursedeps: difftest on fixture handles (local + 3 sync dbs, ignore, assumeinstalled, NODEPVERSION, usage), questions/logs compared |
 | `lib/libalpm/graph.c` | 38 | `alpm-core::graph` | via sortbydeps |
@@ -367,6 +367,14 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
   after); `QueryEnv` carries `getcols()` and `PATH`; `-Qkk` loads files
   up front. `sync`/`files` display copies of cache entries (one db
   borrowed at a time).
+- `signing`: gpg(1) driven as gpgme's engine-gpg does (same binary,
+  `--homedir`, status lines, colon listings); the signature goes over
+  stdin, the file by path after a first read; only error/warning logs go
+  through `SigCallbacks`. Divergences: the C's process-wide gpgme `init`
+  (warning once per process, NOT_A_FILE leaking into later pm_errno) is
+  per `Keyring`; a read error mid-file shows gpg's status, not gpgme's
+  errno text; a key lookup failing partway returns Err instead of zeroed
+  entries; FAILURE status lines ignored.
 
 Follow-ups raised by port units:
 
@@ -391,7 +399,8 @@ Follow-ups raised by port units:
 | handle callbacks + log.c: one `Log`/`Events`/`Progress`/`Questions` set in alpm-core (today per unit in deps, conflict, diskspace), wired into `Handle` with logcb/eventcb/progresscb/questioncb, overwrite_files, assumeinstalled, trans flags | deps, conflict, diskspace | todo |
 | shared helpers into util: `llstat` (copies in conflict, diskspace), `strerror(io::Error)` (4 copies), frontend `pm_printf`/`Output`/`check_syncdbs` (check, query, sync), `getcols` | conflict, diskspace, query, sync | todo |
 | `Handle` split borrow of local + sync caches (resolver and displays clone caches today) | deps, sync | todo |
-| `alpm_extract_keyid` wired into -Sii/-Qii `sig_keys` | sync | with signing |
+| `alpm_extract_keyid` wired into -Sii/-Qii `sig_keys` | sync | todo (ported in signing) |
+| `Handle` owns `signing::Keyring` (gpgdir, known_keys) and implements `SigCallbacks`; `Db::register_sync` calls `be_sync::sync_db_validate` | signing | with the callbacks unit |
 | `alpm_sync_get_new_version` (lib sync.c) out of query.rs into alpm-core | query | with sync.c |
 | difftest: `read_deps` pub(crate) (drops conflict's `CDepend`), `SyncWorld` into fixtures.rs | conflict, sync | todo |
 | be_sync: a non-archive db must fail at open (DB_OPEN, db invalid) like libarchive, not LIBARCHIVE | query | with the mtree/compress patch unit |

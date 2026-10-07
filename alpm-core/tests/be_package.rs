@@ -188,3 +188,33 @@ fn validate_and_changelog() {
 	let p = pkg_load(nolog.path(), false).unwrap();
 	assert!(matches!(changelog(&p), Err(Error::NotFound)));
 }
+
+// signature levels where no gpg runs: a missing .sig is refused unless
+// optional, an optional one gives empty results
+#[test]
+fn signature_levels_without_sig() {
+	use alpm_core::be_package::{pkg_load_level, pkg_validate};
+	use alpm_core::signing::{
+		Keyring, NoCallbacks, SIG_PACKAGE, SIG_PACKAGE_OPTIONAL,
+	};
+	let pkg = Pkg::new("unsigned", &[(b".PKGINFO", b'0', PKGINFO)]);
+	let mut kr = Keyring::new(b"/nonexistent/");
+	kr.set_gpg("/nonexistent/gpg");
+	let cb = &mut NoCallbacks;
+	let r = pkg_validate(&mut kr, cb, pkg.path(), None, SIG_PACKAGE);
+	assert!(matches!(r, Err(Error::MissingSig)));
+	assert_eq!(r.unwrap_err().errno(), Errno::PkgMissingSig);
+	let level = SIG_PACKAGE | SIG_PACKAGE_OPTIONAL;
+	let v = pkg_validate(&mut kr, cb, pkg.path(), None, level).unwrap();
+	assert_eq!(v.validation, PKG_VALIDATION_NONE);
+	assert_eq!(v.siglist, Some(Vec::new()));
+	let p = pkg_load_level(&mut kr, cb, pkg.path(), false, level).unwrap();
+	assert_eq!(p.validation, PKG_VALIDATION_NONE);
+	// an empty .sig cannot be read for the key step
+	let sig = [pkg.path(), b".sig"].concat();
+	let sig = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&sig));
+	fs::write(&sig, b"").unwrap();
+	let r = pkg_load_level(&mut kr, cb, pkg.path(), false, level);
+	fs::remove_file(&sig).unwrap();
+	assert!(matches!(r, Err(Error::SigFile)));
+}

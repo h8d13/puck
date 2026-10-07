@@ -164,3 +164,45 @@ fn estimate_follows_dbext() {
 	assert_eq!(buckets(b".files\0x"), 19);
 	assert_eq!(buckets(b""), 73);
 }
+
+// sync_db_validate where no gpg runs
+#[test]
+fn validate_without_signature() {
+	use alpm_core::be_sync::sync_db_validate;
+	use alpm_core::signing::{
+		Keyring, LogLevel, NoCallbacks, SIG_DATABASE,
+		SIG_DATABASE_OPTIONAL, SigCallbacks,
+	};
+	struct Lines(Vec<Vec<u8>>);
+	impl SigCallbacks for Lines {
+		fn import_key(&mut self, _: Option<&[u8]>, _: &[u8]) -> bool {
+			false
+		}
+		fn log(&mut self, _: LogLevel, msg: &[u8]) {
+			self.0.push(msg.to_vec());
+		}
+	}
+	let db = Db::new("validate");
+	let mut kr = Keyring::new(b"/nonexistent/");
+	kr.set_gpg("/nonexistent/gpg");
+	let path = db.path();
+	let cb = &mut NoCallbacks;
+	// missing file: valid without a check
+	let r = sync_db_validate(&mut kr, cb, &path, b"repo", SIG_DATABASE);
+	assert_eq!(r, Ok(false));
+	db.write(&tar(&[]));
+	assert_eq!(sync_db_validate(&mut kr, cb, &path, b"repo", 0), Ok(true));
+	let level = SIG_DATABASE | SIG_DATABASE_OPTIONAL;
+	let r = sync_db_validate(&mut kr, cb, &path, b"repo", level);
+	assert_eq!(r, Ok(true));
+	let mut lines = Lines(Vec::new());
+	let r = sync_db_validate(
+		&mut kr,
+		&mut lines,
+		&path,
+		b"repo",
+		SIG_DATABASE,
+	);
+	assert_eq!(r, Err(Errno::DbInvalidSig));
+	assert_eq!(lines.0, [b"repo: missing required signature\n".to_vec()]);
+}

@@ -1,32 +1,11 @@
 // alpm_core::signing::decode_signature against C alpm_decode_signature
 use alpm_core::signing::{DecodeError, decode_signature};
-use difftest::{Rng, c_decode_signature, iters};
+use difftest::{Rng, c_decode_signature, encode_base64 as encode, iters};
 
 const ENC: &[u8] =
 	b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 // symbols plus everything the scanner special-cases
 const NOISE: &[u8] = b"AZaz09+/====\r\n\n \x7f\xc3-_";
-
-// standard padded encoding, the C has none to compare against
-fn encode(raw: &[u8]) -> Vec<u8> {
-	let mut out = Vec::new();
-	for chunk in raw.chunks(3) {
-		let mut b = [0u8; 3];
-		b[..chunk.len()].copy_from_slice(chunk);
-		let x = u32::from(b[0]) << 16
-			| u32::from(b[1]) << 8
-			| u32::from(b[2]);
-		for k in 0..4 {
-			if k <= chunk.len() {
-				out.push(ENC
-					[(x >> (18 - 6 * k)) as usize & 0x3f]);
-			} else {
-				out.push(b'=');
-			}
-		}
-	}
-	out
-}
 
 fn random_input(rng: &mut Rng) -> Vec<u8> {
 	match rng.below(3) {

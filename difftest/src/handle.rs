@@ -337,3 +337,11 @@ unsafe extern "C" {
 		deps: *mut CList,
 	) -> c_int;
 }
+
+// gpgdir (signing)
+unsafe extern "C" {
+	pub(crate) fn alpm_option_set_gpgdir(
+		handle: *mut c_void,
+		gpgdir: *const c_char,
+	) -> c_int;
+}

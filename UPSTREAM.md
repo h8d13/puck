@@ -372,9 +372,12 @@ declarations. No existing MR found for it.
 
 - uninitialized `siglist` freed when the package file is gone between load
   and display (package.c:365-378, signing.c:550-552). **env**
-- `alpm_extract_keyid` bounds allow reading one byte past the signature
-  and `blen - hlen - 8` can underflow (signing.c:1159-1170). **packager**
-  (crafted `%PGPSIG%`)
+- `alpm_extract_keyid` reads `sig[pos + 1]` one byte past the signature
+  when the hashed area ends at len-1 (signing.c:1188) and `blen - hlen -
+  8` can underflow (1197); 4-byte lengths shift a signed int, a top byte
+  >= 0x80 is UB and can wrap `pos` backwards (1052, 1112, 1143), reached
+  from `alpm_pkg_load` on a crafted `.sig` before verification.
+  **packager**
 - the `-1` "unset date" check never matches, missing dates print as
   1970-01-01 instead of "None" (package.c:202, 206). **packager / local**,
   cosmetic
@@ -516,6 +519,28 @@ declarations. No existing MR found for it.
 - sync: NULL repo to `printf("%s")` and NULL db in `sync_list`, both
   unreachable through `check_syncdbs` (sync.c:443, 487-493) **none**;
   unchecked malloc/strdup (files.c:135, sync.c:409) **env**
+
+## `signing.c` minor
+
+- gpgme's engine home is fixed by the first handle's gpgdir (static
+  `init`, signing.c:146-196): later handles and `set_gpgdir` changes are
+  ignored, the keyring warning and NOT_A_FILE come once and NOT_A_FILE
+  survives successful checks. **api**
+- `siglist->count` is set before the per-signature key lookups, a failure
+  partway returns -1 with zeroed (VALID/FULL) entries that be_sync.c:117
+  hands to `_alpm_process_siglist` (signing.c:621, 659). **env**
+- `key_import_wkd` treats a -1 lookup error as imported (signing.c:284).
+  **env**
+- an expired db-signing key that the keyserver still serves imports with
+  result 0, so the validate retry loop asks again for every yes
+  (be_sync.c:109-123; not verified, needs network). **real (rare)**
+- an empty `.sig` fails `fread` of 0 bytes, `pacman -U` stops with
+  "failed to read signature file" even at Optional (be_package.c:704,
+  730-736). **real (rare)**; `.sig` over 16384 bytes refused **packager**
+- the package is fully loaded and freed once per unknown key
+  (be_package.c:744-748). **real**, cost only
+- every helper failure, corrupt `.sig` included, reports PKG_INVALID_SIG
+  (be_package.c:341). **real**, message only
 
 ## `src/pacman/conf.c` minor
 
