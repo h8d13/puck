@@ -755,6 +755,17 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
 - the -1 check after `_alpm_remove_single_package` is dead, it always
   returns 0 (add.c:508-511). **none**
 
+## `sighandler.c` minor
+
+- the soft handler calls printf/`fflush`, `alpm_trans_interrupt` and
+  `alpm_unlock` in signal context (sighandler.c:52-74), not
+  async-signal-safe (a signal mid-printf holds stdio's lock). **env**
+- CURSOR_SHOW is written to stdout even when it is not a terminal
+  (sighandler.c:63): Ctrl-C with redirected output leaves `\x1b[?25h`.
+  **real**, cosmetic (port matches)
+- "SIGINT sent, abort by alerting curl" is stale: `dload_interrupted` is
+  only set for the max file size (dload.c:267-270, 281). **none**
+
 ## `pacman-conf.c` / `testpkg.c` minor
 
 - `DisableSandboxFilesystem` cannot be queried: the `DisableSandbox` test
@@ -981,15 +992,13 @@ maintainer of this repo, not from here.
 
 # ALPM findings
 
-Corrected in `vendor/patches/` (see PORTING.md "ALPM patches for
-parity"): epoch Ord 0101, one-sided pkgrel 0102, pkgrel text 0103, Url
-0104, Packager 0105, RelationOrSoname 0106, ExtraDataEntry 0107,
-OptionalDependency 0108, PackageDescription 0109, desc v2 detection 0201,
-blank lines 0202/0301, backups 0205, files blank line 0206, `%DATA%` 0303,
-`usr` == `usr/` 0305, mtree order/duplicates/defaults/types/keywords
-0401-0410, mtree gzip members 0403, pkginfo strictness 0501-0506 (gone
-with the owned `.PKGINFO` reader), gzip members 0551, content sniffing
-0552. Further notes from the patch work:
+Applied in `vendor/patches/` today: mtree 0401-0411 (until the mtree
+reader is owned), gzip members 0551, content sniffing 0552. Kept as
+reports in `vendor/upstream-reports/`, no longer applied: version
+ordering 0101/0102, `Unknown Packager` 0105, relation backtracking 0106,
+empty xdata value 0107. The alpm-db/alpm-repo-db/alpm-pkginfo findings
+below came from patches dropped with the owned readers (PORTING.md
+"Owned readers"); they stay valid as reports. Further notes from the patch work:
 
 - alpm-mtree `Error::Parse` display broken (`error-parse` wants `$source`,
   code passes `error`), fixed in 0411. **api**

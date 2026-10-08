@@ -513,6 +513,7 @@ pub fn trans_release(h: &mut Handle) -> Result<(), Errno> {
 	}
 	let nolock = trans.flags & TRANS_FLAG_NOLOCK != 0;
 	h.set_trans(None);
+	h.interrupt().set_committing(false);
 	if !nolock {
 		h.handle_unlock();
 	}
@@ -664,8 +665,26 @@ fn run_hooks(h: &mut Handle, when: HookWhen) -> bool {
 	ok
 }
 
+// the commit's state changes. with release the only ones entering or
+// leaving COMMITTING/INTERRUPTED, so the ones the Interrupt follows
 fn set_state(h: &mut Handle, state: TransState) {
 	h.trans_mut().expect("committing").state = state;
+	let committing = state == TransState::Committing;
+	h.interrupt().set_committing(committing);
+}
+
+// trans->state == STATE_INTERRUPTED as the commit loops read it, an
+// interrupt another thread asked (Interrupt::trans_interrupt) set into
+// the state first
+pub(crate) fn interrupted(h: &mut Handle) -> bool {
+	let interrupt = h.interrupt();
+	let Some(trans) = h.trans_mut() else {
+		return false;
+	};
+	if interrupt.take_request() {
+		trans.state = TransState::Interrupted;
+	}
+	trans.state == TransState::Interrupted
 }
 
 fn logaction(h: &mut Handle, msg: &[u8]) {
@@ -720,9 +739,7 @@ pub fn trans_commit(h: &mut Handle) -> Result<(), CommitError> {
 		return Err(e.into());
 	}
 
-	if h.trans()
-		.is_some_and(|t| t.state == TransState::Interrupted)
-	{
+	if interrupted(h) {
 		logaction(h, b"transaction interrupted\n");
 	} else {
 		h.callbacks().event(&Event::TransactionDone);
