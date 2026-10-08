@@ -117,13 +117,12 @@ in the milestone 1 gate and equal.
 Gate: upstream's full meson suite against the Rust binaries,
 `scripts/upstream-suite.sh` (pactest's 341 tests, vercmptest and the two
 script tests): meson's 338 ok / 6 expected fail, reproduced by
-`pacman/build`. Rust with the owned `.PKGINFO` reader: 200 ok / 6 xfail
-/ 138 fail / 0 unexpected pass; vercmptest and the script tests pass.
-No failure is a package load error any more. Failure classes: ~120 db
-desc files pactest writes with only the sections it sets (ALPM's
-spec-strict parsers, readers being owned: "target not found" or a silent
--Su), `-Sc` (ported; its clean tests
-wait on the db readers), a few with other causes behind those.
+`pacman/build`. Rust on master (owned `.PKGINFO` reader, `-Sc`): 203 ok
+/ 6 xfail / 135 fail / 0 unexpected pass; vercmptest and the script tests
+pass. No failure is a package load error any more. Failure classes: ~120
+db desc files pactest writes with only the sections it sets ("target not
+found" or a silent -Su, dbreaders unit), ~50 silent `-Su`/resolver cases
+behind those, hooks and signatures (hooksig unit).
 
 ### 4. Drop-in
 
