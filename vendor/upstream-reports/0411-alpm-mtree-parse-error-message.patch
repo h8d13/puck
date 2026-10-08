@@ -1,0 +1,12 @@
+diff -ruN a/alpm-mtree/src/error.rs b/alpm-mtree/src/error.rs
+--- a/alpm-mtree/src/error.rs
++++ b/alpm-mtree/src/error.rs
+@@ -71,7 +71,7 @@
+     PathValidation(#[from] PathValidationErrors),
+ 
+     /// A parsing error that occurred during the winnow file parsing.
+-    #[error("{msg}", msg = t!("error-parse", { "error" => .0 }))]
++    #[error("{msg}", msg = t!("error-parse", { "source" => .0 }))]
+     Parse(String),
+ 
+     /// An error occurred during the interpretation phase of the language.

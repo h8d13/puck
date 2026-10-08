@@ -4,10 +4,10 @@
 // missing or modified (content, size, mode, mtime, type swapped, link
 // retargeted, unreadable, parents missing or blocked), checked by C
 // check_pkg_fast/check_pkg_full on a real handle and by the port on the
-// same fixture: stdout, stderr and return compared. the C mtree reader's
-// entries are compared with alpm-mtree's libarchive reader on every
-// fixture, on odd inputs and on fuzzed mtree text; the real local db's
-// mtree files give counts
+// same fixture: stdout, stderr and return compared. libarchive's mtree
+// reader is compared with alpm_core::mtree on every fixture, on odd
+// inputs, cut streams and fuzzed mtree text (entries, where it stops and
+// its error text), and on the real local db's mtree files
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
@@ -285,31 +285,19 @@ fn assert_checks(
 	}
 }
 
-// archive_entry_filetype of a type
-fn filetype(k: MtreeType) -> u32 {
-	match k {
-		MtreeType::Block => 0o060000,
-		MtreeType::Char => 0o020000,
-		MtreeType::Dir => 0o040000,
-		MtreeType::Fifo => 0o010000,
-		MtreeType::File => 0o100000,
-		MtreeType::Link => 0o120000,
-	}
-}
-
 // a digest as libarchive keeps it: unset reads as zeros
 fn digest(d: Option<&[u8]>) -> Option<Vec<u8>> {
 	d.filter(|d| d.iter().any(|&b| b != 0)).map(<[u8]>::to_vec)
 }
 
-// one C entry against one alpm-mtree entry: what check.c and
+// one C entry against one port entry: what check.c and
 // build_filelist_from_mtree read
 fn entry_diff(c: &CMtreeEntry, r: &MtreeEntry) -> Vec<&'static str> {
 	let mut d = Vec::new();
 	if c.path != r.path {
 		d.push("path");
 	}
-	if c.filetype != filetype(r.kind) {
+	if c.filetype != r.kind.filetype() {
 		d.push("type");
 	}
 	if c.mode_perm != r.mode {
@@ -342,7 +330,8 @@ fn entry_diff(c: &CMtreeEntry, r: &MtreeEntry) -> Vec<&'static str> {
 // the C's entries against the port's up to the one the C stops at (the
 // first libarchive warns about, pacman's -Qkk ends there: UPSTREAM.md)
 fn entries_diff(c: &[CMtreeEntry], r: &[MtreeEntry]) -> Option<String> {
-	let r = &r[..r.iter().position(|e| e.warned).unwrap_or(r.len())];
+	let warned = r.iter().position(|e| e.warning.is_some());
+	let r = &r[..warned.unwrap_or(r.len())];
 	if c.len() != r.len() {
 		return Some(format!("count C {} rust {}", c.len(), r.len()));
 	}
@@ -404,13 +393,46 @@ fn c_read(c: &Option<difftest::CMtree>) -> Read {
 
 fn r_read(r: &Result<Vec<MtreeEntry>, MtreeError>) -> Read {
 	match r {
-		Ok(v) => match v.iter().position(|e| e.warned) {
+		Ok(v) => match v.iter().position(|e| e.warning.is_some()) {
 			Some(n) => Read::Entries(n, -1),
 			None => Read::Entries(v.len(), 1),
 		},
 		Err(MtreeError::Missing | MtreeError::Read(_)) => Read::NoMtree,
 		Err(MtreeError::Parse(_)) => Read::Entries(0, -1),
 	}
+}
+
+// archive_error_string where the walk stopped: the warning of the entry
+// it stopped at, read_mtree's error
+fn r_text(r: &Result<Vec<MtreeEntry>, MtreeError>) -> Option<Vec<u8>> {
+	match r {
+		Ok(v) => v.iter().find_map(|e| e.warning.clone()),
+		Err(MtreeError::Parse(t)) => Some(t.clone()),
+		Err(_) => None,
+	}
+}
+
+// both readers stop at the same place, with the same text, after the
+// same entries
+fn assert_same_read(
+	c: &Option<difftest::CMtree>,
+	r: &Result<Vec<MtreeEntry>, MtreeError>,
+	what: &dyn Fn() -> String,
+) {
+	assert_eq!(c_read(c), r_read(r), "{}\nC {c:?}\nrust {r:?}", what());
+	if let (Some(c), Ok(_) | Err(MtreeError::Parse(_))) = (c, r) {
+		let (ct, rt) = (c.error.as_deref().map(lossy), r_text(r));
+		let rt = rt.as_deref().map(lossy);
+		assert_eq!(ct, rt, "{}", what());
+	}
+	if let (Some(c), Ok(r)) = (c, r) {
+		let diff = entries_diff(&c.entries, r);
+		assert!(diff.is_none(), "{diff:?}\n{}", what());
+	}
+}
+
+fn lossy(b: &[u8]) -> String {
+	String::from_utf8_lossy(b).into_owned()
 }
 
 fn line(path: &str, props: &str) -> String {
@@ -433,9 +455,8 @@ fn compress(settings: &CompressionSettings, data: &[u8]) -> Vec<u8> {
 	out
 }
 
-// libarchive's mtree reader against alpm-mtree's libarchive reader on odd
-// inputs (plain and gzip'd): what the C reads, the port reads the same
-// entries in the same order
+// libarchive's mtree reader against the port's on odd inputs (plain and
+// gzip'd): the same entries in the same order, the same stop and text
 #[test]
 fn mtree_odd_inputs() {
 	let set = "#mtree\n/set type=file uid=0 gid=0 mode=644\n";
@@ -444,6 +465,7 @@ fn mtree_odd_inputs() {
 	};
 	let all = |n| Read::Entries(n, 1);
 	let warned = |n| Read::Entries(n, -1);
+	let long = |n: usize| format!("{set}./{} type=file\n", "a".repeat(n));
 	let cases: Vec<(&str, String, Read)> = vec![
 		(
 			"baseline",
@@ -463,14 +485,6 @@ fn mtree_odd_inputs() {
 		(
 			"crlf",
 			format!("{set}{}", f("./a")).replace('\n', "\r\n"),
-			all(1),
-		),
-		(
-			"no signature",
-			format!(
-				"/set type=file uid=0 gid=0 mode=644\n{}",
-				f("./a")
-			),
 			all(1),
 		),
 		(
@@ -496,11 +510,17 @@ fn mtree_odd_inputs() {
 			"duplicate",
 			format!(
 				"{set}{}./b time=1.0\n./a time=5.0 size=2 \
-			sha256digest={SHA_A}\n./\\141 type=dir\n",
+			sha256digest={SHA_A}\n./\\141 type=dir\n./\\141\\0z uid=7\n",
 				f("./a")
 			),
 			all(2),
 		),
+		(
+			"duplicate without type",
+			"#mtree\n./a type=dir\n./b uid=1\n./a uid=2\n".into(),
+			warned(1),
+		),
+		("dot-dot name", "#mtree\n/set type=dir\nusr\n..\\0/x\nz\n".into(), all(2)),
 		("escaped #", format!("{set}{}", f("./h\\#x")), all(1)),
 		(
 			"escapes",
@@ -518,9 +538,10 @@ fn mtree_odd_inputs() {
 			"numbers",
 			format!(
 				"{set}./a time=-5.3 size=12x uid=-1 gid=99999999999 \
-			mode=0100644\n./b time=99999999999999999999.5 mode=7777777\n"
+			mode=0100644\n./b time=99999999999999999999.5 mode=7777777\n\
+			./c time=-99999999999999999999 uid=0x10 link=\n"
 			),
-			all(2),
+			all(3),
 		),
 		("empty", String::new(), Read::NoMtree),
 		("short", "./a\n".into(), Read::NoMtree),
@@ -595,6 +616,16 @@ fn mtree_odd_inputs() {
 			all(1),
 		),
 		(
+			"device packs",
+			format!(
+				"{set}./a device=linux,1,2,\n./b device=freebsd,1,-65281\n\
+			./c device=bsdos,1,2,3\n./d device=netbsd,4095,1048575\n\
+			./e device=hpux,255,0xffffff\n./f device=native,4294967295,0\n\
+			./g device=solaris,0x3fff,0x3ffff\n./h device=0x77\n"
+			),
+			all(8),
+		),
+		(
 			"/unset all",
 			format!("{set}/unset all\n./a type=file uid=0 \
 			gid=0 mode=644 time=1.0 size=1 sha256digest={SHA_A}\n"),
@@ -611,9 +642,9 @@ fn mtree_odd_inputs() {
 			"relative v1 paths",
 			"#mtree\n/set type=dir uid=0 gid=0 \
 			mode=755\nusr time=1.0\nbin time=1.0\n..\nlib type=file\n\
-			./x type=file\n..\n..\nz\n"
+			./x type=file\n..\n..\nz\nd\\057e\n..\ny\n"
 				.into(),
-			all(5),
+			all(7),
 		),
 		(
 			"whitespace",
@@ -624,9 +655,10 @@ fn mtree_odd_inputs() {
 		(
 			"continuation",
 			format!(
-				"{set}./a time=1.0 \\\n size=1 sha256digest={SHA_A}\n"
+				"{set}./a time=1.0 \\\n size=1 sha256digest={SHA_A}\n\
+				./b \\\r\n uid=3\n./c\\\\\n"
 			),
-			all(1),
+			all(3),
 		),
 		(
 			"last line without newline",
@@ -641,6 +673,42 @@ fn mtree_odd_inputs() {
 				f("./a")
 			),
 			all(1),
+		),
+		// no signature: libarchive guesses from the first lines
+		(
+			"no signature",
+			format!(
+				"/set type=file uid=0 gid=0 mode=644\n{}",
+				f("./a")
+			),
+			all(1),
+		),
+		("no signature, one path", "./a type=file\n".into(), all(1)),
+		(
+			"no signature, three lines",
+			"# c\n./a type=dir\n./b \\\n type=dir\n./c type=dir\n./d foo\n"
+				.into(),
+			warned(3),
+		),
+		("no signature, unknown keyword", "./a type=file foo=1\n".into(), Read::NoMtree),
+		("no signature, text", "hello world\n".into(), Read::NoMtree),
+		("no signature, /set only", "/set type=file\n".into(), Read::NoMtree),
+		(
+			"no signature, last line",
+			"/unset all\n./a type=dir\n./b type=dir".into(),
+			all(1),
+		),
+		// NetBSD's mtree -D: the path last
+		(
+			"form D",
+			"type=dir uid=2 ./a\ntype=file ./a/b\n".into(),
+			all(2),
+		),
+		("form D after signature", "#mtree\ntype=dir ./a\n".into(), all(1)),
+		(
+			"form D mixed",
+			"type=dir ./a\n./b type=dir\n./c type=dir\n".into(),
+			Read::NoMtree,
 		),
 		// libarchive warns: the C stops before that entry
 		(
@@ -660,14 +728,25 @@ fn mtree_odd_inputs() {
 		),
 		("unknown keyword", format!("{set}./a foo=1\n"), warned(0)),
 		("no value", format!("{set}./a time=1.0 #x\n"), warned(0)),
+		("two warnings", format!("{set}./a x y=1 z\n"), warned(0)),
 		("unknown type", format!("{set}./a type=bogus\n"), warned(0)),
 		("symbolic mode", format!("{set}./a mode=u+x\n"), warned(0)),
+		("empty mode", format!("{set}./a mode=\n"), warned(0)),
 		("no type", "#mtree\n./a uid=0\n".into(), warned(0)),
 		(
 			"device format",
 			format!("{set}./a device=foo,1,2\n"),
 			warned(0),
 		),
+		("device major", format!("{set}./a device=linux,256,1\n"), warned(0)),
+		("device minor", format!("{set}./a device=sco,1,256\n"), warned(0)),
+		("device fields", format!("{set}./a device=svr4,1,2,3\n"), warned(0)),
+		("device missing", format!("{set}./a device=isc,1,,2\n"), warned(0)),
+		("device few", format!("{set}./a device=4bsd,1\n"), warned(0)),
+		("device many", format!("{set}./a device=bsdos,1,2,3,4\n"), warned(0)),
+		("device unit", format!("{set}./a device=bsdos,1,4096,1\n"), warned(0)),
+		("device native", format!("{set}./a device=native,1,4294967296\n"), warned(0)),
+		("device netbsd", format!("{set}./a device=netbsd,1,1048576\n"), warned(0)),
 		// libarchive cannot parse the file: no entries
 		(
 			"raw UTF-8 name",
@@ -687,6 +766,19 @@ fn mtree_odd_inputs() {
 		),
 		("/set alone", format!("{set}/set\n{}", f("./a")), warned(0)),
 		("/unset value", format!("{set}/unset uid=0\n"), warned(0)),
+		("line too long", long(65530), warned(0)),
+		("line just short", long(65518), all(1)),
+		// a nul: the rest of the data is one unended line
+		(
+			"nul",
+			format!("{set}{}./b\0 type=dir\n{}", f("./a"), f("./c")),
+			all(1),
+		),
+		(
+			"nul, long rest",
+			format!("{set}./a\0\n{}", "./b type=dir\n".repeat(6000)),
+			warned(0),
+		),
 	];
 	for (name, text, want) in &cases {
 		for gz in [false, true] {
@@ -697,18 +789,7 @@ fn mtree_odd_inputs() {
 			};
 			let (c, r) = read_both(&data);
 			assert_eq!(&c_read(&c), want, "{name} gz={gz} C {c:?}");
-			assert_eq!(
-				&r_read(&r),
-				want,
-				"{name} gz={gz} rust {r:?}"
-			);
-			if let (Some(c), Ok(r)) = (&c, &r) {
-				let diff = entries_diff(&c.entries, r);
-				assert!(
-					diff.is_none(),
-					"{name} gz={gz}: {diff:?}"
-				);
-			}
+			assert_same_read(&c, &r, &|| format!("{name} gz={gz}"));
 		}
 	}
 	// libarchive takes any filter, the port the ones alpm-compress knows
@@ -728,11 +809,7 @@ fn mtree_odd_inputs() {
 		let data = compress(&settings, text.as_bytes());
 		let (c, r) = read_both(&data);
 		assert_eq!(c_read(&c), Read::Entries(1, 1), "{settings:?}");
-		assert_eq!(
-			r_read(&r),
-			Read::Entries(1, 1),
-			"{settings:?} {r:?}"
-		);
+		assert_same_read(&c, &r, &|| format!("{settings:?}"));
 	}
 	// gzip members are read one after the other
 	let parts = [format!("{set}{}", f("./a")), f("./b")];
@@ -740,12 +817,12 @@ fn mtree_odd_inputs() {
 		[gzip(parts[0].as_bytes()), gzip(parts[1].as_bytes())].concat();
 	let (c, r) = read_both(&data);
 	assert_eq!(c_read(&c), Read::Entries(2, 1));
-	assert_eq!(r_read(&r), Read::Entries(2, 1), "{r:?}");
+	assert_same_read(&c, &r, &|| "gzip members".into());
 }
 
 // a compressed mtree cut short, over several of libarchive's filter
-// blocks: inside the first the C's open fails (no mtree), later its first
-// mtree_next does (libarchive's reader reads the whole file there)
+// blocks: inside the first the C's open fails (no mtree), later the
+// failed read is the end of the data (libarchive's readline)
 #[test]
 fn mtree_cuts() {
 	let mut text =
@@ -787,14 +864,8 @@ fn mtree_cuts() {
 		cuts.extend([1, 4, 8, 9, 12, 20, 64].map(|d| len - d));
 		for n in cuts {
 			let (c, r) = read_both(&data[..n]);
-			let what = format!("{settings:?} cut at {n}/{len}");
-			let c_err = c.as_ref().map(|m| &m.error);
-			let r_err = r.as_ref().err();
-			assert_eq!(
-				c_read(&c),
-				r_read(&r),
-				"{what}\nC {c_err:?}\nrust {r_err:?}"
-			);
+			let what = || format!("{settings:?} cut at {n}/{len}");
+			assert_same_read(&c, &r, &what);
 			seen.insert(format!("{:?}", c_read(&c)));
 		}
 	}
@@ -813,8 +884,11 @@ fn fuzz_path(rng: &mut Rng, seen: &[String]) -> String {
 			1 => "\\#".into(),
 			2 => "\\\\".into(),
 			3 => format!("\\{:03o}", rng.below(256)),
-			4 => pick(rng, &["\\x", "\\4", "\\0", "\\01", "\\a"])
-				.into(),
+			4 => pick(
+				rng,
+				&["\\x", "\\4", "\\0", "\\01", "\\a", "\\057"],
+			)
+			.into(),
 			5 => "#".into(),
 			6 => ".".into(),
 			_ => (rng.pick(b"abcz019-_+=") as char).to_string(),
@@ -824,7 +898,8 @@ fn fuzz_path(rng: &mut Rng, seen: &[String]) -> String {
 		(0..1 + rng.below(3)).map(|_| piece(rng)).collect()
 	};
 	match rng.below(10) {
-		0 => pick(rng, &["..", ".", "./."]).into(),
+		0 => pick(rng, &["..", ".", "./.", "..\\0/", "\\056\\056"])
+			.into(),
 		1 | 2 => seg(rng),
 		_ => {
 			let mut p = String::from(".");
@@ -844,6 +919,8 @@ fn fuzz_number(rng: &mut Rng) -> String {
 		2 => "99999999999999999999".into(),
 		3 => format!("{}x", rng.below(100)),
 		4 => String::new(),
+		5 => format!("0x{:x}", rng.below(70000)),
+		6 => format!("0{:o}", rng.below(70000)),
 		_ => rng.below(70000).to_string(),
 	}
 }
@@ -862,9 +939,34 @@ fn fuzz_hex(rng: &mut Rng, len: usize) -> String {
 	(0..n).map(|_| rng.pick(alphabet) as char).collect()
 }
 
+// a device value: raw, or a format with major, minor and maybe more
+fn fuzz_device(rng: &mut Rng) -> String {
+	if rng.below(4) == 0 {
+		return fuzz_number(rng);
+	}
+	let format = pick(
+		rng,
+		&[
+			"linux", "native", "freebsd", "netbsd", "bsdos",
+			"hpux", "solaris", "osf1", "foo", "", "Linux",
+		],
+	);
+	let mut out = String::from(format);
+	for _ in 0..rng.below(5) {
+		out.push(',');
+		match rng.below(6) {
+			0 => {}
+			1 => out += "4294967296",
+			2 => out += &rng.below(1 << 20).to_string(),
+			_ => out += &fuzz_number(rng),
+		}
+	}
+	out
+}
+
 // one keyword of a path or /set line, mostly well formed
 fn fuzz_keyword(rng: &mut Rng) -> String {
-	match rng.below(24) {
+	match rng.below(25) {
 		0..=3 => format!(
 			"type={}",
 			pick(
@@ -920,10 +1022,9 @@ fn fuzz_keyword(rng: &mut Rng) -> String {
 				"cksum=7",
 				"inode=9",
 				"tags=a,b",
-				"device=12",
-				"resdevice=linux,8,1",
-				"device=foo,1",
 				"content=x",
+				"sha512=x",
+				"rmd160=",
 			],
 		)
 		.into(),
@@ -931,6 +1032,11 @@ fn fuzz_keyword(rng: &mut Rng) -> String {
 		19 if rng.below(4) == 0 => {
 			pick(rng, &["foo=1", "foo", "=x", "TYPE=dir"]).into()
 		}
+		20 => format!(
+			"{}={}",
+			pick(rng, &["device", "resdevice"]),
+			fuzz_device(rng)
+		),
 		_ => format!("time={}.0", rng.below(5)),
 	}
 }
@@ -942,7 +1048,10 @@ fn fuzz_join(rng: &mut Rng, words: &[String]) -> String {
 		if i > 0 {
 			out += pick(
 				rng,
-				&[" ", " ", " ", "  ", "\t", " \\\n "],
+				&[
+					" ", " ", " ", "  ", "\t", " \\\n ",
+					" \\\r\n ",
+				],
 			);
 		}
 		out += w;
@@ -953,9 +1062,16 @@ fn fuzz_join(rng: &mut Rng, words: &[String]) -> String {
 // mtree text around the shapes bsdtar writes and the odd ones libarchive
 // still reads, warns about or refuses
 fn fuzz_mtree(rng: &mut Rng) -> Vec<u8> {
-	// libarchive guesses whether data without the signature is mtree
-	// (detect_form), the port takes it as such: not fuzzed
-	let mut out = String::from(pick(rng, &["#mtree\n", "#mtree v2.0\n"]));
+	// without signature libarchive guesses from the first lines
+	// (detect_form), form D puts the path last
+	let head = match rng.below(12) {
+		0 => "",
+		1 => "#x\n",
+		2 => "#mtree v2.0\n",
+		_ => "#mtree\n",
+	};
+	let mut out = String::from(head);
+	let form_d = rng.below(8) == 0;
 	if rng.below(3) != 0 {
 		out += "/set type=file uid=0 gid=0 mode=644\n";
 	}
@@ -995,21 +1111,26 @@ fn fuzz_mtree(rng: &mut Rng) -> Vec<u8> {
 					"/unset uid=0",
 					"./a\u{e9}",
 					"./a\x01",
+					"./a\0b",
 				],
 			)
 			.into(),
 			_ => {
 				let path = fuzz_path(rng, &seen);
 				seen.push(path.clone());
-				let mut w = vec![path];
-				w.extend(words(rng));
+				let mut w = words(rng);
+				if form_d {
+					w.push(path);
+				} else {
+					w.insert(0, path);
+				}
 				fuzz_join(rng, &w)
 			}
 		};
 		out += indent;
 		out += &body;
 		if rng.below(10) == 0 {
-			out += pick(rng, &[" ", "\t", "\r"]);
+			out += pick(rng, &[" ", "\t", "\r", "\\"]);
 		}
 		out.push('\n');
 	}
@@ -1020,12 +1141,12 @@ fn fuzz_mtree(rng: &mut Rng) -> Vec<u8> {
 }
 
 // fuzzed mtree text: the C's entries up to where it stops are the
-// port's, with the same reason to stop
+// port's, with the same reason to stop and text
 #[test]
 fn fuzz_mtree_reader() {
 	let mut rng = Rng::new(0x3a7e);
 	let n = (iters() / 20).max(200);
-	let (mut entries, mut warned, mut fatal) = (0, 0, 0);
+	let (mut entries, mut warned, mut fatal, mut none) = (0, 0, 0, 0);
 	for i in 0..n {
 		let text = fuzz_mtree(&mut rng);
 		let data = if rng.below(4) == 0 && !text.is_empty() {
@@ -1034,34 +1155,21 @@ fn fuzz_mtree_reader() {
 			text.clone()
 		};
 		let (c, r) = read_both(&data);
-		let what = || {
-			format!(
-				"iteration {i}\n{}",
-				String::from_utf8_lossy(&text)
-			)
-		};
-		assert_eq!(
-			c_read(&c),
-			r_read(&r),
-			"{}\nC {c:?}\nrust {r:?}",
-			what()
-		);
-		if let (Some(c), Ok(r)) = (&c, &r) {
-			let diff = entries_diff(&c.entries, r);
-			assert!(diff.is_none(), "{diff:?}\n{}", what());
-		}
+		let what = || format!("iteration {i}\n{}", lossy(&text));
+		assert_same_read(&c, &r, &what);
 		match c_read(&c) {
 			Read::Entries(k, 1) => entries += k,
 			Read::Entries(0, _) if r.is_err() => fatal += 1,
 			Read::Entries(_, _) => warned += 1,
-			Read::NoMtree => {}
+			Read::NoMtree => none += 1,
 		}
 	}
 	println!(
 		"fuzz_mtree_reader: {n} texts, {entries} entries, {warned} \
-		stopped at a warning, {fatal} refused"
+		stopped at a warning, {fatal} refused, {none} not mtree"
 	);
-	assert!(entries > n && warned * 10 > n && fatal * 50 > n);
+	assert!(entries * 2 > n && warned * 10 > n && fatal * 50 > n);
+	assert!(none * 50 > n && none * 5 < n);
 }
 
 // one packaged path: what the mtree and files list say
@@ -1570,7 +1678,7 @@ fn assert_same_mtree(fx: &Fixture, name: &str, version: &str, what: &str) {
 	assert_eq!(c.end, 1, "C stopped: {:?}\n{what}", c.error);
 	let path = fx.pkgdir(name, version).join("mtree");
 	let r = read_mtree(&bytes(&path)).unwrap_or_else(|e| {
-		panic!("alpm-mtree: {e:?}\n{what}");
+		panic!("rust: {e:?}\n{what}");
 	});
 	if let Some(d) = entries_diff(&c.entries, &r) {
 		panic!("{d}\n{what}");
@@ -1992,8 +2100,8 @@ fn check_divergences() {
 }
 
 // the mtree files of the real local db, read-only through a fixture db
-// of symlinked package dirs: entries of both readers compared, in
-// order. skipped without /var/lib/pacman/local
+// of symlinked package dirs: both readers compared, entries in order.
+// skipped without /var/lib/pacman/local
 #[test]
 fn real_local_mtrees() {
 	let real = Path::new("/var/lib/pacman/local");
@@ -2012,70 +2120,21 @@ fn real_local_mtrees() {
 		}
 	}
 	let cw = CheckWorld::open(&fx.root(), &fx.dbpath(), &[]);
-	let (mut same, mut order, mut differ, mut rejected) = (0, 0, 0, 0);
+	let (mut entries, mut stopped) = (0, 0);
 	for d in &dirs {
 		// name-pkgver-pkgrel
-		let mut parts = d.rsplitn(3, '-');
-		let (rel, ver) = (parts.next().unwrap(), parts.next().unwrap());
-		let name = parts.next().unwrap();
-		let c = cw.mtree(name.as_bytes()).expect("C: no mtree");
+		let name = d.rsplitn(3, '-').nth(2).unwrap();
+		let c = cw.mtree(name.as_bytes());
 		let path = fx.dbpath().join("local").join(d).join("mtree");
-		let r = match read_mtree(&bytes(&path)) {
-			Ok(r) => r,
-			Err(e) => {
-				rejected += 1;
-				println!("rejected {name}-{ver}-{rel}: {e:?}");
-				continue;
-			}
-		};
-		if entries_diff(&c.entries, &r).is_none() {
-			same += 1;
-			continue;
-		}
-		let mut sorted = c.entries.clone();
-		sorted.sort_by(|a, b| {
-			use std::os::unix::ffi::OsStrExt;
-			let p = |x: &[u8]| {
-				Path::new(std::ffi::OsStr::from_bytes(x))
-					.to_path_buf()
-			};
-			p(&a.path).cmp(&p(&b.path))
-		});
-		match entries_diff(&sorted, &r) {
-			None => {
-				if order == 0 {
-					let i = c
-						.entries
-						.iter()
-						.zip(&r)
-						.position(|(a, b)| {
-							a.path != b.path
-						})
-						.unwrap();
-					println!(
-						"order {name}: C {:?} rust {:?}",
-						String::from_utf8_lossy(
-							&c.entries[i].path
-						),
-						String::from_utf8_lossy(
-							&r[i].path
-						)
-					);
-				}
-				order += 1
-			}
-			Some(d) => {
-				differ += 1;
-				println!("differ {name}: {d}");
-			}
+		let r = read_mtree(&bytes(&path));
+		assert_same_read(&c, &r, &|| d.clone());
+		match c_read(&c) {
+			Read::Entries(k, 1) => entries += k,
+			_ => stopped += 1,
 		}
 	}
 	println!(
-		"{} mtree files: {same} same, {order} same after sorting, \
-		{differ} differ, {rejected} rejected by alpm-mtree",
+		"{} mtree files, {entries} entries, {stopped} stopped early",
 		dirs.len()
 	);
-	assert_eq!(same + order + differ + rejected, dirs.len());
-	// file order and entries like libarchive's
-	assert_eq!((order, differ, rejected), (0, 0, 0));
 }

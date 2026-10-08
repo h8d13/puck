@@ -9,8 +9,8 @@
 // Output. messages are the untranslated msgids, _n() picks the singular
 // for 1 like ngettext without a catalog.
 //
-// mtree entries come from alpm-mtree's libarchive reader
-// (be_local::read_mtree), in file order like the C. an entry libarchive
+// mtree entries come from libarchive's mtree reader (alpm_core::mtree
+// through be_local::read_mtree), in file order. an entry libarchive
 // warns about ends the C's walk silently (UPSTREAM.md), here it is
 // checked; data that cannot be parsed checks no entries in both.
 

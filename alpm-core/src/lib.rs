@@ -18,6 +18,7 @@ pub mod group;
 pub mod handle;
 pub mod hook;
 pub mod log;
+pub mod mtree;
 pub mod package;
 pub mod pkghash;
 pub mod regex;
