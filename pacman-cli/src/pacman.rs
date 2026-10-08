@@ -12,13 +12,12 @@
 // the operation, cleanup, the exit status.
 //
 // operations and the callbacks write into Outputs flushed to one sink
-// (the binary's std streams) where the C flushes. not ported: -D, -Sc
-// and the commit of a transaction (-S, -R, -U run up to it, --print
-// completes) report an error and fail. the prompts of a transaction
-// and of the callbacks read stdin through separate buffers. signals: std has no handler
-// API; SIGINT/SIGHUP kill the process (the C's soft handler exits
-// 128 + signal without a transaction, the same status), no SIGSEGV
-// cursor restore, no SIGWINCH (getcols is not cached anyway).
+// (the binary's std streams) where the C flushes. the prompts of the
+// operations and of the callbacks read stdin through separate buffers.
+// signals: std has no handler API; SIGINT/SIGHUP kill the process (the
+// C's soft handler exits 128 + signal without a transaction, the same
+// status), no SIGSEGV cursor restore, no SIGWINCH (getcols is not cached
+// anyway).
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -43,7 +42,7 @@ use crate::getopt::{Getopt, HasArg, LongOpt};
 use crate::package::format_date_utc;
 use crate::query::{QueryEnv, pacman_query};
 use crate::remove::pacman_remove;
-use crate::sync::{Unported, pacman_sync, sync_trans};
+use crate::sync::{Deferred, pacman_sync, sync_clean, sync_trans};
 use crate::upgrade::pacman_upgrade;
 use crate::util::{
 	Output, Term, Ui, arg_to_string, console_cursor_hide,
@@ -1582,13 +1581,6 @@ fn verbose(
 	list_display(out, Some(title), targets, 0, &config.colstr);
 }
 
-// a branch this port does not have yet: reported, status 1
-fn unported(err: &mut Vec<u8>, config: &Config, what: &str) -> i32 {
-	let msg = format!("{what} is not supported by this port yet\n");
-	pm_printf(err, config, LOG_ERROR, msg.as_bytes());
-	1
-}
-
 // the operation of config.op on handle: the exit status
 fn dispatch<R: BufRead>(
 	ui: &mut Ui<R>,
@@ -1612,12 +1604,8 @@ fn dispatch<R: BufRead>(
 			match pacman_sync(config, handle, targets, cols, ui.out)
 			{
 				Ok(ret) => ret,
-				Err(Unported::Clean) => unported(
-					&mut ui.out.stderr,
-					config,
-					"--clean",
-				),
-				Err(Unported::Transaction) => {
+				Err(Deferred::Clean) => sync_clean(ui, handle),
+				Err(Deferred::Transaction) => {
 					sync_trans(ui, handle, targets)
 				}
 			}

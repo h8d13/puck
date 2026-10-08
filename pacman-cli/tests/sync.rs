@@ -50,7 +50,7 @@ fn run(
 	h: &mut Handle,
 	set: fn(&mut Config),
 	targets: &[&str],
-) -> (Result<i32, Unported>, String, String) {
+) -> (Result<i32, Deferred>, String, String) {
 	let mut cfg = Config::new();
 	set(&mut cfg);
 	let mut out = Output::default();
@@ -70,7 +70,7 @@ fn no_repos() {
 	// -Sc comes before the check, -Sy after it
 	assert_eq!(
 		run(&mut h, |c| c.op_s_clean = 1, &[]).0,
-		Err(Unported::Clean)
+		Err(Deferred::Clean)
 	);
 	assert_eq!(run(&mut h, |c| c.op_s_sync = 1, &[]).0, Ok(1));
 	// logmask hides the message, not the result
@@ -91,10 +91,10 @@ fn dispatch() {
 		 configured for repository)\n"
 	);
 	assert!(run(&mut h, |c| c.op_s_search = 1, &[]).0.is_ok());
-	assert_eq!(run(&mut h, |_| {}, &["a"]).0, Err(Unported::Transaction));
+	assert_eq!(run(&mut h, |_| {}, &["a"]).0, Err(Deferred::Transaction));
 	assert_eq!(
 		run(&mut h, |c| c.op_s_upgrade = 1, &[]).0,
-		Err(Unported::Transaction)
+		Err(Deferred::Transaction)
 	);
 	let (r, _, e) = run(&mut h, |_| {}, &[]);
 	assert_eq!(r, Ok(1));
