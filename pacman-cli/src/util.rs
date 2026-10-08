@@ -1,5 +1,5 @@
-// port of src/pacman/util.c, the helpers that need no alpm handle,
-// config file or terminal
+// port of src/pacman/util.c, the display helpers plus pm_printf,
+// check_syncdbs and getcols
 //
 // functions that print in the C append the same bytes to `out` instead.
 // inputs are byte strings as the C would see them, cut at the first nul.
@@ -11,12 +11,124 @@
 // gettext is not ported. sizes are size_t in the C and wrap: a width of
 // -1 from wcwidth/wcswidth is added as usize::MAX, like the C conversion.
 
+use std::ffi::{c_int, c_long};
+use std::io::{self, IsTerminal};
 use std::iter::repeat_n;
+use std::os::unix::ffi::OsStrExt;
 
+use alpm_core::handle::Handle;
 use alpm_core::util::until_nul;
 use unicode_width::UnicodeWidthChar;
 
 pub use crate::conf::ColStr;
+use crate::conf::{Config, LOG_ERROR};
+
+// what the C writes to stdout and stderr
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Output {
+	pub stdout: Vec<u8>,
+	pub stderr: Vec<u8>,
+}
+
+// pm_printf(level, ...) to stderr: logmask filter, then the prefix
+pub fn pm_printf(err: &mut Vec<u8>, config: &Config, level: u16, msg: &[u8]) {
+	if config.logmask & level == 0 {
+		return;
+	}
+	let c = &config.colstr;
+	let prefix: &[&[u8]] = match level {
+		LOG_ERROR => &[c.err, b"error: ", c.nocolor],
+		_ => &[c.warn, b"warning: ", c.nocolor],
+	};
+	err.extend(prefix.concat());
+	err.extend_from_slice(msg);
+}
+
+// check_syncdbs: 1 without sync dbs when need_repos, or when check_valid
+// finds an invalid db (each one reported)
+pub fn check_syncdbs(
+	err: &mut Vec<u8>,
+	config: &Config,
+	handle: &Handle,
+	need_repos: bool,
+	check_valid: bool,
+) -> i32 {
+	let dbs = handle.syncdbs();
+	if need_repos && dbs.is_empty() {
+		let msg = b"no usable package repositories configured.\n";
+		pm_printf(err, config, LOG_ERROR, msg);
+		return 1;
+	}
+	let mut ret = 0;
+	if check_valid {
+		for db in dbs {
+			if let Err(e) = db.valid() {
+				let msg = [
+					b"database '",
+					db.name(),
+					b"' is not valid (",
+					e.strerror().as_bytes(),
+					b")\n",
+				];
+				pm_printf(
+					err,
+					config,
+					LOG_ERROR,
+					&msg.concat(),
+				);
+				ret = 1;
+			}
+		}
+	}
+	ret
+}
+
+fn is_space(c: u8) -> bool {
+	matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
+// strtol(s, &p, 10) with *p == '\0' checked: None when digits are
+// missing or trail. out of range saturates like ERANGE
+fn strtol_whole(s: &[u8]) -> Option<c_long> {
+	let start = s.iter().take_while(|&&c| is_space(c)).count();
+	let mut rest = &s[start..];
+	let neg = rest.first() == Some(&b'-');
+	if matches!(rest.first(), Some(b'+' | b'-')) {
+		rest = &rest[1..];
+	}
+	let n = rest.iter().take_while(|c| c.is_ascii_digit()).count();
+	if n == 0 || n != rest.len() {
+		return None;
+	}
+	let mut v: c_long = 0;
+	for &d in rest {
+		let d = c_long::from(d - b'0');
+		v = match neg {
+			true => v.saturating_mul(10).saturating_sub(d),
+			false => v.saturating_mul(10).saturating_add(d),
+		};
+	}
+	Some(v)
+}
+
+// getcols without the cache: COLUMNS when it is a whole number, cut to
+// int like the C; else 0 when stdout is no terminal. a terminal's width
+// needs ioctl(TIOCGWINSZ) (rustix "termios"), here the C's fallback 80
+pub fn getcols() -> u16 {
+	let env = std::env::var_os("COLUMNS");
+	let e = env.as_ref().map(|e| e.as_bytes()).unwrap_or_default();
+	let mut c: c_int = -1;
+	if !e.is_empty() {
+		c = strtol_whole(e).map_or(-1, |v| v as c_int);
+	}
+	if c < 0 && !io::stdout().is_terminal() {
+		c = 0;
+	}
+	if c < 0 {
+		c = 80;
+	}
+	c as u16
+}
 
 // alpm_sigstatus_t, alpm_sigvalidity_t and the part of alpm_sigresult_t
 // signature_display reads, until signing.c gets there

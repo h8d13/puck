@@ -3,7 +3,7 @@
 use alpm_core::handle::Handle;
 use alpm_core::util::until_nul;
 
-use crate::check::Output;
+use crate::util::Output;
 
 // pacman_deptest: targets that are neither a local package name nor
 // satisfied by one, one per line on stdout. 127 when any is missing,

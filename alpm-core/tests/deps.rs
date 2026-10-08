@@ -129,6 +129,7 @@ mod resolve {
 	use std::fs;
 	use std::path::PathBuf;
 
+	use alpm_core::callbacks::{Callbacks, LogLevel, Question};
 	use alpm_core::db::{DB_USAGE_ALL, DB_USAGE_SEARCH};
 	use alpm_core::deps::*;
 	use alpm_core::error::Errno;
@@ -204,7 +205,7 @@ mod resolve {
 		logs: Vec<(LogLevel, String)>,
 	}
 
-	impl Questions for Cb {
+	impl Callbacks for Cb {
 		fn question(&mut self, q: &mut Question<'_>) {
 			let a = self.answers.pop_front();
 			match q {
@@ -224,11 +225,10 @@ mod resolve {
 					self.asked.push(format!("select {n}"));
 					*use_index = a.unwrap_or(*use_index);
 				}
+				_ => unreachable!("deps asks two questions"),
 			}
 		}
-	}
 
-	impl Log for Cb {
 		fn log(&mut self, level: LogLevel, msg: &[u8]) {
 			let m = String::from_utf8_lossy(msg).into_owned();
 			self.logs.push((level, m));
@@ -242,7 +242,6 @@ mod resolve {
 	) -> DepsEnv<'a> {
 		DepsEnv {
 			handle: h,
-			assumeinstalled: &[],
 			nodepversion: false,
 			local: DbPkgs {
 				usage: DB_USAGE_ALL,
@@ -307,7 +306,7 @@ mod resolve {
 
 	#[test]
 	fn checkdeps_missing_and_broken() {
-		let t = Tmp::new("check");
+		let mut t = Tmp::new("check");
 		let local = hash(Vec::new());
 		let e = env(&t.1, &local, &[]);
 		let (a, b) = (pkg("a", &["b>=2"], &[]), pkg("b", &[], &[]));
@@ -329,11 +328,8 @@ mod resolve {
 		assert_eq!(dep_compute_string(&miss[0].depend), b"b");
 		// assumeinstalled satisfies
 		let assume = [dep_from_string(b"b=2")];
-		let e = DepsEnv {
-			assumeinstalled: &assume,
-			nodepversion: false,
-			..e
-		};
+		t.1.set_assumeinstalled(&assume).unwrap();
+		let e = env(&t.1, &local, &[]);
 		assert!(checkdeps(&e, &[], &[], &[&a], false, &mut ())
 			.is_empty());
 	}

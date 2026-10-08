@@ -10,7 +10,9 @@ use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{
+	DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt,
+};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
@@ -20,7 +22,10 @@ use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
 use alpm_compress::tarball::TarballReader;
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
-use crate::deps::LogLevel;
+use crate::callbacks::{Callbacks, Event, LogLevel};
+use crate::handle::Handle;
+
+pub use pacman_common::util_common::{PATH_MAX, llstat};
 
 // what a C string would see of these bytes
 pub fn until_nul(s: &[u8]) -> &[u8] {
@@ -613,7 +618,8 @@ pub fn test_checksum(
 	Some(until_nul(expected?) == computed?)
 }
 
-// strerror(errno) of an io::Error: the OS text without std's suffix
+// strerror(errno) of an io::Error: std formats "<strerror_r text> (os
+// error N)". errors without errno as std prints them
 pub fn strerror(e: &io::Error) -> Vec<u8> {
 	let s = e.to_string();
 	let Some(n) = e.raw_os_error() else {
@@ -650,29 +656,19 @@ pub const CALLER_PREFIX: &[u8] = b"ALPM";
 // (METHODOLOGY.md): no pre_exec, and it works under fakechroot
 const CHROOT: &str = "/usr/bin/chroot";
 
-// limits.h on linux
-const PATH_MAX: usize = 4096;
 const LINE_MAX: usize = 2048;
 
-// what _alpm_run_chroot reports through the handle: _alpm_log,
-// alpm_logaction and ALPM_EVENT_SCRIPTLET_INFO. messages are formatted
-// msgids (no gettext)
-pub trait ChrootCb {
-	fn log(&mut self, level: LogLevel, msg: &[u8]);
-	fn logaction(&mut self, prefix: &[u8], msg: &[u8]);
-	fn scriptlet_info(&mut self, line: &[u8]);
-}
-
-fn logv(cb: &mut impl ChrootCb, level: LogLevel, parts: &[&[u8]]) {
-	cb.log(level, &parts.concat());
+// _alpm_log through the handle's logcb, messages are formatted msgids
+fn logv(h: &mut Handle, level: LogLevel, parts: &[&[u8]]) {
+	h.callbacks().log(level, &parts.concat());
 }
 
 // _alpm_chroot_process_output: the line goes out as a C string, so a nul
-// cuts it (and its '\n')
-fn process_output(cb: &mut impl ChrootCb, line: &[u8]) {
+// cuts it (and its '\n'). alpm_logaction's result is not checked
+fn process_output(h: &mut Handle, line: &[u8]) {
 	let line = until_nul(line);
-	cb.logaction(b"ALPM-SCRIPTLET", line);
-	cb.scriptlet_info(line);
+	let _ = h.logaction(b"ALPM-SCRIPTLET", line);
+	h.callbacks().event(&Event::ScriptletInfo { line });
 }
 
 // glibc strsignal, C locale. 32 and 33 are taken by nptl, SIGRTMIN is 34
@@ -743,30 +739,30 @@ impl Output {
 		}
 	}
 
-	fn line(&mut self, cb: &mut impl ChrootCb, line: &[u8]) {
+	fn line(&mut self, h: &mut Handle, line: &[u8]) {
 		if self.chroot
 			&& self.lines == 0 && line.starts_with(b"chroot: ")
 		{
 			self.held = Some(line.to_vec());
 		} else {
-			if let Some(h) = self.held.take() {
-				process_output(cb, &h);
+			if let Some(held) = self.held.take() {
+				process_output(h, &held);
 			}
-			process_output(cb, line);
+			process_output(h, line);
 		}
 		self.lines += 1;
 	}
 
-	fn feed(&mut self, cb: &mut impl ChrootCb, data: &[u8]) {
+	fn feed(&mut self, h: &mut Handle, data: &[u8]) {
 		for &c in data {
 			self.buf.push(c);
 			if c == b'\n' {
 				let line = std::mem::take(&mut self.buf);
-				self.line(cb, &line);
+				self.line(h, &line);
 			} else if self.buf.len() == LINE_MAX - 2 {
 				let mut line = std::mem::take(&mut self.buf);
 				line.push(b'\n');
-				self.line(cb, &line);
+				self.line(h, &line);
 			}
 		}
 	}
@@ -774,20 +770,20 @@ impl Output {
 	// end of file or a read error: an unterminated tail goes out twice,
 	// once by the read and once by the C's leftover flush after the poll
 	// loop (the read does not reset ilen)
-	fn finish(&mut self, cb: &mut impl ChrootCb) {
+	fn finish(&mut self, h: &mut Handle) {
 		if !self.buf.is_empty() {
 			let mut line = std::mem::take(&mut self.buf);
 			line.push(b'\n');
-			self.line(cb, &line);
-			self.line(cb, &line);
+			self.line(h, &line);
+			self.line(h, &line);
 		}
 	}
 
 	// after the exit status: chroot(8) exits 125 when chroot() fails,
 	// 126/127 when the exec does, after one "chroot: ...: <strerror>"
 	// line. other first lines go out as they were
-	fn release(&mut self, cb: &mut impl ChrootCb, code: Option<i32>) {
-		let Some(h) = self.held.take() else {
+	fn release(&mut self, h: &mut Handle, code: Option<i32>) {
+		let Some(held) = self.held.take() else {
 			return;
 		};
 		let what: &[u8] = match code {
@@ -801,21 +797,18 @@ impl Output {
 			Some(125) => b"could not change the root directory (",
 			_ => b"call to execv failed (",
 		};
-		let err = h.strip_suffix(b"\n").and_then(|l| {
+		let err = held.strip_suffix(b"\n").and_then(|l| {
 			let i = l.windows(2).rposition(|w| w == b": ")?;
 			Some(&l[i + 2..])
 		});
 		match err {
 			Some(e) if self.lines == 1
-				&& !what.is_empty() && h
+				&& !what.is_empty() && held
 				.starts_with(what) =>
 			{
-				process_output(
-					cb,
-					&[c_text, e, b")\n"].concat(),
-				)
+				process_output(h, &[c_text, e, b")\n"].concat())
 			}
-			_ => process_output(cb, &h),
+			_ => process_output(h, &held),
 		}
 	}
 }
@@ -872,17 +865,17 @@ fn command(root: &[u8], cmd: &[u8], argv: &[&[u8]]) -> Command {
 
 // the C parent's poll loop on the child's output, until end of file or
 // a read error
-fn read_output(cb: &mut impl ChrootCb, mut from: UnixStream, out: &mut Output) {
+fn read_output(h: &mut Handle, mut from: UnixStream, out: &mut Output) {
 	let mut buf = [0; LINE_MAX];
 	loop {
 		match from.read(&mut buf) {
 			Ok(0) => break,
-			Ok(n) => out.feed(cb, &buf[..n]),
+			Ok(n) => out.feed(h, &buf[..n]),
 			Err(e) if e.kind() == ErrorKind::Interrupted => {}
 			Err(e) => {
-				out.finish(cb);
+				out.finish(h);
 				logv(
-					cb,
+					h,
 					LogLevel::Error,
 					&[
 						b"unable to read from pipe (",
@@ -894,7 +887,7 @@ fn read_output(cb: &mut impl ChrootCb, mut from: UnixStream, out: &mut Output) {
 			}
 		}
 	}
-	out.finish(cb);
+	out.finish(h);
 }
 
 // non-blocking writes of data until the socket is full, back to blocking
@@ -916,14 +909,15 @@ fn prefill<'a>(to: &mut UnixStream, data: &'a [u8]) -> io::Result<&'a [u8]> {
 
 // the exit status as the C parent reads it from waitpid
 fn report_status(
-	cb: &mut impl ChrootCb,
+	h: &mut Handle,
 	code: Option<i32>,
 	signal: Option<i32>,
 ) -> bool {
 	if let Some(code) = code {
-		cb.log(LogLevel::Debug, b"call to waitpid succeeded\n");
+		h.callbacks()
+			.log(LogLevel::Debug, b"call to waitpid succeeded\n");
 		if code != 0 {
-			cb.log(
+			h.callbacks().log(
 				LogLevel::Error,
 				b"command failed to execute correctly\n",
 			);
@@ -936,30 +930,31 @@ fn report_status(
 	};
 	let msg = format!("command terminated by signal {sig}: ");
 	logv(
-		cb,
+		h,
 		LogLevel::Error,
 		&[msg.as_bytes(), &strsignal(sig), b"\n"],
 	);
 	false
 }
 
-// _alpm_run_chroot: cmd with argv under root (with its trailing '/'),
-// stdin fed from the bytes the C's stdin_cb would hand out in turn.
+// _alpm_run_chroot: cmd with argv under handle->root (with its trailing
+// '/'), stdin fed from the bytes the C's stdin_cb would hand out in turn.
 // every output line goes through process_output. true when the command
 // exited 0 (C 0). root that cannot be entered logs and counts as success
 // like the C. cmd None is the C's NULL (an empty hook Exec): its execv
 // fails with EFAULT
 pub fn run_chroot(
-	root: &[u8],
+	h: &mut Handle,
 	cmd: Option<&[u8]>,
 	argv: &[&[u8]],
 	stdin: Option<&[u8]>,
-	cb: &mut impl ChrootCb,
 ) -> bool {
-	let root = until_nul(root);
+	// the callbacks borrow the handle mutably
+	let root = h.root().to_vec();
+	let root = &root[..];
 	if let Err(e) = can_chdir(root) {
 		logv(
-			cb,
+			h,
 			LogLevel::Error,
 			&[
 				b"could not change directory to ",
@@ -973,17 +968,17 @@ pub fn run_chroot(
 	}
 	let shown = cmd.map_or(&b"(null)"[..], until_nul);
 	logv(
-		cb,
+		h,
 		LogLevel::Debug,
 		&[b"executing \"", shown, b"\" under chroot \"", root, b"\"\n"],
 	);
 	let Some(cmd) = cmd else {
 		let e = errno_text(rustix::io::Errno::FAULT);
 		process_output(
-			cb,
+			h,
 			&[b"call to execv failed (", &e[..], b")\n"].concat(),
 		);
-		return report_status(cb, Some(1), None);
+		return report_status(h, Some(1), None);
 	};
 
 	let pipes = UnixStream::pair().and_then(|out| {
@@ -995,7 +990,7 @@ pub fn run_chroot(
 		Ok(p) => p,
 		Err(e) => {
 			logv(
-				cb,
+				h,
 				LogLevel::Error,
 				&[
 					b"could not create pipe (",
@@ -1013,7 +1008,7 @@ pub fn run_chroot(
 	let rest = match stdin.map(|data| prefill(&mut to, data)) {
 		Some(Err(e)) => {
 			logv(
-				cb,
+				h,
 				LogLevel::Error,
 				&[
 					b"unable to write to pipe (",
@@ -1040,15 +1035,15 @@ pub fn run_chroot(
 		Err(e) if root == b"/" => {
 			let e = strerror(&e);
 			process_output(
-				cb,
+				h,
 				&[b"call to execv failed (", &e[..], b")\n"]
 					.concat(),
 			);
-			return report_status(cb, Some(1), None);
+			return report_status(h, Some(1), None);
 		}
 		Err(e) => {
 			logv(
-				cb,
+				h,
 				LogLevel::Error,
 				&[
 					b"could not fork a new process (",
@@ -1066,12 +1061,12 @@ pub fn run_chroot(
 			let mut to = to;
 			rest.map_or(Ok(()), |data| to.write_all(data))
 		});
-		read_output(cb, from, &mut out);
+		read_output(h, from, &mut out);
 		writer.join().expect("stdin writer panicked")
 	});
 	if let Err(e) = write_err {
 		logv(
-			cb,
+			h,
 			LogLevel::Error,
 			&[b"unable to write to pipe (", &strerror(&e), b")\n"],
 		);
@@ -1083,38 +1078,33 @@ pub fn run_chroot(
 				Err(e) if e.kind()
 					== ErrorKind::Interrupted => {}
 				Err(e) => {
-					logv(cb, LogLevel::Error, &[
+					logv(h, LogLevel::Error, &[
 					b"call to waitpid failed (",
 					&strerror(&e),
 					b")\n",
 				]);
-					out.release(cb, None);
+					out.release(h, None);
 					return false;
 				}
 				Ok(st) => break st,
 			}
 		};
-	out.release(cb, status.code());
-	report_status(cb, status.code(), status.signal())
+	out.release(h, status.code());
+	report_status(h, status.code(), status.signal())
 }
 
 // _alpm_ldconfig: LDCONFIG under root when root has etc/ld.so.conf and
 // an executable root + LDCONFIG (the C's "%s%s" keeps the double '/').
 // true when not run (C 0). argv[0] is "ldconfig" in the C, chroot(8)
 // passes LDCONFIG
-pub fn ldconfig(root: &[u8], cb: &mut impl ChrootCb) -> bool {
-	cb.log(LogLevel::Debug, b"running ldconfig\n");
-	let conf = join_path(root, b"etc/ld.so.conf");
+pub fn ldconfig(h: &mut Handle) -> bool {
+	h.callbacks().log(LogLevel::Debug, b"running ldconfig\n");
+	let conf = join_path(h.root(), b"etc/ld.so.conf");
+	let exe = join_path(h.root(), LDCONFIG);
 	if access(&conf, Access::EXISTS).is_ok()
-		&& access(&join_path(root, LDCONFIG), Access::EXEC_OK).is_ok()
+		&& access(&exe, Access::EXEC_OK).is_ok()
 	{
-		return run_chroot(
-			root,
-			Some(LDCONFIG),
-			&[b"ldconfig"],
-			None,
-			cb,
-		);
+		return run_chroot(h, Some(LDCONFIG), &[b"ldconfig"], None);
 	}
 	true
 }
@@ -1126,13 +1116,13 @@ pub fn ldconfig(root: &[u8], cb: &mut impl ChrootCb) -> bool {
 // on success (C 0); no matching entry is a success. libarchive's
 // open/extract error texts are the port's
 pub fn unpack_single(
+	h: &mut Handle,
 	archive: &[u8],
 	prefix: &[u8],
 	filename: &[u8],
-	cb: &mut impl ChrootCb,
 ) -> bool {
 	let (archive, prefix) = (until_nul(archive), until_nul(prefix));
-	logv(cb, LogLevel::Debug, &[b"opening archive ", archive, b"\n"]);
+	logv(h, LogLevel::Debug, &[b"opening archive ", archive, b"\n"]);
 	let reader = File::open(c_path(archive)).and_then(|mut f| {
 		let mut magic =
 			Vec::with_capacity(DecompressionSettings::MAGIC_LEN);
@@ -1146,7 +1136,7 @@ pub fn unpack_single(
 		Ok(d) => TarballReader::new(d),
 		Err(e) => {
 			logv(
-				cb,
+				h,
 				LogLevel::Error,
 				&[
 					b"could not open file ",
@@ -1161,7 +1151,7 @@ pub fn unpack_single(
 	};
 	if let Err(e) = can_chdir(prefix) {
 		logv(
-			cb,
+			h,
 			LogLevel::Error,
 			&[
 				b"could not change directory to ",
@@ -1188,7 +1178,7 @@ pub fn unpack_single(
 		if head != filename {
 			continue;
 		}
-		logv(cb, LogLevel::Debug, &[b"extracting: ", &name, b"\n"]);
+		logv(h, LogLevel::Debug, &[b"extracting: ", &name, b"\n"]);
 		let dest = [prefix, b"/", &name].concat();
 		let done = if entry.is_dir() {
 			DirBuilder::new().mode(0o755).create(c_path(&dest))
@@ -1209,7 +1199,7 @@ pub fn unpack_single(
 		};
 		if let Err(e) = done {
 			logv(
-				cb,
+				h,
 				LogLevel::Error,
 				&[
 					b"could not extract ",
@@ -1224,4 +1214,112 @@ pub fn unpack_single(
 		break;
 	}
 	true
+}
+
+// _alpm_filecache_find: "<cachedir><filename>" of the first cachedir
+// holding it as a regular file
+pub fn filecache_find(
+	cachedirs: &[Vec<u8>],
+	filename: &[u8],
+	cb: &mut dyn Callbacks,
+) -> Option<Vec<u8>> {
+	for dir in cachedirs {
+		let mut p = [dir, until_nul(filename)].concat();
+		// snprintf into char[PATH_MAX]
+		p.truncate(PATH_MAX - 1);
+		match fs::metadata(c_path(&p)) {
+			Ok(md) if md.is_file() => return Some(p),
+			Ok(md) => {
+				let m = format!(": mode={}\n", md.mode());
+				let m = [
+					b"cached pkg '",
+					&p[..],
+					b"' is not a regular file",
+					m.as_bytes(),
+				];
+				cb.log(LogLevel::Warning, &m.concat());
+			}
+			Err(e) if e.raw_os_error() != Some(2) => {
+				let m = [
+					b"could not open '",
+					&p[..],
+					b"'\n: ",
+					&strerror(&e),
+				];
+				cb.log(LogLevel::Warning, &m.concat());
+			}
+			Err(_) => {}
+		}
+	}
+	None
+}
+
+// _alpm_filecache_exists
+pub fn filecache_exists(
+	cachedirs: &[Vec<u8>],
+	filename: &[u8],
+	cb: &mut dyn Callbacks,
+) -> bool {
+	filecache_find(cachedirs, filename, cb).is_some()
+}
+
+// _alpm_filecache_setup: the first cachedir that exists (or can be made)
+// and is a writable directory with a write bit. without one, "/tmp/" is
+// added to the cachedirs and used. the C takes TMPDIR instead only when
+// stat(TMPDIR) fails and the last cachedir it stat'ed was a directory
+pub fn filecache_setup(
+	cachedirs: &mut Vec<Vec<u8>>,
+	cb: &mut dyn Callbacks,
+) -> Vec<u8> {
+	let mut last_dir = None;
+	for dir in cachedirs.iter() {
+		let md = match fs::metadata(c_path(dir)) {
+			Err(_) => {
+				let m = [
+					b"no ",
+					&dir[..],
+					b" cache exists, creating...\n",
+				];
+				cb.log(LogLevel::Warning, &m.concat());
+				if makepath(dir).is_ok() {
+					return dir.clone();
+				}
+				continue;
+			}
+			Ok(md) => md,
+		};
+		last_dir = Some(md.is_dir());
+		let writable = rustix::fs::accessat(
+			rustix::fs::CWD,
+			c_path(dir),
+			rustix::fs::Access::WRITE_OK,
+			rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+		)
+		.is_ok();
+		if md.is_dir() && writable && md.mode() & 0o222 != 0 {
+			return dir.clone();
+		}
+	}
+	let tmpdir = std::env::var_os("TMPDIR").map(|t| t.as_bytes().to_vec());
+	let tmpdir = match tmpdir {
+		Some(t) if fs::metadata(c_path(&t)).is_err()
+			&& last_dir == Some(true) =>
+		{
+			t
+		}
+		_ => b"/tmp".to_vec(),
+	};
+	// alpm_option_add_cachedir's canonicalize_path
+	let mut dir = tmpdir;
+	if dir.last() != Some(&b'/') {
+		dir.push(b'/');
+	}
+	cachedirs.push(dir.clone());
+	let m = [
+		b"couldn't find or create package cache, using ",
+		&dir[..],
+		b" instead\n",
+	];
+	cb.log(LogLevel::Warning, &m.concat());
+	dir
 }

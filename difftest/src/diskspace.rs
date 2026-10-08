@@ -51,9 +51,6 @@ unsafe extern "C" {
 // (which call it) included
 static MNTENT: Mutex<()> = Mutex::new(());
 
-// ALPM_PROGRESS_DISKSPACE_START
-pub const PROGRESS_DISKSPACE: c_int = 6;
-
 // a logcb or progresscb call, in call order
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CbEvent {

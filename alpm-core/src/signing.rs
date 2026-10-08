@@ -15,7 +15,7 @@
 // no operation here starts, and are left out.
 //
 // handle->gpgdir and handle->known_keys live in Keyring, the question and
-// the error/warning log lines go through SigCallbacks. pm_errno is Err as
+// the error/warning log lines go through Callbacks. pm_errno is Err as
 // in the other modules. debug logging is not modelled.
 // alpm_siglist_cleanup is dropping the Vec.
 
@@ -29,10 +29,11 @@ use std::process::{Command, Stdio};
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
 use crate::base64;
+use crate::callbacks::{Callbacks, LogLevel, Question};
 use crate::db::Db;
 use crate::error::Errno;
 use crate::package::Package;
-use crate::util::until_nul;
+use crate::util::{strerror, until_nul};
 
 pub use crate::db::{SIG_DATABASE, SIG_USE_DEFAULT};
 
@@ -108,38 +109,6 @@ pub struct SigResult {
 	pub key: PgpKey,
 	pub status: SigStatus,
 	pub validity: SigValidity,
-}
-
-// alpm_loglevel_t values of the levels reported
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum LogLevel {
-	Error = 1,
-	Warning = 1 << 1,
-}
-
-// the handle callbacks signing.c reaches
-pub trait SigCallbacks {
-	// ALPM_QUESTION_IMPORT_KEY, true imports. the C answers no when
-	// there is no question callback
-	fn import_key(
-		&mut self,
-		uid: Option<&[u8]>,
-		fingerprint: &[u8],
-	) -> bool;
-	// _alpm_log at error and warning level, the formatted msgid
-	fn log(&mut self, level: LogLevel, msg: &[u8]);
-}
-
-// no question callback, no log callback
-pub struct NoCallbacks;
-
-impl SigCallbacks for NoCallbacks {
-	fn import_key(&mut self, _: Option<&[u8]>, _: &[u8]) -> bool {
-		false
-	}
-
-	fn log(&mut self, _: LogLevel, _: &[u8]) {}
 }
 
 // handle->gpgdir, handle->known_keys and the gpg binary gpgme would run
@@ -234,15 +203,9 @@ enum ListMode {
 	Extern,
 }
 
-// gpg_error_from_errno's text for a failed read: io::Error's without
-// the " (os error N)" std adds
+// gpg_error_from_errno's text for a failed read
 fn read_error(e: std::io::Error) -> GpgError {
-	let text = e.to_string();
-	let text = match text.rfind(" (os error ") {
-		Some(i) => &text[..i],
-		None => &text[..],
-	};
-	GpgError::Read(text.as_bytes().to_vec())
+	GpgError::Read(strerror(&e))
 }
 
 // the first read gpgme's data callback makes on the file
@@ -873,7 +836,7 @@ impl Keyring {
 
 // init_gpgme: the keyring warning, once. the C also leaves pm_errno
 // NOT_A_FILE behind, which no caller reads on success
-fn init_gpgme(kr: &mut Keyring, cb: &mut dyn SigCallbacks) {
+fn init_gpgme(kr: &mut Keyring, cb: &mut dyn Callbacks) {
 	if kr.init {
 		return;
 	}
@@ -889,7 +852,7 @@ fn init_gpgme(kr: &mut Keyring, cb: &mut dyn SigCallbacks) {
 	kr.init = true;
 }
 
-fn gpgme_error(cb: &mut dyn SigCallbacks, e: GpgError) -> Errno {
+fn gpgme_error(cb: &mut dyn Callbacks, e: GpgError) -> Errno {
 	let msg = [b"GPGME error: ", e.text(), b"\n"].concat();
 	cb.log(LogLevel::Error, &msg);
 	Errno::Gpgme
@@ -899,7 +862,7 @@ fn gpgme_error(cb: &mut dyn SigCallbacks, e: GpgError) -> Errno {
 // Some(false) unknown or expired, None when the lookup failed (C -1)
 pub fn key_in_keychain(
 	kr: &mut Keyring,
-	cb: &mut dyn SigCallbacks,
+	cb: &mut dyn Callbacks,
 	fpr: &[u8],
 ) -> Option<bool> {
 	let fpr = until_nul(fpr);
@@ -922,7 +885,7 @@ pub fn key_in_keychain(
 // keychain (a failed lookup counts as there, the C tests nonzero)
 fn key_import_wkd(
 	kr: &mut Keyring,
-	cb: &mut dyn SigCallbacks,
+	cb: &mut dyn Callbacks,
 	email: &[u8],
 	fpr: &[u8],
 ) -> bool {
@@ -950,7 +913,7 @@ fn key_search_keyserver(
 }
 
 // _alpm_access(gpgdir, "pubring.gpg", W_OK), logged when refused
-fn writable(kr: &Keyring, cb: &mut dyn SigCallbacks) -> bool {
+fn writable(kr: &Keyring, cb: &mut dyn Callbacks) -> bool {
 	if access(&kr.file(b"pubring.gpg"), Access::WRITE_OK) {
 		return true;
 	}
@@ -961,7 +924,7 @@ fn writable(kr: &Keyring, cb: &mut dyn SigCallbacks) -> bool {
 // key_import_keyserver: exactly one key considered and imported
 fn key_import_keyserver(
 	kr: &Keyring,
-	cb: &mut dyn SigCallbacks,
+	cb: &mut dyn Callbacks,
 	key: &Key,
 ) -> bool {
 	writable(kr, cb) && matches!(kr.recv_key(key), Ok((1, Some(true))))
@@ -975,17 +938,32 @@ fn email_from_uid(uid: Option<&[u8]>) -> Option<&[u8]> {
 	Some(&uid[start + 1..start + end])
 }
 
+// ALPM_QUESTION_IMPORT_KEY, true imports. no answer is no
+fn ask_import(
+	cb: &mut dyn Callbacks,
+	uid: Option<&[u8]>,
+	fingerprint: &[u8],
+) -> bool {
+	let mut q = Question::ImportKey {
+		import: 0,
+		uid,
+		fingerprint,
+	};
+	cb.question(&mut q);
+	q.answer() != 0
+}
+
 // _alpm_key_import: asked first, then WKD by the uid's address, then the
 // keyservers. true is the C's 0
 pub fn key_import(
 	kr: &mut Keyring,
-	cb: &mut dyn SigCallbacks,
+	cb: &mut dyn Callbacks,
 	uid: Option<&[u8]>,
 	fpr: &[u8],
 ) -> bool {
 	let uid = uid.map(until_nul);
 	let fpr = until_nul(fpr);
-	if !writable(kr, cb) || !cb.import_key(uid, fpr) {
+	if !writable(kr, cb) || !ask_import(cb, uid, fpr) {
 		return false;
 	}
 	if let Some(email) = email_from_uid(uid)
@@ -1033,7 +1011,7 @@ fn result_key(key: &Key) -> (PgpKey, bool) {
 // Gpgme)
 pub fn gpgme_checksig(
 	kr: &mut Keyring,
-	cb: &mut dyn SigCallbacks,
+	cb: &mut dyn Callbacks,
 	path: Option<&[u8]>,
 	base64_sig: Option<&[u8]>,
 ) -> Result<Vec<SigResult>, Errno> {
@@ -1106,7 +1084,7 @@ pub fn gpgme_checksig(
 // results come back either way (sigdata)
 pub fn check_pgp_helper(
 	kr: &mut Keyring,
-	cb: &mut dyn SigCallbacks,
+	cb: &mut dyn Callbacks,
 	path: Option<&[u8]>,
 	base64_sig: Option<&[u8]>,
 	optional: bool,
@@ -1138,7 +1116,7 @@ pub fn check_pgp_helper(
 // the validation should be retried
 pub fn process_siglist(
 	kr: &mut Keyring,
-	cb: &mut dyn SigCallbacks,
+	cb: &mut dyn Callbacks,
 	identifier: &[u8],
 	siglist: &[SigResult],
 	optional: bool,
@@ -1213,7 +1191,7 @@ pub fn process_siglist(
 // alpm_pkg_check_pgp_signature: pkg->filename and pkg->base64_sig
 pub fn pkg_check_pgp_signature(
 	kr: &mut Keyring,
-	cb: &mut dyn SigCallbacks,
+	cb: &mut dyn Callbacks,
 	pkg: &Package,
 ) -> Result<Vec<SigResult>, Errno> {
 	let path = pkg.filename.as_deref();
@@ -1223,7 +1201,7 @@ pub fn pkg_check_pgp_signature(
 // alpm_db_check_pgp_signature: "<db path>.sig"
 pub fn db_check_pgp_signature(
 	kr: &mut Keyring,
-	cb: &mut dyn SigCallbacks,
+	cb: &mut dyn Callbacks,
 	db: &Db,
 ) -> Result<Vec<SigResult>, Errno> {
 	gpgme_checksig(kr, cb, Some(db.path()), None)
@@ -1397,7 +1375,7 @@ impl Packets<'_> {
 // alpm_extract_keyid: issuer key ids of the signature packets in sig,
 // appended to keys (those found before an error stay, like the C list)
 pub fn extract_keyid(
-	cb: &mut dyn SigCallbacks,
+	cb: &mut dyn Callbacks,
 	identifier: &[u8],
 	sig: &[u8],
 	keys: &mut Vec<Vec<u8>>,

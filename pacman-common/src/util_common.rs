@@ -10,6 +10,9 @@ use std::fs::{self, Metadata};
 use std::io::{self, BufRead, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
 
+// limits.h on linux, the buffer size of paths and lines in the C
+pub const PATH_MAX: usize = 4096;
+
 // what a C string would see of these bytes
 pub(crate) fn until_nul(s: &[u8]) -> &[u8] {
 	match s.iter().position(|&c| c == 0) {

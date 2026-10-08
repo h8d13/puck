@@ -27,6 +27,7 @@ use alpm_repo_db::desc::{Section, parse_libalpm};
 use alpm_repo_db::files::RepoFiles;
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
+use crate::callbacks::{Callbacks, LogLevel};
 use crate::deps::{Depend, dep_from_string};
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
@@ -37,14 +38,14 @@ use crate::package::{
 use crate::pkghash::PkgHash;
 use crate::signing::{
 	Keyring, SIG_DATABASE, SIG_DATABASE_MARGINAL_OK, SIG_DATABASE_OPTIONAL,
-	SIG_DATABASE_UNKNOWN_OK, SigCallbacks, check_pgp_helper,
-	process_siglist,
+	SIG_DATABASE_UNKNOWN_OK, check_pgp_helper, process_siglist,
 };
-use crate::util::{fnmatch, hash_sdbm, splitname, until_nul};
+use crate::util::{
+	PATH_MAX, fnmatch, hash_sdbm, splitname, strerror, until_nul,
+};
 
 // limits.h on linux
 const NAME_MAX: usize = 255;
-const PATH_MAX: usize = 4096;
 
 // why an entry made the db invalid
 #[derive(Debug)]
@@ -112,7 +113,7 @@ pub fn db_path(dbpath: &[u8], treename: &[u8], dbext: &[u8]) -> Vec<u8> {
 // Err(DbInvalidSig) marks the db invalid
 pub fn sync_db_validate(
 	kr: &mut Keyring,
-	cb: &mut dyn SigCallbacks,
+	cb: &mut dyn Callbacks,
 	path: &[u8],
 	treename: &[u8],
 	siglevel: c_int,
@@ -120,9 +121,15 @@ pub fn sync_db_validate(
 	let path = until_nul(path);
 	// _alpm_access(R_OK) failing with ENOENT, a dangling link exists
 	let nofollow = AtFlags::SYMLINK_NOFOLLOW;
-	let access = accessat(CWD, path, Access::READ_OK, nofollow);
-	if access == Err(rustix::io::Errno::NOENT) {
-		return Ok(false);
+	if let Err(e) = accessat(CWD, path, Access::READ_OK, nofollow) {
+		let why = strerror(&io::Error::from_raw_os_error(
+			e.raw_os_error(),
+		));
+		let msg = [b"\"", path, b"\" is not readable: ", &why, b"\n"];
+		cb.log(LogLevel::Debug, &msg.concat());
+		if e == rustix::io::Errno::NOENT {
+			return Ok(false);
+		}
 	}
 	if siglevel & SIG_DATABASE == 0 {
 		return Ok(true);

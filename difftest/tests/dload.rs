@@ -13,9 +13,8 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use alpm_core::dload::{
-	DownloadEvent, DownloadState, Downloader, LogLevel, Payload, Settings,
-};
+use alpm_core::callbacks::{DownloadEvent, LogLevel};
+use alpm_core::dload::{DownloadState, Downloader, Payload, Settings};
 use difftest::{
 	CDload, Fetcher, Record, Recorder, Reply, Req, Rng, Server, TempRoot,
 	closed_port, iters, payload_layout_ok,
@@ -1550,13 +1549,13 @@ fn filecache_and_dirs() {
 		let r = {
 			let mut rec = Recorder::default();
 			let mut all = rdirs.clone();
-			let found = alpm_core::dload::filecache_find(
+			let found = alpm_core::util::filecache_find(
 				&all,
 				b"pkg.tar.zst",
 				&mut rec,
 			);
 			let frec = std::mem::take(&mut rec.0);
-			let setup = alpm_core::dload::filecache_setup(
+			let setup = alpm_core::util::filecache_setup(
 				&mut all, &mut rec,
 			);
 			let srec = std::mem::take(&mut rec.0);

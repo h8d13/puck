@@ -194,13 +194,11 @@ fn validate_and_changelog() {
 #[test]
 fn signature_levels_without_sig() {
 	use alpm_core::be_package::{pkg_load_level, pkg_validate};
-	use alpm_core::signing::{
-		Keyring, NoCallbacks, SIG_PACKAGE, SIG_PACKAGE_OPTIONAL,
-	};
+	use alpm_core::signing::{Keyring, SIG_PACKAGE, SIG_PACKAGE_OPTIONAL};
 	let pkg = Pkg::new("unsigned", &[(b".PKGINFO", b'0', PKGINFO)]);
 	let mut kr = Keyring::new(b"/nonexistent/");
 	kr.set_gpg("/nonexistent/gpg");
-	let cb = &mut NoCallbacks;
+	let cb = &mut ();
 	let r = pkg_validate(&mut kr, cb, pkg.path(), None, SIG_PACKAGE);
 	assert!(matches!(r, Err(Error::MissingSig)));
 	assert_eq!(r.unwrap_err().errno(), Errno::PkgMissingSig);

@@ -9,11 +9,10 @@ use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use alpm_core::dload::{
-	Callbacks, DownloadEvent, DownloadState, LogLevel, Payload, Sandbox,
-	Settings,
-};
+use alpm_core::callbacks::{Callbacks, DownloadEvent, LogLevel};
+use alpm_core::dload::{DownloadState, Payload, Sandbox, Settings};
 use alpm_core::error::Errno;
+use alpm_core::handle::Handle;
 use alpm_core::sandbox::{
 	CB_DOWNLOAD, CB_LOG, CallbackWriter, ChildOps, HelperSandbox, Host,
 	Request, Setup, System, process_callbacks, run_helper, setup_child,
@@ -78,6 +77,24 @@ fn use_sandbox_table() {
 	assert!(!use_sandbox(0, u, true, true));
 	assert!(!use_sandbox(1000, u, false, false));
 	assert!(!use_sandbox(0, None, false, false));
+}
+
+#[test]
+fn for_handle_reads_user_and_flags() {
+	let t = Tmp::new("handle");
+	fs::create_dir(t.p("root")).unwrap();
+	fs::create_dir(t.p("db")).unwrap();
+	let path = |rel| t.p(rel).into_os_string().into_encoded_bytes();
+	let mut h = Handle::initialize(&path("root"), &path("db")).unwrap();
+	assert!(HelperSandbox::for_handle(&h, 0).is_none());
+	assert!(h.set_sandboxuser(Some(b"root")));
+	h.set_disable_sandbox_syscalls(1);
+	let sb = HelperSandbox::for_handle(&h, 0).unwrap();
+	assert_eq!(sb.user, b"root");
+	assert!(!sb.disable_filesystem && sb.disable_syscalls);
+	assert!(HelperSandbox::for_handle(&h, 1000).is_none());
+	h.set_disable_sandbox(1);
+	assert!(HelperSandbox::for_handle(&h, 0).is_none());
 }
 
 const EVENTS: [DownloadEvent; 6] = [

@@ -3,7 +3,7 @@
 use libseccomp::{ScmpAction, ScmpFilterContext, ScmpSyscall};
 use rustix::io::Errno;
 
-use crate::dload::{Callbacks, LogLevel};
+use crate::callbacks::{Callbacks, LogLevel};
 
 // denied_syscalls, in the C's order. chroot and pivot_root are listed
 // twice there too: duplicate rules succeed, so both count in the log

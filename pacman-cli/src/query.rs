@@ -34,19 +34,16 @@ use alpm_core::package::{
 	compute_requiredby, pkg_compare_versions, pkg_should_ignore,
 };
 use alpm_core::util::{compute_md5sum, fnmatch, until_nul};
-use pacman_common::util_common::{mbasename, mdirname};
+use pacman_common::util_common::{PATH_MAX, mbasename, mdirname};
 
-use crate::check::{CheckEnv, Output, check_pkg_fast, check_pkg_full};
+use crate::check::{CheckEnv, check_pkg_fast, check_pkg_full};
 use crate::conf::{Config, LOG_ERROR, LOG_WARNING, cat};
 use crate::package::{
 	FileProbe, PkgEnv, dump_pkg_changelog, dump_pkg_files, dump_pkg_full,
 	dump_pkg_search,
 };
 use crate::pacman::{PKG_LOCALITY_FOREIGN, PKG_LOCALITY_NATIVE};
-use crate::util::SigResult;
-
-// limits.h, the rpath buffer of query_fileowner
-const PATH_MAX: usize = 4096;
+use crate::util::{Output, SigResult, check_syncdbs, pm_printf};
 const LOCAL_PREFIX: &[u8] = b"local/";
 // fcntl.h on linux: the access(R_OK) probes open without blocking on a
 // fifo
@@ -59,20 +56,6 @@ pub struct QueryEnv {
 	pub cols: u16,
 	// getenv("PATH"), None when unset
 	pub path: Option<Vec<u8>>,
-}
-
-// pm_printf(level, ...) to stderr: logmask filter, then the prefix
-fn pm_printf(err: &mut Vec<u8>, c: &Config, level: u16, msg: &[u8]) {
-	if c.logmask & level == 0 {
-		return;
-	}
-	let cs = &c.colstr;
-	let prefix: &[&[u8]] = match level {
-		LOG_ERROR => &[cs.err, b"error: ", cs.nocolor],
-		_ => &[cs.warn, b"warning: ", cs.nocolor],
-	};
-	err.extend(prefix.concat());
-	err.extend_from_slice(msg);
 }
 
 fn os(path: &[u8]) -> &Path {
@@ -263,32 +246,6 @@ fn local_at(handle: &mut Handle, i: usize, reqs: &[c_int]) -> Option<Package> {
 		pkg = db.load_pkg_at(&dbext, i, req);
 	}
 	pkg.cloned()
-}
-
-// check_syncdbs(1, 1) of util.c: sync dbs registered and all valid
-fn check_syncdbs(c: &Config, handle: &Handle, err: &mut Vec<u8>) -> i32 {
-	let dbs = handle.syncdbs();
-	if dbs.is_empty() {
-		let msg = b"no usable package repositories configured.\n";
-		pm_printf(err, c, LOG_ERROR, msg);
-		return 1;
-	}
-	let mut ret = 0;
-	for db in dbs {
-		if let Err(e) = db.valid() {
-			let why = e.strerror().as_bytes();
-			let msg = cat(&[
-				b"database '",
-				db.name(),
-				b"' is not valid (",
-				why,
-				b")\n",
-			]);
-			pm_printf(err, c, LOG_ERROR, &msg);
-			ret = 1;
-		}
-	}
-	ret
 }
 
 // pkg_get_locality: native when a sync db has a package of that name
@@ -792,7 +749,7 @@ pub fn pacman_query(
 		return query_group(c, handle, targets, o);
 	}
 	if (c.op_q_locality != 0 || c.op_q_upgrade != 0)
-		&& check_syncdbs(c, handle, &mut o.stderr) != 0
+		&& check_syncdbs(&mut o.stderr, c, handle, true, true) != 0
 	{
 		return 1;
 	}

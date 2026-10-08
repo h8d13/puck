@@ -4,31 +4,34 @@
 //
 // the mount table and statvfs come through Mounts (System reads
 // /etc/mtab and calls rustix statvfs), _alpm_log and PROGRESS through
-// Events. the transaction is passed as its add/remove package lists, the
-// handle gives root, dbpath, noextract and the local db for upgrades.
+// Callbacks (progress is ALPM_PROGRESS_DISKSPACE_START with an empty
+// package name). the transaction is passed as its add/remove package
+// lists, the handle gives root, dbpath, noextract and the local db for
+// upgrades.
 // pm_errno is not modelled, see SpaceError. getmntent is reimplemented
 // on the bytes of the table (glibc misc/mntent_r.c, getmntent's 4096
 // byte line buffer); mnt_freq/mnt_passno are not parsed, nothing here
 // reads them.
 
 use std::ffi::{OsStr, c_int};
-use std::fs::{self, File, Metadata};
+use std::fs::{self, File};
 use std::io::{self, Read};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 use rustix::fs::StatVfsMountFlags;
 
 use crate::be_local::INFRQ_FILES;
+use crate::callbacks::{Callbacks, LogLevel, Progress};
 use crate::error::Errno;
 use crate::filelist::FileList;
 use crate::handle::Handle;
 use crate::package::Package;
-use crate::util::until_nul;
+use crate::util::{PATH_MAX, llstat, strerror, until_nul};
+
+const DISKSPACE: Progress = Progress::DiskspaceStart;
 
 // _PATH_MOUNTED, what setmntent(MOUNTED, "r") opens
 pub const MOUNTED: &[u8] = b"/etc/mtab";
-// limits.h, the char path[PATH_MAX] buffers
-const PATH_MAX: usize = 4096;
 // getmntent's static line buffer, BUFFER_SIZE in glibc misc/mntent.c
 const MNT_BUFSIZ: usize = 4096;
 // char tmp[1024] get_mnt_entry drains the rest of a long line with
@@ -41,22 +44,6 @@ const S_IFLNK: u32 = 0o120000;
 // enum mount_used_level bits of MountPoint::used
 pub const USED_REMOVE: u8 = 1;
 pub const USED_INSTALL: u8 = 1 << 1;
-
-// alpm_loglevel_t, the levels diskspace.c logs at
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LogLevel {
-	Error = 1,
-	Warning = 1 << 1,
-	Debug = 1 << 2,
-}
-
-// the handle callbacks diskspace.c reaches: logcb through _alpm_log with
-// the message already formatted (msgids, no gettext), and progresscb
-// with ALPM_PROGRESS_DISKSPACE_START and an empty package name
-pub trait Events {
-	fn log(&mut self, level: LogLevel, msg: &[u8]);
-	fn progress(&mut self, percent: c_int, howmany: usize, current: usize);
-}
 
 // the fields of struct statvfs diskspace.c reads: f_bsize, f_blocks,
 // f_bavail and f_flag & ST_RDONLY
@@ -304,28 +291,11 @@ impl SpaceError {
 	}
 }
 
-// strerror(errno): std formats "<strerror_r text> (os error N)"
-fn strerror(e: &io::Error) -> Vec<u8> {
-	let s = e.to_string();
-	let Some(n) = e.raw_os_error() else {
-		return s.into_bytes();
-	};
-	let suffix = format!(" (os error {n})");
-	s.strip_suffix(&suffix).unwrap_or(&s).as_bytes().to_vec()
-}
-
 // snprintf(path, PATH_MAX, "%s%s", a, b): cut to PATH_MAX - 1 bytes
 fn join_path(a: &[u8], b: &[u8]) -> Vec<u8> {
 	let mut p = [until_nul(a), until_nul(b)].concat();
 	p.truncate(PATH_MAX - 1);
 	p
-}
-
-// llstat (src/common): lstat with trailing '/' stripped, a lone "/" kept
-fn llstat(path: &[u8]) -> io::Result<Metadata> {
-	let slashes = path.iter().rev().take_while(|&&c| c == b'/').count();
-	let len = (path.len() - slashes).max(1).min(path.len());
-	fs::symlink_metadata(OsStr::from_bytes(&path[..len]))
 }
 
 // (size + bsize - 1) / bsize in unsigned long, stored in a blkcnt_t. the
@@ -340,7 +310,7 @@ fn ceil_blocks(size: i64, bsize: u64) -> i64 {
 pub fn load_fsinfo(
 	mp: &mut MountPoint,
 	mounts: &mut impl Mounts,
-	ev: &mut impl Events,
+	ev: &mut dyn Callbacks,
 ) -> bool {
 	match mounts.statvfs(&mp.dir) {
 		Err(e) => {
@@ -371,7 +341,7 @@ pub fn load_fsinfo(
 // opened or has no entries (the C's NULL list)
 pub fn mount_point_list(
 	mounts: &mut impl Mounts,
-	ev: &mut impl Events,
+	ev: &mut dyn Callbacks,
 ) -> Vec<MountPoint> {
 	let table = match mounts.table() {
 		Ok(t) => t,
@@ -423,7 +393,7 @@ fn loaded_mount<'a>(
 	path: &[u8],
 	filename: &[u8],
 	mounts: &mut impl Mounts,
-	ev: &mut impl Events,
+	ev: &mut dyn Callbacks,
 ) -> Option<&'a mut MountPoint> {
 	let Some(i) = match_mount_point(mps, path) else {
 		let msg = [
@@ -452,7 +422,7 @@ pub fn calculate_removed_size(
 	mps: &mut [MountPoint],
 	files: &FileList,
 	mounts: &mut impl Mounts,
-	ev: &mut impl Events,
+	ev: &mut dyn Callbacks,
 ) {
 	for file in &files.files {
 		let filename = until_nul(&file.name);
@@ -493,7 +463,7 @@ pub fn calculate_installed_size(
 	mps: &mut [MountPoint],
 	files: &FileList,
 	mounts: &mut impl Mounts,
-	ev: &mut impl Events,
+	ev: &mut dyn Callbacks,
 ) {
 	for file in &files.files {
 		let kind = file.mode & S_IFMT;
@@ -517,7 +487,7 @@ pub fn calculate_installed_size(
 
 // check_mountpoint: true (C 1) when max_blocks_needed plus the cushion,
 // min(5% of the blocks, 20 MiB) + 1 block, exceeds f_bavail
-pub fn check_mountpoint(mp: &MountPoint, ev: &mut impl Events) -> bool {
+pub fn check_mountpoint(mp: &MountPoint, ev: &mut dyn Callbacks) -> bool {
 	let fs = &mp.fsp;
 	let fivepc = fs.blocks / 20 + 1;
 	// bsize 0 divides by zero in the C, no 20 MiB term here
@@ -555,7 +525,7 @@ pub fn check_downloadspace(
 	cachedir: &[u8],
 	file_sizes: &[i64],
 	mounts: &mut impl Mounts,
-	ev: &mut impl Events,
+	ev: &mut dyn Callbacks,
 ) -> Result<(), SpaceError> {
 	let cachedir = until_nul(cachedir);
 	let resolved = realpath(cachedir);
@@ -610,7 +580,7 @@ pub fn check_diskspace(
 	add: &[Package],
 	remove: &[Package],
 	mounts: &mut impl Mounts,
-	ev: &mut impl Events,
+	ev: &mut dyn Callbacks,
 ) -> Result<(), SpaceError> {
 	let mut numtargs = add.len();
 	let mut mps = mount_point_list(mounts, ev);
@@ -633,14 +603,26 @@ pub fn check_diskspace(
 	// size_t arithmetic, the result fits an int
 	let percent = |current: usize| (current * 100 / numtargs) as c_int;
 	for pkg in remove {
-		ev.progress(percent(current), numtargs, current);
+		ev.progress(
+			DISKSPACE,
+			b"",
+			percent(current),
+			numtargs,
+			current,
+		);
 		calculate_removed_size(
 			handle, &mut mps, &pkg.files, mounts, ev,
 		);
 		current += 1;
 	}
 	for pkg in add {
-		ev.progress(percent(current), numtargs, current);
+		ev.progress(
+			DISKSPACE,
+			b"",
+			percent(current),
+			numtargs,
+			current,
+		);
 		if let Some(files) = local_files(handle, pkg) {
 			calculate_removed_size(
 				handle, &mut mps, &files, mounts, ev,
@@ -655,7 +637,7 @@ pub fn check_diskspace(
 		}
 		current += 1;
 	}
-	ev.progress(100, numtargs, current);
+	ev.progress(DISKSPACE, b"", 100, numtargs, current);
 	let mut error = false;
 	for mp in &mps {
 		if mp.used != 0 && mp.read_only {

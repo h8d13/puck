@@ -13,9 +13,10 @@ use std::path::Path;
 
 use alpm_core::backup::Backup;
 use alpm_core::be_local::{INFRQ_ALL, LocalDb};
+use alpm_core::callbacks::{Callbacks, Progress};
 use alpm_core::conflict::{
-	Conflict, FileCheck, FileConflictType, FileConflicts, Progress,
-	ProgressCb, checkconflicts, innerconflicts, outerconflicts,
+	Conflict, FileCheck, FileConflictType, FileConflicts, checkconflicts,
+	innerconflicts, outerconflicts,
 };
 use alpm_core::deps::dep_from_string;
 use alpm_core::filelist::{File, FileList};
@@ -358,7 +359,7 @@ impl Fix {
 #[derive(Default)]
 struct Recorder(Vec<ProgressEvent>);
 
-impl ProgressCb for Recorder {
+impl Callbacks for Recorder {
 	fn progress(
 		&mut self,
 		progress: Progress,

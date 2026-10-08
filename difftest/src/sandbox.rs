@@ -21,7 +21,7 @@ use std::process::Command;
 use std::ptr;
 use std::sync::MutexGuard;
 
-use alpm_core::dload::{Callbacks, DownloadEvent, LogLevel};
+use alpm_core::callbacks::{Callbacks, DownloadEvent, LogLevel};
 
 use crate::cstr;
 use crate::handle::{
