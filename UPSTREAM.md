@@ -1009,3 +1009,25 @@ pacman's formats. Same practice labels, judged against real databases.
   `multi: false`); libarchive reads concatenated streams (pbzip2
   output). From source, not exercised. **packager** (makepkg's
   `COMPRESSBZ2` set to a parallel bzip2)
+
+## transaction commit minor
+
+- sync.c:942 check_keyring: `keyinfo->uid = strdup(pkg->packager)` on a
+  sync entry without `%PACKAGER%` is strdup(NULL). Practice: **packager**
+  (a crafted repo db with package signatures required). The port passes
+  no uid.
+- sync.c:804 download_files: a failed CALLOC of the download sizes jumps
+  to `finish` with ret still 0, so the downloads are skipped and the load
+  goes on as if they had worked. Practice: **env** (OOM).
+- sync.c:1080 check_validity: pm_errno is whatever the last validated
+  package left (each `_alpm_pkg_validate_internal` resets it): an early
+  bad package followed by a good one reports PKG_INVALID instead of its
+  own error. Practice: **real** (message only; the per-package lines are
+  right).
+- remove.c:752 `_alpm_remove_single_package` always returns 0, so the
+  failure branches of `_alpm_remove_packages` (TRANS_ABORT, ldconfig
+  skipped) and sync.c:1347 ("could not commit removal transaction") are
+  dead. Practice: **none**.
+- sync.c download_files leaves the transaction DOWNLOADING after a failed
+  load, so `alpm_trans_interrupt` refuses it until release. Practice:
+  **api**.

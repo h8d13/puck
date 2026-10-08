@@ -106,15 +106,19 @@ in the milestone 1 gate and equal.
 | deps resolution (`deps.c` rest + `graph.c`), `conflict.c`, `diskspace.c` | done |
 | `hook.c`, scriptlets (`_alpm_runscriptlet`), `_alpm_run_chroot`, `_alpm_ldconfig` | done (on unified callbacks, take `&mut Handle`) |
 | transaction prepare phase (`trans.c` model, `alpm_add/remove_pkg`, sysupgrade, sync/remove prepare, frontend prepare) | done |
-| transaction commit phase (downloads, validation, add.c, remove.c, hooks, db writes) | in progress (remove.c and add.c per package done) |
+| transaction commit phase (downloads, validation, add.c, remove.c, hooks, db writes) | done (`trans_commit`; frontend commits -S/-U/-R) |
 | sandbox (landlock/seccomp, download helper) | done |
 | local db writing | done |
 
 Gate: the full pactest suite (`meson test` baseline 338 ok, 6 expected
 fail) run against the Rust binary. `scripts/pactest.sh` (341 pactests,
 meson's 338 counts 3 non-pactest tests): C 335 ok / 6 xfail; Rust today
-100 ok / 5 xfail / 235 fail / 1 unexpected pass (deprange001), the
-dispatch stops before the commit.
+132 ok / 5 xfail / 203 fail / 1 unexpected pass (deprange001). Failure
+classes: ~140 sync dbs pactest writes with only the sections it sets
+(alpm-repo-db's `parse_libalpm` refuses the db, "target not found" or a
+silent -Su), ~60 `.PKGINFO` with empty `pkgdesc`/`url`/`builddate`/
+`packager` (alpm-pkginfo refuses, "could not parse package description
+file"), 5 `-Sc`, a few with other causes behind those two.
 
 ### 4. Drop-in
 
@@ -215,7 +219,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `lib/libalpm/error.c` | 166 | `alpm-core::error` | strerror, all 56 values + out of range: difftest; alpm_errno waits for handle |
 | `lib/libalpm/log.c` | 112 | - | |
 | `lib/libalpm/package.c` | 868 | `alpm-core::package` (partial) | data model (`Package`, `PkgFrom`, `PkgReason`), dup, pkg_cmp, compare_versions, find, compute_requiredby/optionalfor (`DbCaches`), should_ignore (fixture handles + mirror fuzz): difftest via `#[repr(C)]` mirror (offsets checked through the C getters); handle/db/archive parts pending |
-| `lib/libalpm/be_package.c` | 778 | `alpm-core::be_package` (partial) | pkg_load_internal (full and metadata-only walk, .PKGINFO via alpm-pkginfo, .MTREE via alpm-mtree with archive fallback, file list, check_meta), pkg_load/pkg_validate at every level (.sig, base64 sig, sha256 skip), key import question, changelog: difftest on generated packages (gz/bz2/xz/zst/none, full on/off, every field + changelog), 82 pinned odd inputs, real cached packages (`DIFFTEST_PKG_CORPUS`); gpgme/.sig pending |
+| `lib/libalpm/be_package.c` | 778 | `alpm-core::be_package` (partial) | pkg_load_internal (full and metadata-only walk, .PKGINFO via alpm-pkginfo, .MTREE via alpm-mtree with archive fallback, file list, check_meta), pkg_load/pkg_validate at every level (.sig, base64 sig, sha256 skip), key import question, changelog, the C's load/validate log lines (not libarchive's texts, not check_meta's): difftest on generated packages (gz/bz2/xz/zst/none, full on/off, every field + changelog), 82 pinned odd inputs, real cached packages (`DIFFTEST_PKG_CORPUS`); gpgme/.sig pending |
 | `lib/libalpm/be_local.c` | 1232 | `alpm-core::be_local` (partial) | register/validate (ALPM_DB_VERSION, creation), populate, local_db_read via `alpm-db`: difftest on random v1/v2 dbs (every field, cache counts), version-file fuzz, 69 pinned odd inputs, /var/lib/pacman read-only; local_db_prepare/write/remove, set_reason: difftest `be_local_write` (written trees byte for byte, modes, rc); mtree, changelog pending |
 | `lib/libalpm/be_sync.c` | 762 | `alpm-core::be_sync` (partial) | populate (tar walk, load_pkg_for_entry, check_meta subset, validate_filename, error ranking), get_validation, db_path, sync_db_validate (missing file, signature, import retry) via `alpm-repo-db` + `alpm-compress`: difftest on generated .db/.files in gz/bz2/xz/zst/none (fields, cache order, table counts), real sync db copies; alpm_db_update + get_sync_dir: difftest vs C on loopback mirrors with gpg-signed fixture dbs (sequences, edges, signatures, fuzz) |
 | `lib/libalpm/db.c` | 773 | `alpm-core::db` (partial) | register/unregister, servers (sanitize_url), usage, siglevel, get_valid, pkgcache/get_pkg, groupcache/get_group (load_grpcache order), add/remove pkg in cache, load_pkg (lazy loads in place), dbext read at load, db_path, db_cmp: difftest op-sequence fuzz (results, errno, db state each step); search (difftest fuzz), load_all/walk/find_satisfier; log lines (db.c, be_local populate/read, be_sync populate): the op fuzz compares every line of each op and of the release; update pending |
@@ -228,10 +232,10 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `lib/libalpm/graph.c` | 38 | `alpm-core::graph` | via sortbydeps |
 | `lib/libalpm/conflict.c` | 686 | `alpm-core::conflict` | innerconflicts, outerconflicts, checkconflicts, db_find_fileconflicts (both checks, skip_remove, progress): difftest on fixture roots (files, dirs, symlinks) and local dbs, 2M fuzz |
 | `lib/libalpm/diskspace.c` | 514 | `alpm-core::diskspace` | check_diskspace, check_downloadspace (+ mount list, fsinfo, match, sizes, check_mountpoint): difftest on fixture roots and root "/" (every log/progress line, f_bavail pinned from the C trace); getmntent parser vs glibc |
-| `lib/libalpm/trans.c` | 452 | `alpm-core::trans` (partial: no commit) | model, init/release/interrupt/getters, prepare dispatch, check_arch, sort: difftest `trans_prep` op sequences vs C (2000 cases, results, data lists, logs, events, questions, trans afterwards); _alpm_runscriptlet + grep: difftest under fakechroot |
-| `lib/libalpm/sync.c` | 1360 | `alpm-core::sync` (partial: no load/check/commit) | get_new_version, sysupgrade (literal, replacers), find_group_pkgs, compute_download_size, `_alpm_sync_prepare`, dbs_satisfier: difftest `trans_prep` |
-| `lib/libalpm/add.c` | 718 | `alpm-core::add` (all but the `_alpm_upgrade_packages` loop) | alpm_add_pkg: difftest `trans_prep`; commit_single_pkg with extract_single_file, extract_db_file, perform_extraction (archive_write_disk with OWNER/PERM/TIME/UNLINK/SECURE_SYMLINKS), try_rename, get_install_time, and the per-package step of `_alpm_upgrade_packages`: difftest `add_commit` vs C `_alpm_upgrade_packages` on one-package transactions (backup md5 states, .pacnew, NoUpgrade/NoExtract, dir/file/symlink changes, modes, SUID/SGID, root-owned entries, hard links, db files, DBONLY, reasons, truncated packages, SOURCE_DATE_EPOCH children; trees with archive mtimes, local db, logs, events, progress, logfile, rc, pm_errno), scriptlets under fakechroot, 2M fuzz |
-| `lib/libalpm/remove.c` | 798 | `alpm-core::remove` (all but `_alpm_remove_packages`) | alpm_remove_pkg, `_alpm_remove_prepare` (cascade, recurse, unneeded, optdepend events): difftest `trans_prep`; `_alpm_remove_single_package` with can_remove_file, shift_pacsave, unlink_file, should_skip_file, remove_package_files, dir_is_mountpoint: difftest `remove_commit` on fixture roots and local dbs (files, dirs, symlinks, /proc mountpoint, read-only dirs, .pacsave rotations, other owners, NoUpgrade, skip_remove, NOSAVE/DBONLY/NOSCRIPTLET, upgrade path; trees, local db, cache, logs, events, progress, logfile, pm_errno), scriptlets under fakechroot, 2M fuzz |
+| `lib/libalpm/trans.c` | 452 | `alpm-core::trans` | alpm_trans_commit (state checks, hooks, log lines, events, remove/sync dispatch, interrupted, Committed): difftest `trans_commit`; model, init/release/interrupt/getters, prepare dispatch, check_arch, sort: difftest `trans_prep` op sequences vs C (2000 cases, results, data lists, logs, events, questions, trans afterwards); _alpm_runscriptlet + grep: difftest under fakechroot |
+| `lib/libalpm/sync.c` | 1360 | `alpm-core::sync` | `_alpm_sync_load` (download_files, check_keyring, check_validity, load_packages, prompt_to_delete), `_alpm_sync_check`, `_alpm_sync_commit`: difftest `trans_commit` vs C alpm_trans_commit on fixture worlds with a file:// mirror (installs, upgrades, cached, -U, DOWNLOADONLY, DBONLY, NODEPS, bad checksums, db/file mismatch, CORRUPTED_PKG yes/no, missing on the mirror, file conflicts, download space, replaces/conflicts removed; rc, pm_errno, data list, state, logs, events, questions, progress, download events, logfile, root, local db, cache), 2000-case fuzz; check_keyring and the signature branches not difftested (siglevel 0 worlds); get_new_version, sysupgrade (literal, replacers), find_group_pkgs, compute_download_size, `_alpm_sync_prepare`, dbs_satisfier: difftest `trans_prep` |
+| `lib/libalpm/add.c` | 718 | `alpm-core::add` | `_alpm_upgrade_packages` (`upgrade_packages`): difftest `trans_commit`; alpm_add_pkg: difftest `trans_prep`; commit_single_pkg with extract_single_file, extract_db_file, perform_extraction (archive_write_disk with OWNER/PERM/TIME/UNLINK/SECURE_SYMLINKS), try_rename, get_install_time, and the per-package step of `_alpm_upgrade_packages`: difftest `add_commit` vs C `_alpm_upgrade_packages` on one-package transactions (backup md5 states, .pacnew, NoUpgrade/NoExtract, dir/file/symlink changes, modes, SUID/SGID, root-owned entries, hard links, db files, DBONLY, reasons, truncated packages, SOURCE_DATE_EPOCH children; trees with archive mtimes, local db, logs, events, progress, logfile, rc, pm_errno), scriptlets under fakechroot, 2M fuzz |
+| `lib/libalpm/remove.c` | 798 | `alpm-core::remove` | `_alpm_remove_packages` (`remove_packages`): difftest `trans_commit`; alpm_remove_pkg, `_alpm_remove_prepare` (cascade, recurse, unneeded, optdepend events): difftest `trans_prep`; `_alpm_remove_single_package` with can_remove_file, shift_pacsave, unlink_file, should_skip_file, remove_package_files, dir_is_mountpoint: difftest `remove_commit` on fixture roots and local dbs (files, dirs, symlinks, /proc mountpoint, read-only dirs, .pacsave rotations, other owners, NoUpgrade, skip_remove, NOSAVE/DBONLY/NOSCRIPTLET, upgrade path; trees, local db, cache, logs, events, progress, logfile, pm_errno), scriptlets under fakechroot, 2M fuzz |
 | `lib/libalpm/hook.c` | 679 | `alpm-core::hook` | parse/validate, dir scan and masking, triggers, Depends, AbortOnFail, NeedsTargets, run: difftest fuzz on root "/" and runs under fakechroot |
 | `lib/libalpm/sandbox*.c` | 608 | `alpm-core::{sandbox,sandbox_fs,sandbox_syscalls}` | restrict_writes_to (8 variants incl. injected landlock failures), syscalls_filter (list parsed from the C, raw syscall probes): errno per probe in spawned children vs C; callback pipe writer + parent loop: byte-stream fuzz; helper download vs C _alpm_download; uid switch: unit tests (root) |
 | regcomp/regexec (glibc, used by db.c, remove.c, files.c) | - | `alpm-core::regex` | difftest fuzz vs glibc (C.UTF-8, 4 flag sets) on agreeing characters; classes/towupper via std, divergence per class counted |
@@ -242,8 +246,8 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `src/pacman/check.c` (in the above) | 435 | `pacman-cli::check` | check_pkg_fast/full: difftest on fixture roots and dbs (all 22 message kinds), mtree readers compared per fixture and on 804 real mtrees |
 | `src/pacman/query.c` (in the above) | 521 | `pacman-cli::query` | every -Q mode, filter and message: difftest vs C pacman_query on fixture roots |
 | `src/pacman/deptest.c` (in the above) | 57 | `pacman-cli::deptest` | difftest vs C pacman_deptest |
-| `src/pacman/sync.c` (in the above) | 978 | `pacman-cli::sync` (partial) | sync_info, sync_list, sync_group, dispatch, check_syncdbs: difftest vs C pacman_sync (4 db states, warm caches); -Sy/-Syy: difftest vs C pacman_sync with the frontend callbacks (no bars); sync_trans/sync_prepare_execute up to the commit: difftest `frontend_fuzz` (C never commits: --print or a declined question); -Sc, -Ss pending |
-| `src/pacman/remove.c`, `upgrade.c` | 309 | `pacman-cli::{remove,upgrade}` (up to the commit) | difftest `frontend_fuzz` vs C pacman_remove/pacman_upgrade (rc, stdout, stderr, input consumed); -U url fetch wired, untested (network) |
+| `src/pacman/sync.c` (in the above) | 978 | `pacman-cli::sync` (partial) | sync_info, sync_list, sync_group, dispatch, check_syncdbs: difftest vs C pacman_sync (4 db states, warm caches); -Sy/-Syy: difftest vs C pacman_sync with the frontend callbacks (no bars); sync_trans/sync_prepare_execute: difftest `frontend_fuzz` (C never commits: --print or a declined question), the commit and its failure report through pactest; -Sc, -Ss pending |
+| `src/pacman/remove.c`, `upgrade.c` | 309 | `pacman-cli::{remove,upgrade}` | difftest `frontend_fuzz` vs C pacman_remove/pacman_upgrade (rc, stdout, stderr, input consumed); -U url fetch wired, untested (network) |
 | `src/pacman/database.c` (in the above) | 305 | `pacman-cli::database` | -D --asdeps/--asexplicit, -Dk, -Dkk: difftest vs C pacman_database on two copies of each fixture (ret, stdout, stderr, local db tree after), -Dkk on sync worlds; unit tests |
 | `src/pacman/files.c` (in the above) | 341 | `pacman-cli::files` | -F, -Fx, -Fq, --machinereadable, -Fl: difftest vs C pacman_files on .files dbs; -Fy: same, with the frontend callbacks |
 | `src/pacman/package.c` (in the above) | 587 | `pacman-cli::package` | dump_pkg_full (all origins, -i/-ii), dump_pkg_backups, dump_pkg_files, print_installed, print_groups, dump_pkg_search: difftest on a real C handle with refilled db caches and real files under the root, strftime %c vs `format_date_utc` fuzz + localtime limits; changelog and gpgme results: unit tests |
@@ -344,7 +348,8 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
   binary's uid is 0 (or FAKEROOTUID) under fakeroot (FAKEROOTKEY): /proc
   shows the real uid where fakeroot fakes getuid. Transaction prompts and
   callback prompts read stdin through separate buffers. No Callbacks hook
-  for `multibar_move_completed_up` (only package downloads set it). After
+  for `multibar_move_completed_up` (sync_prepare_execute sets it before
+  the commit's downloads; the callbacks sit boxed in the handle). After
   '-' targets the C reopens the tty on stdin; std cannot swap fd 0. Write
   errors are dropped (the C dies of SIGPIPE). PACMAN_DEBUG stamps in UTC.
 - `be_sync::db_update` takes positions in `syncdbs()`, returns
@@ -508,6 +513,20 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
   packages read in one go, coarser otherwise). The pm_errno a successful upgrade leaves from
   remove_single_package (PkgCantRemove) is not kept. The db.c/be_local
   log lines around prepare, write and the cache add are logged in add.rs.
+- commit: `trans_commit` returns `CommitError { errno, data }`, data
+  the file conflicts or the filenames load_packages refused. Sync
+  targets are replaced in `trans.add` by their loaded files (origin
+  File, `db` None, removes dropped) like the C. `upgrade_packages` lends
+  `trans.add` out of the transaction for `add::upgrade_package`;
+  `remove_packages` passes copies of `trans.remove` entries. pm_errno
+  as the C leaves it: check_validity's is the last validation's (each
+  resets it), load_packages' the last failed load's, PkgInvalid without
+  one. The local files are loaded whole before the file conflict check
+  (the C loads them as the check goes) and conflict.rs logs nothing, so
+  the difftest drops debug lines inside that check and inside downloads
+  (dload's internals). Hooks run with the transaction taken off the
+  handle. Signals are not caught, so nothing interrupts a commit from
+  outside; `trans_interrupt` works as before.
 
 Follow-ups raised by port units:
 
@@ -553,6 +572,10 @@ Follow-ups raised by port units:
 | one `logv(cb, ...)` helper (copies in hook.rs, deps.rs, trans.rs, util's `log_parts`) | integrate2 | in progress: `callbacks::logv`, used by db, be_local, be_sync |
 | `-D` dispatch arm: `pacman_database(config, handle, targets, &mut o)` | m1close | done |
 | setup_libalpm's server adds through `Handle::dbs_mut()` (`Db::add_server` takes the callbacks) | m1close | done |
+| `multibar_move_completed_up` from the frontend (a Callbacks hook or a shared flag) | commit | todo |
+| conflict.rs debug lines ("searching for file conflicts", ...), then drop the difftest's quiet window | commit | todo |
+| commit difftest with hooks (fakechroot) and signed packages (check_keyring, PKG_INVALID_SIG, MISSING_SIG) | commit | todo |
+| alpm-repo-db / alpm-pkginfo: accept pactest's minimal sync db entries and empty `.PKGINFO` values (vendor patches), the main pactest blockers | commit | todo |
 | query: -Qk/-Qkk lazy loads per package like the C (-Qkk loads files up front), op stderr flushed per package so callback lines interleave; then drop cli_binary's empty files lists | m1close | todo |
 | signing debug lines (`_alpm_access` "is not readable", "sig path ... could not be opened", "missing required signature") | m1close | todo |
 | difftest C log callbacks (deps_graph, dload, diskspace, db_update) onto `handle::record_log` | m1close | todo |
