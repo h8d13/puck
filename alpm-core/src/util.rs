@@ -1420,6 +1420,9 @@ impl Read for Filter {
 	}
 }
 
+// BUFSIZ in glibc
+const ALPM_BUFFER_SIZE: u64 = 8192;
+
 // a tar entry read through the filter
 pub type Entry<'a> = tar::Entry<'a, Filter>;
 
@@ -1439,6 +1442,12 @@ pub struct Archive {
 	pub consumed: Rc<Cell<u64>>,
 	// the filter picked, None: tar offsets are file offsets
 	pub settings: DecompressionSettings,
+	// archive_read_data_block hands entry data out in pieces ending
+	// where the reads under the tar reader end: the filter's output
+	// blocks, without a filter the fd reads of archive_read_open_fd
+	// (st_blksize, at least ALPM_BUFFER_SIZE). a piece boundary lies at
+	// every multiple of this in the tar stream
+	pub block: u64,
 }
 
 pub(crate) fn archive_io_err(e: alpm_compress::Error) -> io::Error {
@@ -1466,11 +1475,16 @@ pub fn open_archive(path: &[u8]) -> io::Result<Archive> {
 	let mut filter = Filter::new(decoder, &settings);
 	filter.open()?;
 	let consumed = filter.consumed.clone();
+	let block = match filter.size {
+		0 => meta.blksize().max(ALPM_BUFFER_SIZE),
+		n => n as u64,
+	};
 	Ok(Archive {
 		reader: tar::Archive::new(filter),
 		meta,
 		consumed,
 		settings,
+		block,
 	})
 }
 
