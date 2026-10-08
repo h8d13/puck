@@ -35,7 +35,7 @@ use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
 use crate::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
-	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, PkgXData,
+	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, check_meta, parse_xdata,
 };
 use crate::signing::{
 	Keyring, SIG_PACKAGE, SIG_PACKAGE_MARGINAL_OK, SIG_PACKAGE_OPTIONAL,
@@ -43,17 +43,12 @@ use crate::signing::{
 	key_import, key_in_keychain, sigpath,
 };
 use crate::util::{
-	self, Entry, fnmatch, hash_sdbm, parsedate, strtoofft, until_nul,
+	self, ArchiveFgets, DataBlocks, Entry, hash_sdbm, parsedate, strtoofft,
+	until_nul,
 };
-
-// limits.h on linux
-const NAME_MAX: usize = 255;
 
 // read_sigfile's limit, adopted from repo-add
 const MAX_SIGFILE_SIZE: u64 = 16384;
-
-// parse_descfile's buf.max_line_size
-const MAX_LINE_SIZE: usize = 512 * 1024;
 
 // mode_t file type bits, archive_entry.h AE_IF*
 const AE_IFMT: u32 = 0o170000;
@@ -167,171 +162,8 @@ fn log(cb: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
 	cb.log(level, &parts.concat());
 }
 
-// _alpm_pkg_check_meta on a package with a name and a version (the load
-// refuses others before, so its "name or version missing" bail is not
-// reached). every failed check logs, fnmatch arguments in the C's order:
-// the name is the pattern
-fn check_meta(cb: &mut dyn Callbacks, name: &[u8], version: &[u8]) -> bool {
-	let mut ok = true;
-	let mut fail = |why: &[u8]| {
-		let msg = [
-			b"invalid metadata for package ",
-			name,
-			b"-",
-			version,
-			b" (",
-			why,
-			b")\n",
-		];
-		log(cb, LogLevel::Error, &msg);
-		ok = false;
-	};
-	if matches!(name[0], b'-' | b'.') {
-		fail(b"package name cannot start with '.' or '-'");
-	}
-	if fnmatch(name, b"[![:alnum:]+_.@-]") {
-		fail(b"package name contains invalid characters");
-	}
-	let dashes = version.iter().filter(|&&c| c == b'-').count();
-	if dashes > 1 {
-		fail(b"package version contains invalid characters");
-	}
-	if version.contains(&b'/') {
-		fail(b"package version contains invalid characters");
-	}
-	if name.len() + version.len() + 1 > NAME_MAX {
-		fail(b"package name and version too long");
-	}
-	ok
-}
-
 fn text(v: &impl Display) -> Vec<u8> {
 	v.to_string().into_bytes()
-}
-
-// archive_read_data_block on an entry: its data in the blocks libarchive
-// hands out, which end at multiples of the block size in the archive
-// stream. a short read is the truncated archive: what arrived is one
-// more block, the next read fails like libarchive's
-struct DataBlocks<'e, 'a> {
-	entry: &'e mut Entry<'a>,
-	block: u64,
-	// stream offset of the next byte, entry bytes not read yet
-	pos: u64,
-	left: u64,
-	truncated: bool,
-}
-
-impl<'e, 'a> DataBlocks<'e, 'a> {
-	fn new(entry: &'e mut Entry<'a>, block: u64) -> Self {
-		DataBlocks {
-			pos: entry.raw_file_position(),
-			left: entry.size(),
-			entry,
-			block,
-			truncated: false,
-		}
-	}
-
-	// None at the entry's end (ARCHIVE_EOF)
-	fn next(&mut self) -> io::Result<Option<Vec<u8>>> {
-		if self.truncated {
-			return Err(ErrorKind::UnexpectedEof.into());
-		}
-		if self.left == 0 {
-			return Ok(None);
-		}
-		let want = (self.block - self.pos % self.block).min(self.left);
-		let mut data = Vec::new();
-		(&mut *self.entry).take(want).read_to_end(&mut data)?;
-		if data.is_empty() {
-			return Err(ErrorKind::UnexpectedEof.into());
-		}
-		self.truncated = (data.len() as u64) < want;
-		self.pos += data.len() as u64;
-		self.left -= data.len() as u64;
-		Ok(Some(data))
-	}
-}
-
-// _alpm_archive_fgets with its archive_read_buffer. a line ends at the
-// first '\n' of the block; a block without one ends it at its first nul
-// instead, and a line may run over several blocks. the data's end gives
-// the last line (empty after a final '\n')
-struct ArchiveFgets<'e, 'a> {
-	src: DataBlocks<'e, 'a>,
-	block: Vec<u8>,
-	off: usize,
-	// the last read was the entry's end (b->ret == ARCHIVE_EOF)
-	eof: bool,
-	// b->line allocated: its first allocation skips the size check
-	started: bool,
-	line: Vec<u8>,
-}
-
-impl<'e, 'a> ArchiveFgets<'e, 'a> {
-	fn new(src: DataBlocks<'e, 'a>) -> Self {
-		ArchiveFgets {
-			src,
-			block: Vec::new(),
-			off: 0,
-			eof: false,
-			started: false,
-			line: Vec::new(),
-		}
-	}
-
-	// the next line without its end of line, None at the end. an error
-	// ends the reading (the C frees the buffer)
-	fn next(&mut self) -> io::Result<Option<&[u8]>> {
-		self.line.clear();
-		loop {
-			if self.off == self.block.len() {
-				if self.eof {
-					return Ok(None);
-				}
-				let next = self.src.next()?;
-				self.eof = next.is_none();
-				self.block = next.unwrap_or_default();
-				self.off = 0;
-			}
-			let rest = &self.block[self.off..];
-			let eol = rest
-				.iter()
-				.position(|&c| c == b'\n')
-				.or_else(|| rest.iter().position(|&c| c == 0));
-			let new = eol.unwrap_or(rest.len());
-			let needed = self.line.len() + new + 1;
-			if self.started && needed > MAX_LINE_SIZE {
-				return Err(io::Error::from_raw_os_error(
-					rustix::io::Errno::RANGE.raw_os_error(),
-				));
-			}
-			self.started = true;
-			self.line.extend_from_slice(&rest[..new]);
-			match eol {
-				Some(i) => {
-					self.off += i + 1;
-					return Ok(Some(&self.line));
-				}
-				None => {
-					self.off = self.block.len();
-					if new == 0 {
-						return Ok(Some(&self.line));
-					}
-				}
-			}
-		}
-	}
-}
-
-// _alpm_pkg_parse_xdata: split at the first '='
-fn parse_xdata(s: &[u8]) -> Option<PkgXData> {
-	let i = s.iter().position(|&c| c == b'=')?;
-	Some(PkgXData {
-		name: s[..i].to_vec(),
-		value: s[i + 1..].to_vec(),
-	})
 }
 
 // one "key = value" line of parse_descfile. the key ends at the line's
@@ -655,7 +487,7 @@ pub fn pkg_load_internal(
 		pkg.infolevel |= INFRQ_FILES;
 	}
 	let version = pkg.version.as_deref().unwrap_or_default();
-	if !check_meta(cb, pkg.name_bytes(), until_nul(version)) {
+	if !check_meta(pkg.name_bytes(), until_nul(version), cb) {
 		return Err(Error::Invalid(Reason::Meta));
 	}
 	Ok(pkg)

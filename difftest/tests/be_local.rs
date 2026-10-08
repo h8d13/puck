@@ -1,9 +1,11 @@
 // alpm_core::be_local against be_local.c: random local databases are
-// written under /tmp, loaded by the C (alpm_initialize, pkgcache, lazy
-// getters) and by the port, every package field compared. desc/files as
-// pacman writes and reads them must match exactly (sections left out,
-// repeated or unknown, odd file lists); what alpm-types still refuses or
-// normalizes is pinned as the divergence list (PORTING.md)
+// written under the temp dir, loaded by the C (alpm_initialize, pkgcache,
+// lazy getters) and by the port; every package field, the cache order and
+// counts and every log line compared. desc/files are generated as bytes:
+// any subset of sections in any order, unknown and repeated keys, blank
+// lines, CRLF, nul bytes, non-UTF-8, lines over the C's 1023 byte pieces,
+// odd relations and values, files without a final blank line or newline
+use std::cell::RefCell;
 use std::ffi::c_int;
 use std::fmt::Write as _;
 use std::fs;
@@ -11,9 +13,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 
-use alpm_core::be_local::{
-	INFRQ_DESC, INFRQ_ERROR, INFRQ_FILES, INFRQ_SCRIPTLET, LocalDb,
-};
+use alpm_core::be_local::{INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET, LocalDb};
+use alpm_core::callbacks::{Callbacks, LogLevel};
 use alpm_core::package::Package;
 use difftest::{CLocalDb, Loads, LocalEntry, Rng, TempRoot, c_local_db, iters};
 
@@ -23,30 +24,65 @@ fn db_iters() -> usize {
 	(iters() / 20).max(100)
 }
 
-type Loaded = Result<CLocalDb, c_int>;
+type Logs = Vec<(c_int, Vec<u8>)>;
+type Loaded = (Result<CLocalDb, c_int>, Logs);
+
+// the port's log lines
+struct Rec(RefCell<Logs>);
+
+impl Callbacks for &Rec {
+	fn log(&mut self, level: LogLevel, msg: &[u8]) {
+		self.0.borrow_mut().push((level as c_int, msg.to_vec()));
+	}
+}
+
+// db.c's lines around the populate, the port calls be_local directly
+fn modelled(line: &(c_int, Vec<u8>)) -> bool {
+	const NOT: [&[u8]; 4] = [
+		b"loading package cache for repository",
+		b"failed to load package cache for repository",
+		b"returning error ",
+		b"got error ",
+	];
+	!NOT.iter().any(|p| line.1.starts_with(p))
+}
 
 fn rust_local_db(dbpath: &[u8], loads: Loads) -> Loaded {
-	let db = LocalDb::register(dbpath).map_err(|e| e.errno() as c_int)?;
-	let cache = db.populate(&mut ()).map_err(|e| e.errno() as c_int)?;
-	let counts = (cache.len(), cache.buckets(), cache.limit());
-	let pkgs = cache
-		.iter()
-		.map(|p| {
-			let mut p = p.clone();
-			// errors show up as INFRQ_ERROR in infolevel
-			for (on, bit) in [
-				(loads.desc, INFRQ_DESC),
-				(loads.files, INFRQ_FILES),
-				(loads.scriptlet, INFRQ_SCRIPTLET),
-			] {
-				if on {
-					let _ = db.read(&mut p, bit, &mut ());
+	let rec = Rec(RefCell::new(Vec::new()));
+	let r = (|| {
+		let db = LocalDb::register(dbpath)
+			.map_err(|e| e.errno() as c_int)?;
+		let cache = db
+			.populate(&mut &rec)
+			.map_err(|e| e.errno() as c_int)?;
+		let counts = (cache.len(), cache.buckets(), cache.limit());
+		let pkgs = cache
+			.iter()
+			.map(|p| {
+				let mut p = p.clone();
+				// errors show up as INFRQ_ERROR in infolevel
+				for (on, bit) in [
+					(loads.desc, INFRQ_DESC),
+					(loads.files, INFRQ_FILES),
+					(loads.scriptlet, INFRQ_SCRIPTLET),
+				] {
+					if on {
+						let _ = db.read(
+							&mut p, bit, &mut &rec,
+						);
+					}
 				}
-			}
-			p
-		})
-		.collect();
-	Ok(CLocalDb { pkgs, counts })
+				p
+			})
+			.collect();
+		Ok(CLocalDb { pkgs, counts })
+	})();
+	(r, rec.0.into_inner())
+}
+
+fn c_side(root: &[u8], dbpath: &[u8], loads: Loads) -> Loaded {
+	let (r, logs) = c_local_db(root, dbpath, loads);
+	(r, logs.into_iter().filter(modelled).collect())
 }
 
 // the read error of the port for this package, for assert messages
@@ -104,12 +140,9 @@ fn diff_fields(a: &Package, b: &Package) -> Vec<&'static str> {
 		reason,
 		scriptlet,
 		xdata,
-		validation
+		validation,
+		infolevel
 	);
-	// the error bit is reported apart, the loaded bits are fields
-	if a.infolevel & !INFRQ_ERROR != b.infolevel & !INFRQ_ERROR {
-		out.push("infolevel");
-	}
 	out
 }
 
@@ -119,11 +152,20 @@ fn s(b: &Option<Vec<u8>>) -> String {
 	})
 }
 
-// both sides on the same tree, full equality
-fn assert_same(sb: &TempRoot, loads: Loads, what: &dyn Fn() -> String) {
-	let c = c_local_db(&sb.root(), &sb.dbpath(), loads);
-	let r = rust_local_db(&sb.dbpath(), loads);
-	match (&c, &r) {
+fn lines(l: &Logs) -> Vec<(c_int, String)> {
+	l.iter().map(|(lv, m)| (*lv, String::from_utf8_lossy(m).into()))
+		.collect()
+}
+
+// both sides on the same tree, full equality: the packages compared
+fn assert_same(
+	sb: &TempRoot,
+	loads: Loads,
+	what: &dyn Fn() -> String,
+) -> usize {
+	let (c, clog) = c_side(&sb.root(), &sb.dbpath(), loads);
+	let (r, rlog) = rust_local_db(&sb.dbpath(), loads);
+	let n = match (&c, &r) {
 		(Ok(c), Ok(r)) => {
 			let names = |v: &[Package]| -> Vec<String> {
 				v.iter().map(|p| {
@@ -152,407 +194,336 @@ fn assert_same(sb: &TempRoot, loads: Loads, what: &dyn Fn() -> String) {
 					what()
 				);
 			}
+			c.pkgs.len()
 		}
-		(Err(c), Err(r)) => assert_eq!(c, r, "{}", what()),
+		(Err(c), Err(r)) => {
+			assert_eq!(c, r, "{}", what());
+			0
+		}
 		_ => panic!("C {c:?}\nrust {r:?}\n{}", what()),
-	}
+	};
+	assert_eq!(lines(&clog), lines(&rlog), "log lines\n{}", what());
+	n
 }
 
-// valid alpm-db generators. they include text alpm-types normalizes or
-// reads specially (pkgrel leading zeros, runs of spaces, urls without
-// path or in uppercase, ".so" in names, packagers without email), which
-// has to come out as the C reads it
+// byte generators. text values mix in the bytes the reader special-cases
+// ('\n' ends a line, '\r' stays, a nul ends the C string, '%' starts keys)
+// and non-UTF-8; long ones cross the 1023 byte pieces of safe_fgets
+const TEXT: &[u8] = b"abcxyz019 \t%:=<>-./_\r\0\xff\xc3\xa9";
+const NAME: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789@._+-";
+const DIGIT: &[u8] = b"0123456789";
 
-const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
-const ALNUM: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
-
-fn word(rng: &mut Rng, alphabet: &[u8], min: usize, max: usize) -> String {
+fn word(rng: &mut Rng, alphabet: &[u8], min: usize, max: usize) -> Vec<u8> {
 	let n = min + rng.below(max - min + 1);
-	(0..n).map(|_| rng.pick(alphabet) as char).collect()
+	(0..n).map(|_| rng.pick(alphabet)).collect()
 }
 
-fn pick<'a>(rng: &mut Rng, v: &[&'a str]) -> &'a str {
+fn pick<'a>(rng: &mut Rng, v: &[&'a [u8]]) -> &'a [u8] {
 	v[rng.below(v.len())]
 }
 
-// sometimes with ".so" inside, which alpm-types tries as a soname first
-fn pkgname(rng: &mut Rng) -> String {
-	let first = rng.pick(b"abcdefghijklmnopqrstuvwxyz0123456789_@+");
-	let rest =
-		word(rng, b"abcdefghijklmnopqrstuvwxyz0123456789@._+-", 0, 10);
-	let so = if rng.below(8) == 0 { ".so" } else { "" };
-	format!("{}{so}{rest}", first as char)
-}
-
-// positive integer without leading zero
-fn number(rng: &mut Rng, max: u64) -> u64 {
-	1 + rng.next_u64() % max
-}
-
-fn pkgver(rng: &mut Rng) -> String {
-	let first = rng.pick(ALNUM) as char;
-	format!("{first}{}", word(rng, b"0123456789abcxyz._+~", 0, 6))
-}
-
-// sometimes with a leading zero
-fn pkgrel(rng: &mut Rng) -> String {
-	let zero = if rng.below(4) == 0 { "0" } else { "" };
-	match rng.below(3) {
-		0 => format!("{zero}{}.{}", number(rng, 20), number(rng, 9)),
-		_ => format!("{zero}{}", number(rng, 30)),
+// a value line: mostly plain, sometimes odd bytes, sometimes long
+fn text(rng: &mut Rng) -> Vec<u8> {
+	match rng.below(12) {
+		0 => word(rng, TEXT, 1000, 2200),
+		1 => {
+			// around the piece edge: 1022..=1024 bytes before '\n'
+			let n = 1022 + rng.below(3);
+			word(rng, b"ab", n, n)
+		}
+		2..5 => word(rng, TEXT, 0, 12),
+		_ => word(rng, NAME, 1, 12),
 	}
 }
 
-fn epoch(rng: &mut Rng) -> String {
-	match rng.below(4) {
-		0 => format!("{}:", number(rng, 30)),
-		_ => String::new(),
+fn number(rng: &mut Rng) -> Vec<u8> {
+	match rng.below(10) {
+		0 => pick(
+			rng,
+			&[b"", b"-1", b"+5", b" 7", b"7 ", b"x1", b"0x10"],
+		)
+		.to_vec(),
+		1 => pick(
+			rng,
+			&[
+				b"18446744073709551615",
+				b"18446744073709551616",
+				b"9223372036854775807",
+				b"9223372036854775808",
+				b"-9223372036854775808",
+				b"99999999999999999999999",
+			],
+		)
+		.to_vec(),
+		_ => word(rng, DIGIT, 1, 10),
 	}
 }
 
-fn full_version(rng: &mut Rng) -> String {
-	format!("{}{}-{}", epoch(rng), pkgver(rng), pkgrel(rng))
+fn version(rng: &mut Rng) -> Vec<u8> {
+	let mut v = word(rng, DIGIT, 1, 3);
+	if rng.below(3) == 0 {
+		v.extend(b".");
+		v.extend(word(rng, DIGIT, 1, 2));
+	}
+	if rng.below(4) == 0 {
+		v.splice(0..0, b"1:".iter().copied());
+	}
+	v.extend(b"-");
+	v.extend(word(rng, DIGIT, 1, 2));
+	v
 }
 
-fn relation(rng: &mut Rng) -> String {
-	let name = pkgname(rng);
+// what alpm_dep_from_string takes apart: operators, versions, ": " and
+// ':' descriptions, sonames, empty and spaced parts
+fn relation(rng: &mut Rng) -> Vec<u8> {
+	let mut r = word(rng, NAME, 0, 8);
 	if rng.below(2) == 0 {
-		return name;
-	}
-	let op = pick(rng, &["<", "<=", "=", ">=", ">"]);
-	let rel = match rng.below(2) {
-		0 => format!("-{}", pkgrel(rng)),
-		_ => String::new(),
-	};
-	format!("{name}{op}{}{}{rel}", epoch(rng), pkgver(rng))
-}
-
-// a relation or an alpm soname (v1 "name.so=ver-bits", v2 "prefix:soname")
-fn relation_or_soname(rng: &mut Rng) -> String {
-	match rng.below(5) {
-		0 => format!(
-			"lib{}.so={}-{}",
-			word(rng, LOWER, 1, 6),
-			number(rng, 9),
-			pick(rng, &["32", "64"])
-		),
-		1 => format!(
-			"{}:lib{}.so.{}",
-			pick(rng, &["lib", "usr"]),
-			word(rng, LOWER, 1, 6),
-			number(rng, 9)
-		),
-		_ => relation(rng),
-	}
-}
-
-// words, sometimes apart by runs of blanks
-fn sentence(rng: &mut Rng, max_words: usize) -> String {
-	let n = rng.below(max_words + 1);
-	let words: Vec<String> = (0..n)
-		.map(|_| word(rng, b"abcXYZ019,.()'!-/#&", 1, 8))
-		.collect();
-	words.join(pick(rng, &[" ", " ", "  ", " \t"]))
-}
-
-fn optdepend(rng: &mut Rng) -> String {
-	let name = match rng.below(4) {
-		0 => relation(rng),
-		_ => pkgname(rng),
-	};
-	match rng.below(2) {
-		0 => name,
-		// libalpm keeps the description after ": " as is
-		_ => format!(
-			"{name}: {}{}",
-			pick(rng, &["", "", " "]),
-			word(rng, ALNUM, 0, 6)
-		),
-	}
-}
-
-fn url(rng: &mut Rng) -> String {
-	match rng.below(6) {
-		0 => String::new(),
-		// url::Url adds a '/' path and lowercases
-		1 => format!(
-			"{}://{}.ORG",
-			pick(rng, &["HTTPS", "http"]),
-			word(rng, LOWER, 1, 8)
-		),
-		_ => format!(
-			"{}://{}.{}/{}",
-			pick(rng, &["https", "http", "ftp"]),
-			word(rng, LOWER, 1, 8),
-			pick(rng, &["org", "com", "io"]),
-			word(rng, b"abc012/_-~", 0, 10)
-		),
-	}
-}
-
-// a User ID, sometimes makepkg's default or an email address only
-fn packager(rng: &mut Rng) -> String {
-	let email = format!(
-		"<{}@{}.org>",
-		word(rng, LOWER, 1, 6),
-		word(rng, LOWER, 1, 6)
-	);
-	match rng.below(6) {
-		0 => "Unknown Packager".into(),
-		1 => email,
-		_ => format!(
-			"{} {} {email}",
-			word(rng, ALNUM, 1, 6),
-			word(rng, ALNUM, 1, 6)
-		),
-	}
-}
-
-fn md5(rng: &mut Rng) -> String {
-	word(rng, b"0123456789abcdef", 32, 32)
-}
-
-// one desc file as an ordered list of sections, None for v2 xdata off
-struct Desc {
-	sections: Vec<(String, Vec<String>)>,
-}
-
-impl Desc {
-	fn text(&self) -> String {
-		let mut out = String::new();
-		for (key, lines) in &self.sections {
-			writeln!(out, "%{key}%").unwrap();
-			for l in lines {
-				writeln!(out, "{l}").unwrap();
-			}
-			out.push('\n');
-		}
-		out
-	}
-
-	fn set(&mut self, key: &str, lines: Vec<String>) {
-		match self.sections.iter_mut().find(|(k, _)| k == key) {
-			Some(sec) => sec.1 = lines,
-			None => self.sections.push((key.into(), lines)),
+		r.extend(pick(
+			rng,
+			&[b"=", b">=", b"<=", b">", b"<", b"<>", b"=="],
+		));
+		if rng.below(5) != 0 {
+			r.extend(version(rng));
 		}
 	}
-
-	fn remove(&mut self, key: &str) {
-		self.sections.retain(|(k, _)| k != key);
+	match rng.below(6) {
+		0 => {
+			r.extend(pick(rng, &[b": ", b":", b":  ", b": : "]));
+			r.extend(word(rng, TEXT, 0, 10));
+		}
+		1 => r.extend(pick(rng, &[b" ", b"\r", b".so", b".so=1-64"])),
+		_ => {}
 	}
+	r
 }
 
-fn list<F: FnMut(&mut Rng) -> String>(
-	rng: &mut Rng,
-	max: usize,
-	mut f: F,
-) -> Vec<String> {
-	(0..rng.below(max + 1)).map(|_| f(rng)).collect()
-}
+const SINGLE: [&str; 9] = [
+	"BASE",
+	"DESC",
+	"URL",
+	"ARCH",
+	"PACKAGER",
+	"BUILDDATE",
+	"INSTALLDATE",
+	"SIZE",
+	"REASON",
+];
+const LISTS: [&str; 4] = ["GROUPS", "LICENSE", "VALIDATION", "XDATA"];
+const RELATIONS: [&str; 7] = [
+	"REPLACES",
+	"DEPENDS",
+	"OPTDEPENDS",
+	"MAKEDEPENDS",
+	"CHECKDEPENDS",
+	"CONFLICTS",
+	"PROVIDES",
+];
 
-fn gen_desc(rng: &mut Rng, name: &str, version: &str) -> Desc {
-	let one = |v: String| vec![v];
-	let mut sections = vec![
-		("NAME".to_string(), one(name.into())),
-		("VERSION".into(), one(version.into())),
-		("BASE".into(), one(pkgname(rng))),
-		("DESC".into(), one(sentence(rng, 6))),
-		("URL".into(), one(url(rng))),
-		(
-			"ARCH".into(),
-			one(pick(
+// the value lines of a section
+fn values(rng: &mut Rng, key: &str, name: &[u8], ver: &[u8]) -> Vec<Vec<u8>> {
+	let n = match rng.below(10) {
+		0 => 0,
+		1 => 2 + rng.below(3),
+		_ => 1,
+	};
+	let one = |rng: &mut Rng| -> Vec<u8> {
+		match key {
+			"NAME" if rng.below(4) != 0 => name.to_vec(),
+			"VERSION" if rng.below(4) != 0 => ver.to_vec(),
+			"BUILDDATE" | "INSTALLDATE" | "SIZE" => number(rng),
+			"REASON" => pick(
 				rng,
-				&["x86_64", "any", "aarch64", "i686", "armv7h"],
+				&[b"0", b"1", b"2", b"abc", b"", b" 1", b"01"],
 			)
-			.into()),
-		),
-		(
-			"BUILDDATE".into(),
-			one((rng.next_u64() % 4_000_000_000).to_string()),
-		),
-		("INSTALLDATE".into(), one((rng.next_u64() >> 1).to_string())),
-		("PACKAGER".into(), one(packager(rng))),
-	];
-	let mut vals = vec!["none", "md5", "sha256", "pgp"];
-	let n = 1 + rng.below(vals.len());
-	let mut validation = Vec::new();
-	for _ in 0..n {
-		validation.push(vals.remove(rng.below(vals.len())).to_string());
-	}
-	sections.push(("VALIDATION".into(), validation));
-	if rng.below(3) != 0 {
-		sections.push((
-			"SIZE".into(),
-			one((rng.next_u64() >> rng.below(64)).to_string()),
-		));
-	}
-	if rng.below(2) == 0 {
-		sections.push((
-			"REASON".into(),
-			one(pick(rng, &["0", "1"]).into()),
-		));
-	}
-	let licenses = &[
-		"MIT",
-		"GPL-3.0-or-later",
-		"Apache-2.0 OR MIT",
-		"custom:foo",
-		"LicenseRef-bar",
-		"BSD-3-Clause",
-		"LGPL-2.1-only WITH GCC-exception-3.1",
-	];
-	let lists: [(&str, Vec<String>); 7] = [
-		("GROUPS", list(rng, 3, pkgname)),
-		("LICENSE", list(rng, 3, |r| pick(r, licenses).into())),
-		("REPLACES", list(rng, 3, relation)),
-		("DEPENDS", list(rng, 5, relation_or_soname)),
-		("OPTDEPENDS", list(rng, 3, optdepend)),
-		("CONFLICTS", list(rng, 3, relation)),
-		("PROVIDES", list(rng, 3, relation_or_soname)),
-	];
-	for (key, vals) in lists {
-		if !vals.is_empty() {
-			sections.push((key.into(), vals));
-		}
-	}
-	if rng.below(2) == 0 {
-		let mut x = vec![format!(
-			"pkgtype={}",
-			pick(rng, &["pkg", "debug", "split", "src"])
-		)];
-		x.extend(list(rng, 3, |r| {
-			format!(
-				"{}={}",
-				word(r, LOWER, 1, 6),
-				word(r, ALNUM, 1, 6)
+			.to_vec(),
+			"VALIDATION" => pick(
+				rng,
+				&[
+					b"none", b"sha256", b"pgp", b"md5",
+					b"foo", b"PGP",
+				],
 			)
-		}));
-		let at = rng.below(x.len());
-		x.swap(0, at);
-		sections.push(("XDATA".into(), x));
-	}
-	// pacman writes these only when set
-	for key in [
-		"BASE",
-		"DESC",
-		"URL",
-		"ARCH",
-		"BUILDDATE",
-		"INSTALLDATE",
-		"PACKAGER",
-		"VALIDATION",
-	] {
-		if rng.below(12) == 0 {
-			sections.retain(|(k, _)| k != key);
+			.to_vec(),
+			"XDATA" => match rng.below(6) {
+				0 => word(rng, TEXT, 0, 6),
+				_ => [
+					word(rng, NAME, 0, 6),
+					b"=".to_vec(),
+					word(rng, TEXT, 0, 8),
+				]
+				.concat(),
+			},
+			k if RELATIONS.contains(&k) => relation(rng),
+			_ => text(rng),
 		}
-	}
-	// read by pacman, never written to a local db
-	for key in ["MAKEDEPENDS", "CHECKDEPENDS"] {
-		if rng.below(8) == 0 {
-			sections.push((key.into(), list(rng, 3, relation)));
-		}
-	}
-	// skipped by pacman up to the next blank line
-	if rng.below(8) == 0 {
-		let key = format!("X{}", word(rng, b"ABCXYZ_", 1, 6));
-		let lines = list(rng, 3, |r| word(r, b"abc%XY =", 1, 8));
-		sections.push((key, lines));
+	};
+	let lists = LISTS.contains(&key) || RELATIONS.contains(&key);
+	let n = if lists { rng.below(4) } else { n };
+	(0..n).map(|_| one(rng)).collect()
+}
+
+// a header the C does not know: case, blanks, CR, stray '%'
+fn unknown_key(rng: &mut Rng) -> Vec<u8> {
+	pick(
+		rng,
+		&[
+			b"%FOO%",
+			b"%name%",
+			b"%NAME% ",
+			b" %DESC%",
+			b"%DESC%\r",
+			b"NAME",
+			b"%%",
+			b"%",
+			b"%FILES%",
+			b"%BACKUP%",
+		],
+	)
+	.to_vec()
+}
+
+// one desc file: random sections in random order, each ending in a blank
+// line or not, some repeated, extra blank lines, then whole-file changes
+fn gen_desc(rng: &mut Rng, name: &[u8], ver: &[u8]) -> Vec<u8> {
+	let mut keys: Vec<String> = ["NAME", "VERSION"]
+		.iter()
+		.chain(&SINGLE)
+		.chain(&LISTS)
+		.chain(&RELATIONS)
+		.filter(|_| rng.below(3) != 0)
+		.map(|k| format!("%{k}%"))
+		.collect();
+	for _ in 0..rng.below(3) {
+		keys.push(String::from_utf8_lossy(&unknown_key(rng)).into());
 	}
 	// a repeated value overwrites, a repeated list appends
-	if !sections.is_empty() && rng.below(8) == 0 {
-		let again = sections[rng.below(sections.len())].clone();
-		sections.push(again);
+	if !keys.is_empty() && rng.below(4) == 0 {
+		let again = keys[rng.below(keys.len())].clone();
+		keys.push(again);
 	}
-	// section order is free in both readers
-	for i in (1..sections.len()).rev() {
-		sections.swap(i, rng.below(i + 1));
+	for i in (1..keys.len()).rev() {
+		keys.swap(i, rng.below(i + 1));
 	}
-	Desc { sections }
+	let mut out = Vec::new();
+	for k in &keys {
+		// unknown_key's bytes are ASCII, lossy keeps them
+		let key = k.trim_matches('%');
+		out.extend(k.as_bytes());
+		out.push(b'\n');
+		for v in values(rng, key, name, ver) {
+			out.extend(v);
+			out.push(b'\n');
+		}
+		match rng.below(8) {
+			0 => {}
+			1 => out.extend(b"\n\n"),
+			_ => out.push(b'\n'),
+		}
+	}
+	finish(rng, out)
 }
 
-// a whitespace-only file name is no backup path for alpm-db: left to
-// odd_inputs
-fn segment(rng: &mut Rng) -> String {
-	loop {
-		let s = word(rng, b"abcz019._-+@ ", 1, 5);
-		if !s.trim().is_empty() {
-			return s;
+// whole-file changes: CRLF, no final newline, cut anywhere, empty
+fn finish(rng: &mut Rng, mut out: Vec<u8>) -> Vec<u8> {
+	match rng.below(16) {
+		0 => {
+			let mut crlf = Vec::new();
+			for &c in &out {
+				if c == b'\n' {
+					crlf.push(b'\r');
+				}
+				crlf.push(c);
+			}
+			crlf
+		}
+		1 => {
+			while out.last() == Some(&b'\n') {
+				out.pop();
+			}
+			out
+		}
+		2 if !out.is_empty() => {
+			out.truncate(rng.below(out.len()));
+			out
+		}
+		3 => Vec::new(),
+		_ => out,
+	}
+}
+
+fn path(rng: &mut Rng) -> Vec<u8> {
+	match rng.below(10) {
+		0 => text(rng),
+		1 => pick(rng, &[b"/etc/x", b"usr", b"usr/", b"./a", b" "])
+			.to_vec(),
+		_ => {
+			let parts = 1 + rng.below(3);
+			let mut p = Vec::new();
+			for i in 0..parts {
+				if i > 0 {
+					p.push(b'/');
+				}
+				p.extend(word(rng, NAME, 1, 6));
+			}
+			if rng.below(3) == 0 {
+				p.push(b'/');
+			}
+			p
 		}
 	}
 }
 
-fn shuffle<T>(rng: &mut Rng, v: &mut [T]) {
-	for i in (1..v.len()).rev() {
-		v.swap(i, rng.below(i + 1));
-	}
+// a backup line: path, tab, md5; no tab is a NULL hash, more tabs stay
+// in the hash
+fn backup(rng: &mut Rng) -> Vec<u8> {
+	let p = path(rng);
+	let hash = match rng.below(6) {
+		0 => return p,
+		1 => b"(null)".to_vec(),
+		2 => word(rng, TEXT, 0, 8),
+		3 => b"a\tb".to_vec(),
+		_ => word(rng, b"0123456789abcdef", 32, 32),
+	};
+	[p, b"\t".to_vec(), hash].concat()
 }
 
-// %FILES% shuffled (both sides sort), parents sometimes missing, paths
-// sometimes repeated or listed as file and directory; %BACKUP% of some
-// files in any order, "(null)" hashes and paths not in %FILES% included.
-// pacman checks none of it
-fn gen_files(rng: &mut Rng) -> String {
-	let mut paths: Vec<String> = Vec::new();
-	let mut files: Vec<String> = Vec::new();
-	for _ in 0..rng.below(12) {
-		let depth = rng.below(4);
-		let mut prefix = String::new();
-		for _ in 0..depth {
-			let seg = segment(rng);
-			prefix = format!("{prefix}{seg}/");
-			if !paths.contains(&prefix) && rng.below(10) != 0 {
-				paths.push(prefix.clone());
+// %FILES% and %BACKUP% in any order, sometimes twice, blank lines inside
+// (the C stops the section there), unknown sections and stray lines
+fn gen_files(rng: &mut Rng) -> Vec<u8> {
+	let mut out = Vec::new();
+	if rng.below(8) == 0 {
+		out.extend(b"stray\n\n");
+	}
+	for _ in 0..rng.below(4) {
+		let key: &[u8] = match rng.below(8) {
+			0 => b"%FOO%",
+			1 => b"%BACKUP%",
+			2 => b"%FILES%\r",
+			_ => b"%FILES%",
+		};
+		let backups = key == b"%BACKUP%";
+		out.extend(key);
+		out.push(b'\n');
+		for _ in 0..rng.below(8) {
+			out.extend(match backups {
+				true => backup(rng),
+				false => path(rng),
+			});
+			out.push(b'\n');
+			if rng.below(20) == 0 {
+				out.push(b'\n');
 			}
 		}
-		let f = format!("{prefix}{}", segment(rng));
-		if rng.below(10) == 0 {
-			paths.push(format!("{f}/"));
+		if rng.below(5) != 0 {
+			out.push(b'\n');
 		}
-		if rng.below(10) == 0 {
-			paths.push(f.clone());
-		}
-		paths.push(f.clone());
-		files.push(f);
 	}
-	shuffle(rng, &mut paths);
-	let mut backup: Vec<String> =
-		files.into_iter().filter(|_| rng.below(3) == 0).collect();
-	if rng.below(8) == 0 {
-		backup.push(format!("etc/{}", segment(rng)));
-	}
-	shuffle(rng, &mut backup);
-	let mut out = String::new();
-	if !paths.is_empty() {
-		out.push_str(&section("FILES", &paths));
-	}
-	if !backup.is_empty() {
-		let lines: Vec<String> = backup
-			.iter()
-			.map(|b| match rng.below(6) {
-				0 => format!("{b}\t(null)"),
-				_ => format!("{b}\t{}", md5(rng)),
-			})
-			.collect();
-		out.push_str(&section("BACKUP", &lines));
-	}
-	out
-}
-
-fn section(key: &str, lines: &[String]) -> String {
-	format!("%{key}%\n{}\n\n", lines.join("\n"))
-}
-
-// blank lines between sections are skipped by pacman
-fn spaced(rng: &mut Rng, text: String) -> String {
-	match rng.below(6) {
-		0 => text.replace("\n\n%", "\n\n\n%"),
-		_ => text,
-	}
+	finish(rng, out)
 }
 
 fn dump(entries: &[LocalEntry]) -> String {
 	let text = |t: &Option<Vec<u8>>| match t {
-		Some(t) => String::from_utf8_lossy(t).into_owned(),
+		Some(t) => format!("{:?}\n", String::from_utf8_lossy(t)),
 		None => "(missing)\n".into(),
 	};
 	let mut out = String::new();
@@ -570,17 +541,19 @@ fn dump(entries: &[LocalEntry]) -> String {
 }
 
 fn gen_entry(rng: &mut Rng) -> LocalEntry {
-	let name = pkgname(rng);
-	let version = full_version(rng);
-	let desc = gen_desc(rng, &name, &version);
-	let desc = spaced(rng, desc.text());
-	let files = gen_files(rng);
-	let files = spaced(rng, files);
+	let name = word(rng, NAME, 1, 8);
+	let name = match name[0] {
+		b'-' | b'.' if rng.below(2) == 0 => [b"a", &name[..]].concat(),
+		_ => name,
+	};
+	let ver = version(rng);
+	let dir = [&name[..], b"-", &ver].concat();
 	LocalEntry {
-		dir: format!("{name}-{version}"),
+		// NAME is ASCII, version digits
+		dir: String::from_utf8(dir).unwrap(),
 		// missing files fail on both sides
-		desc: (rng.below(40) != 0).then(|| desc.into_bytes()),
-		files: (rng.below(40) != 0).then(|| files.into_bytes()),
+		desc: (rng.below(40) != 0).then(|| gen_desc(rng, &name, &ver)),
+		files: (rng.below(40) != 0).then(|| gen_files(rng)),
 		install: rng.below(3) == 0,
 	}
 }
@@ -602,21 +575,13 @@ fn fixed_layout() {
 	sb.reset_local();
 	let mut rng = Rng::new(7);
 	let mut entries = Vec::new();
-	for dir in ["dup-1-1", "dup-2-1", "a-b-c-1-1", "x-1:2.0-3"] {
-		let (name, ver) = alpm_core::util::splitname(dir.as_bytes())
-			.map(|(n, v)| {
-				(
-					String::from_utf8(n.to_vec()).unwrap(),
-					String::from_utf8(v.to_vec()).unwrap(),
-				)
-			})
-			.unwrap();
+	for dir in ["dup-1-1", "dup-2-1", "a-b-c-1-1", "x-1:2.0-3", ".h-1-1"] {
+		let (name, ver) =
+			alpm_core::util::splitname(dir.as_bytes()).unwrap();
 		entries.push(LocalEntry {
 			dir: dir.into(),
-			desc: Some(gen_desc(&mut rng, &name, &ver)
-				.text()
-				.into_bytes()),
-			files: Some(gen_files(&mut rng).into_bytes()),
+			desc: Some(gen_desc(&mut rng, name, ver)),
+			files: Some(gen_files(&mut rng)),
 			install: false,
 		});
 	}
@@ -627,10 +592,17 @@ fn fixed_layout() {
 	for bad in ["nodash", "one-dash", "-1-1", "trailing-1-"] {
 		fs::create_dir(local.join(bad)).unwrap();
 	}
-	// d_type DT_LNK: skipped like a file
+	// names check_meta warns about; its length check needs a name
+	// longer than a file name can be
+	fs::create_dir(local.join("-x-1-1")).unwrap();
+	fs::create_dir(local.join("*-1-1")).unwrap();
+	// stat follows the link: a directory
 	symlink(local.join("x-1:2.0-3"), local.join("link-1-1")).unwrap();
 	// no desc, no files
 	fs::create_dir(local.join("empty-1-1")).unwrap();
+	// desc a directory: fopen works, the first read fails
+	fs::create_dir_all(local.join("dirdesc-1-1/desc")).unwrap();
+	fs::create_dir_all(local.join("dirdesc-1-1/files")).unwrap();
 	assert_same(&sb, Loads::ALL, &|| dump(&entries));
 	for (desc, files, scriptlet) in [
 		(false, true, false),
@@ -648,8 +620,8 @@ fn fixed_layout() {
 }
 
 #[test]
-fn fuzz_valid() {
-	let sb = TempRoot::new("be-local-valid");
+fn fuzz_bytes() {
+	let sb = TempRoot::new("be-local-fuzz");
 	let mut rng = Rng::new(0x10ca1);
 	let mut compared = 0;
 	for _ in 0..db_iters() {
@@ -665,15 +637,9 @@ fn fuzz_valid() {
 					prev.dir.as_bytes(),
 				)
 				.unwrap();
-				let name = String::from_utf8(name.to_vec())
-					.unwrap();
-				let version = full_version(&mut rng);
-				e.dir = format!("{name}-{version}");
-				e.desc = Some(gen_desc(
-					&mut rng, &name, &version,
-				)
-				.text()
-				.into_bytes());
+				let ver = version(&mut rng);
+				let dir = [name, b"-", &ver].concat();
+				e.dir = String::from_utf8(dir).unwrap();
 			}
 			if entries.iter().any(|x| x.dir == e.dir) {
 				continue;
@@ -682,8 +648,7 @@ fn fuzz_valid() {
 		}
 		sb.write_local(&entries);
 		let loads = random_loads(&mut rng);
-		assert_same(&sb, loads, &|| dump(&entries));
-		compared += entries.len();
+		compared += assert_same(&sb, loads, &|| dump(&entries));
 	}
 	assert!(compared > db_iters(), "only {compared} packages");
 }
@@ -742,14 +707,22 @@ fn validate_version_file() {
 					.unwrap();
 				}
 			}
-			let cr = c_local_db(&c.root(), &c.dbpath(), Loads::ALL);
+			let cr = c_side(&c.root(), &c.dbpath(), Loads::ALL);
 			let rr = rust_local_db(&r.dbpath(), Loads::ALL);
 			let what = format!("case {i} {case:?} pkg {with_pkg}");
 			assert_eq!(
-				cr.as_ref().err(),
-				rr.as_ref().err(),
+				cr.0.as_ref().err(),
+				rr.0.as_ref().err(),
 				"{what}"
 			);
+			// the two trees differ in the paths logged
+			let c_dir = c.dir().to_str().unwrap();
+			let r_dir = r.dir().to_str().unwrap();
+			let rebased: Vec<_> = lines(&cr.1)
+				.into_iter()
+				.map(|(l, m)| (l, m.replace(c_dir, r_dir)))
+				.collect();
+			assert_eq!(rebased, lines(&rr.1), "{what}");
 			assert_eq!(
 				listing(&c.local()),
 				listing(&r.local()),
@@ -779,8 +752,8 @@ fn validate_layouts() {
 		TempRoot::new("be-local-lay-c"),
 		TempRoot::new("be-local-lay-r"),
 	);
-	let cr = c_local_db(&c.root(), &c.dbpath(), Loads::ALL);
-	let rr = rust_local_db(&r.dbpath(), Loads::ALL);
+	let cr = c_side(&c.root(), &c.dbpath(), Loads::ALL).0;
+	let rr = rust_local_db(&r.dbpath(), Loads::ALL).0;
 	assert_eq!(cr.as_ref().err(), rr.as_ref().err());
 	assert!(rr.is_ok());
 	assert_eq!(listing(&c.local()), listing(&r.local()));
@@ -792,8 +765,8 @@ fn validate_layouts() {
 	for sb in [&c, &r] {
 		fs::write(sb.local(), "").unwrap();
 	}
-	let cr = c_local_db(&c.root(), &c.dbpath(), Loads::ALL);
-	let rr = rust_local_db(&r.dbpath(), Loads::ALL);
+	let cr = c_side(&c.root(), &c.dbpath(), Loads::ALL).0;
+	let rr = rust_local_db(&r.dbpath(), Loads::ALL).0;
 	assert!(cr.is_err());
 	assert_eq!(cr.err(), rr.err());
 	// version file is a directory: fopen works, fscanf fails
@@ -804,15 +777,15 @@ fn validate_layouts() {
 	for sb in [&c, &r] {
 		fs::create_dir_all(sb.local().join("ALPM_DB_VERSION")).unwrap();
 	}
-	let cr = c_local_db(&c.root(), &c.dbpath(), Loads::ALL);
-	let rr = rust_local_db(&r.dbpath(), Loads::ALL);
+	let cr = c_side(&c.root(), &c.dbpath(), Loads::ALL).0;
+	let rr = rust_local_db(&r.dbpath(), Loads::ALL).0;
 	assert!(cr.is_err());
 	assert_eq!(cr.err(), rr.err());
 }
 
-// pacman-accepted input outside the alpm-db formats, one package each.
-// expected: the fields that differ, "" when both agree. ERR marks a port
-// read error (alpm-db rejects the file)
+// inputs the ALPM parsers refused or read otherwise (the divergences
+// pinned before the owned reader), and the C's own corners, one package
+// each: every one equal now
 const BASE_DESC: &str = "%NAME%\nfoo\n\n%VERSION%\n1.0-1\n\n%BASE%\nfoo\n\n\
 	%DESC%\nA package\n\n%URL%\nhttps://example.org/\n\n%ARCH%\nx86_64\n\n\
 	%BUILDDATE%\n1700000000\n\n%INSTALLDATE%\n1700000001\n\n\
@@ -820,6 +793,35 @@ const BASE_DESC: &str = "%NAME%\nfoo\n\n%VERSION%\n1.0-1\n\n%BASE%\nfoo\n\n\
 	%DEPENDS%\nbar>=1.0\n\n";
 const BASE_FILES: &str = "%FILES%\netc/\netc/foo.conf\nusr/\nusr/bin/\n\
 	usr/bin/foo\n\n%BACKUP%\netc/foo.conf\td41d8cd98f00b204e9800998ecf8427e\n\n";
+
+// a desc as ordered sections
+struct Desc {
+	sections: Vec<(String, Vec<String>)>,
+}
+
+impl Desc {
+	fn text(&self) -> String {
+		let mut out = String::new();
+		for (key, lines) in &self.sections {
+			out.push_str(&format!(
+				"%{key}%\n{}\n\n",
+				lines.join("\n")
+			));
+		}
+		out
+	}
+
+	fn set(&mut self, key: &str, lines: Vec<String>) {
+		match self.sections.iter_mut().find(|(k, _)| k == key) {
+			Some(s) => s.1 = lines,
+			None => self.sections.push((key.into(), lines)),
+		}
+	}
+
+	fn remove(&mut self, key: &str) {
+		self.sections.retain(|(k, _)| k != key);
+	}
+}
 
 fn desc_with(f: impl Fn(&mut Desc)) -> String {
 	let mut d = Desc {
@@ -838,8 +840,7 @@ fn one(v: &str) -> Vec<String> {
 	vec![v.to_string()]
 }
 
-#[allow(clippy::type_complexity)]
-fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
+fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>)> {
 	let long = "x".repeat(1500);
 	let desc = |f: &dyn Fn(&mut Desc)| desc_with(f).into_bytes();
 	let base_f = BASE_FILES.as_bytes().to_vec();
@@ -850,70 +851,59 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 			"desc crlf",
 			BASE_DESC.replace('\n', "\r\n").into_bytes(),
 			base_f.clone(),
-			"",
 		),
 		(
 			"desc line > 1023",
 			desc(&|d| d.set("DESC", one(&long))),
 			base_f.clone(),
-			"desc",
 		),
 		(
 			"unknown key",
 			desc(&|d| d.set("FOO", one("bar"))),
 			base_f.clone(),
-			"",
 		),
 		(
 			"reason 2",
 			desc(&|d| d.set("REASON", one("2"))),
 			base_f.clone(),
-			"ERR",
 		),
 		(
 			"reason abc",
 			desc(&|d| d.set("REASON", one("abc"))),
 			base_f.clone(),
-			"ERR",
 		),
 		(
 			"no validation",
 			desc(&|d| d.remove("VALIDATION")),
 			base_f.clone(),
-			"",
 		),
-		("no base", desc(&|d| d.remove("BASE")), base_f.clone(), ""),
-		("no url", desc(&|d| d.remove("URL")), base_f.clone(), ""),
+		("no base", desc(&|d| d.remove("BASE")), base_f.clone()),
+		("no url", desc(&|d| d.remove("URL")), base_f.clone()),
 		(
 			"no packager",
 			desc(&|d| d.remove("PACKAGER")),
 			base_f.clone(),
-			"",
 		),
 		(
 			"no builddate",
 			desc(&|d| d.remove("BUILDDATE")),
 			base_f.clone(),
-			"",
 		),
-		("no arch", desc(&|d| d.remove("ARCH")), base_f.clone(), ""),
+		("no arch", desc(&|d| d.remove("ARCH")), base_f.clone()),
 		(
 			"empty url",
 			desc(&|d| d.set("URL", one(""))),
 			base_f.clone(),
-			"",
 		),
 		(
 			"desc spaces",
 			desc(&|d| d.set("DESC", one(" a  b\tc "))),
 			base_f.clone(),
-			"",
 		),
 		(
 			"desc empty",
 			desc(&|d| d.set("DESC", one(""))),
 			base_f.clone(),
-			"",
 		),
 		(
 			"desc not utf-8",
@@ -926,19 +916,16 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				v
 			},
 			base_f.clone(),
-			"ERR",
 		),
 		(
 			"makedepends",
 			desc(&|d| d.set("MAKEDEPENDS", one("gcc"))),
 			base_f.clone(),
-			"",
 		),
 		(
 			"checkdepends",
 			desc(&|d| d.set("CHECKDEPENDS", one("chk"))),
 			base_f.clone(),
-			"",
 		),
 		(
 			"groups twice",
@@ -950,13 +937,11 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				s.into_bytes()
 			},
 			base_f.clone(),
-			"",
 		),
 		(
 			"xdata no pkgtype",
 			desc(&|d| d.set("XDATA", one("a=b"))),
 			base_f.clone(),
-			"ERR",
 		),
 		(
 			"xdata spaces",
@@ -970,7 +955,6 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				)
 			}),
 			base_f.clone(),
-			"xdata",
 		),
 		(
 			"xdata empty value",
@@ -981,7 +965,6 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				)
 			}),
 			base_f.clone(),
-			"",
 		),
 		(
 			"xdata empty value mid",
@@ -996,7 +979,6 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				)
 			}),
 			base_f.clone(),
-			"",
 		),
 		(
 			"xdata no =",
@@ -1007,153 +989,128 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				)
 			}),
 			base_f.clone(),
-			"ERR,CERR",
 		),
 		(
 			"size +5",
 			desc(&|d| d.set("SIZE", one("+5"))),
 			base_f.clone(),
-			"isize",
 		),
 		(
 			"size -1",
 			desc(&|d| d.set("SIZE", one("-1"))),
 			base_f.clone(),
-			"ERR",
 		),
 		(
 			"size huge",
 			desc(&|d| d.set("SIZE", one("18446744073709551615"))),
 			base_f.clone(),
-			"",
 		),
 		(
 			"builddate text",
 			desc(&|d| d.set("BUILDDATE", one("x1"))),
 			base_f.clone(),
-			"ERR",
 		),
 		(
 			"validation foo",
 			desc(&|d| d.set("VALIDATION", one("foo"))),
 			base_f.clone(),
-			"ERR",
 		),
 		(
 			"validation md5",
 			desc(&|d| d.set("VALIDATION", one("md5"))),
 			base_f.clone(),
-			"",
 		),
 		(
 			"unknown packager",
 			desc(&|d| d.set("PACKAGER", one("Unknown Packager"))),
 			base_f.clone(),
-			"",
 		),
 		(
 			"url normalized",
 			desc(&|d| d.set("URL", one("HTTPS://Example.ORG"))),
 			base_f.clone(),
-			"",
 		),
 		(
 			"url dot segment",
 			desc(&|d| d.set("URL", one("https://a.org/x/./y"))),
 			base_f.clone(),
-			"",
 		),
 		(
 			"url invalid",
 			desc(&|d| d.set("URL", one("not a url"))),
 			base_f.clone(),
-			"ERR",
 		),
 		(
 			"license lowercase or",
 			desc(&|d| d.set("LICENSE", one("MIT or Apache-2.0"))),
 			base_f.clone(),
-			"",
 		),
 		(
 			"license deprecated",
 			desc(&|d| d.set("LICENSE", one("GPL-2.0+"))),
 			base_f.clone(),
-			"",
 		),
 		(
 			"dep trailing space",
 			desc(&|d| d.set("DEPENDS", one("bar>=1.0 "))),
 			base_f.clone(),
-			"ERR",
 		),
 		(
 			"dep two ops",
 			desc(&|d| d.set("DEPENDS", one("a<1>2"))),
 			base_f.clone(),
-			"ERR",
 		),
 		(
 			"dep empty version",
 			desc(&|d| d.set("DEPENDS", one("a>="))),
 			base_f.clone(),
-			"ERR",
 		),
 		(
 			"dep name with .so",
 			desc(&|d| d.set("DEPENDS", one("d1.so62r"))),
 			base_f.clone(),
-			"",
 		),
 		(
 			"dep with desc",
 			desc(&|d| d.set("DEPENDS", one("a: x"))),
 			base_f.clone(),
-			"ERR",
 		),
 		(
 			"optdep no space",
 			desc(&|d| d.set("OPTDEPENDS", one("a:desc"))),
 			base_f.clone(),
-			"ERR",
 		),
 		(
 			"optdep spaces",
 			desc(&|d| d.set("OPTDEPENDS", one("a:  two  words "))),
 			base_f.clone(),
-			"",
 		),
 		(
 			"arch upper",
 			desc(&|d| d.set("ARCH", one("X86_64"))),
 			base_f.clone(),
-			"",
 		),
 		(
 			"arch ANY",
 			desc(&|d| d.set("ARCH", one("ANY"))),
 			base_f.clone(),
-			"arch",
 		),
 		(
 			"name mismatch",
 			desc(&|d| d.set("NAME", one("other"))),
 			base_f.clone(),
-			"",
 		),
 		(
 			"version no pkgrel",
 			desc(&|d| d.set("VERSION", one("1.0"))),
 			base_f.clone(),
-			"ERR",
 		),
 		(
 			"desc mentions %XDATA%",
 			desc(&|d| d.set("DESC", one("see %XDATA%"))),
 			base_f.clone(),
-			"",
 		),
-		("empty desc file", Vec::new(), base_f.clone(), ""),
+		("empty desc file", Vec::new(), base_f.clone()),
 		(
 			"header leading space",
 			{
@@ -1162,25 +1119,21 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 					.into_bytes()
 			},
 			base_f.clone(),
-			"",
 		),
 		(
 			"no final newline",
 			base_d.trim_ascii_end().to_vec(),
 			base_f.clone(),
-			"",
 		),
 		(
 			"nul in desc",
 			desc(&|d| d.set("DESC", one("a\0b"))),
 			base_f.clone(),
-			"desc",
 		),
 		(
 			"files crlf",
 			base_d.clone(),
 			BASE_FILES.replace('\n', "\r\n").into_bytes(),
-			"",
 		),
 		(
 			"backup (null)",
@@ -1189,7 +1142,6 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				"d41d8cd98f00b204e9800998ecf8427e",
 				"(null)",
 			)),
-			"",
 		),
 		(
 			"backup no tab",
@@ -1198,7 +1150,6 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				"\td41d8cd98f00b204e9800998ecf8427e",
 				"",
 			)),
-			"ERR",
 		),
 		(
 			"backup not in files",
@@ -1207,7 +1158,6 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				"etc/foo.conf\td41",
 				"etc/bar.conf\td41",
 			)),
-			"",
 		),
 		(
 			"backup unsorted",
@@ -1216,7 +1166,6 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				"%BACKUP%\n",
 				"%BACKUP%\nusr/bin/foo\t00000000000000000000000000000000\n",
 			)),
-			"",
 		),
 		(
 			"backup md5 upper",
@@ -1225,7 +1174,6 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				"d41d8cd98f00b204e9800998ecf8427e",
 				"D41D8CD98F00B204E9800998ECF8427E",
 			)),
-			"backup",
 		),
 		(
 			"backup md5 short",
@@ -1234,86 +1182,72 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				"d41d8cd98f00b204e9800998ecf8427e",
 				"abc",
 			)),
-			"ERR",
 		),
 		(
 			"backup only md5 short",
 			base_d.clone(),
 			files("%BACKUP%\netc/foo.conf\tabc\n\n"),
-			"ERR",
 		),
 		(
 			"files blank line inside",
 			base_d.clone(),
 			files("%FILES%\nusr/\n\nusr/bin/\n\n"),
-			"",
 		),
 		(
 			"files absolute",
 			base_d.clone(),
 			files("%FILES%\n/etc/\n/etc/x\n\n"),
-			"",
 		),
 		(
 			"files no parent",
 			base_d.clone(),
 			files("%FILES%\nusr/bin/foo\n\n"),
-			"",
 		),
 		(
 			"files duplicate",
 			base_d.clone(),
 			files("%FILES%\nusr/\nusr/\n\n"),
-			"",
 		),
 		(
 			"files dir and file",
 			base_d.clone(),
 			files("%FILES%\nusr\nusr/\n\n"),
-			"",
 		),
 		(
 			"files dot segment",
 			base_d.clone(),
 			files("%FILES%\nusr/\nusr/./\n\n"),
-			"",
 		),
 		(
 			"files blank path",
 			base_d.clone(),
 			files("%FILES%\nusr/\n \nusr/bin/\n\n"),
-			"",
 		),
 		(
 			"files long path",
 			base_d.clone(),
 			files(&format!("%FILES%\n{long}\n\n")),
-			"files",
 		),
 		(
 			"files not utf-8",
 			base_d.clone(),
 			b"%FILES%\nusr/\nusr/\xff\n\n".to_vec(),
-			"ERR",
 		),
 		(
 			"files unknown section",
 			base_d.clone(),
 			files(&format!("{BASE_FILES}%FOO%\nbar\n\n")),
-			"",
 		),
 		(
 			"files leading blank",
 			base_d.clone(),
 			files(&format!("\n{BASE_FILES}")),
-			"",
 		),
-		("no desc", desc(&|d| d.remove("DESC")), base_f.clone(), ""),
+		("no desc", desc(&|d| d.remove("DESC")), base_f.clone()),
 		(
 			"no installdate",
 			desc(&|d| d.remove("INSTALLDATE")),
 			base_f.clone(),
-			"",
 		),
 		(
 			"url twice",
@@ -1323,7 +1257,6 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				s.into_bytes()
 			},
 			base_f.clone(),
-			"",
 		),
 		(
 			"validation twice",
@@ -1333,7 +1266,6 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				s.into_bytes()
 			},
 			base_f.clone(),
-			"",
 		),
 		(
 			"header line in a list",
@@ -1344,7 +1276,6 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				)
 			}),
 			base_f.clone(),
-			"",
 		),
 		(
 			"stray line after a value",
@@ -1355,7 +1286,6 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				)
 				.into_bytes(),
 			base_f.clone(),
-			"",
 		),
 		(
 			"backup only",
@@ -1363,13 +1293,11 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 			files(
 				"%BACKUP%\netc/foo.conf\td41d8cd98f00b204e9800998ecf8427e\n\n",
 			),
-			"",
 		),
 		(
 			"files twice",
 			base_d.clone(),
 			files(&format!("{BASE_FILES}%FILES%\nopt/\n\n")),
-			"",
 		),
 		(
 			"backup twice",
@@ -1377,7 +1305,6 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 			files(&format!(
 				"{BASE_FILES}%BACKUP%\nusr/bin/foo\t(null)\n\n"
 			)),
-			"",
 		),
 		(
 			"files sorted by strcmp",
@@ -1385,7 +1312,67 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 			files(
 				"%FILES%\nusr/\nusr/lib-x\nusr/lib/\nusr/lib/a\n\n",
 			),
-			"",
+		),
+	]
+}
+
+// the C's corners on top of the old divergence list
+fn corner_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>)> {
+	let base_f = BASE_FILES.as_bytes().to_vec();
+	let d = |s: &str| s.as_bytes().to_vec();
+	vec![
+		// the last value without a blank line: the NULL fgets at the
+		// end keeps it in the buffer, read once more as a key
+		("last value again", d("%DESC%\nfoo\n"), base_f.clone()),
+		("last value a key", d("%BASE%\n%DESC%\n"), base_f.clone()),
+		("header at the end", d("%DESC%"), base_f.clone()),
+		(
+			"header and newline at the end",
+			d("%URL%\n"),
+			base_f.clone(),
+		),
+		("list at the end", d("%GROUPS%\na\nb"), base_f.clone()),
+		("reason 0", d("%REASON%\n0\n\n"), base_f.clone()),
+		("reason empty", d("%REASON%\n\n"), base_f.clone()),
+		(
+			"reason twice",
+			d("%REASON%\n1\n\n%REASON%\nx\n\n"),
+			base_f.clone(),
+		),
+		(
+			"1023 byte line",
+			format!("%DESC%\n{}\n\n", "d".repeat(1023))
+				.into_bytes(),
+			base_f.clone(),
+		),
+		(
+			"1022 byte line",
+			format!("%DESC%\n{}\n\n", "d".repeat(1022))
+				.into_bytes(),
+			base_f.clone(),
+		),
+		(
+			"long key line",
+			format!("{}\nx\n\n", "%".repeat(2050)).into_bytes(),
+			base_f.clone(),
+		),
+		("nul key", d("%DESC%\0junk\nx\n\n"), base_f.clone()),
+		(
+			"nul only line",
+			d("%GROUPS%\na\n\0b\nc\n\n"),
+			base_f.clone(),
+		),
+		("xdata =", d("%XDATA%\n=\na=b=c\n\n"), base_f.clone()),
+		("files nul", d(""), d("%FILES%\na\0b\n\0\nc\n\n")),
+		("files at the end", d(""), d("%FILES%\na\nb")),
+		("backup no tab", d(""), d("%BACKUP%\netc/x\n\n")),
+		("backup two tabs", d(""), d("%BACKUP%\na\tb\tc\n\n")),
+		("backup empty hash", d(""), d("%BACKUP%\na\t\n\t\n\n")),
+		(
+			"files long path",
+			d(""),
+			format!("%FILES%\n{}\n\n", "p".repeat(2500))
+				.into_bytes(),
 		),
 	]
 }
@@ -1393,60 +1380,33 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 #[test]
 fn odd_inputs() {
 	let sb = TempRoot::new("be-local-odd");
-	let mut report = String::new();
-	let mut wrong = Vec::new();
-	for (label, desc, files, expect) in odd_cases() {
+	let cases = odd_cases().into_iter().chain(corner_cases());
+	for (label, desc, files) in cases {
 		sb.reset_local();
-		sb.write_local(&[LocalEntry {
+		let entries = [LocalEntry {
 			dir: "foo-1.0-1".into(),
 			desc: Some(desc),
 			files: Some(files),
 			install: false,
-		}]);
-		// desc and files independently: a desc error hides files
-		let mut got = Vec::new();
+		}];
+		sb.write_local(&entries);
+		let what = || format!("{label}\n{}", dump(&entries));
+		// desc and files apart too: a desc error hides files
 		for loads in [
-			Loads {
-				desc: true,
-				files: false,
-				scriptlet: false,
-			},
+			Loads::ALL,
 			Loads {
 				desc: false,
 				files: true,
 				scriptlet: false,
 			},
 		] {
-			let c = c_local_db(&sb.root(), &sb.dbpath(), loads)
-				.unwrap();
-			let r = rust_local_db(&sb.dbpath(), loads).unwrap();
-			let (c, r) = (&c.pkgs[0], &r.pkgs[0]);
-			// a port error leaves the section empty, every field
-			// the C read differs then
-			match r.infolevel & INFRQ_ERROR != 0 {
-				true => got.push("ERR"),
-				false => got.extend(diff_fields(c, r)),
-			}
-			if c.infolevel & INFRQ_ERROR != 0 {
-				got.push("CERR");
-			}
-		}
-		let got = got.join(",");
-		writeln!(report, "{label:28} {got}").unwrap();
-		if got != expect {
-			wrong.push(format!(
-				"{label}: expected {expect:?} got {got:?}"
-			));
+			assert_same(&sb, loads, &what);
 		}
 	}
-	eprintln!("{report}");
-	assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 // the real local db, strictly read only: alpm_initialize only reads
-// ALPM_DB_VERSION when it exists, no transaction or lock is taken.
-// mismatches are counted per field; only the url normalization of
-// alpm-types is expected (PORTING.md)
+// ALPM_DB_VERSION when it exists, no transaction or lock is taken
 #[test]
 fn system_local_db() {
 	let dbpath = b"/var/lib/pacman/";
@@ -1454,48 +1414,25 @@ fn system_local_db() {
 		eprintln!("no /var/lib/pacman/local, skipped");
 		return;
 	}
-	let c = c_local_db(b"/", dbpath, Loads::ALL).unwrap();
-	let r = rust_local_db(dbpath, Loads::ALL).unwrap();
+	let n = assert_same_at(b"/", dbpath);
+	eprintln!("/var/lib/pacman: {n} packages equal");
+}
+
+// assert_same on an existing root and dbpath
+fn assert_same_at(root: &[u8], dbpath: &[u8]) -> usize {
+	let (c, clog) = c_side(root, dbpath, Loads::ALL);
+	let (r, rlog) = rust_local_db(dbpath, Loads::ALL);
+	let (c, r) = (c.unwrap(), r.unwrap());
 	assert_eq!(c.counts, r.counts);
 	assert_eq!(c.pkgs.len(), r.pkgs.len());
-	let mut by_field: Vec<(&str, usize, String)> = Vec::new();
-	let (mut mismatched, mut errs) = (0, 0);
-	// url: only a '/' appended
-	let mut url_slash = 0;
 	for (cp, rp) in c.pkgs.iter().zip(&r.pkgs) {
-		assert_eq!(cp.name, rp.name);
-		assert_eq!(cp.version, rp.version);
-		let d = diff_fields(cp, rp);
-		mismatched += usize::from(!d.is_empty());
-		if rp.infolevel & INFRQ_ERROR != 0 {
-			errs += 1;
-			let e = port_error(dbpath, rp);
-			eprintln!("port error {}: {e}", s(&rp.name));
-			continue;
-		}
-		let slash = |u: &Option<Vec<u8>>| {
-			u.as_ref().map(|u| [&u[..], b"/"].concat())
-		};
-		if cp.url != rp.url && slash(&cp.url) == rp.url {
-			url_slash += 1;
-		}
-		for f in d {
-			match by_field.iter_mut().find(|x| x.0 == f) {
-				Some(x) => x.1 += 1,
-				None => by_field.push((f, 1, s(&cp.name))),
-			}
-		}
+		assert!(
+			cp == rp,
+			"{} differs in {:?}",
+			s(&cp.name),
+			diff_fields(cp, rp)
+		);
 	}
-	eprintln!(
-		"/var/lib/pacman: {} packages, {mismatched} with mismatches, \
-		{errs} port read errors",
-		c.pkgs.len()
-	);
-	for (f, n, first) in &by_field {
-		eprintln!("  {f:12} {n:5} (first: {first})");
-	}
-	eprintln!("  url only '/' appended: {url_slash}");
-	// alpm-types keeps the url as read, alpm-db the backups (vendor/patches)
-	assert_eq!(url_slash, 0);
-	assert!(by_field.is_empty(), "new divergence {by_field:?}");
+	assert_eq!(lines(&clog), lines(&rlog));
+	c.pkgs.len()
 }

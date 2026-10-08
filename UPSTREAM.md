@@ -87,7 +87,7 @@ truncated and its tail parsed as an unknown key (swallowing lines up to
 the next blank line), a long path becomes two file entries, which then
 take part in ownership queries and conflict checks.
 
-- port: `alpm-db` keeps lines whole (listed as a divergence)
+- port: splits like the C (owned reader, difftest `be_local`)
 
 ## Include matching nothing is fatal
 
@@ -110,7 +110,8 @@ be_sync.c:552-555 parses `line`, captured at the section header
 freed, so `alpm_dep_from_string(line)` reads freed memory. Applies to
 every relation section. Fix idea: use `buf.line` like READ_AND_STORE_ALL.
 
-- difftest: relation lines kept far below the buffer size
+- port: parses the current line (the fix idea)
+- difftest: lines of 512 bytes and more never inside a relation section
 
 ## `-Qii` crashes on a backup path that is now a directory
 
@@ -386,6 +387,25 @@ declarations. No existing MR found for it.
   **packager**
 - `_alpm_strtoofft` does not range-check: 2^63..2^64-1 become negative
   (util.c:1435). **packager**
+- `local_db_read` loops `while(!feof(fp))`, and a `safe_fgets` NULL at
+  the end leaves `line` as it was: a desc whose last value is not
+  followed by a blank line reads that value again as a key, logging
+  "unknown key" (`%DESC%\nfoo\n`), or storing a key-like value twice
+  (`%BASE%\n%DESC%\n` sets desc to "%DESC%") (be_local.c:748-755,
+  685-688). pacman writes a blank line after every section. **local**
+- every READ_* macro of `sync_db_read` treats the end of the entry data
+  as an error (be_sync.c:533-555): a list, `%FILES%` or a value running
+  into the end of a desc without its blank line (or final newline)
+  invalidates the whole db. repo-add writes the blank lines.
+  **packager**
+- `_alpm_archive_fgets` checks `max_line_size` only once the line buffer
+  exists, so a line over 512 KiB is accepted when it sits in the first
+  data block it is read from (util.c:1269-1273), refused elsewhere.
+  **packager**
+- `_alpm_pkg_check_meta`'s "invalid package metadata (name or version
+  missing)" has no '\n' (package.c:835); its length check cannot fire for
+  local entries, whose directory names are at most NAME_MAX.
+  **none**
 - `HAVE_STRUCT_DIRENT_D_TYPE` is never defined by meson, the d_type
   shortcut is dead and a symlink to a dir in `local/` becomes a package
   (be_local.c:392). **local**
@@ -686,7 +706,7 @@ be_local.c:1118 prints `%s` of `backup->hash`, NULL when the package had
 no md5 for that file; glibc writes `(null)`. The reader then keeps
 `(null)` as the hash string.
 
-- port: writes `(null)` like the C, the reader maps it back
+- port: writes `(null)` like the C, the reader keeps it as the hash
 - difftest: `be_local_write`
 
 ## local db writing and `_alpm_unpack` minor

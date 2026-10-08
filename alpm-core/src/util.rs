@@ -1437,6 +1437,128 @@ pub fn content(entry: &mut Entry) -> io::Result<Vec<u8>> {
 	Ok(data)
 }
 
+// _alpm_archive_fgets's line limit, archive_read_buffer.max_line_size as
+// its callers set it ("512K for a line length seems reasonable")
+pub(crate) const MAX_LINE_SIZE: usize = 512 * 1024;
+
+// archive_read_data_block on an entry: its data in the blocks libarchive
+// hands out, which end at multiples of the block size in the archive
+// stream. a short read is the truncated archive: what arrived is one
+// more block, the next read fails like libarchive's
+pub(crate) struct DataBlocks<'e, 'a> {
+	entry: &'e mut Entry<'a>,
+	block: u64,
+	// stream offset of the next byte, entry bytes not read yet
+	pos: u64,
+	left: u64,
+	truncated: bool,
+}
+
+impl<'e, 'a> DataBlocks<'e, 'a> {
+	pub(crate) fn new(entry: &'e mut Entry<'a>, block: u64) -> Self {
+		DataBlocks {
+			pos: entry.raw_file_position(),
+			left: entry.size(),
+			entry,
+			block,
+			truncated: false,
+		}
+	}
+
+	// None at the entry's end (ARCHIVE_EOF)
+	pub(crate) fn next(&mut self) -> io::Result<Option<Vec<u8>>> {
+		if self.truncated {
+			return Err(ErrorKind::UnexpectedEof.into());
+		}
+		if self.left == 0 {
+			return Ok(None);
+		}
+		let want = (self.block - self.pos % self.block).min(self.left);
+		let mut data = Vec::new();
+		(&mut *self.entry).take(want).read_to_end(&mut data)?;
+		if data.is_empty() {
+			return Err(ErrorKind::UnexpectedEof.into());
+		}
+		self.truncated = (data.len() as u64) < want;
+		self.pos += data.len() as u64;
+		self.left -= data.len() as u64;
+		Ok(Some(data))
+	}
+}
+
+// _alpm_archive_fgets with its archive_read_buffer. a line ends at the
+// first '\n' of the block; a block without one ends it at its first nul
+// instead, and a line may run over several blocks. the data's end gives
+// the last line (empty after a final '\n')
+pub(crate) struct ArchiveFgets<'e, 'a> {
+	src: DataBlocks<'e, 'a>,
+	block: Vec<u8>,
+	off: usize,
+	// the last read was the entry's end (b->ret == ARCHIVE_EOF)
+	eof: bool,
+	// b->line allocated: its first allocation skips the size check
+	started: bool,
+	line: Vec<u8>,
+}
+
+impl<'e, 'a> ArchiveFgets<'e, 'a> {
+	pub(crate) fn new(src: DataBlocks<'e, 'a>) -> Self {
+		ArchiveFgets {
+			src,
+			block: Vec::new(),
+			off: 0,
+			eof: false,
+			started: false,
+			line: Vec::new(),
+		}
+	}
+
+	// the next line without its end of line, None at the end. an error
+	// ends the reading (the C frees the buffer)
+	pub(crate) fn next(&mut self) -> io::Result<Option<&[u8]>> {
+		self.line.clear();
+		loop {
+			if self.off == self.block.len() {
+				if self.eof {
+					return Ok(None);
+				}
+				let next = self.src.next()?;
+				self.eof = next.is_none();
+				self.block = next.unwrap_or_default();
+				self.off = 0;
+			}
+			let rest = &self.block[self.off..];
+			let eol = rest
+				.iter()
+				.position(|&c| c == b'\n')
+				.or_else(|| rest.iter().position(|&c| c == 0));
+			let new = eol.unwrap_or(rest.len());
+			let needed = self.line.len() + new + 1;
+			if self.started && needed > MAX_LINE_SIZE {
+				let range =
+					rustix::io::Errno::RANGE.raw_os_error();
+				return Err(io::Error::from_raw_os_error(
+					range,
+				));
+			}
+			self.started = true;
+			self.line.extend_from_slice(&rest[..new]);
+			match eol {
+				Some(i) => {
+					self.off += i + 1;
+					return Ok(Some(&self.line));
+				}
+				None => {
+					self.off = self.block.len();
+					if new == 0 {
+						return Ok(Some(&self.line));
+					}
+				}
+			}
+		}
+	}
+}
+
 // _alpm_open_archive: the reader over the file and its fstat. libarchive
 // also reads the first header to pick the format, which unpack does next
 pub struct Archive {

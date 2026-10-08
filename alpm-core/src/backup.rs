@@ -14,6 +14,22 @@ pub struct Backup {
 	pub hash: Option<Vec<u8>>,
 }
 
+// _alpm_split_backup: name up to the first tab, the rest is the hash
+// (later tabs included). no tab gives a NULL hash
+pub fn split_backup(s: &[u8]) -> Backup {
+	let s = until_nul(s);
+	match s.iter().position(|&c| c == b'\t') {
+		Some(i) => Backup {
+			name: s[..i].to_vec(),
+			hash: Some(s[i + 1..].to_vec()),
+		},
+		None => Backup {
+			name: s.to_vec(),
+			hash: None,
+		},
+	}
+}
+
 // _alpm_needbackup: first backup entry of pkg named file (strcmp). the
 // C's NULL checks belong to the C ABI layer
 pub fn needbackup<'a>(file: &[u8], pkg: &'a Package) -> Option<&'a Backup> {
