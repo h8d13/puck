@@ -182,7 +182,7 @@ Diffs, latest run:
 - pacman.log stamps: Rust UTC (+0000), C local (+0200); output unit.
   Normalised, the logs are equal.
 - `security.capability` missing on usr/bin/newuidmap, newgidmap (shadow):
-  xattr unit.
+  fixed by the xattr unit (pax records and xattrs on extraction).
 - optdepends after install/upgrade lack ` [installed]`/` [pending]`:
   `pacman-cli/src/callback.rs` runs with `Lookup for ()`, whose
   `installed()` (and `db_name()`, the provider list's repository
@@ -226,6 +226,7 @@ reader patches and crate dependencies go once nothing uses them.
 | sync db desc/files | be_sync.c `sync_db_read`, `_alpm_archive_fgets` | `alpm-core::be_sync` | 0301-0305, alpm-repo-db | done |
 | `.PKGINFO` | be_package.c `parse_descfile` | `alpm-core::be_package` | 0501-0506, alpm-pkginfo, alpm-package, alpm-buildinfo | done |
 | `.MTREE` / local mtree | libarchive mtree reader (as pacman uses it) | `alpm-core::mtree` | 0401-0411, alpm-mtree | done |
+| tar members (packages, sync dbs, `.INSTALL`) | libarchive `archive_read_support_format_tar.c` | `alpm-core::tar` | tar crate in alpm-core | done |
 | alpm-types patches | port uses alpm-types only for `Checksum`/`digests::{Md5, Sha256}` (be_local, be_package, util); no patched type is used | - | 0101-0109 removed (0101, 0102, 0105-0107 kept as upstream reports); alpm-types itself if checksums go to md-5/sha2 directly | patches done; crate todo |
 
 Kept and to report upstream: 0551 (gzip members), 0552 (content
@@ -245,9 +246,9 @@ makes them; METHODOLOGY.md has the rules.
 | alpm-compress (vendored, 0551-0553) | util `Filter`, be_sync, be_local, add, mtree | the decoders (gzip/bzip2/xz/zstd) under libarchive's block filter | start |
 | alpm-types (vendored, no patches) | be_local, be_package, util, difftest | `Checksum` md5/sha256 only | start; 0101-0109 dropped |
 | alpm-parsers (vendored) | none directly | dependency of alpm-types | start |
-| tar 0.4 | util `Filter` + `tar::Archive` | tar headers (ALPM's own tar dependency) | compress unit |
+| tar 0.4 | workspace table only, for alpm-compress | alpm-core reads tar with `alpm-core::tar` (libarchive's reader) | compress unit; dropped from alpm-core by the xattr unit |
 | reqwest 0.13 blocking, rustls | dload | HTTP downloads (ALPM dev-scripts precedent) | dload unit |
-| rustix 1.1 (`fs`, `process`, `termios`, `net`; `use-libc`) | util, diskspace, lock, sandbox, frontend util | statvfs, access, umask, getuid/geteuid, fchdir, tty width, tcflush, SCM_RIGHTS to the exec helper | handle unit, process unit |
+| rustix 1.1 (`fs`, `process`, `termios`, `net`; `use-libc`) | util, diskspace, lock, sandbox, frontend util | statvfs, access, umask, getuid/geteuid, fchdir, tty width, tcflush, SCM_RIGHTS to the exec helper; fsetxattr/lsetxattr, utimensat with ns (`fs`) | handle unit, process unit, xattr unit |
 | landlock 0.4, libseccomp 0.4 | sandbox | `alpm_sandbox_setup_child` | sandbox unit |
 | signal-hook 0.4 (+ signal-hook-registry) | pacman-cli sighandler | SIGINT/SIGHUP soft interrupt (no safe handler API in std/rustix, none in ALPM; tokio's signals use the same registry) | signals unit |
 | md-5, sha2, base64, time, unicode-width | through alpm-types / directly | precedent crates of ALPM | start |
@@ -284,8 +285,8 @@ Hand-written parts checked against ALPM and the crates it depends on.
 |---|---|---|
 | `alpm-core::base64` | `base64` crate | done: crate decodes; base64.c framing and signing.c 3/4 check kept |
 | `be_package` reader instead of alpm-package `PackageReader` | alpm-package | kept: needs a valid `PackageFileName` (pacman takes any name), parses `.BUILDINFO`, reads `.INSTALL` as String, iterator drops data entries; `.PKGINFO` read like parse_descfile (alpm-pkginfo validates the spec), `.MTREE` by `alpm-core::mtree`, uses alpm-compress; alpm-package dropped |
-| `be_package` tar mode/size rules | tar crate (raw headers) | kept: libarchive's type-flag -> mode/size semantics, not in ALPM |
-| `util::Filter` + `tar::Archive` instead of alpm-compress `TarballReader` | alpm-compress | kept: libarchive's block-wise filter output sits between decoder and tar reader, `TarballReader` only wraps a `CompressionDecoder` |
+| `alpm-core::tar` instead of the tar crate | tar | kept: libarchive's pax semantics (binary values with '\n', last record wins, a warning ends pacman's loops, hdrcharset, ACL records setting the mode, GNU/Sun sparse maps), its framing (types without data, hard link sizes, checksums) and read-ahead blocks; the crate has none of these. entry mode/size come from it (be_package's own rules gone) |
+| `util::Filter` + `tar::Reader` instead of alpm-compress `TarballReader` | alpm-compress | kept: libarchive's block-wise filter output sits between decoder and tar reader, `TarballReader` only wraps a `CompressionDecoder` |
 | `pacman-cli::package::format_date_utc` | `time` crate | done: time does the calendar; `%c` field layout is a format! (no `formatting` feature) |
 | glibc wcwidth table in `pacman-cli::util` | `unicode-width` | done: unicode-width, glibc -1 mapping |
 | generated glibc class/towupper tables in `alpm-core::regex` | std `char` Unicode methods | done: std classes, `to_uppercase` when single-char; divergence counted (`class_divergence`, `towupper_divergence`) |
@@ -346,7 +347,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `lib/libalpm/diskspace.c` | 514 | `alpm-core::diskspace` | check_diskspace, check_downloadspace (+ mount list, fsinfo, match, sizes, check_mountpoint): difftest on fixture roots and root "/" (every log/progress line, f_bavail pinned from the C trace); getmntent parser vs glibc |
 | `lib/libalpm/trans.c` | 452 | `alpm-core::trans` | alpm_trans_commit (state checks, hooks, log lines, events, remove/sync dispatch, interrupted, Committed): difftest `trans_commit`, hooks for real under fakechroot (Package/Path triggers per operation, NeedsTargets, Exec arguments, Depends before/after the install, AbortOnFail, reused and invalid sections, masking, ordering, output lines, NOHOOKS/DBONLY, fuzz); model, init/release/interrupt/getters, prepare dispatch, check_arch, sort: difftest `trans_prep` op sequences vs C (2000 cases, results, data lists, logs, events, questions, trans afterwards); _alpm_runscriptlet + grep: difftest under fakechroot |
 | `lib/libalpm/sync.c` | 1360 | `alpm-core::sync` | `_alpm_sync_load` (download_files, check_keyring, check_validity, load_packages, prompt_to_delete), `_alpm_sync_check`, `_alpm_sync_commit`: difftest `trans_commit` vs C alpm_trans_commit on fixture worlds with a file:// mirror (installs, upgrades, cached, -U, DOWNLOADONLY, DBONLY, NODEPS, bad checksums, db/file mismatch, CORRUPTED_PKG yes/no, missing on the mirror, file conflicts, download space, replaces/conflicts removed; rc, pm_errno, data list, state, logs, events, questions, progress, download events, logfile, root, local db, cache), 2000-case fuzz; signed packages on a GpgFixture keyring (package Never/Required/Optional x TrustedOnly/TrustAll; trusted, marginal, unknown, revoked, other-data and garbage signatures; .sig on the mirror, in the cache, unreadable, %PGPSIG%; check_keyring's import question for a missing key, CORRUPTED_PKG for INVALID_SIG, a bad and a good package together); get_new_version, sysupgrade (literal, replacers), find_group_pkgs, compute_download_size, `_alpm_sync_prepare`, dbs_satisfier: difftest `trans_prep` |
-| `lib/libalpm/add.c` | 718 | `alpm-core::add` | `_alpm_upgrade_packages` (`upgrade_packages`): difftest `trans_commit`; alpm_add_pkg: difftest `trans_prep`; commit_single_pkg with extract_single_file, extract_db_file, perform_extraction (archive_write_disk with OWNER/PERM/TIME/UNLINK/SECURE_SYMLINKS), try_rename, get_install_time, and the per-package step of `_alpm_upgrade_packages`: difftest `add_commit` vs C `_alpm_upgrade_packages` on one-package transactions (backup md5 states, .pacnew, NoUpgrade/NoExtract, dir/file/symlink changes, modes, SUID/SGID, root-owned entries, hard links, db files, DBONLY, reasons, truncated packages, SOURCE_DATE_EPOCH children; trees with archive mtimes, local db, logs, events, progress, logfile, rc, pm_errno), scriptlets under fakechroot, 2M fuzz |
+| `lib/libalpm/add.c` | 718 | `alpm-core::add` | `_alpm_upgrade_packages` (`upgrade_packages`): difftest `trans_commit`; alpm_add_pkg: difftest `trans_prep`; commit_single_pkg with extract_single_file, extract_db_file, perform_extraction (archive_write_disk with OWNER/PERM/TIME/UNLINK/SECURE_SYMLINKS), try_rename, get_install_time, and the per-package step of `_alpm_upgrade_packages`: difftest `add_commit` vs C `_alpm_upgrade_packages` on one-package transactions (backup md5 states, .pacnew, NoUpgrade/NoExtract, dir/file/symlink changes, modes, SUID/SGID, root-owned entries, hard links, db files, DBONLY, reasons, truncated packages, SOURCE_DATE_EPOCH children, pax records (names, ns times, ids, xattrs, ACLs, sparse maps, malformed; fuzz), a fakeroot run for security.capability and ids incl. real packages; trees with archive times to the ns, owners, xattrs, local db, logs, events, progress, logfile, rc, pm_errno), scriptlets under fakechroot, 2M fuzz |
 | `lib/libalpm/remove.c` | 798 | `alpm-core::remove` | `_alpm_remove_packages` (`remove_packages`): difftest `trans_commit`; alpm_remove_pkg, `_alpm_remove_prepare` (cascade, recurse, unneeded, optdepend events): difftest `trans_prep`; `_alpm_remove_single_package` with can_remove_file, shift_pacsave, unlink_file, should_skip_file, remove_package_files, dir_is_mountpoint: difftest `remove_commit` on fixture roots and local dbs (files, dirs, symlinks, /proc mountpoint, read-only dirs, .pacsave rotations, other owners, NoUpgrade, skip_remove, NOSAVE/DBONLY/NOSCRIPTLET, upgrade path; trees, local db, cache, logs, events, progress, logfile, pm_errno), scriptlets under fakechroot, 2M fuzz |
 | `lib/libalpm/hook.c` | 679 | `alpm-core::hook` | parse/validate, dir scan and masking, triggers, Depends, AbortOnFail, NeedsTargets, run: difftest fuzz on root "/" and runs under fakechroot |
 | `lib/libalpm/sandbox*.c` | 608 | `alpm-core::{sandbox,sandbox_fs,sandbox_syscalls}` | restrict_writes_to (8 variants incl. injected landlock failures), syscalls_filter (list parsed from the C, raw syscall probes): errno per probe in spawned children vs C; callback pipe writer + parent loop: byte-stream fuzz; helper download vs C _alpm_download; uid switch: unit tests (root); exec mode (XferCommand): `cli_binary` vs the C binary under fakeroot |
@@ -619,8 +620,8 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   HTTP/1.0 responses are decoded by curl and a parse error to hyper.
 - `unpack`: names joined to the prefix and modes set by chmod with the
   umask fixed at 022, the process cwd and umask are never touched. A
-  directory entry carrying data is skipped by size (libarchive stops
-  there, UPSTREAM.md). Filtered archives are read through `Filter`
+  directory entry carrying data ends the loop like libarchive's
+  (UPSTREAM.md). Filtered archives are read through `Filter`
   (libarchive's 64 KiB output blocks, 128 KiB for zstd, and the open's
   read-ahead): a cut stream fails at open inside the first block, later
   a data read reaching the failed block fails the extraction and a
@@ -688,10 +689,15 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   entry (a directory's mode and times fixed up right after it), names
   absolute, hard link targets joined to root instead of chdir(root),
   umask taken as 0022 (modes come out exact either way), euid from
-  `util::geteuid`. Not restored: xattrs and pax time/id records (not
-  translated yet), lchmod is a no-op like glibc's on symlinks.
-  libarchive's texts are copied; a short entry is "Truncated tar archive
-  detected while reading data", other read errors show the port's text.
+  `util::geteuid`. Entries come from libarchive's tar reader
+  (`alpm-core::tar`): pax times to the nanosecond (atime too), pax
+  uid/gid (no lookups are set, uname/gname unused), xattrs set like
+  set_xattrs (before the mode when not root, last when root; POSIX ACL
+  names skipped, xfsroot refused), hard links with data, data blocks at
+  their offsets; ACLs and file flags are read, not restored (no
+  ARCHIVE_EXTRACT_ACL/FFLAGS). lchmod is a no-op like glibc's on
+  symlinks. libarchive's texts are copied, read errors included. Every
+  header result other than ARCHIVE_OK ends the loop like the C's.
   Progress: an unfiltered tar's position is the entry's data start
   (exactly what libarchive consumed), a compressed one's is what the
   decoder had read from the file by `Filter`'s last block (equal for
@@ -790,7 +796,8 @@ Follow-ups raised by port units:
 | difftest: `read_deps` pub(crate) (drops conflict's `CDepend`), `SyncWorld` into fixtures.rs | conflict, sync | todo |
 | be_sync: a non-archive db must fail at open (DB_OPEN, db invalid) like libarchive, not LIBARCHIVE | query | done |
 | `%DATA%` in repo dbs, gzip multi-member, `Packager` default, backup `(null)` | db readers | ALPM side, see `UPSTREAM.md` |
-| xattrs and pax mtime/uid/gid on extraction: alpm-compress `TarballEntry` needs a `raw_mut` (pax_extensions takes `&mut`) | addcommit | todo |
+| xattrs and pax mtime/uid/gid on extraction | addcommit | done (xattr unit): `alpm-core::tar`, add.rs set_xattrs/times; difftest add_commit pax cases, fuzz_pax, fakeroot run (`security.capability`, ids; `DIFFTEST_CAP_PKGS` real packages) |
+| NFC composition of pax strings (libarchive `archive_string_normalize_C`, its Unicode 6.0 tables) and non-UTF-8 locales | xattr | todo: pinned (`pax_composed_divergence`, `under_c_locale`); makepkg writes such names with hdrcharset=BINARY, which skips the conversion |
 | one geteuid/getuid helper (add.rs `euid`, sandbox `System::uid` read /proc/self/status) or rustix `process` | addcommit | done: `util::getuid`/`geteuid` (dload's Umask reader stays: no getumask without setting it) |
 | dload's internal debug lines (url, maxsize, time condition, tempfile, curl result, response code), so `-Sy --debug` with the built-in downloader matches | process | todo (then drop db_update's `DLOAD_DEBUG` and trans_commit's quiet download window) |
 | `_alpm_upgrade_packages` loop over trans.add, interrupted state, ldconfig | addcommit | with alpm_trans_commit |
@@ -804,6 +811,9 @@ divergences left with the owned readers.
 | Divergence | Effect |
 |---|---|
 | dates before -9999 or after 9999: C formats, port prints "None" | `-Qi`/`-Si` display only |
+| pax strings in a UTF-8 locale: libarchive composes decomposed sequences (NFC), the port keeps them; other locales are not modelled (the C locale fails non-ASCII UTF-8 names with ARCHIVE_WARN) | names with hdrcharset UTF-8 only; makepkg marks them BINARY |
+| a pax record name past its 512-byte window: the port sees up to the block end, libarchive's copy buffer may hold less or more | "overlarge attribute name" on names past 512 bytes only |
+| fifos made with mknodat, libarchive's mkfifo (glibc's internal mknodat) | none on a system; under fakeroot only the port's is faked |
 | wcwidth: unassigned code points -1 in glibc, 1/2/0 in unicode-width (814641), 84 marks zero width in unicode-width, 8 ambiguous (U+3248-324F), 3 special rules | `string_length`/wrapping differ for such text; the C returns `(size_t)-1` for unassigned |
 
 ## Divergences from pacman (ALPM parsers)

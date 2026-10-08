@@ -1092,7 +1092,7 @@ fn pax_odd_members() {
 // NFC (archive_string_normalize_C, Unicode 6.0 tables), the port keeps
 // it. the composed name is not the one in the package's file list
 #[test]
-fn pax_nfc_divergence() {
+fn pax_composed_divergence() {
 	let nfd = b"e\xcc\x81";
 	let members = [with_pax(&[rec("path", nfd)], file("x", 0o644, b"x"))];
 	let c = pax_case(&members, &[(nfd, "file")]);
