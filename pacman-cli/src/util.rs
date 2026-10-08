@@ -1,5 +1,7 @@
 // port of src/pacman/util.c, the display helpers plus pm_printf,
-// check_syncdbs and getcols
+// check_syncdbs, getcols, the prompts (yesno, noyes, select_question)
+// and the displays the callbacks use (colon_printf, select_display,
+// display_optdepends)
 //
 // functions that print in the C append the same bytes to `out` instead.
 // inputs are byte strings as the C would see them, cut at the first nul.
@@ -17,11 +19,13 @@ use std::iter::repeat_n;
 use std::os::unix::ffi::OsStrExt;
 
 use alpm_core::handle::Handle;
+use alpm_core::log::utc_now;
 use alpm_core::util::until_nul;
+use pacman_common::util_common::strtrim;
 use unicode_width::UnicodeWidthChar;
 
 pub use crate::conf::ColStr;
-use crate::conf::{Config, LOG_ERROR};
+use crate::conf::{Config, LOG_DEBUG, LOG_ERROR, LOG_FUNCTION, LOG_WARNING};
 
 // what the C writes to stdout and stderr
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -30,18 +34,60 @@ pub struct Output {
 	pub stderr: Vec<u8>,
 }
 
-// pm_printf(level, ...) to stderr: logmask filter, then the prefix
-pub fn pm_printf(err: &mut Vec<u8>, config: &Config, level: u16, msg: &[u8]) {
+// time(NULL)
+pub fn now_secs() -> i64 {
+	utc_now().secs
+}
+
+// PACMAN_DEBUG (set by the meson build): pm_vfprintf puts "[%H:%M:%S] "
+// before every message while debug logging is on. localtime needs the
+// zone database, safe std has none: the stamp is UTC (TZ=UTC in the C)
+pub fn debug_stamp(secs: i64) -> Vec<u8> {
+	let s = secs.rem_euclid(86400);
+	let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
+	format!("[{h:02}:{m:02}:{s:02}] ").into_bytes()
+}
+
+// pm_vasprintf: the message with its level prefix, None when logmask
+// filters the level. no PACMAN_DEBUG stamp on this path
+pub fn pm_vasprintf(
+	config: &Config,
+	level: u16,
+	msg: &[u8],
+) -> Option<Vec<u8>> {
 	if config.logmask & level == 0 {
-		return;
+		return None;
 	}
 	let c = &config.colstr;
 	let prefix: &[&[u8]] = match level {
 		LOG_ERROR => &[c.err, b"error: ", c.nocolor],
-		_ => &[c.warn, b"warning: ", c.nocolor],
+		LOG_WARNING => &[c.warn, b"warning: ", c.nocolor],
+		LOG_DEBUG => &[b"debug: "],
+		LOG_FUNCTION => &[b"function: "],
+		_ => &[],
 	};
-	err.extend(prefix.concat());
-	err.extend_from_slice(msg);
+	Some([&prefix.concat()[..], msg].concat())
+}
+
+// pm_vfprintf: pm_vasprintf with the PACMAN_DEBUG stamp of now (time(NULL))
+pub fn pm_vfprintf(
+	config: &Config,
+	level: u16,
+	msg: &[u8],
+	now: i64,
+) -> Option<Vec<u8>> {
+	let line = pm_vasprintf(config, level, msg)?;
+	if config.logmask & LOG_DEBUG == 0 {
+		return Some(line);
+	}
+	Some([debug_stamp(now), line].concat())
+}
+
+// pm_printf(level, ...) to stderr
+pub fn pm_printf(err: &mut Vec<u8>, config: &Config, level: u16, msg: &[u8]) {
+	if let Some(line) = pm_vfprintf(config, level, msg, now_secs()) {
+		err.extend_from_slice(&line);
+	}
 }
 
 // check_syncdbs: 1 without sync dbs when need_repos, or when check_valid
@@ -558,4 +604,302 @@ pub fn console_cursor_move_down(out: &mut Vec<u8>, lines: u32) {
 // console_erase_line: CSI K, cursor to end of line
 pub fn console_erase_line(out: &mut Vec<u8>) {
 	out.extend_from_slice(b"\x1b[K");
+}
+
+// the process the prompts and callbacks talk to: the C stdout, stderr
+// and stdin, and the probes the C makes on them
+pub trait Term {
+	// fputs to stdout, stderr
+	fn out(&mut self, s: &[u8]);
+	fn err(&mut self, s: &[u8]);
+	// fflush(stdout) and fflush(stderr)
+	fn flush(&mut self) {}
+	// safe_fgets(s, size, stdin): at most size - 1 bytes up to and with
+	// a '\n', None at end of input
+	fn read_line(&mut self, size: usize) -> Option<Vec<u8>>;
+	fn stdin_is_tty(&mut self) -> bool;
+	fn stdout_is_tty(&mut self) -> bool;
+	// getcols()
+	fn cols(&mut self) -> u16;
+	// get_time_ms: CLOCK_MONOTONIC_COARSE in milliseconds
+	fn now_ms(&mut self) -> i64;
+	// time(NULL), for the PACMAN_DEBUG stamp
+	fn now_secs(&mut self) -> i64 {
+		now_secs()
+	}
+}
+
+// pm_printf on a Term: stderr, stamped
+pub fn pm_printf_term(
+	term: &mut dyn Term,
+	config: &Config,
+	level: u16,
+	msg: &[u8],
+) {
+	let now = term.now_secs();
+	if let Some(line) = pm_vfprintf(config, level, msg, now) {
+		term.err(&line);
+	}
+}
+
+// the prompt stream: stdout with --noconfirm, else stderr so prompts
+// show when the output is redirected
+fn prompt(term: &mut dyn Term, config: &Config, s: &[u8]) {
+	match config.noconfirm {
+		0 => term.err(s),
+		_ => term.out(s),
+	}
+}
+
+// CURSOR_HIDE_ANSICODE, CURSOR_SHOW_ANSICODE
+pub const CURSOR_HIDE: &[u8] = b"\x1b[?25l";
+pub const CURSOR_SHOW: &[u8] = b"\x1b[?25h";
+
+// console_cursor_hide
+pub fn console_cursor_hide(term: &mut dyn Term) {
+	if term.stdout_is_tty() {
+		term.out(CURSOR_HIDE);
+	}
+}
+
+// console_cursor_show
+pub fn console_cursor_show(term: &mut dyn Term) {
+	if term.stdout_is_tty() {
+		term.out(CURSOR_SHOW);
+		term.flush();
+	}
+}
+
+// safe_fgets_stdin: the cursor shows while reading
+fn safe_fgets_stdin(term: &mut dyn Term, size: usize) -> Option<Vec<u8>> {
+	console_cursor_show(term);
+	let line = term.read_line(size);
+	console_cursor_hide(term);
+	line
+}
+
+// colon_printf: the colon prefix, the message, then nocolor
+pub fn colon_printf(term: &mut dyn Term, config: &Config, msg: &[u8]) {
+	let c = &config.colstr;
+	term.out(&[c.colon, msg, c.nocolor].concat());
+	term.flush();
+}
+
+// question: the yes/no prompt, preset on --noconfirm or an empty answer.
+// one fgets of 32 bytes, what does not fit stays for the next read.
+// mbscasecmp only meets ASCII here: no other character lowercases to
+// y, e, s, n or o. flush_term_input (tcflush on a terminal stdin) needs
+// termios, outside safe std: not done
+fn question(
+	term: &mut dyn Term,
+	config: &Config,
+	preset: bool,
+	msg: &[u8],
+) -> i32 {
+	term.flush();
+	let c = &config.colstr;
+	let choice: &[u8] = if preset { b" [Y/n] " } else { b" [y/N] " };
+	prompt(term, config, &[c.colon, msg, choice, c.nocolor].concat());
+	term.flush();
+	if config.noconfirm != 0 {
+		prompt(term, config, b"\n");
+		return i32::from(preset);
+	}
+	let Some(line) = safe_fgets_stdin(term, 32) else {
+		return 0;
+	};
+	let response = strtrim(&line);
+	if response.is_empty() {
+		return i32::from(preset);
+	}
+	// a piped answer is not echoed by the terminal
+	if !term.stdin_is_tty() {
+		prompt(term, config, &[response, b"\n"].concat());
+	}
+	let is = |s: &[u8]| response.eq_ignore_ascii_case(s);
+	i32::from(is(b"Y") || is(b"YES"))
+}
+
+// yesno: preset yes
+pub fn yesno(term: &mut dyn Term, config: &Config, msg: &[u8]) -> i32 {
+	question(term, config, true, msg)
+}
+
+// noyes: preset no
+pub fn noyes(term: &mut dyn Term, config: &Config, msg: &[u8]) -> i32 {
+	question(term, config, false, msg)
+}
+
+// strtol into an int: ERANGE saturates the long, the conversion to int
+// keeps the low 32 bits (gcc). None when no digit was read or some
+// trail (endptr not at the end)
+fn strtol_int(s: &[u8]) -> Option<c_int> {
+	let start = s.iter().take_while(|&&c| is_space(c)).count();
+	let mut rest = &s[start..];
+	let neg = rest.first() == Some(&b'-');
+	if matches!(rest.first(), Some(b'+' | b'-')) {
+		rest = &rest[1..];
+	}
+	let n = rest.iter().take_while(|c| c.is_ascii_digit()).count();
+	if n == 0 || n != rest.len() {
+		return None;
+	}
+	let mut v: i64 = 0;
+	for &d in rest {
+		let d = i64::from(d - b'0');
+		v = match neg {
+			true => v.saturating_mul(10).saturating_sub(d),
+			false => v.saturating_mul(10).saturating_add(d),
+		};
+	}
+	Some(v as c_int)
+}
+
+// parseindex: a number within min..=max, errors reported
+fn parseindex(
+	term: &mut dyn Term,
+	config: &Config,
+	s: &[u8],
+	min: c_int,
+	max: c_int,
+) -> Option<c_int> {
+	let Some(n) = strtol_int(s) else {
+		let msg = [b"invalid number: ", s, b"\n"].concat();
+		pm_printf_term(term, config, LOG_ERROR, &msg);
+		return None;
+	};
+	if n < min || n > max {
+		let msg = format!(
+			"invalid value: {n} is not between {min} and {max}\n"
+		);
+		pm_printf_term(term, config, LOG_ERROR, msg.as_bytes());
+		return None;
+	}
+	Some(n)
+}
+
+// select_question: the index picked out of count (default the first),
+// asked again after an invalid number
+pub fn select_question(
+	term: &mut dyn Term,
+	config: &Config,
+	count: c_int,
+) -> c_int {
+	let preset = 1;
+	loop {
+		let ask = format!("\nEnter a number (default={preset}): ");
+		prompt(term, config, ask.as_bytes());
+		term.flush();
+		if config.noconfirm != 0 {
+			prompt(term, config, b"\n");
+			break;
+		}
+		let Some(line) = safe_fgets_stdin(term, 32) else {
+			break;
+		};
+		let response = strtrim(&line);
+		if response.is_empty() {
+			break;
+		}
+		match parseindex(term, config, response, 1, count) {
+			Some(n) => return n - 1,
+			None => continue,
+		}
+	}
+	preset - 1
+}
+
+// display_repo_list: colon_printf ends the line before its nocolor
+fn display_repo_list(
+	term: &mut dyn Term,
+	config: &Config,
+	dbname: &[u8],
+	list: &[Vec<u8>],
+	cols: u16,
+) {
+	let c = &config.colstr;
+	colon_printf(
+		term,
+		config,
+		&[b"Repository ", c.repo, dbname, b"\n"].concat(),
+	);
+	let mut out = Vec::new();
+	list_display(&mut out, Some(b"  "), list, cols, &config.colstr);
+	term.out(&out);
+}
+
+// select_display: "n) name" per provider (db name, package name), one
+// list per run of the same db. the C prints a NULL db name for an empty
+// list, never asked for
+pub fn select_display(
+	term: &mut dyn Term,
+	config: &Config,
+	providers: &[(&[u8], &[u8])],
+) {
+	let cols = term.cols();
+	let mut list = Vec::new();
+	let mut dbname: Option<&[u8]> = None;
+	for (nth, &(db, name)) in providers.iter().enumerate() {
+		let db = until_nul(db);
+		if let Some(prev) = dbname.filter(|&p| p != db) {
+			display_repo_list(term, config, prev, &list, cols);
+			list.clear();
+		}
+		dbname = Some(db);
+		let num = format!("{}) ", nth + 1);
+		list.push([num.as_bytes(), until_nul(name)].concat());
+	}
+	let last = dbname.unwrap_or(b"(null)");
+	display_repo_list(term, config, last, &list, cols);
+}
+
+// display_optdepends: optstrings are make_optstring's texts (the dep
+// string and its status), nothing printed without any
+pub fn display_optdepends(
+	term: &mut dyn Term,
+	config: &Config,
+	name: &[u8],
+	optstrings: &[Vec<u8>],
+) {
+	optdepends_list(
+		term,
+		config,
+		b"Optional dependencies for ",
+		name,
+		optstrings,
+	);
+}
+
+// display_new_optdepends: the same for the optdepends new in an upgrade
+pub fn display_new_optdepends(
+	term: &mut dyn Term,
+	config: &Config,
+	name: &[u8],
+	optstrings: &[Vec<u8>],
+) {
+	let title = b"New optional dependencies for ";
+	optdepends_list(term, config, title, name, optstrings);
+}
+
+fn optdepends_list(
+	term: &mut dyn Term,
+	config: &Config,
+	title: &[u8],
+	name: &[u8],
+	optstrings: &[Vec<u8>],
+) {
+	if optstrings.is_empty() {
+		return;
+	}
+	term.out(&[title, until_nul(name), b"\n"].concat());
+	let cols = term.cols();
+	let mut out = Vec::new();
+	list_display_linebreak(
+		&mut out,
+		Some(b"   "),
+		optstrings,
+		cols,
+		&config.colstr,
+	);
+	term.out(&out);
 }

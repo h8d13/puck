@@ -20,7 +20,7 @@ unsafe extern "C" {
 	fn wordsplit(str: *const c_char) -> *mut *mut c_char;
 	fn wordsplit_free(ws: *mut *mut c_char);
 
-	fn fmemopen(
+	pub(crate) fn fmemopen(
 		buf: *mut c_void,
 		size: usize,
 		mode: *const c_char,
