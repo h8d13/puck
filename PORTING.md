@@ -204,6 +204,15 @@ the java keystore and ldconfig's aux-cache not compared (dates, inode
 numbers); `download-XXXXXX` names canonicalised. Runtime ~2-3 min warm
 (network bound), ~620 MiB per root.
 
+### Later (low priority)
+
+Not needed for an English-locale replacement; noted so it is not lost.
+
+| Item | State |
+|---|---|
+| translations: pacman and libalpm messages through gettext (49 `po` languages); the port prints the English msgids | later |
+| locale-dependent behaviour beyond C.UTF-8: regex collation ranges and `[=e=]`, `strcoll` sort of glob results, non-UTF-8 locales for display (`mbstowcs`/`wcwidth`), pax NFC composition | later |
+
 ### 4. Drop-in
 
 libalpm C ABI (`alpm.h`) exported from the Rust library so existing
