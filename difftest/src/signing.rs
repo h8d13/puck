@@ -387,8 +387,20 @@ pub struct CSigHandle {
 }
 
 impl CSigHandle {
-	// root and dbpath must exist
+	// root and dbpath must exist. init_gpgme runs here, before any
+	// recording: its lines come once per process
 	pub fn new(root: &Path, dbpath: &Path, gpgdir: &[u8]) -> Self {
+		let c = Self::uninit(root, dbpath, gpgdir);
+		// a pattern under 8 characters returns before gpg runs
+		let fpr = cstr(b"init");
+		// SAFETY: live handle, valid string
+		unsafe { _alpm_key_in_keychain(c.h, fpr.as_ptr()) };
+		c
+	}
+
+	// new without the init_gpgme call: the first signing call of the
+	// process logs init_gpgme's lines
+	pub fn uninit(root: &Path, dbpath: &Path, gpgdir: &[u8]) -> Self {
 		let guard = ALPM.lock().unwrap_or_else(|e| e.into_inner());
 		let root = cstr(root.as_os_str().as_bytes());
 		let dbpath = cstr(dbpath.as_os_str().as_bytes());
@@ -430,11 +442,6 @@ impl CSigHandle {
 			_guard: guard,
 		};
 		c.set_gpgdir(gpgdir);
-		// run init_gpgme now, so its engine setup comes before ours. a
-		// pattern under 8 characters returns before gpg runs
-		let fpr = cstr(b"init");
-		// SAFETY: live handle, valid string
-		unsafe { _alpm_key_in_keychain(c.h, fpr.as_ptr()) };
 		c
 	}
 
