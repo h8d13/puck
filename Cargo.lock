@@ -1411,6 +1411,7 @@ dependencies = [
  "pacman-common",
  "rustix",
  "signal-hook",
+ "tar",
  "time",
  "unicode-width",
 ]

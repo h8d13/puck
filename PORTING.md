@@ -675,7 +675,7 @@ Follow-ups raised by port units:
 | fixture writer copied into `difftest/tests/deps_resolve.rs`, move to `fixtures.rs` | pkg follow-ups | done |
 | db search (`_alpm_db_search`) on the ported regex | db | done |
 | `LIB_VERSION` next to `PACKAGE_VERSION`, `needs_root` into util.rs, `TRANS_FLAG_*` with trans.c | args | todo |
-| one `check_meta` (be_sync, be_package, package), test ustar builders onto `fixtures::ustar` | be_package | in progress: `package::check_meta` with its log lines, used by be_sync and be_local populate; be_package keeps its copy (sniff done via 0552) |
+| one `check_meta` (be_sync, be_package, package), test ustar builders onto `fixtures::ustar` | be_package | done: `package::check_meta` (its log lines) for be_sync, be_local and be_package; difftest's be_package tars through `fixtures::ustar_nodes`, port tests through `tar::Builder` |
 | precedent cleanup: base64, time, unicode-width, drop split_backup/parse_xdata, ALPM vs C difftest for vercmp/relations | audit | done |
 | regex class/towupper tables -> std `char` methods, divergence counted like wcwidth | audit | done |
 | handle callbacks + log.c: one `Callbacks` model wired into `Handle` (deps, conflict, diskspace, dload, signing, hooks, scriptlets, sandbox) | deps, conflict, diskspace | done |
