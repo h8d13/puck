@@ -4,6 +4,7 @@ use std::ffi::{CStr, CString, c_char, c_void};
 
 mod backup;
 mod be_local;
+mod be_local_write;
 mod be_package;
 mod be_sync;
 mod check;
@@ -38,6 +39,7 @@ mod version;
 
 pub use backup::*;
 pub use be_local::*;
+pub use be_local_write::*;
 pub use be_package::*;
 pub use be_sync::*;
 pub use check::*;

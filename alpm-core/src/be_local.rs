@@ -9,15 +9,17 @@
 // sections once, a failed read marks the package INFRQ_ERROR and later
 // reads give up. logging (name/version mismatch, unknown keys,
 // _alpm_pkg_check_meta warnings) is not modelled, it never changes the
-// result. mtree reading is the last section. not ported: writing,
-// removal, prepare and changelog.
+// result. mtree reading and the writing side are the last sections. not
+// ported: changelog.
 
 use std::ffi::{OsStr, c_int};
 use std::fmt::Display;
-use std::fs::{self, DirBuilder, File};
-use std::io::{self, ErrorKind, Read};
+use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
+use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::fs::{
+	DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt,
+};
 use std::path::{Path, PathBuf};
 
 use alpm_common::MetadataFile;
@@ -28,7 +30,7 @@ use alpm_mtree::mtree::v2::Path as MtreePath;
 use alpm_types::{ExtraDataEntry, PackageInstallReason, PackageValidation};
 
 use crate::backup::Backup;
-use crate::deps::{Depend, dep_from_string};
+use crate::deps::{Depend, dep_compute_string, dep_from_string};
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
 use crate::package::{
@@ -36,7 +38,7 @@ use crate::package::{
 	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, PkgReason, PkgXData,
 };
 use crate::pkghash::PkgHash;
-use crate::util::{hash_sdbm, splitname};
+use crate::util::{hash_sdbm, makepath, mkdir_mode, splitname, until_nul};
 
 // ALPM_LOCAL_DB_VERSION
 pub const LOCAL_DB_VERSION: u64 = 9;
@@ -525,5 +527,271 @@ impl LocalDb {
 		pkg: &Package,
 	) -> Result<Vec<MtreeEntry>, MtreeError> {
 		read_mtree(&self.pkgpath(pkg, b"mtree"))
+	}
+}
+
+// writing side: _alpm_local_db_prepare, _alpm_local_db_write,
+// _alpm_local_db_remove and alpm_pkg_set_reason
+//
+// desc and files are written by a translation of the C writer, not by
+// alpm-db's Display: alpm-db writes validated values only, always writes
+// sections pacman leaves out and orders and sorts differently (see
+// PORTING.md). fields go through %s, so each is cut at its first nul. the
+// C sets the umask (0000 for prepare, 0022 for write) around its mkdir and
+// fopen; the port gives the same modes by chmod. logging is not modelled
+
+// why _alpm_local_db_prepare returned -1
+#[derive(Debug)]
+pub enum PrepareError {
+	// checkdbdir could not create the db dir or replace a non-directory
+	// with one: ALPM_ERR_SYSTEM
+	DbDir(io::Error),
+	// mkdir of the package dir failed (also when it exists), logged,
+	// pm_errno untouched
+	Mkdir(io::Error),
+}
+
+impl PrepareError {
+	// the pm_errno the C sets, None where it leaves it alone
+	pub fn errno(&self) -> Option<Errno> {
+		match self {
+			PrepareError::DbDir(_) => Some(Errno::System),
+			PrepareError::Mkdir(_) => None,
+		}
+	}
+}
+
+// why _alpm_local_db_write failed
+#[derive(Debug)]
+pub enum WriteError {
+	// desc or files could not be opened: -1, pm_errno untouched. a desc
+	// failure skips the files
+	Open(io::Error),
+	// writing failed (disk full). the C ignores fprintf/fclose results
+	// and returns 0 here
+	Write(io::Error),
+}
+
+// fopen(path, "w") under umask(0022): a new file gets 0644, an existing
+// one keeps its mode and is truncated
+fn create_0644(path: &[u8]) -> io::Result<File> {
+	let new = OpenOptions::new()
+		.write(true)
+		.create_new(true)
+		.mode(0o644)
+		.open(os(path));
+	match new {
+		Ok(f) => {
+			f.set_permissions(Permissions::from_mode(0o644))?;
+			Ok(f)
+		}
+		Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+			OpenOptions::new()
+				.write(true)
+				.create(true)
+				.truncate(true)
+				.mode(0o644)
+				.open(os(path))
+		}
+		Err(e) => Err(e),
+	}
+}
+
+// fputs of a C string
+fn put(out: &mut Vec<u8>, s: &[u8]) {
+	out.extend_from_slice(until_nul(s));
+}
+
+// "%KEY%\n<value>\n\n" for a set field
+fn single(out: &mut Vec<u8>, key: &[u8], value: Option<&[u8]>) {
+	if let Some(v) = value {
+		put(out, key);
+		out.push(b'\n');
+		put(out, v);
+		out.extend_from_slice(b"\n\n");
+	}
+}
+
+// a header, one line per value and a blank line, nothing for no values
+fn list<T>(
+	out: &mut Vec<u8>,
+	key: &[u8],
+	values: &[T],
+	line: impl Fn(&T) -> Vec<u8>,
+) {
+	if values.is_empty() {
+		return;
+	}
+	put(out, key);
+	out.push(b'\n');
+	for v in values {
+		out.extend_from_slice(&line(v));
+		out.push(b'\n');
+	}
+	out.push(b'\n');
+}
+
+// %jd and %u: only written when nonzero
+fn number(out: &mut Vec<u8>, key: &[u8], n: i64) {
+	if n != 0 {
+		single(out, key, Some(n.to_string().as_bytes()));
+	}
+}
+
+// the desc file, field for field in the C's order
+fn desc_text(pkg: &Package) -> Vec<u8> {
+	let mut out = Vec::new();
+	let name = pkg.name.as_deref().unwrap_or_default();
+	let version = pkg.version.as_deref().unwrap_or_default();
+	single(&mut out, b"%NAME%", Some(name));
+	single(&mut out, b"%VERSION%", Some(version));
+	single(&mut out, b"%BASE%", pkg.base.as_deref());
+	single(&mut out, b"%DESC%", pkg.desc.as_deref());
+	single(&mut out, b"%URL%", pkg.url.as_deref());
+	single(&mut out, b"%ARCH%", pkg.arch.as_deref());
+	number(&mut out, b"%BUILDDATE%", pkg.builddate);
+	number(&mut out, b"%INSTALLDATE%", pkg.installdate);
+	single(&mut out, b"%PACKAGER%", pkg.packager.as_deref());
+	// only the installed size, csize is irrelevant once installed
+	number(&mut out, b"%SIZE%", pkg.isize);
+	number(&mut out, b"%REASON%", pkg.reason as i64);
+	let text = |s: &Vec<u8>| until_nul(s).to_vec();
+	list(&mut out, b"%GROUPS%", &pkg.groups, text);
+	list(&mut out, b"%LICENSE%", &pkg.licenses, text);
+	if pkg.validation != 0 {
+		// the known bits in a fixed order, md5 is never written
+		let methods: Vec<&[u8]> = [
+			(PKG_VALIDATION_NONE, &b"none"[..]),
+			(PKG_VALIDATION_SHA256SUM, b"sha256"),
+			(PKG_VALIDATION_SIGNATURE, b"pgp"),
+		]
+		.into_iter()
+		.filter(|(bit, _)| pkg.validation & bit != 0)
+		.map(|(_, m)| m)
+		.collect();
+		out.extend_from_slice(b"%VALIDATION%\n");
+		for m in methods {
+			out.extend_from_slice(m);
+			out.push(b'\n');
+		}
+		out.push(b'\n');
+	}
+	// write_deps
+	for (key, deps) in [
+		(&b"%REPLACES%"[..], &pkg.replaces),
+		(b"%DEPENDS%", &pkg.depends),
+		(b"%OPTDEPENDS%", &pkg.optdepends),
+		(b"%CONFLICTS%", &pkg.conflicts),
+		(b"%PROVIDES%", &pkg.provides),
+	] {
+		list(&mut out, key, deps, dep_compute_string);
+	}
+	list(&mut out, b"%XDATA%", &pkg.xdata, |x| {
+		[until_nul(&x.name), b"=", until_nul(&x.value)].concat()
+	});
+	out
+}
+
+// the files file: %FILES% in list order, %BACKUP% with "<name>\t<hash>".
+// a NULL hash prints as glibc's "(null)"
+fn files_text(pkg: &Package) -> Vec<u8> {
+	let mut out = Vec::new();
+	list(&mut out, b"%FILES%", &pkg.files.files, |f| {
+		until_nul(&f.name).to_vec()
+	});
+	list(&mut out, b"%BACKUP%", &pkg.backup, |b| {
+		let hash = b.hash.as_deref().unwrap_or(b"(null)");
+		[until_nul(&b.name), b"\t", until_nul(hash)].concat()
+	});
+	out
+}
+
+fn write_file(path: &[u8], text: &[u8]) -> Result<(), WriteError> {
+	let mut f = create_0644(path).map_err(WriteError::Open)?;
+	f.write_all(text).map_err(WriteError::Write)
+}
+
+impl LocalDb {
+	// checkdbdir: a missing (or unstat-able) db dir is created, a
+	// non-directory in its place unlinked and replaced
+	fn checkdbdir(&self) -> io::Result<()> {
+		match fs::metadata(os(&self.path)) {
+			Ok(m) if m.is_dir() => return Ok(()),
+			Ok(_) => fs::remove_file(os(&self.path))?,
+			Err(_) => {}
+		}
+		makepath(&self.path)
+	}
+
+	// _alpm_local_db_prepare: the package directory, mode 0755 (umask
+	// 0000)
+	pub fn prepare(&self, pkg: &Package) -> Result<(), PrepareError> {
+		self.checkdbdir().map_err(PrepareError::DbDir)?;
+		let path = self.pkgpath(pkg, b"");
+		mkdir_mode(os(&path), 0o755).map_err(PrepareError::Mkdir)
+	}
+
+	// _alpm_local_db_write: desc for INFRQ_DESC, files for INFRQ_FILES.
+	// install and mtree are extracted by add.c, nothing to write
+	pub fn write(
+		&self,
+		pkg: &Package,
+		inforeq: c_int,
+	) -> Result<(), WriteError> {
+		if inforeq & INFRQ_DESC != 0 {
+			write_file(
+				&self.pkgpath(pkg, b"desc"),
+				&desc_text(pkg),
+			)?;
+		}
+		if inforeq & INFRQ_FILES != 0 {
+			write_file(
+				&self.pkgpath(pkg, b"files"),
+				&files_text(pkg),
+			)?;
+		}
+		Ok(())
+	}
+
+	// _alpm_local_db_remove: unlink every entry of the package dir (they
+	// are files), then rmdir it. failures do not stop the others; the
+	// first is returned. the C's PATH_MAX check is the kernel's
+	// ENAMETOOLONG on the joined name
+	pub fn remove(&self, pkg: &Package) -> io::Result<()> {
+		let path = self.pkgpath(pkg, b"");
+		let dir = fs::read_dir(os(&path))?;
+		let mut first = None;
+		for ent in entries(dir) {
+			// "<pkgpath>/<name>", pkgpath already ends in '/'
+			let name = ent.file_name();
+			let file = [&path[..], b"/", name.as_bytes()].concat();
+			if let Err(e) = fs::remove_file(os(&file)) {
+				first.get_or_insert(e);
+			}
+		}
+		if let Err(e) = fs::remove_dir(os(&path)) {
+			first.get_or_insert(e);
+		}
+		first.map_or(Ok(()), Err)
+	}
+
+	// alpm_pkg_set_reason on a package of this db (the C checks
+	// origin_data.db against handle->db_local, the caller does here).
+	// alpm_pkg_get_reason loads the desc first, a failed load compares
+	// what the package holds. the desc is rewritten only on a change
+	pub fn set_reason(
+		&self,
+		pkg: &mut Package,
+		reason: PkgReason,
+	) -> Result<(), Errno> {
+		if pkg.origin != Some(PkgFrom::LocalDb) {
+			return Err(Errno::WrongArgs);
+		}
+		let _ = self.read(pkg, INFRQ_DESC);
+		if pkg.reason == reason {
+			return Ok(());
+		}
+		pkg.reason = reason;
+		self.write(pkg, INFRQ_DESC).map_err(|_| Errno::DbWrite)
 	}
 }
