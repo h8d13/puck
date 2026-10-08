@@ -615,6 +615,19 @@ declarations. No existing MR found for it.
   chroot/pivot_root listed twice (sandbox_syscalls.c:43/95, 52/100);
   `ruleset_fd` leaked on early returns (sandbox_fs.c:140, 157). **none**
 
+## `escape_chars` writes its nul past the buffer
+
+Practice: **local**. `--sysroot` (or an Include pattern under sysroot
+with GLOB_NOESCAPE) whose path contains `\`, `*`, `?` or `[`.
+
+conf.c:1111-1150 allocates `len + escaped` bytes and writes the
+terminating nul one byte past them. On glibc it corrupts the heap when
+that size is 16k+8 (no chunk slack): `free(): invalid size` aborts.
+Found through the conf difftest aborting only with longer TMPDIR paths.
+
+- port: no buffer
+- difftest: odd-root fixture names padded so the size avoids 16k+8
+
 ## `src/pacman/conf.c` minor
 
 - CacheServer `file://` URLs do not get the sysroot, Server ones do

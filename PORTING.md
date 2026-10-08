@@ -436,7 +436,7 @@ Follow-ups raised by port units:
 | shared helpers into util: `llstat` (copies in conflict, diskspace), `strerror(io::Error)` (4 copies), frontend `pm_printf`/`Output`/`check_syncdbs` (check, query, sync), `getcols` | conflict, diskspace, query, sync | todo |
 | `Handle` split borrow of local + sync caches (resolver and displays clone caches today) | deps, sync | in progress (integration) |
 | XferCommand via a sandbox helper exec mode (`alpm_sandbox_setup_child` from conf.c) | sandbox | todo |
-| every difftest touching C frontend globals (`config`, stdout/stderr, locale) holds `FRONTEND` | conf race report | done for conf (`c_glob`) |
+| conf difftest abort under long TMPDIR | sandbox, dbwrite reports | done: C one-byte heap overflow in `escape_chars` (UPSTREAM.md), fixture avoids it |
 | `alpm_extract_keyid` wired into -Sii/-Qii `sig_keys` | sync | todo (ported in signing) |
 | `Handle` owns `signing::Keyring` (gpgdir, known_keys) and implements `SigCallbacks`; `Db::register_sync` calls `be_sync::sync_db_validate` | signing | with the callbacks unit |
 | `alpm_sync_get_new_version` (lib sync.c) out of query.rs into alpm-core | query | with sync.c |
