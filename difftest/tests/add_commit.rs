@@ -1385,6 +1385,43 @@ fn fr_capabilities() {
 	assert_eq!(meta_of(&r, b"w").owner.0, 1, "{}", show(&r));
 }
 
+// directory modes outside mkdir's (read-only, sticky, setgid, group
+// write) come from the close-time fixup: fakeroot must see that chmod,
+// as it sees libarchive's, or its faked modes stay at mkdir's
+#[test]
+fn fr_dir_modes() {
+	if std::env::var_os(FR_CHILD).is_none() {
+		return;
+	}
+	let members = [
+		plain(dir("ro/", 0o555)),
+		plain(dir("tmp/", 0o1777)),
+		plain(dir("games/", 0o775)),
+		plain(dir("sgid/", 0o2755)),
+		plain(file("ro/f", 0o644, b"f")),
+	];
+	let listed: &[(&[u8], &str)] = &[
+		(b"ro", "dir"),
+		(b"tmp", "dir"),
+		(b"games", "dir"),
+		(b"sgid", "dir"),
+		(b"ro/f", "file"),
+	];
+	let r = compare("ac-fr-dir-modes", &pax_case(&members, listed));
+	assert_eq!(r.rc, 0, "{}", show(&r));
+	for (name, mode) in [
+		(&b"ro"[..], 0o555),
+		(b"tmp", 0o1777),
+		(b"games", 0o775),
+		(b"sgid", 0o2755),
+	] {
+		let Some(AcNode::Dir(m, ..)) = find(&r, &[name]) else {
+			panic!("{name:?} not a dir\n{}", show(&r));
+		};
+		assert_eq!(m & 0o7777, mode, "{name:?}\n{}", show(&r));
+	}
+}
+
 // the files of a tree carrying a security.capability xattr
 fn capabilities(n: &AcNode, path: &str, out: &mut Vec<String>) {
 	if let AcNode::Dir(_, Some(es), _) = n {
