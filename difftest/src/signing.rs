@@ -111,7 +111,7 @@ unsafe extern "C" {
 		marginal: c_int,
 		unknown: c_int,
 	) -> c_int;
-	fn _alpm_key_in_keychain(
+	pub(crate) fn _alpm_key_in_keychain(
 		handle: *mut c_void,
 		fpr: *const c_char,
 	) -> c_int;
