@@ -1171,6 +1171,14 @@ pub fn filecache_setup(
 	cachedirs: &mut Vec<Vec<u8>>,
 	cb: &mut dyn Callbacks,
 ) -> Vec<u8> {
+	let using = |cb: &mut dyn Callbacks, dir: &[u8]| {
+		let m = [b"using cachedir: ", dir, b"\n"].concat();
+		cb.log(LogLevel::Debug, &m);
+	};
+	let skipping = |cb: &mut dyn Callbacks, why: &[u8], dir: &[u8]| {
+		let m = [b"skipping cachedir, ", why, b": ", dir, b"\n"];
+		cb.log(LogLevel::Debug, &m.concat());
+	};
 	let mut last_dir = None;
 	for dir in cachedirs.iter() {
 		let md = match fs::metadata(c_path(dir)) {
@@ -1182,6 +1190,7 @@ pub fn filecache_setup(
 				];
 				cb.log(LogLevel::Warning, &m.concat());
 				if makepath(dir).is_ok() {
+					using(cb, dir);
 					return dir.clone();
 				}
 				continue;
@@ -1189,16 +1198,36 @@ pub fn filecache_setup(
 			Ok(md) => md,
 		};
 		last_dir = Some(md.is_dir());
+		if !md.is_dir() {
+			skipping(cb, b"not a directory", dir);
+			continue;
+		}
+		// _alpm_access(dir, W_OK) with its debug line
 		let writable = rustix::fs::accessat(
 			rustix::fs::CWD,
 			c_path(dir),
 			rustix::fs::Access::WRITE_OK,
 			rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-		)
-		.is_ok();
-		if md.is_dir() && writable && md.mode() & 0o222 != 0 {
-			return dir.clone();
+		);
+		if let Err(e) = writable {
+			let e = strerror(&e.into());
+			let m = [
+				b"\"",
+				&dir[..],
+				b"\" is not writable: ",
+				&e,
+				b"\n",
+			];
+			cb.log(LogLevel::Debug, &m.concat());
+			skipping(cb, b"not writable", dir);
+			continue;
 		}
+		if md.mode() & 0o222 == 0 {
+			skipping(cb, b"no write bits set", dir);
+			continue;
+		}
+		using(cb, dir);
+		return dir.clone();
 	}
 	let tmpdir = std::env::var_os("TMPDIR").map(|t| t.as_bytes().to_vec());
 	let tmpdir = match tmpdir {
@@ -1215,6 +1244,7 @@ pub fn filecache_setup(
 		dir.push(b'/');
 	}
 	cachedirs.push(dir.clone());
+	using(cb, &dir);
 	let m = [
 		b"couldn't find or create package cache, using ",
 		&dir[..],

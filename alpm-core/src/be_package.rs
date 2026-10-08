@@ -12,8 +12,9 @@
 // see PORTING.md.
 //
 // file packages have no mtree stream: default_pkg_ops.mtree_open returns
-// NULL, nothing to port. logging is not modelled, it never changes the
-// result; the signature messages go through Callbacks.
+// NULL, nothing to port. the load logs the C's lines through Callbacks
+// except those carrying libarchive's error texts and check_meta's; the
+// validation logs the signature messages only.
 
 use std::ffi::{OsStr, c_int};
 use std::fmt::Display;
@@ -139,12 +140,56 @@ fn open_err(e: io::Error) -> Error {
 }
 
 // _alpm_open_archive and the C's errno check after it: the reader and
-// st_size
+// st_size. a failed open(2) is logged with its strerror, a format the
+// readers refuse is not (the C prints libarchive's text)
 fn open_archive(
+	cb: &mut dyn Callbacks,
 	path: &[u8],
 ) -> Result<(tar::Archive<util::Filter>, i64), Error> {
-	let archive = util::open_archive(path).map_err(open_err)?;
+	log(cb, LogLevel::Debug, &[b"opening archive ", path, b"\n"]);
+	let archive = util::open_archive(path).map_err(|e| {
+		if e.raw_os_error().is_some() {
+			let e = util::strerror(&e);
+			let msg = [
+				b"could not open file ",
+				path,
+				b": ",
+				&e,
+				b"\n",
+			];
+			log(cb, LogLevel::Error, &msg);
+		}
+		open_err(e)
+	})?;
 	Ok((archive.reader, archive.meta.len() as i64))
+}
+
+fn log(cb: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
+	cb.log(level, &parts.concat());
+}
+
+// the error line of a refused .PKGINFO
+fn pkginfo_error(
+	cb: &mut dyn Callbacks,
+	pkg: &Package,
+	why: &Reason,
+	file: &[u8],
+) {
+	let what: &[u8] = match why {
+		Reason::Version if pkg.name_bytes().is_empty() => {
+			b"missing package name in "
+		}
+		Reason::Version
+			if pkg.version
+				.as_deref()
+				.is_none_or(|v| until_nul(v).is_empty()) =>
+		{
+			b"missing package version in "
+		}
+		Reason::Version => b"invalid package version in ",
+		_ => b"could not parse package description file in ",
+	};
+	log(cb, LogLevel::Error, &[what, file, b"\n"]);
 }
 
 // _alpm_pkg_check_meta on a package that has a name and a version with a
@@ -320,12 +365,18 @@ fn filelist_from_mtree(
 // _alpm_pkg_load_internal: the package of the archive at pkgfile. full
 // reads every entry for the file list, otherwise the walk stops after
 // the metadata
-pub fn pkg_load_internal(pkgfile: &[u8], full: bool) -> Result<Package, Error> {
+pub fn pkg_load_internal(
+	cb: &mut dyn Callbacks,
+	pkgfile: &[u8],
+	full: bool,
+) -> Result<Package, Error> {
 	let pkgfile = until_nul(pkgfile);
 	if pkgfile.is_empty() {
 		return Err(Error::WrongArgs);
 	}
-	let (mut archive, size) = open_archive(pkgfile)?;
+	let (mut archive, size) = open_archive(cb, pkgfile)?;
+	let msg = [b"starting package load for ", pkgfile, b"\n"];
+	log(cb, LogLevel::Debug, &msg);
 	let mut pkg = Package {
 		filename: Some(pkgfile.to_vec()),
 		size,
@@ -346,12 +397,28 @@ pub fn pkg_load_internal(pkgfile: &[u8], full: bool) -> Result<Package, Error> {
 		// the .PKGINFO and .MTREE branches continue before the break
 		// check below, so the walk always goes one entry further
 		if name == b".PKGINFO" {
-			parse_descfile(&mut pkg, &mut entry)
-				.map_err(Error::Invalid)?;
+			if let Err(why) = parse_descfile(&mut pkg, &mut entry) {
+				pkginfo_error(cb, &pkg, &why, pkgfile);
+				return Err(Error::Invalid(why));
+			}
 			config = true;
 			continue;
 		} else if full && name == b".MTREE" {
+			let msg = [b"found mtree for package ", pkgfile];
+			let msg = [&msg.concat()[..], b", getting file list\n"];
+			log(cb, LogLevel::Debug, &msg);
 			let files = filelist_from_mtree(&mut pkg, &mut entry);
+			if files.is_some() {
+				let msg = [
+					b"finished mtree reading for ",
+					pkgfile,
+				];
+				log(
+					cb,
+					LogLevel::Debug,
+					&[&msg.concat(), b"\n"],
+				);
+			}
 			hit_mtree = files.is_some();
 			if let Some(files) = files {
 				pkg.files = files;
@@ -373,6 +440,8 @@ pub fn pkg_load_internal(pkgfile: &[u8], full: bool) -> Result<Package, Error> {
 	}
 
 	if !config {
+		let msg = [b"missing package metadata in ", pkgfile, b"\n"];
+		log(cb, LogLevel::Error, &msg);
 		return Err(Error::Invalid(Reason::Missing));
 	}
 	pkg.origin = Some(PkgFrom::File(pkgfile.to_vec()));
@@ -380,6 +449,10 @@ pub fn pkg_load_internal(pkgfile: &[u8], full: bool) -> Result<Package, Error> {
 	pkg.validation = PKG_VALIDATION_NONE;
 	if full {
 		// "checking for conflicts" needs the list sorted
+		if !pkg.files.files.is_empty() {
+			let msg = [b"sorting package filelist for ", pkgfile];
+			log(cb, LogLevel::Debug, &[&msg.concat(), b"\n"]);
+		}
 		pkg.files.sort();
 		pkg.infolevel |= INFRQ_FILES;
 	}
@@ -397,10 +470,17 @@ fn sha256_hex(path: &[u8]) -> Option<Vec<u8>> {
 	Some(text(&sum))
 }
 
-// _alpm_access(path, R_OK)
-fn readable(path: &[u8]) -> bool {
+// _alpm_access(NULL, path, R_OK) with its debug line
+fn access_read(cb: &mut dyn Callbacks, path: &[u8]) -> io::Result<()> {
 	let nofollow = AtFlags::SYMLINK_NOFOLLOW;
-	accessat(CWD, path, Access::READ_OK, nofollow).is_ok()
+	let Err(e) = accessat(CWD, path, Access::READ_OK, nofollow) else {
+		return Ok(());
+	};
+	let e: io::Error = e.into();
+	let text = util::strerror(&e);
+	let msg = [b"\"", path, b"\" is not readable: ", &text, b"\n"];
+	log(cb, LogLevel::Debug, &msg);
+	Err(e)
 }
 
 // a validation that passed: the validation bits (PKG_VALIDATION_NONE
@@ -426,15 +506,19 @@ pub fn pkg_validate(
 	if pkgfile.is_empty() {
 		return Err(Error::WrongArgs);
 	}
-	// access(R_OK): opening for reading checks the same permission
-	File::open(os(pkgfile)).map_err(open_err)?;
+	access_read(cb, pkgfile).map_err(open_err)?;
 	let b64 = syncpkg.and_then(|p| p.base64_sig.as_deref());
 	let wants_sig = level & SIG_PACKAGE != 0;
-	let has_sig =
-		wants_sig && (b64.is_some() || readable(&sigpath(pkgfile)));
+	let has_sig = wants_sig
+		&& (b64.is_some()
+			|| access_read(cb, &sigpath(pkgfile)).is_ok());
 	let mut validation = 0;
 	let expected = syncpkg.and_then(|p| p.sha256sum.as_deref());
 	if let Some(expected) = expected.filter(|_| !has_sig || b64.is_none()) {
+		let expected = until_nul(expected);
+		log(cb, LogLevel::Debug, &[b"sha256sum: ", expected, b"\n"]);
+		let msg = [b"checking sha256sum for ", pkgfile, b"\n"];
+		log(cb, LogLevel::Debug, &msg);
 		// _alpm_test_checksum: strcmp with the lowercase hex
 		if sha256_hex(pkgfile).as_deref() != Some(until_nul(expected)) {
 			return Err(Error::Checksum);
@@ -443,6 +527,8 @@ pub fn pkg_validate(
 	}
 	let mut siglist = None;
 	if wants_sig {
+		let data = b64.map_or(&b"<from .sig>"[..], until_nul);
+		log(cb, LogLevel::Debug, &[b"sig data: ", data, b"\n"]);
 		let optional = level & SIG_PACKAGE_OPTIONAL != 0;
 		if !has_sig && !optional {
 			return Err(Error::MissingSig);
@@ -493,24 +579,17 @@ fn read_sigfile(sigpath: &[u8]) -> Option<Vec<u8>> {
 	Some(sig)
 }
 
-// alpm_pkg_load's key step: each issuer key id of a readable .sig the
+// alpm_pkg_load's key step on a readable .sig: each issuer key id the
 // keychain lacks is offered for import. a failed extraction skips it
 fn import_missing_keys(
 	kr: &mut Keyring,
 	cb: &mut dyn Callbacks,
 	filename: &[u8],
+	sigfile: &[u8],
 	full: bool,
 ) -> Result<(), Error> {
-	let sigfile = sigpath(filename);
-	if !readable(&sigfile) {
-		return Ok(());
-	}
-	let Some(sig) = read_sigfile(&sigfile) else {
-		let msg = [
-			b"failed to read signature file: ",
-			&sigfile[..],
-			b"\n",
-		];
+	let Some(sig) = read_sigfile(sigfile) else {
+		let msg = [b"failed to read signature file: ", sigfile, b"\n"];
 		cb.log(LogLevel::Error, &msg.concat());
 		return Err(Error::SigFile);
 	};
@@ -525,7 +604,7 @@ fn import_missing_keys(
 		}
 		// the C loads the package here and frees it unused, only its
 		// pm_errno stays
-		if let Err(e) = pkg_load_internal(filename, full) {
+		if let Err(e) = pkg_load_internal(cb, filename, full) {
 			errno = Some(e.errno());
 		}
 		if !key_import(kr, cb, None, key) {
@@ -550,11 +629,13 @@ pub fn pkg_load_level(
 	level: c_int,
 ) -> Result<Package, Error> {
 	let filename = until_nul(filename);
-	if level & SIG_PACKAGE != 0 {
-		import_missing_keys(kr, cb, filename, full)?;
+	// the C tests the .sig whatever the level
+	let sigfile = sigpath(filename);
+	if access_read(cb, &sigfile).is_ok() && level & SIG_PACKAGE != 0 {
+		import_missing_keys(kr, cb, filename, &sigfile, full)?;
 	}
 	let validated = pkg_validate(kr, cb, filename, None, level)?;
-	let mut pkg = pkg_load_internal(filename, full)?;
+	let mut pkg = pkg_load_internal(cb, filename, full)?;
 	pkg.validation = validated.validation;
 	Ok(pkg)
 }
@@ -572,7 +653,7 @@ pub fn changelog(pkg: &Package) -> Result<Vec<u8>, Error> {
 	let Some(PkgFrom::File(path)) = &pkg.origin else {
 		return Err(Error::WrongArgs);
 	};
-	let (mut archive, _) = open_archive(until_nul(path))?;
+	let (mut archive, _) = open_archive(&mut (), until_nul(path))?;
 	let entries = archive.entries().map_err(Error::Open)?;
 	// a header error ends the search like the C's while loop
 	for mut entry in entries.map_while(Result::ok) {

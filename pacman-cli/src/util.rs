@@ -1848,14 +1848,3 @@ pub struct Ui<'a, R> {
 	pub explicit_adds: Vec<Package>,
 	pub explicit_removes: Vec<Package>,
 }
-
-// how a transaction front end ended, up to where the C calls
-// alpm_trans_commit
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Prepared {
-	// the C return value, the transaction released
-	Done(i32),
-	// confirmed: the C commits now. the prepared transaction stays in
-	// the handle, commit and trans_release are the caller's
-	Commit,
-}

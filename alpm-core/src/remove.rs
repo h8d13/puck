@@ -1,10 +1,9 @@
 // port of lib/libalpm/remove.c: alpm_remove_pkg and _alpm_remove_prepare
 // (cascade, keep needed, optdepend notices), then the commit side of one
-// package (_alpm_remove_single_package and its file removal).
-//
-// not here: _alpm_remove_packages, the loop over trans->remove (the
-// commit). trans->remove holds dups of local packages; the C dups
-// force-load every section, trans.rs reloads them fully after prepare.
+// package (_alpm_remove_single_package and its file removal) and the
+// loop over trans->remove (_alpm_remove_packages). trans->remove holds
+// dups of local packages; the C dups force-load every section, trans.rs
+// reloads them fully after prepare.
 
 use std::ffi::{OsStr, c_int, c_ulong};
 use std::fs;
@@ -37,7 +36,7 @@ use crate::trans::{
 };
 use crate::util::{
 	CALLER_PREFIX, PATH_MAX, compute_md5sum, files_in_directory,
-	fnmatch_patterns, llstat, strerror, until_nul,
+	fnmatch_patterns, ldconfig, llstat, strerror, until_nul,
 };
 
 use LogLevel::{Debug, Error, Warning};
@@ -223,8 +222,7 @@ pub(crate) fn remove_prepare(
 
 // commit side: _alpm_remove_single_package with its static helpers
 // (dir_is_mountpoint, can_remove_file, shift_pacsave, unlink_file,
-// should_skip_file, remove_package_files). the loop over trans->remove
-// (_alpm_remove_packages) belongs to the commit. flags and skip_remove
+// should_skip_file, remove_package_files). flags and skip_remove
 // come from h.trans(); oldpkg is a trans->remove dup (every section
 // loaded, as alpm_remove_pkg leaves it), newpkg the upgrading package
 // with its files sorted. the local cache is walked with INFRQ_FILES
@@ -813,5 +811,29 @@ fn remove_db_entry(h: &mut Handle, oldpkg: &Package) {
 			b"' from cache\n",
 		];
 		log(dbs.cb, Error, &msg);
+	}
+}
+
+// _alpm_remove_packages: each package of trans.remove through
+// remove_single_package, in order, until the transaction is interrupted
+// (which also skips ldconfig). the C's failure branch (TRANS_ABORT, no
+// ldconfig) is dead: _alpm_remove_single_package always returns 0, the
+// files' result is dropped here like there
+pub(crate) fn remove_packages(h: &mut Handle, run_ldconfig: bool) {
+	let pkg_count = h.trans().map_or(0, |t| t.remove.len());
+	for i in 0..pkg_count {
+		let Some(trans) = h.trans() else {
+			return;
+		};
+		if trans.state == TransState::Interrupted {
+			return;
+		}
+		// remove_single_package reads flags and skip_remove from the
+		// transaction, the package goes in as a copy
+		let pkg = trans.remove[i].clone();
+		let _ = remove_single_package(h, &pkg, None, i + 1, pkg_count);
+	}
+	if run_ldconfig {
+		ldconfig(h);
 	}
 }

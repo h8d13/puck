@@ -276,7 +276,7 @@ fn mask_installdate(data: &[u8]) -> Vec<u8> {
 }
 
 // the scriptlet's mkdtemp name: alpm_ and six random characters
-fn mask_tmpdir(msg: &[u8]) -> Vec<u8> {
+pub(crate) fn mask_tmpdir(msg: &[u8]) -> Vec<u8> {
 	let key = b"/tmp/alpm_";
 	let mut out = msg.to_vec();
 	let mut i = 0;
@@ -323,7 +323,7 @@ fn ac_node(path: &Path, node: Node, mask: bool) -> AcNode {
 	}
 }
 
-fn tree(path: &Path, mask: bool) -> AcNode {
+pub(crate) fn tree(path: &Path, mask: bool) -> AcNode {
 	ac_node(path, snapshot(path), mask)
 }
 

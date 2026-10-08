@@ -647,7 +647,7 @@ unsafe extern "C" {
 		handle: *mut c_void,
 		pkg: *mut CPkg,
 	) -> c_int;
-	fn alpm_sync_sysupgrade(
+	pub(crate) fn alpm_sync_sysupgrade(
 		handle: *mut c_void,
 		enable_downgrade: c_int,
 	) -> c_int;
@@ -655,7 +655,7 @@ unsafe extern "C" {
 		dbs: *mut CList,
 		name: *const c_char,
 	) -> *mut CList;
-	fn alpm_trans_prepare(
+	pub(crate) fn alpm_trans_prepare(
 		handle: *mut c_void,
 		data: *mut *mut CList,
 	) -> c_int;

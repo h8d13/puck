@@ -43,11 +43,11 @@ struct CConflictT {
 
 // alpm_fileconflict_t
 #[repr(C)]
-struct CFileConflict {
-	target: *mut c_char,
-	conflict_type: c_int,
-	file: *mut c_char,
-	ctarget: *mut c_char,
+pub(crate) struct CFileConflict {
+	pub(crate) target: *mut c_char,
+	pub(crate) conflict_type: c_int,
+	pub(crate) file: *mut c_char,
+	pub(crate) ctarget: *mut c_char,
 }
 
 // leading fields of struct _alpm_handle_t, handle.h, up to trans (before
@@ -93,7 +93,7 @@ unsafe extern "C" {
 		rem: *mut CList,
 	) -> *mut CList;
 	fn alpm_conflict_free(conflict: *mut CConflictT);
-	fn alpm_fileconflict_free(conflict: *mut CFileConflict);
+	pub(crate) fn alpm_fileconflict_free(conflict: *mut CFileConflict);
 }
 
 // one ALPM_PROGRESS_* callback: progress, pkg, percent, howmany, current

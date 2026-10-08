@@ -46,9 +46,9 @@ use crate::remove::pacman_remove;
 use crate::sync::{Unported, pacman_sync, sync_trans};
 use crate::upgrade::pacman_upgrade;
 use crate::util::{
-	Output, Prepared, Term, Ui, arg_to_string, console_cursor_hide,
+	Output, Term, Ui, arg_to_string, console_cursor_hide,
 	console_cursor_show, debug_stamp, getcols, list_display, now_secs,
-	pm_printf, trans_release,
+	pm_printf,
 };
 
 // alpm_version() of the reference build (meson LIB_VERSION)
@@ -1589,21 +1589,6 @@ fn unported(err: &mut Vec<u8>, config: &Config, what: &str) -> i32 {
 	1
 }
 
-// how a transaction front end ended: its status, or for a confirmed
-// transaction the commit this port does not have yet (reported, the
-// transaction released, status 1)
-fn finish<R: BufRead>(ui: &mut Ui<R>, handle: &mut Handle, p: Prepared) -> i32 {
-	match p {
-		Prepared::Done(ret) => ret,
-		Prepared::Commit => {
-			let what = "committing the transaction";
-			let ret = unported(&mut ui.out.stderr, ui.config, what);
-			trans_release(ui.out, ui.config, handle);
-			ret
-		}
-	}
-}
-
 // the operation of config.op on handle: the exit status
 fn dispatch<R: BufRead>(
 	ui: &mut Ui<R>,
@@ -1615,14 +1600,8 @@ fn dispatch<R: BufRead>(
 		PM_OP_DATABASE => {
 			pacman_database(config, handle, targets, ui.out)
 		}
-		PM_OP_REMOVE => {
-			let p = pacman_remove(ui, handle, targets);
-			finish(ui, handle, p)
-		}
-		PM_OP_UPGRADE => {
-			let p = pacman_upgrade(ui, handle, targets);
-			finish(ui, handle, p)
-		}
+		PM_OP_REMOVE => pacman_remove(ui, handle, targets),
+		PM_OP_UPGRADE => pacman_upgrade(ui, handle, targets),
 		PM_OP_QUERY => {
 			let path =
 				std::env::var_os("PATH").map(|p| p.into_vec());
@@ -1639,8 +1618,7 @@ fn dispatch<R: BufRead>(
 					"--clean",
 				),
 				Err(Unported::Transaction) => {
-					let p = sync_trans(ui, handle, targets);
-					finish(ui, handle, p)
+					sync_trans(ui, handle, targets)
 				}
 			}
 		}

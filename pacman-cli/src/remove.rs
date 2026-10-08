@@ -1,8 +1,7 @@
-// port of src/pacman/remove.c: pacman_remove up to the commit
+// port of src/pacman/remove.c: pacman_remove
 //
 // the C prints to stdout and through pm_printf to stderr, both go into
-// ui.out. a yes to the last question is Prepared::Commit, where the C
-// calls alpm_trans_commit; the transaction stays in the handle then.
+// ui.out. a yes to the last question commits.
 
 use std::io::BufRead;
 
@@ -10,14 +9,16 @@ use alpm_core::deps::dep_compute_string;
 use alpm_core::handle::Handle;
 use alpm_core::package::Package;
 use alpm_core::remove::remove_pkg;
-use alpm_core::trans::{PrepareData, trans_get_remove, trans_prepare};
+use alpm_core::trans::{
+	PrepareData, trans_commit, trans_get_remove, trans_prepare,
+};
 use alpm_core::util::{fnmatch, until_nul};
 
 use crate::conf::cat;
 use crate::sync::{error, local_list, warning};
 use crate::util::{
-	DbPkg, Prepared, TransTargets, Ui, colon_printf, display_targets,
-	noyes, print_packages, trans_init, trans_release, yesno,
+	DbPkg, TransTargets, Ui, colon_printf, display_targets, noyes,
+	print_packages, trans_init, trans_release, yesno,
 };
 
 fn removal_failed<R>(ui: &mut Ui<R>, target: &[u8], e: &[u8]) {
@@ -68,20 +69,20 @@ fn remove_target<R>(ui: &mut Ui<R>, h: &mut Handle, target: &[u8]) -> bool {
 
 // pacman_remove: targets ("local/" stripped) into a transaction, prepare,
 // the HoldPkg question, then nothing to do, --print, or the target list
-// and the remove question
+// and the remove question; a yes commits
 pub fn pacman_remove<R: BufRead, S: AsRef<[u8]>>(
 	ui: &mut Ui<R>,
 	h: &mut Handle,
 	targets: &[S],
-) -> Prepared {
+) -> i32 {
 	let config = ui.config;
 	if targets.is_empty() {
 		let msg: &[u8] = b"no targets specified (use -h for help)\n";
 		error(ui.out, config, &[msg]);
-		return Prepared::Done(1);
+		return 1;
 	}
 	if !trans_init(ui.out, config, h, config.flags, false) {
-		return Prepared::Done(1);
+		return 1;
 	}
 	let mut retval = 0;
 	for t in targets {
@@ -92,15 +93,30 @@ pub fn pacman_remove<R: BufRead, S: AsRef<[u8]>>(
 		}
 	}
 	if retval == 0 {
-		match prepare(ui, h) {
-			Some(r) => retval = r,
-			None => return Prepared::Commit,
-		}
+		retval = match prepare(ui, h) {
+			Some(r) => r,
+			None => commit(ui, h),
+		};
 	}
 	if !trans_release(ui.out, config, h) {
 		retval = 1;
 	}
-	Prepared::Done(retval)
+	retval
+}
+
+// alpm_trans_commit, what came before it printed first
+fn commit<R>(ui: &mut Ui<R>, h: &mut Handle) -> i32 {
+	ui.out.flush();
+	let Err(e) = trans_commit(h) else {
+		return 0;
+	};
+	let msg = [
+		b"failed to commit transaction (",
+		e.errno.strerror().as_bytes(),
+		b")\n",
+	];
+	error(ui.out, ui.config, &msg);
+	1
 }
 
 // the steps from alpm_trans_prepare on, None for a yes to remove

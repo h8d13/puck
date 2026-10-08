@@ -2,7 +2,8 @@
 // -Sg/-Sgg (sync_group), -Ss (sync_search), -Sy/-Syy (util.c's
 // sync_syncdbs, shared with -Fy), the pacman_sync dispatch up to them,
 // util.c's check_syncdbs they rely on, and the transaction of -S/-Su up
-// to the commit (sync_trans, sync_prepare_execute, also run by -U)
+// and through the commit (sync_trans, sync_prepare_execute, also run by
+// -U)
 //
 // the C prints to stdout and through pm_printf to stderr, both go into an
 // Output. config is the C global, handle config->handle; cols is what
@@ -17,9 +18,10 @@
 //
 // not ported, returned as Unported where pacman_sync reaches them: -Sc
 // (trans_init takes the db lock, then interactive prompts and unlinks
-// in the cache dirs). the transaction is sync_trans, which ends in
-// Prepared::Commit where the C calls alpm_trans_commit; pacman_sync
+// in the cache dirs). the transaction is sync_trans; pacman_sync
 // returns Unported::Transaction for it, the dispatch runs sync_trans.
+// multibar_move_completed_up(true) before the commit is not modelled:
+// the callbacks sit boxed in the handle.
 
 use std::fs::File;
 use std::io::BufRead;
@@ -28,6 +30,7 @@ use std::os::unix::ffi::OsStrExt;
 use alpm_core::add::add_pkg;
 use alpm_core::be_sync::{db_update, get_validation};
 use alpm_core::callbacks::Callbacks;
+use alpm_core::conflict::FileConflictType;
 use alpm_core::db::{DB_USAGE_INSTALL, Db};
 use alpm_core::deps::{DepMissing, DepMod, dep_compute_string};
 use alpm_core::error::Errno;
@@ -35,8 +38,8 @@ use alpm_core::handle::Handle;
 use alpm_core::package::{DbCaches, Package, pkg_find};
 use alpm_core::sync::{dbs_satisfier, find_group_pkgs, sync_sysupgrade};
 use alpm_core::trans::{
-	PrepareData, PrepareError, TransPkg, trans_get_add, trans_get_remove,
-	trans_prepare,
+	CommitData, CommitError, PrepareData, PrepareError, TransPkg,
+	trans_commit, trans_get_add, trans_get_remove, trans_prepare,
 };
 use alpm_core::util::until_nul;
 
@@ -45,7 +48,7 @@ use crate::package::{
 	FileProbe, PkgEnv, dump_pkg_full, dump_pkg_search, print_installed,
 };
 use crate::util::{
-	DbPkg, Output, Prepared, SigResult, TransTargets, Ui, check_syncdbs,
+	DbPkg, Output, SigResult, TransTargets, Ui, check_syncdbs,
 	colon_printf, display_targets, multiselect_question, pm_printf,
 	print_packages, select_display, trans_init, trans_release, yesno,
 };
@@ -726,10 +729,10 @@ pub fn sync_trans<R: BufRead, S: AsRef<[u8]>>(
 	ui: &mut Ui<R>,
 	h: &mut Handle,
 	targets: &[S],
-) -> Prepared {
+) -> i32 {
 	let config = ui.config;
 	if !trans_init(ui.out, config, h, config.flags, true) {
-		return Prepared::Done(1);
+		return 1;
 	}
 	let mut retval = 0;
 	for t in targets {
@@ -739,7 +742,7 @@ pub fn sync_trans<R: BufRead, S: AsRef<[u8]>>(
 	}
 	if retval != 0 {
 		trans_release(ui.out, config, h);
-		return Prepared::Done(retval);
+		return retval;
 	}
 	if config.op_s_upgrade != 0 {
 		if config.print == 0 {
@@ -752,7 +755,7 @@ pub fn sync_trans<R: BufRead, S: AsRef<[u8]>>(
 			let msg = [e.strerror().as_bytes(), b"\n"];
 			error(ui.out, config, &msg);
 			trans_release(ui.out, config, h);
-			return Prepared::Done(1);
+			return 1;
 		}
 	}
 	sync_prepare_execute(ui, h)
@@ -855,13 +858,75 @@ fn prepare_failed<R>(ui: &mut Ui<R>, h: &Handle, e: &PrepareError) {
 	}
 }
 
+// the failure report of the commit in sync_prepare_execute
+fn commit_failed<R>(ui: &mut Ui<R>, e: &CommitError) {
+	let msg = [
+		b"failed to commit transaction (",
+		e.errno.strerror().as_bytes(),
+		b")\n",
+	];
+	error(ui.out, ui.config, &msg);
+	let err = &mut ui.out.stderr;
+	match (e.errno, &e.data) {
+		(Errno::FileConflicts, CommitData::FileConflicts(list)) => {
+			for c in list {
+				let (file, target) =
+					(&c.file[..], &c.target[..]);
+				let ctarget = &c.ctarget[..];
+				let msg = match c.conflict_type {
+					FileConflictType::Target => cat(&[
+						file,
+						b" exists in both '",
+						target,
+						b"' and '",
+						ctarget,
+						b"'\n",
+					]),
+					FileConflictType::Filesystem
+						if !ctarget.is_empty() =>
+					{
+						cat(&[
+							target,
+							b": ",
+							file,
+							b" exists in filesystem \
+							  (owned by ",
+							ctarget,
+							b")\n",
+						])
+					}
+					FileConflictType::Filesystem => cat(&[
+						target,
+						b": ",
+						file,
+						b" exists in filesystem\n",
+					]),
+				};
+				err.extend_from_slice(&msg);
+			}
+		}
+		(
+			Errno::PkgInvalid
+			| Errno::PkgInvalidChecksum
+			| Errno::PkgInvalidSig,
+			CommitData::Invalid(files),
+		) => {
+			for f in files {
+				let msg =
+					[&f[..], b" is invalid or corrupted\n"];
+				err.extend_from_slice(&msg.concat());
+			}
+		}
+		_ => {}
+	}
+	let msg = b"Errors occurred, no packages were upgraded.\n";
+	ui.out.stdout.extend_from_slice(msg);
+}
+
 // sync_prepare_execute: prepare, then nothing to do, --print, or the
-// target list and the proceed question. a yes is Prepared::Commit with
-// the transaction still held; every other end releases it
-pub fn sync_prepare_execute<R: BufRead>(
-	ui: &mut Ui<R>,
-	h: &mut Handle,
-) -> Prepared {
+// target list and the proceed question; a yes commits. the transaction
+// is released at every end
+pub fn sync_prepare_execute<R: BufRead>(ui: &mut Ui<R>, h: &mut Handle) -> i32 {
 	let config = ui.config;
 	let mut retval = match trans_prepare(h) {
 		Err(e) => {
@@ -870,13 +935,25 @@ pub fn sync_prepare_execute<R: BufRead>(
 		}
 		Ok(()) => match proceed(ui, h) {
 			Some(r) => r,
-			None => return Prepared::Commit,
+			None => commit(ui, h),
 		},
 	};
 	if !trans_release(ui.out, config, h) {
 		retval = 1;
 	}
-	Prepared::Done(retval)
+	retval
+}
+
+// alpm_trans_commit with what came before it printed first
+fn commit<R>(ui: &mut Ui<R>, h: &mut Handle) -> i32 {
+	ui.out.flush();
+	match trans_commit(h) {
+		Ok(()) => 0,
+		Err(e) => {
+			commit_failed(ui, &e);
+			1
+		}
+	}
 }
 
 // the steps after a successful prepare, None for a yes to proceed

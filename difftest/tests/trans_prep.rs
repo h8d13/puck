@@ -44,7 +44,7 @@ use difftest::{
 use pacman_cli::conf::{ColStr, Config, LOG_ERROR, LOG_WARNING};
 use pacman_cli::package::format_date_utc;
 use pacman_cli::pacman::{PM_OP_REMOVE, PM_OP_SYNC, PM_OP_UPGRADE};
-use pacman_cli::util::{Output, Prepared, Term, Ui};
+use pacman_cli::util::{Output, Term, Ui};
 
 const USAGES: [c_int; 6] = [
 	DB_USAGE_ALL,
@@ -972,7 +972,7 @@ fn rust_front(
 	targets: &[Vec<u8>],
 	cols: u16,
 	input: &[u8],
-) -> (Prepared, Output, usize) {
+) -> (i32, Output, usize) {
 	let mut out = Output::default();
 	let mut term = Term::new(Cursor::new(input.to_vec()), false, false);
 	let r = {
@@ -991,7 +991,7 @@ fn rust_front(
 					cfg, h, targets, cols, ui.out,
 				);
 				match pre {
-					Ok(ret) => Prepared::Done(ret),
+					Ok(ret) => ret,
 					Err(_) => pacman_cli::sync::sync_trans(
 						&mut ui, h, targets,
 					),
@@ -1080,7 +1080,7 @@ fn frontend_fuzz() {
 				&world,
 			);
 			assert_eq!(
-				Prepared::Done(cret),
+				cret,
 				r,
 				"ret {what:#?}\n{}",
 				String::from_utf8_lossy(&cio.out.stderr)
