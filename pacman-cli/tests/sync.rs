@@ -6,9 +6,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use alpm_core::handle::Handle;
-use pacman_cli::check::Output;
 use pacman_cli::conf::Config;
 use pacman_cli::sync::*;
+use pacman_cli::util::Output;
 
 // <tmp>/pacman-cli-sync-<pid>-<name>/ with root/ and db/sync/<repo>.db
 // for each repo, removed on drop

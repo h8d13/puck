@@ -3,14 +3,15 @@ use difftest::{
 	Rng, c_arg_to_string, c_console_cursor_move_down,
 	c_console_cursor_move_up, c_console_erase_line, c_humanize_size,
 	c_indentprint, c_list_display, c_list_display_linebreak, c_mbstowcs,
-	c_signature_display, c_string_display, c_strreplace, c_wcwidth, iters,
-	string_length_in_bounds, widths_agree,
+	c_signature_display, c_string_display, c_strreplace, c_wcwidth,
+	getcols_both, iters, string_length_in_bounds, widths_agree,
 };
 use pacman_cli::util::{
 	ColStr, SigResult, SigStatus, SigValidity, arg_to_string,
 	console_cursor_move_down, console_cursor_move_up, console_erase_line,
-	humanize_size, indentprint, list_display, list_display_linebreak,
-	mbstowcs, signature_display, string_display, strreplace, wcwidth,
+	getcols, humanize_size, indentprint, list_display,
+	list_display_linebreak, mbstowcs, signature_display, string_display,
+	strreplace, wcwidth,
 };
 
 // pieces of display text: words, space runs, wide (2), combining (0),
@@ -542,5 +543,47 @@ fn console_sequences() {
 		let mut down = Vec::new();
 		console_cursor_move_down(&mut down, n);
 		assert_eq!(c_console_cursor_move_down(n), down, "{n}");
+	}
+}
+
+// getcols: COLUMNS parsed like strtol (sign, spaces, trailing junk, past
+// int and long), unset/empty/negative falls back to the terminal check.
+// stdout must not be a terminal (the C asks the tty's width there)
+#[test]
+fn getcols_columns() {
+	use std::io::IsTerminal;
+	if std::io::stdout().is_terminal() {
+		eprintln!("stdout is a terminal, getcols fallback skipped");
+		return;
+	}
+	let fixed: &[Option<&[u8]>] = &[
+		None,
+		Some(b""),
+		Some(b"80"),
+		Some(b"0"),
+		Some(b"+5"),
+		Some(b"-5"),
+		Some(b"  42"),
+		Some(b"42 "),
+		Some(b"4x"),
+		Some(b"-"),
+		Some(b" "),
+		Some(b"65536"),
+		Some(b"65617"),
+		Some(b"4294967376"),
+		Some(b"99999999999999999999"),
+		Some(b"-99999999999999999999"),
+		Some(b"\t\n7"),
+		Some(b"\xc3\xa9"),
+	];
+	for &v in fixed {
+		let (c, r) = getcols_both(v, getcols);
+		assert_eq!(c, r, "COLUMNS={v:?}");
+	}
+	let mut rng = Rng::new(0xc015);
+	for _ in 0..iters() / 20 {
+		let v = rng.bytes(b"0123456789+- \tx9", 24);
+		let (c, r) = getcols_both(Some(&v), getcols);
+		assert_eq!(c, r, "COLUMNS={v:?}");
 	}
 }

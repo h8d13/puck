@@ -9,21 +9,21 @@
 // INFRQ_FILES for file conflicts, INFRQ_ALL where a conflict copies them).
 // logging is not modelled, it never changes the result. allocation
 // failures are not modelled (the C returns NULL or drops entries).
-// progress goes through ProgressCb, handle->progresscb in the C.
+// progress goes through Callbacks, handle->progresscb in the C.
 
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::ffi::{OsStr, c_int};
-use std::fs::{self, Metadata};
-use std::io;
+use std::fs;
 use std::os::unix::ffi::OsStrExt;
 
 use crate::backup::needbackup;
 use crate::be_local::INFRQ_ERROR;
+use crate::callbacks::{Callbacks, Progress};
 use crate::deps::{Depend, depcmp};
 use crate::package::{Package, PkgFrom, has_name, pkg_cmp};
 use crate::pkghash::PkgHash;
-use crate::util::{fnmatch_patterns, until_nul};
+use crate::util::{fnmatch_patterns, llstat, until_nul};
 
 // limits.h on linux, the snprintf buffers of the C
 const PATH_MAX: usize = 4096;
@@ -55,45 +55,6 @@ pub struct FileConflict {
 	pub file: Vec<u8>,
 	// owner of file, empty when unowned
 	pub ctarget: Vec<u8>,
-}
-
-// alpm_progress_t, discriminants as in alpm.h
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Progress {
-	AddStart,
-	UpgradeStart,
-	DowngradeStart,
-	ReinstallStart,
-	RemoveStart,
-	ConflictsStart,
-	DiskspaceStart,
-	IntegrityStart,
-	LoadStart,
-	KeyringStart,
-}
-
-// alpm_cb_progress with its context. () is a handle without a callback
-pub trait ProgressCb {
-	fn progress(
-		&mut self,
-		progress: Progress,
-		pkg: &[u8],
-		percent: c_int,
-		howmany: usize,
-		current: usize,
-	);
-}
-
-impl ProgressCb for () {
-	fn progress(
-		&mut self,
-		_: Progress,
-		_: &[u8],
-		_: c_int,
-		_: usize,
-		_: usize,
-	) {
-	}
 }
 
 fn same_name(a: &Package, b: &Package) -> bool {
@@ -236,14 +197,6 @@ fn cat(parts: &[&[u8]]) -> Vec<u8> {
 	let mut p = parts.concat();
 	p.truncate(PATH_MAX - 1);
 	p
-}
-
-// llstat (src/common): lstat with trailing '/' stripped (not a lone
-// "/"), so "dirsymlink/" describes the link
-fn llstat(path: &[u8]) -> io::Result<Metadata> {
-	let slashes = path.iter().rev().take_while(|&&c| c == b'/').count();
-	let len = (path.len() - slashes).max(1).min(path.len());
-	fs::symlink_metadata(os(&path[..len]))
 }
 
 fn has_file(pkg: &Package, path: &[u8]) -> bool {
@@ -520,7 +473,7 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 		&self,
 		upgrade: &[&Package],
 		rem: &[&Package],
-		progress: &mut impl ProgressCb,
+		progress: &mut dyn Callbacks,
 	) -> FileConflicts {
 		let mut out = FileConflicts::default();
 		let numtargs = upgrade.len();

@@ -8,15 +8,16 @@
 // msgids. -Fy (db download) is not ported, pacman_files returns
 // Unported::Refresh there.
 
+use alpm_core::db::Db;
 use alpm_core::handle::Handle;
 use alpm_core::package::Package;
 use alpm_core::regex::{Flags, Regex};
 use alpm_core::util::until_nul;
 
-use crate::check::Output;
 use crate::conf::{Config, cat};
 use crate::package::{print_groups, print_installed};
-use crate::sync::{Unported, cache_list, check_syncdbs, error};
+use crate::sync::{Unported, cache_list, error};
+use crate::util::{Output, check_syncdbs};
 
 // print_line_machinereadable: repo, name, version, file, nul separated
 fn machine_line(out: &mut Vec<u8>, repo: &[u8], pkg: &Package, file: &[u8]) {
@@ -34,22 +35,23 @@ fn machine_line(out: &mut Vec<u8>, repo: &[u8], pkg: &Package, file: &[u8]) {
 }
 
 // a package with its matching files, printed once the db is searched
-struct Match {
-	pkg: Package,
+struct Match<'p> {
+	pkg: &'p Package,
 	files: Vec<Vec<u8>>,
 }
 
-// print_match
+// print_match. local is handle->db_local, dbext handle->dbext
 fn print_match(
 	config: &Config,
-	handle: &mut Handle,
+	local: Option<&mut Db>,
+	dbext: &[u8],
 	repo: &[u8],
 	m: &Match,
 	exact_file: bool,
 	out: &mut Vec<u8>,
 ) {
 	let c = &config.colstr;
-	let pkg = &m.pkg;
+	let pkg = m.pkg;
 	if config.op_f_machinereadable != 0 {
 		for f in &m.files {
 			machine_line(out, repo, pkg, f);
@@ -88,10 +90,8 @@ fn print_match(
 			c.nocolor,
 		]));
 		print_groups(out, pkg, c);
-		let dbext = handle.dbext().to_vec();
-		let local = handle
-			.localdb_mut()
-			.and_then(|l| l.get_pkg(&dbext, pkg.name_bytes()).ok());
+		let local = local
+			.and_then(|l| l.get_pkg(dbext, pkg.name_bytes()).ok());
 		print_installed(out, local, pkg, c);
 		out.push(b'\n');
 		for f in &m.files {
@@ -194,15 +194,15 @@ pub fn files_search<S: AsRef<[u8]>>(
 	let dbext = handle.dbext().to_vec();
 	for ftarg in &ftargs {
 		let mut found = false;
-		for i in 0..handle.syncdbs().len() {
-			let db = &mut handle.syncdbs_mut()[i];
+		let (mut local, syncdbs) = handle.dbs_mut();
+		for db in syncdbs {
 			let repo = db.name().to_vec();
 			let hits: Vec<Match> = cache_list(db, &dbext)
 				.into_iter()
 				.filter_map(|p| {
 					let files = matches(ftarg, p);
-					(!files.is_empty()).then(|| Match {
-						pkg: p.clone(),
+					(!files.is_empty()).then_some(Match {
+						pkg: p,
 						files,
 					})
 				})
@@ -211,7 +211,10 @@ pub fn files_search<S: AsRef<[u8]>>(
 			for m in &hits {
 				let exact = ftarg.exact_file;
 				let o = &mut out.stdout;
-				print_match(config, handle, &repo, m, exact, o);
+				let l = local.as_deref_mut();
+				print_match(
+					config, l, &dbext, &repo, m, exact, o,
+				);
 			}
 		}
 		if !found {
@@ -305,7 +308,7 @@ pub fn pacman_files<S: AsRef<[u8]>>(
 	targets: &[S],
 	out: &mut Output,
 ) -> Result<i32, Unported> {
-	if check_syncdbs(config, handle, true, false, out) != 0 {
+	if check_syncdbs(&mut out.stderr, config, handle, true, false) != 0 {
 		return Ok(1);
 	}
 	if config.op_s_sync != 0 {

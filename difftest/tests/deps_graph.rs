@@ -14,13 +14,13 @@ use std::ffi::c_int;
 use std::ptr;
 
 use alpm_core::be_local::INFRQ_DESC;
+use alpm_core::callbacks::{Callbacks, LogLevel, Question};
 use alpm_core::db::{
 	DB_USAGE_ALL, DB_USAGE_INSTALL, DB_USAGE_SEARCH, DB_USAGE_UPGRADE,
 };
 use alpm_core::deps::{
-	DbPkgs, DepMissing, DepsEnv, Log, LogLevel, Question, Questions,
-	checkdeps, dep_from_string, find_dbs_satisfier, recursedeps,
-	resolvedeps, sortbydeps,
+	DbPkgs, DepMissing, DepsEnv, checkdeps, dep_from_string,
+	find_dbs_satisfier, recursedeps, resolvedeps, sortbydeps,
 };
 use alpm_core::error::Errno;
 use alpm_core::handle::Handle;
@@ -231,11 +231,9 @@ fn gen_setup(rng: &mut Rng) -> Setup {
 	}
 }
 
-// the Rust handle and caches of a fixture, local entries lazy-loaded
+// the Rust handle of a fixture, caches loaded, local entries lazy-loaded
 struct RustSide {
 	handle: Handle,
-	local: PkgHash<Package>,
-	sync: Vec<PkgHash<Package>>,
 }
 
 impl RustSide {
@@ -247,6 +245,7 @@ impl RustSide {
 		}
 		handle.set_ignorepkgs(&setup.ignorepkg);
 		handle.set_ignoregroups(&setup.ignoregroup);
+		handle.set_assumeinstalled(&setup.assumeinstalled).unwrap();
 		let dbext = handle.dbext().to_vec();
 		let db = handle.localdb_mut().unwrap();
 		let names: Vec<Vec<u8>> = db
@@ -258,21 +257,24 @@ impl RustSide {
 		for n in &names {
 			db.load_pkg(&dbext, n, INFRQ_DESC).unwrap();
 		}
-		let local = db.pkgcache(&dbext).unwrap().clone();
-		let sync = handle
-			.syncdbs_mut()
-			.iter_mut()
-			.map(|d| d.pkgcache(&dbext).unwrap().clone())
-			.collect();
-		RustSide {
-			handle,
-			local,
-			sync,
+		for d in handle.syncdbs_mut() {
+			d.pkgcache(&dbext).unwrap();
 		}
+		RustSide { handle }
+	}
+
+	fn local(&self) -> &PkgHash<Package> {
+		let db = self.handle.localdb().unwrap();
+		db.loaded_pkgcache().expect("loaded")
+	}
+
+	fn sync(&self) -> Vec<&PkgHash<Package>> {
+		let dbs = self.handle.syncdbs().iter();
+		dbs.map(|d| d.loaded_pkgcache().expect("loaded")).collect()
 	}
 
 	fn cache(&self, db: Option<usize>) -> &PkgHash<Package> {
-		db.map_or(&self.local, |i| &self.sync[i])
+		db.map_or(self.local(), |i| self.sync()[i])
 	}
 
 	fn get(&self, id: &PkgId) -> &Package {
@@ -313,7 +315,7 @@ impl<'r> Script<'r> {
 	}
 }
 
-impl Questions for Script<'_> {
+impl Callbacks for Script<'_> {
 	fn question(&mut self, q: &mut Question<'_>) {
 		let answer = self.answers.pop_front();
 		match q {
@@ -344,11 +346,10 @@ impl Questions for Script<'_> {
 					*use_index = a;
 				}
 			}
+			_ => unreachable!("deps asks two questions"),
 		}
 	}
-}
 
-impl Log for Script<'_> {
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {
 		self.calls.logs.push((level as c_int, msg.to_vec()));
 	}
@@ -418,18 +419,17 @@ impl Case<'_> {
 
 	fn with_env<R>(&self, f: impl FnOnce(&DepsEnv) -> R) -> R {
 		let dbs: Vec<DbPkgs> =
-			self.rs.sync
-				.iter()
+			self.rs.sync()
+				.into_iter()
 				.zip(&self.setup.usage)
 				.map(|(cache, &usage)| DbPkgs { usage, cache })
 				.collect();
 		let env = DepsEnv {
 			handle: &self.rs.handle,
-			assumeinstalled: &self.setup.assumeinstalled,
 			nodepversion: self.setup.nodepversion,
 			local: DbPkgs {
 				usage: self.setup.local_usage,
-				cache: &self.rs.local,
+				cache: self.rs.local(),
 			},
 			sync: &dbs,
 		};
@@ -613,7 +613,7 @@ impl Case<'_> {
 			.iter()
 			.map(|id| self.rs.get(id).clone())
 			.collect();
-		recursedeps(&self.rs.local, &mut list, explicit, &mut s);
+		recursedeps(self.rs.local(), &mut list, explicit, &mut s);
 		let names: Vec<Vec<u8>> =
 			list.iter().map(|p| p.name_bytes().to_vec()).collect();
 		let what = (&targs, explicit);

@@ -27,8 +27,9 @@ use alpm_types::Sha256Checksum;
 use difftest::{
 	CCheck, CMtreeEntry, CheckWorld, Rng, iters, set_mtime_nofollow,
 };
-use pacman_cli::check::{HandleEnv, Output, check_pkg_fast, check_pkg_full};
+use pacman_cli::check::{HandleEnv, check_pkg_fast, check_pkg_full};
 use pacman_cli::conf::{ColStr, Config};
+use pacman_cli::util::Output;
 
 // one fixture per iteration (files, two handles, sha256 of every file):
 // far slower than string fuzz

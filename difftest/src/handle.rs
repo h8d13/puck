@@ -393,3 +393,118 @@ unsafe extern "C" {
 		disable_dl_timeout: std::ffi::c_ushort,
 	) -> c_int;
 }
+
+// the rest of handle.c and log.c (handle_opts)
+unsafe extern "C" {
+	pub(crate) fn alpm_option_get_hookdirs(
+		handle: *mut c_void,
+	) -> *mut CList;
+	pub(crate) fn alpm_option_add_hookdir(
+		handle: *mut c_void,
+		hookdir: *const c_char,
+	) -> c_int;
+	pub(crate) fn alpm_option_set_hookdirs(
+		handle: *mut c_void,
+		hookdirs: *mut CList,
+	) -> c_int;
+	pub(crate) fn alpm_option_remove_hookdir(
+		handle: *mut c_void,
+		hookdir: *const c_char,
+	) -> c_int;
+	pub(crate) fn alpm_option_set_cachedirs(
+		handle: *mut c_void,
+		cachedirs: *mut CList,
+	) -> c_int;
+	pub(crate) fn alpm_option_remove_cachedir(
+		handle: *mut c_void,
+		cachedir: *const c_char,
+	) -> c_int;
+	pub(crate) fn alpm_option_get_gpgdir(
+		handle: *mut c_void,
+	) -> *const c_char;
+	pub(crate) fn alpm_option_get_logfile(
+		handle: *mut c_void,
+	) -> *const c_char;
+	pub(crate) fn alpm_option_set_logfile(
+		handle: *mut c_void,
+		logfile: *const c_char,
+	) -> c_int;
+	pub(crate) fn alpm_option_get_lockfile(
+		handle: *mut c_void,
+	) -> *const c_char;
+	pub(crate) fn alpm_option_get_sandboxuser(
+		handle: *mut c_void,
+	) -> *const c_char;
+	pub(crate) fn alpm_option_set_sandboxuser(
+		handle: *mut c_void,
+		sandboxuser: *const c_char,
+	) -> c_int;
+	pub(crate) fn alpm_option_get_usesyslog(handle: *mut c_void) -> c_int;
+	pub(crate) fn alpm_option_set_usesyslog(
+		handle: *mut c_void,
+		usesyslog: c_int,
+	) -> c_int;
+	pub(crate) fn alpm_option_get_checkspace(handle: *mut c_void) -> c_int;
+	pub(crate) fn alpm_option_set_checkspace(
+		handle: *mut c_void,
+		checkspace: c_int,
+	) -> c_int;
+	pub(crate) fn alpm_option_get_parallel_downloads(
+		handle: *mut c_void,
+	) -> c_int;
+	pub(crate) fn alpm_option_get_disable_dl_timeout(
+		handle: *mut c_void,
+	) -> c_int;
+	pub(crate) fn alpm_option_get_disable_sandbox(
+		handle: *mut c_void,
+	) -> c_int;
+	pub(crate) fn alpm_option_set_disable_sandbox(
+		handle: *mut c_void,
+		disable: std::ffi::c_ushort,
+	) -> c_int;
+	pub(crate) fn alpm_option_get_disable_sandbox_filesystem(
+		handle: *mut c_void,
+	) -> c_int;
+	pub(crate) fn alpm_option_set_disable_sandbox_filesystem(
+		handle: *mut c_void,
+		disable: std::ffi::c_ushort,
+	) -> c_int;
+	pub(crate) fn alpm_option_get_disable_sandbox_syscalls(
+		handle: *mut c_void,
+	) -> c_int;
+	pub(crate) fn alpm_option_set_disable_sandbox_syscalls(
+		handle: *mut c_void,
+		disable: std::ffi::c_ushort,
+	) -> c_int;
+	pub(crate) fn alpm_option_get_overwrite_files(
+		handle: *mut c_void,
+	) -> *mut CList;
+	pub(crate) fn alpm_option_add_overwrite_file(
+		handle: *mut c_void,
+		glob: *const c_char,
+	) -> c_int;
+	pub(crate) fn alpm_option_remove_overwrite_file(
+		handle: *mut c_void,
+		glob: *const c_char,
+	) -> c_int;
+	pub(crate) fn alpm_option_get_assumeinstalled(
+		handle: *mut c_void,
+	) -> *mut CList;
+	pub(crate) fn alpm_option_add_assumeinstalled(
+		handle: *mut c_void,
+		dep: *const c_void,
+	) -> c_int;
+	pub(crate) fn alpm_option_remove_assumeinstalled(
+		handle: *mut c_void,
+		dep: *const c_void,
+	) -> c_int;
+	pub(crate) fn alpm_logaction(
+		handle: *mut c_void,
+		prefix: *const c_char,
+		fmt: *const c_char,
+		...
+	) -> c_int;
+	pub(crate) fn alpm_unlock(handle: *mut c_void) -> c_int;
+	pub(crate) fn _alpm_handle_lock(handle: *mut c_void) -> c_int;
+	pub(crate) fn _alpm_handle_unlock(handle: *mut c_void) -> c_int;
+}

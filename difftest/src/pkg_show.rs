@@ -34,24 +34,24 @@ use crate::{CList, cstr, string_length_in_bounds};
 
 // struct tm of glibc time.h
 #[repr(C)]
-struct Tm {
-	tm_sec: c_int,
-	tm_min: c_int,
-	tm_hour: c_int,
-	tm_mday: c_int,
-	tm_mon: c_int,
-	tm_year: c_int,
-	tm_wday: c_int,
-	tm_yday: c_int,
-	tm_isdst: c_int,
-	tm_gmtoff: c_long,
-	tm_zone: *const c_char,
+pub(crate) struct Tm {
+	pub(crate) tm_sec: c_int,
+	pub(crate) tm_min: c_int,
+	pub(crate) tm_hour: c_int,
+	pub(crate) tm_mday: c_int,
+	pub(crate) tm_mon: c_int,
+	pub(crate) tm_year: c_int,
+	pub(crate) tm_wday: c_int,
+	pub(crate) tm_yday: c_int,
+	pub(crate) tm_isdst: c_int,
+	pub(crate) tm_gmtoff: c_long,
+	pub(crate) tm_zone: *const c_char,
 }
 
 unsafe extern "C" {
 	fn tzset();
 	fn localtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
-	fn strftime(
+	pub(crate) fn strftime(
 		s: *mut c_char,
 		max: usize,
 		format: *const c_char,

@@ -10,7 +10,9 @@ use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{
+	DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt,
+};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
@@ -21,6 +23,11 @@ use alpm_compress::tarball::TarballReader;
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
 use crate::deps::LogLevel;
+
+use crate::callbacks::{Callbacks, LogLevel};
+
+// limits.h on linux
+const PATH_MAX: usize = 4096;
 
 // what a C string would see of these bytes
 pub fn until_nul(s: &[u8]) -> &[u8] {
@@ -613,7 +620,17 @@ pub fn test_checksum(
 	Some(until_nul(expected?) == computed?)
 }
 
-// strerror(errno) of an io::Error: the OS text without std's suffix
+// llstat (src/common, linked into libalpm): lstat with trailing '/'
+// stripped (not a lone "/"), so "dirsymlink/" describes the link
+pub fn llstat(path: &[u8]) -> io::Result<fs::Metadata> {
+	let path = until_nul(path);
+	let slashes = path.iter().rev().take_while(|&&c| c == b'/').count();
+	let len = (path.len() - slashes).max(1).min(path.len());
+	fs::symlink_metadata(OsStr::from_bytes(&path[..len]))
+}
+
+// strerror(errno) of an io::Error: std formats "<strerror_r text> (os
+// error N)". errors without errno as std prints them
 pub fn strerror(e: &io::Error) -> Vec<u8> {
 	let s = e.to_string();
 	let Some(n) = e.raw_os_error() else {
@@ -1224,4 +1241,112 @@ pub fn unpack_single(
 		break;
 	}
 	true
+}
+
+// _alpm_filecache_find: "<cachedir><filename>" of the first cachedir
+// holding it as a regular file
+pub fn filecache_find(
+	cachedirs: &[Vec<u8>],
+	filename: &[u8],
+	cb: &mut dyn Callbacks,
+) -> Option<Vec<u8>> {
+	for dir in cachedirs {
+		let mut p = [dir, until_nul(filename)].concat();
+		// snprintf into char[PATH_MAX]
+		p.truncate(PATH_MAX - 1);
+		match fs::metadata(c_path(&p)) {
+			Ok(md) if md.is_file() => return Some(p),
+			Ok(md) => {
+				let m = format!(": mode={}\n", md.mode());
+				let m = [
+					b"cached pkg '",
+					&p[..],
+					b"' is not a regular file",
+					m.as_bytes(),
+				];
+				cb.log(LogLevel::Warning, &m.concat());
+			}
+			Err(e) if e.raw_os_error() != Some(2) => {
+				let m = [
+					b"could not open '",
+					&p[..],
+					b"'\n: ",
+					&strerror(&e),
+				];
+				cb.log(LogLevel::Warning, &m.concat());
+			}
+			Err(_) => {}
+		}
+	}
+	None
+}
+
+// _alpm_filecache_exists
+pub fn filecache_exists(
+	cachedirs: &[Vec<u8>],
+	filename: &[u8],
+	cb: &mut dyn Callbacks,
+) -> bool {
+	filecache_find(cachedirs, filename, cb).is_some()
+}
+
+// _alpm_filecache_setup: the first cachedir that exists (or can be made)
+// and is a writable directory with a write bit. without one, "/tmp/" is
+// added to the cachedirs and used. the C takes TMPDIR instead only when
+// stat(TMPDIR) fails and the last cachedir it stat'ed was a directory
+pub fn filecache_setup(
+	cachedirs: &mut Vec<Vec<u8>>,
+	cb: &mut dyn Callbacks,
+) -> Vec<u8> {
+	let mut last_dir = None;
+	for dir in cachedirs.iter() {
+		let md = match fs::metadata(c_path(dir)) {
+			Err(_) => {
+				let m = [
+					b"no ",
+					&dir[..],
+					b" cache exists, creating...\n",
+				];
+				cb.log(LogLevel::Warning, &m.concat());
+				if makepath(dir).is_ok() {
+					return dir.clone();
+				}
+				continue;
+			}
+			Ok(md) => md,
+		};
+		last_dir = Some(md.is_dir());
+		let writable = rustix::fs::accessat(
+			rustix::fs::CWD,
+			c_path(dir),
+			rustix::fs::Access::WRITE_OK,
+			rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+		)
+		.is_ok();
+		if md.is_dir() && writable && md.mode() & 0o222 != 0 {
+			return dir.clone();
+		}
+	}
+	let tmpdir = std::env::var_os("TMPDIR").map(|t| t.as_bytes().to_vec());
+	let tmpdir = match tmpdir {
+		Some(t) if fs::metadata(c_path(&t)).is_err()
+			&& last_dir == Some(true) =>
+		{
+			t
+		}
+		_ => b"/tmp".to_vec(),
+	};
+	// alpm_option_add_cachedir's canonicalize_path
+	let mut dir = tmpdir;
+	if dir.last() != Some(&b'/') {
+		dir.push(b'/');
+	}
+	cachedirs.push(dir.clone());
+	let m = [
+		b"couldn't find or create package cache, using ",
+		&dir[..],
+		b" instead\n",
+	];
+	cb.log(LogLevel::Warning, &m.concat());
+	dir
 }

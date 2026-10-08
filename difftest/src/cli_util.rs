@@ -53,6 +53,7 @@ unsafe extern "C" {
 	fn mbstowcs(dst: *mut u32, src: *const c_char, n: usize) -> usize;
 
 	fn indentprint(s: *const c_char, indent: u16, cols: u16);
+	fn getcols() -> u16;
 	fn strreplace(
 		s: *const c_char,
 		needle: *const c_char,
@@ -457,4 +458,31 @@ pub fn c_console_cursor_move_down(lines: u32) -> Vec<u8> {
 pub fn c_console_erase_line() -> Vec<u8> {
 	// SAFETY: prints only
 	capture(&ColStr::default(), || unsafe { console_erase_line() })
+}
+
+// getcols with COLUMNS set to columns (None: unset), its cache reset,
+// next to what f (the Rust side) returns under the same environment.
+// COLUMNS is process wide: FRONTEND holds it for the call
+pub fn getcols_both(
+	columns: Option<&[u8]>,
+	f: impl FnOnce() -> u16,
+) -> (u16, u16) {
+	use std::ffi::OsStr;
+	use std::os::unix::ffi::OsStrExt;
+	let _guard = FRONTEND.lock().unwrap_or_else(|e| e.into_inner());
+	// SAFETY: FRONTEND serializes the env writers and readers of this
+	// crate's frontend calls; getcols reads COLUMNS once, the cache is
+	// reset first so it does
+	unsafe {
+		match columns {
+			Some(v) => std::env::set_var(
+				"COLUMNS",
+				OsStr::from_bytes(v),
+			),
+			None => std::env::remove_var("COLUMNS"),
+		}
+		crate::pkg_show::columns_cache_reset();
+		let c = getcols();
+		(c, f())
+	}
 }

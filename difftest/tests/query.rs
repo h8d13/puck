@@ -21,11 +21,11 @@ use difftest::{
 	CQuery, Comp, QueryWorld, Rng, TempRoot, iters, section, tar_dir,
 	tar_file, ustar, write_db,
 };
-use pacman_cli::check::Output;
 use pacman_cli::conf::{ColStr, Config, ConfigRepo};
 use pacman_cli::deptest::pacman_deptest;
 use pacman_cli::pacman::{PKG_LOCALITY_FOREIGN, PKG_LOCALITY_NATIVE};
 use pacman_cli::query::{QueryEnv, pacman_query};
+use pacman_cli::util::Output;
 
 // one world per case (files, two handles), many runs on it
 fn worlds() -> usize {

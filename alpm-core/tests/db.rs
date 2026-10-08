@@ -8,7 +8,14 @@ use alpm_core::be_local::{INFRQ_DESC, INFRQ_ERROR, INFRQ_FILES};
 use alpm_core::db::{CacheError, DB_USAGE_ALL, DB_USAGE_SEARCH, Db, db_cmp};
 use alpm_core::error::Errno;
 use alpm_core::package::{Package, PkgFrom};
+use alpm_core::signing::Keyring;
 use alpm_core::util::hash_sdbm;
+
+// a sync db as the handle registers it, without a keyring or callbacks
+fn register_sync(dbpath: &[u8], dbext: &[u8], name: &[u8], level: i32) -> Db {
+	let mut kr = Keyring::new(b"");
+	Db::register_sync(dbpath, dbext, name, level, 0, &mut kr, &mut ())
+}
 
 // handle->dbext, what loading a sync cache reads
 const DBEXT: &[u8] = b".db";
@@ -81,7 +88,7 @@ fn pkg(name: &str, version: &str) -> Package {
 #[test]
 fn servers() {
 	let t = Tmp::new("servers");
-	let mut db = Db::register_sync(&t.dbpath(), b".db", b"core", 0);
+	let mut db = register_sync(&t.dbpath(), b".db", b"core", 0);
 	assert_eq!(db.add_server(b""), Err(Errno::WrongArgs));
 	for url in [&b"a//"[..], b"/", b"http://m/x/", b"b\0junk"] {
 		db.add_server(url).unwrap();
@@ -104,8 +111,8 @@ fn servers() {
 #[test]
 fn usage_siglevel_cmp() {
 	let t = Tmp::new("usage");
-	let mut a = Db::register_sync(&t.dbpath(), b".db", b"a", 7);
-	let b = Db::register_sync(&t.dbpath(), b".db", b"b", 0);
+	let mut a = register_sync(&t.dbpath(), b".db", b"a", 7);
+	let b = register_sync(&t.dbpath(), b".db", b"b", 0);
 	assert_eq!(a.usage(), DB_USAGE_ALL);
 	a.set_usage(-3);
 	assert_eq!(a.usage(), -3);
@@ -117,7 +124,7 @@ fn usage_siglevel_cmp() {
 #[test]
 fn missing_sync_db() {
 	let t = Tmp::new("missing");
-	let mut db = Db::register_sync(&t.dbpath(), b".db", b"core", 0);
+	let mut db = register_sync(&t.dbpath(), b".db", b"core", 0);
 	assert_eq!(db.path(), [&t.dbpath()[..], b"sync/core.db"].concat());
 	assert_eq!(db.valid(), Ok(()));
 	assert_eq!(db.pkgcache(DBEXT).err(), Some(Errno::DbNotFound));
@@ -133,7 +140,7 @@ fn missing_sync_db() {
 fn bad_sync_db_turns_invalid() {
 	let t = Tmp::new("invalid");
 	fs::create_dir(t.0.join("sync/core.db")).unwrap();
-	let mut db = Db::register_sync(&t.dbpath(), b".db", b"core", 0);
+	let mut db = register_sync(&t.dbpath(), b".db", b"core", 0);
 	assert!(db.pkgcache(DBEXT).is_err());
 	assert_eq!(db.valid(), Err(Errno::DbInvalidSig));
 	assert_eq!(db.pkgcache(DBEXT).err(), Some(Errno::DbInvalid));
@@ -279,7 +286,7 @@ fn load_pkg_in_place() {
 fn sync_load_reads_current_dbext() {
 	let t = Tmp::new("dbext");
 	fs::write(t.0.join("sync/core.db"), vec![0u8; 3015 * 40]).unwrap();
-	let mut db = Db::register_sync(&t.dbpath(), b".db", b"core", 0);
+	let mut db = register_sync(&t.dbpath(), b".db", b"core", 0);
 	assert_eq!(db.pkgcache(b".files").unwrap().buckets(), 19);
 	db.free_pkgcache();
 	assert_eq!(db.pkgcache(b".db").unwrap().buckets(), 73);
@@ -338,7 +345,7 @@ fn search() {
 #[test]
 fn search_failed_cache() {
 	let t = Tmp::new("search-missing");
-	let mut db = Db::register_sync(&t.dbpath(), DBEXT, b"core", 0);
+	let mut db = register_sync(&t.dbpath(), DBEXT, b"core", 0);
 	assert_eq!(found(db.search(DBEXT, &["a"])), Ok(vec![]));
 	assert_eq!(found(db.search(DBEXT, &["["])), Err(Errno::InvalidRegex));
 }
@@ -358,6 +365,6 @@ fn load_all_and_at() {
 	assert!(db.load_pkg_at(DBEXT, 2, INFRQ_DESC).is_none());
 	let cache = db.load_all(DBEXT, INFRQ_DESC).unwrap();
 	assert!(cache.iter().all(|p| p.desc.as_deref() == Some(&b"d"[..])));
-	let sync = Db::register_sync(&t.dbpath(), DBEXT, b"core", 0);
+	let sync = register_sync(&t.dbpath(), DBEXT, b"core", 0);
 	assert!(sync.local().is_none());
 }

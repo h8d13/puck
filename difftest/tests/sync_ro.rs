@@ -8,9 +8,9 @@ use difftest::{
 	CRun, GROUPS, NAMES, REPOS, Rng, SyncWorld, c_pacman_sync, iters,
 	sync_read_only,
 };
-use pacman_cli::check::Output;
 use pacman_cli::conf::{ColStr, Config, LOG_ERROR, LOG_WARNING};
 use pacman_cli::sync::{Unported, pacman_sync};
+use pacman_cli::util::Output;
 
 // a fixture and four handles per case: far slower than string fuzz
 fn cases() -> usize {

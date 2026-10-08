@@ -12,8 +12,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use alpm_core::be_local::INFRQ_FILES;
+use alpm_core::callbacks::{Callbacks, LogLevel, Progress};
 use alpm_core::diskspace::{
-	Events, FsInfo, LogLevel, Mounts, SpaceError, System, check_diskspace,
+	FsInfo, Mounts, SpaceError, System, check_diskspace,
 	check_downloadspace, match_mount_point, mount_point_list, parse_mntent,
 };
 use alpm_core::filelist::{File, FileList};
@@ -21,8 +22,8 @@ use alpm_core::handle::Handle;
 use alpm_core::package::Package;
 use alpm_core::util::hash_sdbm;
 use difftest::{
-	CSpace, CSpaceResult, CbEvent, LocalEntry, PROGRESS_DISKSPACE, Rng,
-	TempRoot, c_getmntent, iters, section,
+	CSpace, CSpaceResult, CbEvent, LocalEntry, Rng, TempRoot, c_getmntent,
+	iters, section,
 };
 
 const NAMES: [&str; 5] = ["a", "b", "foo", "lib-x", "z9"];
@@ -58,15 +59,22 @@ const SYSTEM_PATHS: [&str; 14] = [
 #[derive(Default)]
 struct Rec(Vec<CbEvent>);
 
-impl Events for Rec {
+impl Callbacks for Rec {
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {
 		self.0.push(CbEvent::Log(level as c_int, msg.to_vec()));
 	}
 
-	fn progress(&mut self, percent: c_int, howmany: usize, current: usize) {
+	fn progress(
+		&mut self,
+		progress: Progress,
+		pkg: &[u8],
+		percent: c_int,
+		howmany: usize,
+		current: usize,
+	) {
 		self.0.push(CbEvent::Progress(
-			PROGRESS_DISKSPACE,
-			Vec::new(),
+			progress as c_int,
+			pkg.to_vec(),
 			percent,
 			howmany,
 			current,

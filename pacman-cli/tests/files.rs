@@ -6,10 +6,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use alpm_core::handle::Handle;
-use pacman_cli::check::Output;
 use pacman_cli::conf::Config;
 use pacman_cli::files::*;
 use pacman_cli::sync::Unported;
+use pacman_cli::util::Output;
 
 // <tmp>/pacman-cli-files-<pid>-<name>/ with root/ and an empty
 // db/sync/core.files, removed on drop

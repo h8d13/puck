@@ -6,25 +6,23 @@
 // the package cache take handle->dbext as it is at call time, for the sync
 // populate size estimate. pm_errno is not modelled: every call returns
 // the alpm_errno_t it would leave as Err, Ok where it leaves ALPM_ERR_OK.
-// logging is not modelled. not ported: alpm_db_update, signature
-// validation of sync dbs (sync_db_validate with ALPM_SIG_DATABASE set)
+// logging is not modelled past registration. not ported: alpm_db_update
 // and db->ops (Backend picks the backend).
 
 use std::cmp::Ordering;
-use std::ffi::{OsStr, c_int};
-use std::fs;
-use std::io::ErrorKind;
+use std::ffi::c_int;
 use std::ops::ControlFlow;
-use std::os::unix::ffi::OsStrExt;
 
 use crate::be_local::{DbError, INFRQ_DESC, LocalDb};
 use crate::be_sync;
+use crate::callbacks::{Callbacks, Event, LogLevel};
 use crate::deps::{dep_from_string, depcmp_literal, depcmp_provides};
 use crate::error::Errno;
 use crate::group::Group;
 use crate::package::{Package, PkgFrom};
 use crate::pkghash::PkgHash;
 use crate::regex::{Flags, Regex};
+use crate::signing::Keyring;
 use crate::util::until_nul;
 
 // alpm_db_usage_t
@@ -93,10 +91,6 @@ pub struct Db {
 	cache_servers: Vec<Vec<u8>>,
 	siglevel: c_int,
 	usage: c_int,
-}
-
-fn os(path: &[u8]) -> &OsStr {
-	OsStr::from_bytes(path)
 }
 
 // sanitize_url: one trailing '/' dropped. callers refuse empty urls
@@ -224,25 +218,56 @@ impl Db {
 	}
 
 	// _alpm_db_register_sync without the handle: the name checks are
-	// alpm_register_syncdb's (Handle::register_syncdb). sync_db_validate
-	// only looks for the file: faccessat(AT_SYMLINK_NOFOLLOW) failing
-	// with ENOENT marks it missing, a dangling symlink exists. signature
-	// checks (ALPM_SIG_DATABASE) are not ported
+	// alpm_register_syncdb's (Handle::register_syncdb), then
+	// sync_db_validate with the handle's keyring, default siglevel and
+	// callbacks
+	#[allow(clippy::too_many_arguments)]
 	pub fn register_sync(
 		dbpath: &[u8],
 		dbext: &[u8],
 		treename: &[u8],
 		siglevel: c_int,
+		default_siglevel: c_int,
+		kr: &mut Keyring,
+		cb: &mut dyn Callbacks,
 	) -> Db {
+		let msg = [b"registering sync database '", treename, b"'\n"];
+		cb.log(LogLevel::Debug, &msg.concat());
 		let path = be_sync::db_path(dbpath, treename, dbext);
+		// _alpm_db_path computing it, the first time validate asks
+		let msg = [b"database path for tree ", treename, b" set to "];
+		cb.log(
+			LogLevel::Debug,
+			&[&msg.concat()[..], &path, b"\n"].concat(),
+		);
 		let mut db = Db::new(treename, path, Backend::Sync);
 		db.siglevel = siglevel;
-		let missing = fs::symlink_metadata(os(&db.path))
-			.is_err_and(|e| e.kind() == ErrorKind::NotFound);
-		if missing {
-			db.status = Status::Missing;
-		}
+		db.validate(default_siglevel, kr, cb);
 		db
+	}
+
+	// sync_db_validate: a missing file sends ALPM_EVENT_DATABASE_MISSING
+	// and is valid, a failed signature check makes the db invalid
+	fn validate(
+		&mut self,
+		default_siglevel: c_int,
+		kr: &mut Keyring,
+		cb: &mut dyn Callbacks,
+	) {
+		let level = self.siglevel(default_siglevel);
+		let name = &self.treename;
+		self.status = match be_sync::sync_db_validate(
+			kr, cb, &self.path, name, level,
+		) {
+			Ok(true) => Status::Valid,
+			Ok(false) => {
+				let ev =
+					Event::DatabaseMissing { dbname: name };
+				cb.event(&ev);
+				Status::Missing
+			}
+			Err(_) => Status::Invalid,
+		};
 	}
 
 	// alpm_db_get_name
@@ -387,6 +412,11 @@ impl Db {
 			self.pkgcache = Some(self.populate(dbext)?);
 		}
 		Ok(())
+	}
+
+	// the package cache as loaded so far, None before the first load
+	pub fn loaded_pkgcache(&self) -> Option<&PkgHash<Package>> {
+		self.pkgcache.as_ref()
 	}
 
 	// alpm_db_get_pkgcache: list order is by name, the table as the
