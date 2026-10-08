@@ -182,6 +182,40 @@ edit() {
 	done
 }
 
+# make_pkg VERSION CONF_LINE: twin-backup, a local package with a backup
+# file (makepkg's .PKGINFO and .MTREE layout, fixed dates). no cached
+# repo package changes a backup file between builds, so .pacnew comes
+# from two of these
+make_pkg() {
+	local v=$1 line=$2 d=$W/pkgs/build-$1
+	local mtree=!all,use-set,type,uid,gid,mode,time,size,md5,sha256,link
+	mkdir -p "$d/etc" "$d/usr/share/twin-backup"
+	printf '%s\n' "$line" > "$d/etc/twin-backup.conf"
+	echo "twin-root test package" > "$d/usr/share/twin-backup/README"
+	cat > "$d/.PKGINFO" <<EOF
+pkgname = twin-backup
+pkgbase = twin-backup
+pkgver = $v
+pkgdesc = twin-root backup file test package
+url = https://archlinux.org
+builddate = 1700000000
+packager = twin-root
+size = 64
+arch = any
+license = GPL-2.0-or-later
+backup = etc/twin-backup.conf
+EOF
+	find "$d" -exec touch -h -d @1700000000 {} +
+	(
+		cd "$d" || exit 1
+		LANG=C bsdtar -cf - --format=mtree --options="$mtree" \
+			.PKGINFO etc usr | gzip -c -f -n > .MTREE
+		touch -d @1700000000 .MTREE
+		bsdtar -cf - .MTREE .PKGINFO etc usr |
+			zstd -q -o "$W/pkgs/twin-backup-$v-any.pkg.tar.zst"
+	)
+}
+
 # newest build of $1 in the host cache older than the installed one;
 # prints its file name
 older_cached() {
@@ -207,7 +241,7 @@ older_cached() {
 }
 
 clean
-mkdir -p "$W"/{c,r}/{cache,dlcache} "$W"/{home,prefetch} "$STEPS"
+mkdir -p "$W"/{c,r}/{cache,dlcache} "$W"/{home,prefetch,pkgs} "$STEPS"
 mount -t tmpfs -o mode=0755 twin "$MNT" || exit 1
 mkdir "$CUR" "$MNT"/{hostcache,prefetch}
 mkroot "$W/c/root"
@@ -285,6 +319,8 @@ window c setup-prefetch with_side c setup_pac \
 	--cachedir "$MNT/prefetch" --cachedir "$MNT/hostcache" \
 	-Sw --noconfirm "${base1[@]}" "${base2[@]}" "${base3[@]}" || exit 1
 mount -o remount,bind,ro "$MNT/prefetch" || exit 1
+make_pkg 1-1 'value=1' || exit 1
+make_pkg 2-1 'value=2' || exit 1
 # the Rust side starts as a copy: same skeleton, dbs and mtimes, and
 # whatever the C runs above created in the root (local db version file)
 cp -a "$W/c/root" "$W/r/root"
@@ -304,8 +340,15 @@ step base-extra $nul -S --noconfirm "${base3[@]}"
 step qi $nul -Qi pacman iputils
 step qii-backup $nul -Qii nano
 step si $nul -Si iputils
+# reinstall over an edited backup file: kept, no .pacnew (the package's
+# file did not change)
 edit etc/pacman.conf '# twin-root edit'
-step pacnew $nul -S --noconfirm pacman
+step reinstall-backup $nul -S --noconfirm pacman
+step local-install $nul -U --noconfirm "$W/pkgs/twin-backup-1-1-any.pkg.tar.zst"
+edit etc/twin-backup.conf 'edited=1'
+step pacnew $nul -U --noconfirm "$W/pkgs/twin-backup-2-1-any.pkg.tar.zst"
+step qii-pacnew $nul -Qii twin-backup
+step pacsave $nul -R --noconfirm twin-backup
 old=
 for p in less gzip which bash; do
 	old=$(older_cached "$p") && break
@@ -315,8 +358,9 @@ if [ -n "$old" ]; then
 else
 	echo "== no older build of less/gzip/which/bash cached: no -U step"
 fi
+# --nosave: the edited backup file goes, no .pacsave
 edit etc/logrotate.conf '# twin-root edit'
-step pacsave $nul -Rns --noconfirm logrotate
+step rns-nosave $nul -Rns --noconfirm logrotate
 step qkk $nul -Qkk
 step dk $nul -Dk
 step sc "$sc_answers" -Sc --cachedir "$CUR/dlcache"
