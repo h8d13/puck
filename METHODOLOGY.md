@@ -115,6 +115,18 @@ binary. A milestone counts as reached only when its gate passes (CLI
 parity against C pacman, then pactest). Units are picked in milestone
 order.
 
+Real-system equivalence, rootless (`scripts/twin-root.sh`, todo): C
+pacman and the Rust binary run the same real operations on twin roots
+inside one `unshare --map-auto --map-root-user --mount` session. uid 0
+inside, the subuid range mapped (chown to any packaged owner, DownloadUser
+`alpm`), `security.capability` and `user.*` xattrs settable, chroot and
+mounts allowed, host network shared. Inputs are made identical (sync dbs
+fetched once and copied, the host package cache as a read-only extra
+CacheDir); downloads are compared in their own phase. After every step:
+rc, stdout, stderr, the whole tree (type, mode, owner, size, sha256, link,
+mtime, xattrs), the local db (install dates masked), pacman.log (stamps
+normalised). No real root and nothing outside `.tmp/` is touched.
+
 ## Unit workflow
 
 - `scripts/unit-worktree.sh <name>` (clean tree, so commit first) makes

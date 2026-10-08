@@ -134,6 +134,15 @@ redirects without connection reuse), vercmptest and the script tests
 included. **Gate met** on master f46c525: `scripts/upstream-suite.sh
 target/release` exits 0.
 
+### 3b. Real-system equivalence (rootless)
+
+Twin roots, C vs Rust, real packages and mirrors in a user namespace
+(METHODOLOGY.md "Integration gates"). Covers what pactest and fakeroot
+do not: real package sets with hooks, scriptlets, capabilities and backup
+files, real HTTPS mirrors, a real keyring, landlock and DownloadUser.
+
+Gate: every step equal on `scripts/twin-root.sh`. State: todo.
+
 ### 4. Drop-in
 
 libalpm C ABI (`alpm.h`) exported from the Rust library so existing
