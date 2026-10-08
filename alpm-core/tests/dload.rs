@@ -489,20 +489,9 @@ fn sandbox_hooks() {
 	assert!(cache.p("b.pkg.part").exists());
 	assert_eq!(sb.raised, [15]);
 	assert!(!tmp_path.exists(), "temporary dir removed");
-	// moving into place needs chown to root
-	if fs::metadata(&t.0).unwrap().uid() == 0 {
-		assert_eq!(r, Ok(true));
-		assert_eq!(fs::read(cache.p("a.pkg")).unwrap(), b"package");
-	} else {
-		assert_eq!(r, Err(Errno::Retrieve));
-		let moved: Vec<_> = rec
-			.logs
-			.iter()
-			.filter(|(_, m)| m.starts_with("could not move "))
-			.collect();
-		assert_eq!(moved.len(), 2, "{:?}", rec.logs);
-		assert!(moved[0].1.ends_with("(Operation not permitted)\n"));
-	}
+	// moved into place, chowned to root only when running as root
+	assert_eq!(r, Ok(true), "{:?}", rec.logs);
+	assert_eq!(fs::read(cache.p("a.pkg")).unwrap(), b"package");
 }
 
 #[test]
