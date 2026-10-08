@@ -208,8 +208,11 @@ impl Callbacks for RecordingCallbacks {
 		*import = c_int::from(self.answer);
 	}
 
+	// errors and warnings, like logcb on the C side
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {
-		self.events.logs.push((level as i32, msg.to_vec()));
+		if matches!(level, LogLevel::Error | LogLevel::Warning) {
+			self.events.logs.push((level as i32, msg.to_vec()));
+		}
 	}
 }
 

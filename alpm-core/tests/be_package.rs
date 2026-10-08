@@ -123,7 +123,7 @@ fn file_list() {
 			(b"usr/bin/a", b'2', b""),
 		],
 	);
-	let p = pkg_load_internal(pkg.path(), true).unwrap();
+	let p = pkg_load_internal(&mut (), pkg.path(), true).unwrap();
 	assert_eq!(names(&p), [&b"usr/"[..], b"usr/bin/a", b"usr/bin/b"]);
 	assert_eq!(p.files.files[2].size, 2);
 	assert_eq!(p.files.files[0].mode, 0o40644);
@@ -133,7 +133,7 @@ fn file_list() {
 #[test]
 fn errors() {
 	assert!(matches!(
-		pkg_load_internal(b"", true),
+		pkg_load_internal(&mut (), b"", true),
 		Err(Error::WrongArgs)
 	));
 	let e = pkg_load(b"/nonexistent/x.pkg.tar", true).unwrap_err();

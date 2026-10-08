@@ -1,9 +1,8 @@
-// port of src/pacman/upgrade.c: pacman_upgrade up to the commit
+// port of src/pacman/upgrade.c: pacman_upgrade
 //
 // URL targets go through alpm_fetch_pkgurl, every file is loaded with
 // the local (fetched: remote) file siglevel and added, then the sync
-// code prepares (sync_prepare_execute, Prepared::Commit where the C
-// commits).
+// code prepares and commits (sync_prepare_execute).
 
 use std::ffi::c_int;
 use std::io::BufRead;
@@ -14,7 +13,7 @@ use alpm_core::handle::Handle;
 use alpm_core::util::until_nul;
 
 use crate::sync::{error, sync_prepare_execute};
-use crate::util::{Prepared, Ui, trans_init, trans_release};
+use crate::util::{Ui, trans_init, trans_release};
 
 fn failed<R>(ui: &mut Ui<R>, targ: &[u8], e: &[u8]) {
 	error(ui.out, ui.config, &[b"'", targ, b"': ", e, b"\n"]);
@@ -68,12 +67,12 @@ pub fn pacman_upgrade<R: BufRead, S: AsRef<[u8]>>(
 	ui: &mut Ui<R>,
 	h: &mut Handle,
 	targets: &[S],
-) -> Prepared {
+) -> i32 {
 	let config = ui.config;
 	if targets.is_empty() {
 		let msg: &[u8] = b"no targets specified (use -h for help)\n";
 		error(ui.out, config, &[msg]);
-		return Prepared::Done(1);
+		return 1;
 	}
 	let is_url = |t: &&[u8]| t.windows(3).any(|w| w == b"://");
 	let targets: Vec<&[u8]> =
@@ -84,11 +83,11 @@ pub fn pacman_upgrade<R: BufRead, S: AsRef<[u8]>>(
 	if !remote.is_empty() {
 		match h.fetch_pkgurl(&remote) {
 			Ok(files) => fetched = files,
-			Err(_) => return Prepared::Done(-1),
+			Err(_) => return -1,
 		}
 	}
 	if !trans_init(ui.out, config, h, config.flags, true) {
-		return Prepared::Done(1);
+		return 1;
 	}
 	if config.print == 0 {
 		ui.out.stdout.extend_from_slice(b"loading packages...\n");
@@ -97,7 +96,7 @@ pub fn pacman_upgrade<R: BufRead, S: AsRef<[u8]>>(
 	retval |= load_packages(ui, h, &fetched, h.remote_file_siglevel());
 	if retval != 0 {
 		trans_release(ui.out, config, h);
-		return Prepared::Done(retval);
+		return retval;
 	}
 	sync_prepare_execute(ui, h)
 }

@@ -1411,7 +1411,8 @@ fn load_all(
 		};
 		let msg = b"replacing pkgcache entry with package file for target ";
 		log(cb, Debug, &[msg, name(&t.pkg), b"\n"]);
-		let file = match be_package::pkg_load_internal(&path, true) {
+		let file = match be_package::pkg_load_internal(cb, &path, true)
+		{
 			Ok(file) => Some(file)
 				.filter(|f| !pkg_differs(cb, &t.pkg, f)),
 			Err(e) => {
