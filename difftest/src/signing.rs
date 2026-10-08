@@ -6,7 +6,7 @@
 // handle's gpgdir. CSigHandle sets it again before every call (same
 // gpg, its gpgdir), the ALPM lock keeps that global to one handle.
 use std::cell::RefCell;
-use std::ffi::{CString, c_char, c_int, c_uint, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::fs;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
@@ -120,12 +120,22 @@ unsafe extern "C" {
 		uid: *const c_char,
 		fpr: *const c_char,
 	) -> c_int;
+	fn gpgme_strerror(err: c_uint) -> *const c_char;
 	pub(crate) fn gpgme_check_version(req: *const c_char) -> *const c_char;
 	pub(crate) fn gpgme_set_engine_info(
 		proto: c_int,
 		file_name: *const c_char,
 		home_dir: *const c_char,
 	) -> c_uint;
+}
+
+// gpgme_strerror of an error value (source 0: the code alone)
+pub fn c_gpgme_strerror(code: u32) -> Vec<u8> {
+	// SAFETY: gpgme_strerror takes any value and returns a static
+	// nul-terminated text (a thread-local buffer for system errors)
+	unsafe { CStr::from_ptr(gpgme_strerror(code)) }
+		.to_bytes()
+		.to_vec()
 }
 
 pub struct CDecoded {
@@ -179,11 +189,26 @@ pub fn encode_base64(raw: &[u8]) -> Vec<u8> {
 }
 
 // what a call left on the callbacks: import questions (uid,
-// fingerprint) and error/warning log lines (level, text)
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+// fingerprint) and log lines (level, text) but FUNCTION ones
+#[derive(Default, Clone, PartialEq, Eq)]
 pub struct SigEvents {
 	pub questions: Vec<(Option<Vec<u8>>, Vec<u8>)>,
 	pub logs: Vec<(i32, Vec<u8>)>,
+}
+
+// texts readable in a failed assert, a line per log
+impl std::fmt::Debug for SigEvents {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+		for (uid, fpr) in &self.questions {
+			let uid = uid.as_deref().map(text);
+			writeln!(f, "question {uid:?} {}", text(fpr))?;
+		}
+		for (level, msg) in &self.logs {
+			write!(f, "\n  log {level} {:?}", text(msg))?;
+		}
+		Ok(())
+	}
 }
 
 // the Rust side's callbacks: records like the C ones, same answer
@@ -208,9 +233,9 @@ impl Callbacks for RecordingCallbacks {
 		*import = c_int::from(self.answer);
 	}
 
-	// errors and warnings, like logcb on the C side
+	// like logcb on the C side
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {
-		if matches!(level, LogLevel::Error | LogLevel::Warning) {
+		if level != LogLevel::Function {
 			self.events.logs.push((level as i32, msg.to_vec()));
 		}
 	}
@@ -238,14 +263,19 @@ extern "C" fn questioncb(ctx: *mut c_void, q: *mut c_void) {
 	}
 }
 
+// RET_ERR's and GOTO_ERR's lines, the C's source position: not logged
+// by the port
+pub(crate) fn c_only(msg: &[u8]) -> bool {
+	msg.starts_with(b"returning error ") || msg.starts_with(b"got error ")
+}
+
 extern "C" fn logcb(
 	ctx: *mut c_void,
 	level: c_int,
 	fmt: *const c_char,
 	ap: *mut c_void,
 ) {
-	let wanted = LogLevel::Error as c_int | LogLevel::Warning as c_int;
-	if level & wanted == 0 {
+	if level & LogLevel::Function as c_int != 0 {
 		return;
 	}
 	let mut buf = [0u8; 4096];
@@ -255,7 +285,9 @@ extern "C" fn logcb(
 		vsnprintf(buf.as_mut_ptr().cast(), buf.len(), fmt, ap);
 		let rec = &*ctx.cast::<RefCell<Recorder>>();
 		let msg = field(buf.as_ptr().cast()).unwrap();
-		rec.borrow_mut().events.logs.push((level, msg));
+		if !c_only(&msg) {
+			rec.borrow_mut().events.logs.push((level, msg));
+		}
 	}
 }
 
