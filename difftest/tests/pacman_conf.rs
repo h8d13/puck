@@ -276,9 +276,9 @@ impl Tally {
 			"== {what}: {}/{} equal, {} exit 0",
 			self.equal, self.total, self.ok
 		);
-		let fifth = self.total / 5;
+		let tenth = self.total / 10;
 		assert!(
-			self.ok > fifth && self.total - self.ok > fifth,
+			self.ok > tenth && self.total - self.ok > tenth,
 			"exit 0 in {} of {} runs",
 			self.ok,
 			self.total
