@@ -670,7 +670,7 @@ Follow-ups raised by port units:
 | xattrs and pax mtime/uid/gid on extraction: alpm-compress `TarballEntry` needs a `raw_mut` (pax_extensions takes `&mut`) | addcommit | todo |
 | one geteuid/getuid helper (add.rs `euid`, sandbox `System::uid` read /proc/self/status) or rustix `process` | addcommit | in progress (process unit) |
 | `_alpm_upgrade_packages` loop over trans.add, interrupted state, ldconfig | addcommit | with alpm_trans_commit |
-| test generators still limited to what alpm-db/alpm-repo-db/alpm-pkginfo accepted (db_search.rs, diskspace.rs, check.rs, be_local_write.rs, sync_clean.rs, be_package.rs "per the alpm-pkginfo spec"): widen to what the C reads, drop the comments | stale sweep | todo |
+| test generators still limited to what alpm-db/alpm-repo-db/alpm-pkginfo accepted (db_search.rs, diskspace.rs, check.rs, be_local_write.rs, sync_clean.rs, be_package.rs "per the alpm-pkginfo spec"): widen to what the C reads, drop the comments | stale sweep | done: `fixtures::loose_sections` (sparse, empty, blank, unknown desc sections), files lists without parents/sorting, odd `.PKGINFO` lines, random packages read back by set_reason, odd deps_graph relations; cli_binary's empty files lists stay with the -Qkk row above |
 
 Divergences below are the remaining ones; the ALPM parser and type
 divergences left with the owned readers.

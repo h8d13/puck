@@ -492,7 +492,7 @@ declarations. No existing MR found for it.
 
 - an uppercase `%SHA256SUM%` fails package validation in C
   (`_alpm_test_checksum` strcmp, util.c:1198-1218, be_package.c:321);
-  alpm-repo-db lowercases, so the Rust path accepts the same db.
+  the port reads the sum as written and compares bytes, failing alike.
   **packager** (repo-add writes lowercase)
 - IgnorePkg/IgnoreGroup use `alpm_list_find` + `_alpm_fnmatch`, so a
   leading '!' is a literal, while NoUpgrade/NoExtract negate with it
