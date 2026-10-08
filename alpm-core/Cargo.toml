@@ -5,18 +5,25 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-alpm-compress.workspace = true
 alpm-types.workspace = true
 base64.workspace = true
+bzip2.workspace = true
+flate2.workspace = true
 landlock.workspace = true
+liblzma.workspace = true
 libseccomp.workspace = true
+lz4_flex.workspace = true
 pacman-common = { path = "../pacman-common" }
 reqwest.workspace = true
 rustix.workspace = true
 # localtime(3) offsets for log stamps (METHODOLOGY.md)
 time = { workspace = true, features = ["local-offset"] }
+twox-hash.workspace = true
+zstd.workspace = true
 
+# test fixtures: archives in every compression
 [dev-dependencies]
+alpm-compress.workspace = true
 tar.workspace = true
 
 [lints]

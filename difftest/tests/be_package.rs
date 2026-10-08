@@ -7,16 +7,10 @@
 // cached packages give counts
 use std::ffi::c_int;
 use std::fs;
-use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use alpm_compress::compression::{
-	Bzip2CompressionLevel, CompressionEncoder, CompressionSettings,
-	GzipCompressionLevel, XzCompressionLevel, ZstdCompressionLevel,
-	ZstdThreads,
-};
 use alpm_core::be_package::{
 	Error, changelog, pkg_load, pkg_load_level, pkg_validate_internal,
 };
@@ -24,8 +18,8 @@ use alpm_core::callbacks::{Callbacks, LogLevel};
 use alpm_core::package::Package;
 use alpm_core::signing::Keyring;
 use difftest::{
-	COMPS, CPkgHandle, Comp, Rng, TarNode, cut_archive_text, iters,
-	pax_record, ustar_nodes,
+	COMPS, CPkgHandle, Comp, FILTERED, Rng, TarNode, compress_bytes,
+	cut_archive_text, iters, pax_record, ustar_nodes,
 };
 
 // alpm_loglevel_t and message of each log line
@@ -422,29 +416,7 @@ fn ustar(entries: &[Entry]) -> Vec<u8> {
 
 // fast levels, the fuzz writes thousands of archives
 fn compress(path: &Path, comp: Comp, data: &[u8]) {
-	let settings = match comp {
-		Comp::None => CompressionSettings::None,
-		Comp::Gzip => CompressionSettings::Gzip {
-			compression_level: GzipCompressionLevel::new(1)
-				.unwrap(),
-		},
-		Comp::Bzip2 => CompressionSettings::Bzip2 {
-			compression_level: Bzip2CompressionLevel::new(1)
-				.unwrap(),
-		},
-		Comp::Xz => CompressionSettings::Xz {
-			compression_level: XzCompressionLevel::new(0).unwrap(),
-		},
-		Comp::Zstd => CompressionSettings::Zstd {
-			compression_level: ZstdCompressionLevel::new(1)
-				.unwrap(),
-			threads: ZstdThreads::new(1),
-		},
-	};
-	let f = fs::File::create(path).unwrap();
-	let mut enc = CompressionEncoder::new(f, &settings).unwrap();
-	enc.write_all(data).unwrap();
-	enc.finish().unwrap();
+	fs::write(path, compress_bytes(comp, data, true)).unwrap();
 }
 
 fn write_pkg(path: &Path, comp: Comp, entries: &[Entry]) {
@@ -1962,10 +1934,9 @@ fn fixed_files() {
 	.unwrap();
 	pin(&h, &path, "two gzip members", ["same", "same"]);
 
-	// gzip inside gzip: libarchive stacks filters, alpm-compress one
-	compress(&a, Comp::Gzip, &tar);
-	compress(&path, Comp::Gzip, &fs::read(&a).unwrap());
-	pin(&h, &path, "gzip in gzip", ["rust open"; 2]);
+	// gzip inside gzip: libarchive stacks filters, so does the port
+	compress(&path, Comp::GzipInGzip, &tar);
+	pin(&h, &path, "gzip in gzip", ["same"; 2]);
 }
 
 // a package over several of libarchive's 64/128 KiB filter blocks, with
@@ -2009,7 +1980,7 @@ fn compressed_cuts() {
 	let tar = ustar(&big_package());
 	let mut rng = Rng::new(0x0c07_5eed);
 	let mut errnos = std::collections::BTreeSet::new();
-	for comp in [Comp::Gzip, Comp::Bzip2, Comp::Xz, Comp::Zstd] {
+	for comp in FILTERED {
 		compress(&path, comp, &tar);
 		let data = fs::read(&path).unwrap();
 		let len = data.len();
@@ -2034,8 +2005,41 @@ fn compressed_cuts() {
 	assert!(errnos.len() >= 3, "{errnos:?}");
 }
 
-// lz4 and lzma (.tar.lz4 is a makepkg PKGEXT): libarchive reads them,
-// alpm-compress has no decoder. through the system tools when present
+// lz4 and lzma written by the system tools when present (lz4's own
+// framing, xz's lzma_alone), not libarchive's writers
+// a filter's magic then garbage or a package, the program filters with
+// their program missing: the C and the port fail the same way
+#[test]
+fn garbage_after_magic() {
+	let fx = Fixture::new();
+	let h = fx.handle();
+	let path = fx.pkg("g.pkg.tar");
+	let pkg = ustar(&[
+		file(b".PKGINFO", PKGINFO.as_bytes()),
+		file(b"a", b"x"),
+	]);
+	let mut rng = Rng::new(0x9a4b_a9e1);
+	let magics: [&[u8]; 9] = [
+		b"\x1f\x9d\x90",
+		b"\x5d\x00\x00\x80\x00\xff\xff\xff\xff\xff\xff\xff\xff",
+		b"LZIP\x01\x0c",
+		b"\x04\x22\x4d\x18\x64\x40\xa7",
+		b"\x02\x21\x4c\x18",
+		b"\x89LZO\x00\r\n\x1a\n",
+		b"LRZI\x00\x06",
+		b"GRZipII\x00\x02\x04:)",
+		b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03",
+	];
+	for m in magics {
+		let junk: Vec<u8> =
+			(0..600).map(|_| rng.next_u64() as u8).collect();
+		for rest in [&junk[..], &pkg] {
+			fs::write(&path, [m, rest].concat()).unwrap();
+			pin(&h, &path, &format!("{m:02x?}"), ["same"; 2]);
+		}
+	}
+}
+
 #[test]
 fn fixed_other_compressions() {
 	let fx = Fixture::new();
@@ -2065,8 +2069,7 @@ fn fixed_other_compressions() {
 		assert!(o.status.success(), "{tool}: {}", lossy(&o.stderr));
 		let path = fx.pkg(out);
 		fs::write(&path, o.stdout).unwrap();
-		// read as a plain tar, the first header fails
-		pin(&h, &path, tool, ["rust open"; 2]);
+		pin(&h, &path, tool, ["same"; 2]);
 	}
 }
 
@@ -2257,7 +2260,7 @@ fn mtree_cuts() {
 		);
 	}
 	let mut lists = std::collections::BTreeSet::new();
-	for comp in [Comp::Gzip, Comp::Bzip2, Comp::Xz, Comp::Zstd] {
+	for comp in FILTERED {
 		compress(&mtree_path, comp, text.as_bytes());
 		let data = fs::read(&mtree_path).unwrap();
 		let len = data.len();

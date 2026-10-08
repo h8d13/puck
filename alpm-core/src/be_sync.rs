@@ -4,9 +4,8 @@
 //
 // the tar walk and the entry reader follow the C: _alpm_archive_fgets
 // over the entry's data blocks as libarchive cuts them, the READ_*
-// macros, keys matched as C strings. libarchive is replaced by
-// alpm-compress (gzip, bzip2, xz, zstd, none) picked by magic bytes, as
-// the db file name carries no compression suffix.
+// macros, keys matched as C strings. libarchive's filters are filter.rs,
+// picked by its bidders: the db file name carries no compression suffix.
 //
 // sync_db_validate without the status bits db.c keeps: the missing file
 // and the signature check (signing.rs). alpm_db_update with get_sync_dir:
@@ -16,11 +15,10 @@
 use std::collections::HashMap;
 use std::ffi::{OsStr, c_int};
 use std::fs;
-use std::io::{self, ErrorKind};
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use alpm_compress::decompression::DecompressionSettings;
 use rustix::fs::{Access, Mode};
 use rustix::process::umask;
 
@@ -32,6 +30,7 @@ use crate::dload::{
 };
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
+use crate::filter::Code;
 use crate::handle::{Handle, SyncParts};
 use crate::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
@@ -348,15 +347,16 @@ pub fn get_validation(pkg: &Package) -> c_int {
 	if v == 0 { PKG_VALIDATION_NONE } else { v }
 }
 
-// estimate_package_count's bytes per package for the filter libarchive
-// detects. zstd has no case there and takes the default
-fn bytes_per_package(settings: &DecompressionSettings) -> u64 {
-	match settings {
-		DecompressionSettings::Gzip => 464,
-		DecompressionSettings::Bzip2 => 394,
-		DecompressionSettings::Xz => 400,
-		DecompressionSettings::Zstd => 500,
-		DecompressionSettings::None => 3015,
+// estimate_package_count's bytes per package for the top filter
+// libarchive picked (archive_filter_code(a, 0)); lzip, lz4, zstd and the
+// program filters have no case there and take the default
+fn bytes_per_package(code: Code) -> u64 {
+	match code {
+		Code::None => 3015,
+		Code::Gzip | Code::Compress => 464,
+		Code::Bzip2 => 394,
+		Code::Lzma | Code::Xz => 400,
+		_ => 500,
 	}
 }
 
@@ -365,12 +365,17 @@ fn open_archive(
 	path: &[u8],
 	dbext: &[u8],
 ) -> Result<(tar::Reader, u64), Error> {
-	let archive = util::open_archive(path).map_err(|e| match e.kind() {
-		ErrorKind::NotFound => Error::NotFound,
-		_ => Error::Open(e),
+	// open(2)'s ENOENT only: a filter's program that cannot run fails
+	// with that kind too (filter/program.rs), the C's db open fails then
+	let enoent = Some(rustix::io::Errno::NOENT.raw_os_error());
+	let archive = util::open_archive(path).map_err(|e| {
+		match e.raw_os_error() == enoent {
+			true => Error::NotFound,
+			false => Error::Open(e),
+		}
 	})?;
 	let size = archive.meta.len();
-	let mut est = size / bytes_per_package(&archive.settings) + 1;
+	let mut est = size / bytes_per_package(archive.code) + 1;
 	// files dbs are about four times larger on average
 	if dbext == b".files" {
 		est /= 4;

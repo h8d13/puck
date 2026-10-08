@@ -1122,11 +1122,50 @@ what pacman reads (bsdtar's `.MTREE`, copied as the local `mtree`).
   matches (`device=freebsd,1,-65281`), the `(int32_t)` read-back sign
   extends. **none**
 
+libarchive 3.8.9's read filters (`alpm-core::filter`), met while
+translating them; practice judged by what pacman reads.
+
+- a program filter whose program cannot run (`.pkg.tar.lzo`/`.lrz`
+  without lzop/lrzip): __archive_create_child uses vfork + execvp
+  (posix_spawnp is compiled out on Linux), the child shares pacman's
+  memory, so execvp's errno (ENOENT) is still set when
+  `_alpm_pkg_load_internal` checks errno after the failed open: the
+  package is reported PKG_NOT_FOUND ("could not find or read package"),
+  BADPERMS for EACCES, though the file is there and the text says "Child
+  process exited with status 254". **real (rare)** (makepkg's
+  PKGEXT=.pkg.tar.lzo/.lrz, program not installed). The port keeps the
+  errno kind on that failure.
+- compress: compress_filter_init ignores next_code's result, so an
+  invalid first code is skipped and decoding goes on with the second.
+  **packager**
+- lz4: lz4_filter_read returns the first block of a frame straight from
+  the magic's branch: a frame whose first block is the end mark (an
+  empty frame) ends the stream, frames after it are ignored; a block
+  that decodes to 0 bytes ends it too (0 is EOF to the read-ahead); a
+  stored block of size 0 (0x80000000) goes to LZ4_decompress_safe with
+  no input and fails; between legacy blocks a failed upstream read is
+  the clean end. linked blocks after one shorter than 64 KiB get that
+  block, zero-filled, as dictionary, not the stream's last 64 KiB (lz4
+  writers make only a frame's last block short). **packager**
+- gzip: consume_trailer does not check the trailer's CRC and size ("XXX
+  TODO"): a corrupt member decodes without error when the deflate data
+  holds. **packager**
+- gzip, bzip2 and zstd ask upstream for data before every pass of the
+  decoder and fail once it has none left inside a stream, even with
+  decoded output pending: a bzip2 stream cut right at a block's end
+  loses the whole decoded block (up to 900 KiB). **none** (any cut
+  fails, only where differs)
+- archive_write_add_filter_lz4 crashes (SIGSEGV) in archive_write_close
+  when no data was written (raw format, empty entry); the compress
+  writer writes one code for no data, which reads back as one nul byte.
+  **none** (pacman does not write archives; met generating fixtures)
+
 # ALPM findings
 
-Applied in `vendor/patches/` today: gzip members 0551, content sniffing
-0552, decoder over any reader 0553. Kept as reports in
-`vendor/upstream-reports/`, no longer applied: version ordering
+Nothing is applied in `vendor/patches/` today. Kept as reports in
+`vendor/upstream-reports/`, no longer applied: gzip members 0551,
+content sniffing 0552, decoder over any reader 0553 (the port reads
+through libarchive's filters translated, `alpm-core::filter`), version ordering
 0101/0102, `Unknown Packager` 0105, relation backtracking 0106, empty
 xdata value 0107, alpm-mtree `PathType` `PartialEq` 0401, gzip members
 in its helper 0403, `Error::Parse` display 0411 (alpm-mtree is no longer
@@ -1224,6 +1263,13 @@ pacman's formats. Same practice labels, judged against real databases.
   from a `File`): a tarball cannot be read through another `Read` layer
   or from memory, so the port reads tar itself (`alpm-core::tar`).
   **api**
+- alpm-compress's decoders miss libarchive's framing (found with the
+  filters unit, which reads through libarchive's readers translated
+  instead): `MultiGzDecoder` fails on data after the last member where
+  libarchive and gzip(1) ignore it; liblzma's `XzDecoder::new` reads one
+  stream (`new_stream_decoder(_, 0)`), libarchive concatenated ones;
+  flate2's default miniz_oxide backend accepts corrupt deflate data
+  zlib refuses (zlib-rs matches). **packager**
 - alpm-compress bzip2 uses `BzDecoder::new`, single stream (bzip2 0.6.1
   `multi: false`); libarchive reads concatenated streams (pbzip2
   output). From source, not exercised. **packager** (makepkg's

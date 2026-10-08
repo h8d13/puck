@@ -1,8 +1,9 @@
 // fixture trees shared by the db difftests: a temp root with root/ and
 // db/{local,sync}/, local db entries (desc, files, install) and sync db
-// archives (ustar, every compression alpm-compress writes), and the
-// read-only sync worlds (SyncWorld). no C here, what goes into the
-// files is up to each test's generators.
+// archives (ustar, every compression pacman reads; libarchive's writers
+// for those alpm-compress has no encoder for), and the read-only sync
+// worlds (SyncWorld). what goes into the files is up to each test's
+// generators.
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
@@ -17,8 +18,8 @@ use alpm_compress::compression::{
 	ZstdThreads,
 };
 
-use crate::Rng;
 use crate::signing::random_sig;
+use crate::{Rng, c_filter_write};
 
 // the C binary of PACMAN_BUILD
 pub fn c_pacman() -> PathBuf {
@@ -395,40 +396,109 @@ pub fn force_remove(path: &Path) {
 	fs::remove_dir(path).unwrap();
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Comp {
 	None,
 	Gzip,
 	Bzip2,
 	Xz,
 	Zstd,
+	// makepkg's other PKGEXTs libarchive reads itself (.Z, .lzma, .lz,
+	// .lz4), and a stack of two filters
+	Compress,
+	Lzma,
+	Lzip,
+	Lz4,
+	GzipInGzip,
 }
 
-pub const COMPS: [Comp; 5] =
-	[Comp::None, Comp::Gzip, Comp::Bzip2, Comp::Xz, Comp::Zstd];
+pub const COMPS: [Comp; 10] = [
+	Comp::None,
+	Comp::Gzip,
+	Comp::Bzip2,
+	Comp::Xz,
+	Comp::Zstd,
+	Comp::Compress,
+	Comp::Lzma,
+	Comp::Lzip,
+	Comp::Lz4,
+	Comp::GzipInGzip,
+];
+
+// every compressed one
+pub const FILTERED: [Comp; 9] = [
+	Comp::Gzip,
+	Comp::Bzip2,
+	Comp::Xz,
+	Comp::Zstd,
+	Comp::Compress,
+	Comp::Lzma,
+	Comp::Lzip,
+	Comp::Lz4,
+	Comp::GzipInGzip,
+];
+
+// data compressed with comp: alpm-compress's encoders (fast: their
+// lowest levels), libarchive's write filters for the rest (filter.rs)
+pub fn compress_bytes(comp: Comp, data: &[u8], fast: bool) -> Vec<u8> {
+	let level = |low: u8, default: u8| if fast { low } else { default };
+	let settings = match comp {
+		Comp::None => return data.to_vec(),
+		Comp::Gzip => CompressionSettings::Gzip {
+			compression_level: GzipCompressionLevel::new(level(
+				1, 6,
+			))
+			.unwrap(),
+		},
+		Comp::Bzip2 => CompressionSettings::Bzip2 {
+			compression_level: Bzip2CompressionLevel::new(level(
+				1, 9,
+			))
+			.unwrap(),
+		},
+		Comp::Xz => CompressionSettings::Xz {
+			compression_level: XzCompressionLevel::new(level(0, 6))
+				.unwrap(),
+		},
+		Comp::Zstd => CompressionSettings::Zstd {
+			compression_level: ZstdCompressionLevel::new(level(
+				1, 3,
+			))
+			.unwrap(),
+			threads: ZstdThreads::new(1),
+		},
+		Comp::Compress => return c_filter_write("compress", "", data),
+		Comp::Lzma => return c_filter_write("lzma", "", data),
+		Comp::Lzip => return c_filter_write("lzip", "", data),
+		// libarchive's lz4 writer crashes on no data (UPSTREAM.md)
+		Comp::Lz4 if data.is_empty() => {
+			let enc =
+				lz4_flex::frame::FrameEncoder::new(Vec::new());
+			return enc.finish().unwrap();
+		}
+		Comp::Lz4 => return c_filter_write("lz4", "", data),
+		Comp::GzipInGzip => {
+			let inner = compress_bytes(Comp::Gzip, data, fast);
+			return compress_bytes(Comp::Gzip, &inner, fast);
+		}
+	};
+	// the encoders write to a File only
+	static N: AtomicUsize = AtomicUsize::new(0);
+	let n = N.fetch_add(1, Ordering::Relaxed);
+	let path = std::env::temp_dir()
+		.join(format!("difftest-comp-{}-{n}", std::process::id()));
+	let f = fs::File::create(&path).unwrap();
+	let mut enc = CompressionEncoder::new(f, &settings).unwrap();
+	enc.write_all(data).unwrap();
+	enc.finish().unwrap();
+	let out = fs::read(&path).unwrap();
+	fs::remove_file(&path).unwrap();
+	out
+}
 
 // tar compressed with comp into path
 pub fn write_db(path: &Path, comp: Comp, tar: &[u8]) {
-	let settings = match comp {
-		Comp::None => CompressionSettings::None,
-		Comp::Gzip => CompressionSettings::Gzip {
-			compression_level: GzipCompressionLevel::default(),
-		},
-		Comp::Bzip2 => CompressionSettings::Bzip2 {
-			compression_level: Bzip2CompressionLevel::default(),
-		},
-		Comp::Xz => CompressionSettings::Xz {
-			compression_level: XzCompressionLevel::default(),
-		},
-		Comp::Zstd => CompressionSettings::Zstd {
-			compression_level: ZstdCompressionLevel::default(),
-			threads: ZstdThreads::new(1),
-		},
-	};
-	let f = fs::File::create(path).unwrap();
-	let mut enc = CompressionEncoder::new(f, &settings).unwrap();
-	enc.write_all(tar).unwrap();
-	enc.finish().unwrap();
+	fs::write(path, compress_bytes(comp, tar, false)).unwrap();
 }
 
 // ---- sync worlds (sync_ro, files_op, database) ----

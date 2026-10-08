@@ -25,46 +25,6 @@ pub enum DecompressionSettings {
     None,
 }
 
-impl DecompressionSettings {
-    /// The number of leading bytes [`DecompressionSettings::from_magic`] needs.
-    pub const MAGIC_LEN: usize = 6;
-
-    /// Detects the compression of data from its leading bytes (magic numbers).
-    ///
-    /// Looks at up to [`DecompressionSettings::MAGIC_LEN`] bytes of `magic`.
-    /// Returns [`DecompressionSettings::None`] for data in none of the supported formats.
-    /// This allows reading files without a compression file extension, as libarchive does
-    /// (e.g. the repository databases of pacman).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use alpm_compress::decompression::DecompressionSettings;
-    ///
-    /// assert_eq!(
-    ///     DecompressionSettings::from_magic(&[0x28, 0xb5, 0x2f, 0xfd, 0x04, 0x58]),
-    ///     DecompressionSettings::Zstd
-    /// );
-    /// assert_eq!(
-    ///     DecompressionSettings::from_magic(b"ustar"),
-    ///     DecompressionSettings::None
-    /// );
-    /// ```
-    pub fn from_magic(magic: &[u8]) -> Self {
-        if magic.starts_with(&[0x1f, 0x8b]) {
-            Self::Gzip
-        } else if magic.starts_with(b"BZh") {
-            Self::Bzip2
-        } else if magic.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0x00]) {
-            Self::Xz
-        } else if magic.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
-            Self::Zstd
-        } else {
-            Self::None
-        }
-    }
-}
-
 impl TryFrom<CompressionAlgorithmFileExtension> for DecompressionSettings {
     type Error = Error;
 
@@ -116,16 +76,12 @@ impl From<&CompressionSettings> for DecompressionSettings {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Seek, Write};
-
     use rstest::rstest;
-    use tempfile::tempfile;
     use testresult::TestResult;
 
     use super::*;
     use crate::compression::{
         Bzip2CompressionLevel,
-        CompressionEncoder,
         GzipCompressionLevel,
         XzCompressionLevel,
         ZstdCompressionLevel,
@@ -168,51 +124,6 @@ mod tests {
             }
             Err(e) => panic!("Unexpected error variant: {e:?}"),
         }
-    }
-
-    /// Ensures that the compression of data written by [`CompressionEncoder`] is detected.
-    #[rstest]
-    #[case::bzip2(CompressionSettings::Bzip2 {
-        compression_level: Bzip2CompressionLevel::default()
-    })]
-    #[case::gzip(CompressionSettings::Gzip {
-        compression_level: GzipCompressionLevel::default()
-    })]
-    #[case::xz(CompressionSettings::Xz {
-        compression_level: XzCompressionLevel::default()
-    })]
-    #[case::zstd(CompressionSettings::Zstd {
-        compression_level: ZstdCompressionLevel::default(),
-        threads: ZstdThreads::new(1),
-    })]
-    #[case::no_compression(CompressionSettings::None)]
-    fn test_from_magic(#[case] settings: CompressionSettings) -> TestResult {
-        let mut file = tempfile()?;
-        let mut encoder = CompressionEncoder::new(file.try_clone()?, &settings)?;
-        encoder.write_all(b"alpm4ever")?;
-        encoder.finish()?;
-        file.rewind()?;
-
-        let mut magic = Vec::new();
-        file.take(DecompressionSettings::MAGIC_LEN as u64)
-            .read_to_end(&mut magic)?;
-        assert_eq!(
-            DecompressionSettings::from_magic(&magic),
-            DecompressionSettings::from(&settings)
-        );
-        Ok(())
-    }
-
-    /// Ensures that data shorter than a magic number is not compressed data.
-    #[rstest]
-    #[case::empty(b"")]
-    #[case::one_byte(&[0x1f])]
-    #[case::partial_xz(&[0xfd, b'7', b'z'])]
-    fn test_from_magic_short(#[case] magic: &[u8]) {
-        assert_eq!(
-            DecompressionSettings::from_magic(magic),
-            DecompressionSettings::None
-        );
     }
 
     /// Ensures that the conversion from [`CompressionSettings`] to

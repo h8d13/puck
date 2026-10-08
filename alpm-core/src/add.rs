@@ -14,7 +14,6 @@ use std::os::unix::fs::{
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use alpm_compress::decompression::DecompressionSettings;
 use rustix::fs::{
 	AtFlags, CWD, Mode, OFlags, Timespec, Timestamps, XattrFlags, chmodat,
 	fchmod, fsetxattr, futimens, lsetxattr, mknodat, openat, utimensat,
@@ -26,6 +25,7 @@ use crate::callbacks::{
 	Event, LogLevel, PackageOp, PackageOperation, Progress, logv,
 };
 use crate::error::Errno;
+use crate::filter::Code;
 use crate::handle::Handle;
 use crate::package::{
 	Package, PkgFrom, PkgReason, pkg_compare_versions, pkg_find,
@@ -1624,7 +1624,7 @@ pub fn commit_single_pkg(
 		Err(e) => return Err(open_failed(h, e)),
 	};
 	let meta = &archive.meta;
-	let plain = archive.settings == DecompressionSettings::None;
+	let plain = archive.code == Code::None;
 	let disk_root = h.root().to_vec();
 	let disk = Disk {
 		root: &disk_root,

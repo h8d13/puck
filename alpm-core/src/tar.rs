@@ -28,8 +28,9 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read};
 
+use crate::filter::Filter;
 use crate::util::{
-	Filter, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG,
+	S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG,
 };
 
 // archive.h results; err_combine keeps the lowest

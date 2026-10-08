@@ -13,6 +13,7 @@ pub mod diskspace;
 pub mod dload;
 pub mod error;
 pub mod filelist;
+pub mod filter;
 pub mod graph;
 pub mod group;
 pub mod handle;

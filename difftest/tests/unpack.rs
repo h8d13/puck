@@ -13,8 +13,8 @@ use alpm_core::callbacks::{Callbacks, LogLevel};
 use alpm_core::error::Errno;
 use alpm_core::util::{unpack, unpack_single};
 use difftest::{
-	COMPS, Comp, Node, Rng, TarNode, TempRoot, c_unpack, force_remove,
-	iters, snapshot, umask_lock, ustar_nodes, write_db,
+	COMPS, Comp, FILTERED, Node, Rng, TarNode, TempRoot, c_unpack,
+	force_remove, iters, snapshot, umask_lock, ustar_nodes, write_db,
 };
 
 fn fs_iters() -> usize {
@@ -491,7 +491,7 @@ fn compressed_cuts() {
 	let mut rng = Rng::new(0x0c07_5eed);
 	let raw = tar(&big_package());
 	let mut outcomes = std::collections::BTreeSet::new();
-	for comp in [Comp::Gzip, Comp::Bzip2, Comp::Xz, Comp::Zstd] {
+	for comp in FILTERED {
 		let data = compressed(comp, &raw);
 		for (i, n) in cuts(data.len(), &mut rng).into_iter().enumerate()
 		{
@@ -551,6 +551,39 @@ fn open_and_prefix_failures() {
 			.unwrap()
 	};
 	compare(&Case::new("prefix read-only", pkg), &ro);
+}
+
+// the magic of each filter libarchive's bidders take, then garbage, a
+// tar, or nothing: the filter's failure at open or on the first header;
+// lzop, lrzip and grzip need their program, which is not installed here
+const MAGICS: [&[u8]; 11] = [
+	b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03",
+	b"BZh91AY&SY",
+	b"\xfd7zXZ\x00",
+	b"\x28\xb5\x2f\xfd\x04\x58",
+	b"\x1f\x9d\x90",
+	b"\x5d\x00\x00\x80\x00\xff\xff\xff\xff\xff\xff\xff\xff",
+	b"LZIP\x01\x0c",
+	b"\x04\x22\x4d\x18\x64\x40\xa7",
+	b"\x89LZO\x00\r\n\x1a\n",
+	b"LRZI\x00\x06",
+	b"GRZipII\x00\x02\x04:)",
+];
+
+#[test]
+fn garbage_after_magic() {
+	let mut rng = Rng::new(0x9a4b_a9e0);
+	let pkg = tar(&package());
+	for m in MAGICS {
+		let junk: Vec<u8> =
+			(0..600).map(|_| rng.next_u64() as u8).collect();
+		for (what, rest) in
+			[("nothing", &[][..]), ("junk", &junk), ("tar", &pkg)]
+		{
+			let what = format!("{m:02x?} + {what}");
+			compare(&Case::new(&what, [m, rest].concat()), &none);
+		}
+	}
 }
 
 #[test]

@@ -17,8 +17,8 @@ use alpm_core::callbacks::{Callbacks, LogLevel};
 use alpm_core::handle::Handle;
 use alpm_core::package::Package;
 use difftest::{
-	CHandle, COMPS, CSyncDb, Comp, Rng, TarEntry, TempRoot, c_sync_db_load,
-	iters, section, tar_dir, tar_file, ustar, write_db,
+	CHandle, COMPS, CSyncDb, Comp, FILTERED, Rng, TarEntry, TempRoot,
+	c_sync_db_load, iters, section, tar_dir, tar_file, ustar, write_db,
 };
 
 // one db per iteration, a C handle each: far slower than string fuzz
@@ -1039,7 +1039,7 @@ fn odd_archives() {
 	truncated.truncate(truncated.len() / 2);
 	let mut short_tar = good.clone();
 	short_tar.truncate(700);
-	let cases: Vec<(&str, Vec<u8>)> = vec![
+	let mut cases: Vec<(&str, Vec<u8>)> = vec![
 		("empty file", Vec::new()),
 		// refused at open (the first tar header): the db is invalid
 		("garbage", b"not an archive at all\n".repeat(40)),
@@ -1048,6 +1048,17 @@ fn odd_archives() {
 		("truncated tar", short_tar),
 		("no end blocks", good[..good.len() - 1024].to_vec()),
 	];
+	// filters with their program missing, filter magics before junk
+	for (label, magic) in [
+		("lzop", &b"\x89LZO\x00\r\n\x1a\n"[..]),
+		("lrzip", b"LRZI\x00\x06"),
+		("grzip", b"GRZipII\x00\x02\x04:)"),
+		("compress + junk", b"\x1f\x9d\x90\x00\xff"),
+		("lzip + junk", b"LZIP\x01\x0c\xff\xff"),
+		("lz4 + junk", b"\x04\x22\x4d\x18\x64\x40\xa7\xff"),
+	] {
+		cases.push((label, [magic, &good[..]].concat()));
+	}
 	for (label, bytes) in cases {
 		let fx = TempRoot::new("be-sync");
 		fs::write(fx.sync_file("t", ".db"), &bytes).unwrap();
@@ -1103,7 +1114,7 @@ fn compressed_cuts() {
 	let tar = ustar(&big_db());
 	let mut rng = Rng::new(0x0c07_5eed);
 	let mut errnos = std::collections::BTreeSet::new();
-	for comp in [Comp::Gzip, Comp::Bzip2, Comp::Xz, Comp::Zstd] {
+	for comp in FILTERED {
 		let fx = TempRoot::new("be-sync");
 		let p = fx.sync_file("t", ".db");
 		write_db(&p, comp, &tar);
@@ -1162,7 +1173,7 @@ const EDGE: &[u8] = b"%DESC%\na\0b\nc\0\0d\n\n%GROUPS%\ng\0h\ni\n\0\nj\n\n\
 	%NAME%\nx\0\n\n%DEPENDS%\nq\0r\ns\n\n%URL%\nu\0v\n\n";
 
 // entries whose desc data starts 512 bytes before a block edge of
-// archive_read_data_block (util::Archive::block), with a filler line
+// archive_read_data_block (filter::Filter::block_size), with a filler line
 // moving EDGE so the edge falls on each of its bytes. a pad entry before
 // each desc (an unknown file, skipped) puts it there
 fn edge_db(block: usize) -> Vec<TarEntry> {
