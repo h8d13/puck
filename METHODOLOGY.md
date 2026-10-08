@@ -55,23 +55,6 @@ whoever writes it.
   parser into pacman's semantics: own that reader instead. pacman bugs
   recorded in `UPSTREAM.md` are not copied.
 
-## Naming
-
-The port is **puck** (Pac-Man's original name, Puck-Man): a safe
-version of pacman that sits next to it, not a replacement for what
-upstream provides. Ours is named puck: binaries `puck` and `puck-conf`,
-crates `puck-core`, `puck-cli`, `puck-common` (test-only `puck-vercmp`,
-`puck-testpkg`), the worktree dir `puck-worktrees`. The program name in
-usage and messages comes from argv[0] like the C, so runs invoked as
-`pacman` (pactest, parity, twin-root) stay byte-identical.
-
-Upstream's stays upstream's: `/etc/pacman.conf`, the `/var/lib/pacman` db
-and lock, `/var/log/pacman.log` and its `[PACMAN]`/`[ALPM]` tags (a format
-other tools parse), the hooks dir, makepkg/pacman-key/repo-add/vercmp/
-testpkg, the vendored ALPM crates, and libalpm names where the code points
-at the C. Sharing config, db and lock lets puck and pacman run side by
-side and swap mid-life.
-
 ## System-level decisions
 
 Where pacman needs things the 10 core ALPM crates do not cover, the choice
