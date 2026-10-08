@@ -130,7 +130,7 @@ fn invalid_entries() {
 		let e = db.load().unwrap_err();
 		assert_eq!(e.errno(), Errno::DbInvalid, "{name}");
 	}
-	db.write(&tar(&[("foo-1-1/desc", "%FOO%\nx\n")]));
+	db.write(&tar(&[("foo-1-1/desc", "%CSIZE%\nx\n")]));
 	let e = db.load().unwrap_err();
 	assert!(matches!(
 		e,

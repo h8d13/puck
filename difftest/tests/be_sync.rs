@@ -1,5 +1,6 @@
 // alpm_core::be_sync against the C sync db backend: repo dbs generated
-// under /tmp (valid desc/files per the alpm-repo-db spec, every
+// under /tmp (desc/files as repo-add writes and pacman reads them:
+// sections left out, repeated or unknown, odd file lists; every
 // compression alpm-compress has), loaded by both, every field, the
 // validation getter, the cache order and the table counts compared. odd
 // inputs the C accepts pin each divergence; copies of the real sync dbs
@@ -188,7 +189,8 @@ fn list(rng: &mut Rng, max: usize, f: fn(&mut Rng) -> String) -> Vec<String> {
 	(0..rng.below(max + 1)).map(|_| f(rng)).collect()
 }
 
-// relative paths with every parent listed, no duplicates
+// relative paths, pacman checks none of it: parents sometimes missing,
+// duplicates and file/dir twins ("usr", "usr/") sometimes
 fn file_list(rng: &mut Rng) -> Vec<String> {
 	let mut out: Vec<String> = Vec::new();
 	let mut dirs: Vec<String> = vec![String::new()];
@@ -200,13 +202,16 @@ fn file_list(rng: &mut Rng) -> Vec<String> {
 			"{parent}{leaf}{}",
 			if is_dir { "/" } else { "" }
 		);
-		let twin = format!("{parent}{leaf}");
-		let clash = out.iter().any(|o| o.trim_end_matches('/') == twin);
-		if clash || leaf == "." || leaf == ".." {
-			continue;
-		}
 		if is_dir {
 			dirs.push(p.clone());
+			if rng.below(10) == 0 {
+				continue;
+			}
+		}
+		match rng.below(12) {
+			0 => out.push(p.clone()),
+			1 => out.push(format!("{parent}{leaf}")),
+			_ => {}
 		}
 		out.push(p);
 	}
@@ -298,10 +303,6 @@ fn gen_pkg(rng: &mut Rng, name: String, files_db: bool) -> Gen {
 			fixed.push(section("PGPSIG", &one(base64(rng, n))));
 		}
 	}
-	// v1 needs %PGPSIG% alongside %MD5SUM%
-	if fixed.iter().any(|s| s.starts_with("%MD5SUM%")) {
-		fixed.push(section("PGPSIG", &one(base64(rng, 20))));
-	}
 	fixed.push(section("GROUPS", &list(rng, 2, |r| word(r, NAME, 1, 8))));
 	fixed.push(section("LICENSE", &list(rng, 2, license)));
 	let rels = [
@@ -317,6 +318,52 @@ fn gen_pkg(rng: &mut Rng, name: String, files_db: bool) -> Gen {
 	if !split {
 		fixed.extend(rels.iter().cloned());
 	}
+	// repo-add always writes these, pacman reads a db without them
+	for key in [
+		"FILENAME",
+		"BASE",
+		"CSIZE",
+		"ISIZE",
+		"SHA256SUM",
+		"ARCH",
+		"BUILDDATE",
+		"PACKAGER",
+	] {
+		if rng.below(12) == 0 {
+			let head = format!("%{key}%\n");
+			fixed.retain(|s| !s.starts_with(&head));
+		}
+	}
+	// an empty list, extra data and an unknown key, read or skipped by
+	// pacman
+	if rng.below(8) == 0 {
+		let key = pick(
+			rng,
+			&["GROUPS", "LICENSE", "DEPENDS", "PROVIDES"],
+		);
+		fixed.push(format!("%{key}%\n\n"));
+	}
+	if rng.below(8) == 0 {
+		let mut data = list(rng, 3, |r| {
+			format!(
+				"{}={}",
+				word(r, LOWER, 1, 6),
+				word(r, ALNUM, 1, 6)
+			)
+		});
+		data.insert(0, "pkgtype=pkg".into());
+		fixed.push(section("DATA", &data));
+	}
+	if rng.below(8) == 0 {
+		let key = format!("X{}", word(rng, b"ABCXYZ_", 1, 6));
+		let vals = list(rng, 3, |r| word(r, b"abc%XY =", 1, 8));
+		fixed.push(format!("%{key}%\n{}\n", vals.join("\n")));
+	}
+	// a repeated value overwrites, a repeated list appends
+	if !fixed.is_empty() && rng.below(8) == 0 {
+		let again = fixed[rng.below(fixed.len())].clone();
+		fixed.push(again);
+	}
 	// pacman reads sections in any order
 	if rng.below(3) == 0 {
 		for i in (1..fixed.len()).rev() {
@@ -330,9 +377,14 @@ fn gen_pkg(rng: &mut Rng, name: String, files_db: bool) -> Gen {
 			false => format!("%FILES%\n{}\n\n", paths.join("\n")),
 		}
 	});
+	let mut desc = fixed.concat();
+	// blank lines between sections are skipped by pacman
+	if rng.below(6) == 0 {
+		desc = desc.replace("\n\n%", "\n\n\n%");
+	}
 	Gen {
 		dir: format!("{name}-{version}"),
-		desc: fixed.concat(),
+		desc,
 		depends: split.then(|| rels.concat()),
 		files,
 	}
@@ -412,7 +464,13 @@ fn assert_same(c: &Outcome, r: &Outcome, ctx: &dyn Fn() -> String) {
 				ctx()
 			);
 			for (a, b) in cp.iter().zip(rp) {
-				assert_eq!(a, b, "package\n{}", ctx());
+				assert_eq!(
+					a,
+					b,
+					"package, fields {:?}\n{}",
+					diff_fields(&a.0, &b.0),
+					ctx()
+				);
 			}
 			assert_eq!(
 				cc,
@@ -661,8 +719,8 @@ enum Expect {
 }
 
 // inputs pacman accepts or refuses in its own way. Same: both sides agree
-// (outcome and every field). Diverge: the documented C vs alpm-repo-db
-// (or libarchive vs alpm-compress) differences
+// (outcome and every field). Diverge: the documented C vs alpm-types
+// (or libarchive vs alpm-compress) differences, and pacman bugs not copied
 #[test]
 fn odd_inputs() {
 	use Expect::*;
@@ -692,22 +750,18 @@ fn odd_inputs() {
 			foo_with("%URL%\nhttps://a.org/x\n\n"),
 			Same,
 		),
-		("unknown key", foo_with("%FOO%\nbar\n\n"), Diverge),
-		("xdata", foo_with("%DATA%\npkgtype=pkg\n\n"), Diverge),
-		(
-			"no %BASE%",
-			foo(&base.replace("%BASE%\nfoo\n\n", "")),
-			Diverge,
-		),
+		("unknown key", foo_with("%FOO%\nbar\n\n"), Same),
+		("xdata", foo_with("%DATA%\npkgtype=pkg\n\n"), Same),
+		("no %BASE%", foo(&base.replace("%BASE%\nfoo\n\n", "")), Same),
 		(
 			"no %PACKAGER%",
 			foo(&base.replace("%PACKAGER%\nA B <a@b.org>\n\n", "")),
-			Diverge,
+			Same,
 		),
-		("empty desc", foo(""), Diverge),
+		("empty desc", foo(""), Same),
 		("desc spaces", foo_with("%DESC%\n a  b \n\n"), Same),
-		("desc empty value", foo_with("%DESC%\n\n"), Diverge),
-		("crlf", foo(&base.replace('\n', "\r\n")), Diverge),
+		("desc empty value", foo_with("%DESC%\n\n"), Same),
+		("crlf", foo(&base.replace('\n', "\r\n")), Same),
 		(
 			"not utf-8",
 			vec![tar_file(
@@ -720,7 +774,7 @@ fn odd_inputs() {
 		(
 			"section twice",
 			foo_with("%DEPENDS%\na\n\n%DEPENDS%\nb\n\n"),
-			Diverge,
+			Same,
 		),
 		(
 			"same name twice",
@@ -732,10 +786,10 @@ fn odd_inputs() {
 				));
 				e
 			},
-			Diverge,
+			Same,
 		),
 		("%FILES% in desc", foo_with("%FILES%\nusr/\n\n"), Diverge),
-		("md5 without pgpsig", foo_with(&md5), Diverge),
+		("md5 without pgpsig", foo_with(&md5), Same),
 		(
 			"csize text",
 			foo(&base.replace("%CSIZE%\n1", "%CSIZE%\nx")),
@@ -746,8 +800,8 @@ fn odd_inputs() {
 			foo(&base.replace(&"ab".repeat(32), &"AB".repeat(32))),
 			Diverge,
 		),
-		("empty %GROUPS%", foo_with("%GROUPS%\n\n"), Diverge),
-		("blank lines", foo(&base.replace("\n\n", "\n\n\n")), Diverge),
+		("empty %GROUPS%", foo_with("%GROUPS%\n\n"), Same),
+		("blank lines", foo(&base.replace("\n\n", "\n\n\n")), Same),
 		(
 			"optdepend no space",
 			foo_with("%OPTDEPENDS%\na:b\n\n"),
@@ -805,7 +859,7 @@ fn odd_inputs() {
 		(
 			"files absolute",
 			vec![tar_file("foo-1-1/files", b"%FILES%\n/usr/\n")],
-			Diverge,
+			Same,
 		),
 		(
 			"files no parent",
@@ -813,7 +867,7 @@ fn odd_inputs() {
 				"foo-1-1/files",
 				b"%FILES%\nusr/bin/x\n",
 			)],
-			Diverge,
+			Same,
 		),
 		(
 			"files in a .db",
@@ -835,11 +889,55 @@ fn odd_inputs() {
 		(
 			"depends without desc",
 			vec![tar_file("foo-1-1/depends", b"%DEPENDS%\na\n\n")],
-			Diverge,
+			Same,
+		),
+		(
+			"files dir and file",
+			vec![tar_file(
+				"foo-1-1/files",
+				b"%FILES%\nusr\nusr/\n",
+			)],
+			Same,
+		),
+		(
+			"files duplicate",
+			vec![tar_file(
+				"foo-1-1/files",
+				b"%FILES%\nusr/\nusr/\n",
+			)],
+			Same,
+		),
+		(
+			"files blank line inside",
+			vec![tar_file(
+				"foo-1-1/files",
+				b"%FILES%\nusr/\n\nopt/\n",
+			)],
+			Same,
+		),
+		(
+			"files crlf",
+			vec![tar_file("foo-1-1/files", b"%FILES%\r\nusr/\r\n")],
+			Same,
+		),
+		(
+			"files after unknown key",
+			vec![tar_file(
+				"foo-1-1/files",
+				b"%FOO%\nx\n\n%FILES%\nusr/\n",
+			)],
+			Same,
+		),
+		("data without pkgtype", foo_with("%DATA%\na=b\n\n"), Same),
+		(
+			"header line in a list",
+			foo_with("%GROUPS%\ng\n%URL%\n\n"),
+			Same,
 		),
 		("empty archive", vec![], Same),
 	];
 	let mut report = Vec::new();
+	let mut wrong = Vec::new();
 	for (label, entries, expect) in cases {
 		let (c, r, why) = run_case(&entries, Comp::None, ".db");
 		let got = if c == r { Same } else { Diverge };
@@ -858,11 +956,14 @@ fn odd_inputs() {
 			brief(&c),
 			brief(&r)
 		));
-		assert_eq!(got, expect, "{label}\nC {c:?}\nrust {r:?}");
+		if got != expect {
+			wrong.push(format!("{label}: expected {expect:?}"));
+		}
 	}
 	for line in report {
 		eprintln!("{line}");
 	}
+	assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 fn brief(o: &Outcome) -> String {

@@ -603,6 +603,22 @@ maintainer of this repo, not from here.
 
 # ALPM findings
 
+Corrected in `vendor/patches/` (see PORTING.md "ALPM patches for
+parity"): epoch Ord 0101, one-sided pkgrel 0102, pkgrel text 0103, Url
+0104, Packager 0105, RelationOrSoname 0106, ExtraDataEntry 0107,
+OptionalDependency 0108, PackageDescription 0109, desc v2 detection 0201,
+blank lines 0202/0301, backups 0205, files blank line 0206, `%DATA%` 0303,
+`usr` == `usr/` 0305. Further notes from the patch work:
+
+- strict desc parsers allow one blank line between sections only,
+  against the spec. **packager**
+- alpm-db-files' "Empty lines are ignored" contradicts upstream's own
+  `empty_line_in_list_of_paths` fixture. **none** (spec wording)
+- keeping `(null)` backups needs an exemption from the not-in-`%FILES%`
+  check, pacman writes them for exactly those paths. **real** (2/804)
+- layer strings swapped between alpm-db and alpm-repo-db ("alpm-repo-desc
+  file value section" in alpm-db and the reverse). **none**
+
 Issues in the ALPM crates (`alpm/` at `0eedcb8`) met while using them for
 pacman's formats. Same practice labels, judged against real databases.
 

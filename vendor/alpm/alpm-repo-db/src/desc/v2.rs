@@ -419,6 +419,8 @@ impl TryFrom<Vec<Section>> for RepoDescFileV2 {
                 Section::CheckDepends(val) => {
                     set_vec_once!(check_dependencies, val, SectionKeyword::CheckDepends)
                 }
+                // Not part of alpm-repo-desc, only read by `parse_libalpm`.
+                Section::Data(_) => {}
                 Section::Md5Sum(_) => {
                     return Err(Error::InvalidSectionForVersion {
                         section: SectionKeyword::Md5Sum,
@@ -508,6 +510,18 @@ mod tests {
             pretty_error.contains(error_snippet),
             "Error:\n=====\n{pretty_error}\n=====\nshould contain snippet:\n\n{error_snippet}"
         );
+    }
+
+    /// Ensures that any number of empty lines between sections is ignored.
+    #[test]
+    fn empty_lines_between_sections_are_ignored() -> testresult::TestResult {
+        let full = include_str!("../../tests/correct/desc/v2/full.desc");
+        let spaced = full.replace("\n\n%", "\n\n\n\n%");
+        assert_eq!(
+            RepoDescFileV2::from_str(&spaced)?,
+            RepoDescFileV2::from_str(full)?
+        );
+        Ok(())
     }
 
     #[test]

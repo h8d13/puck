@@ -1,0 +1,118 @@
+diff -ruN '--exclude=VENDORED' a/alpm-repo-db/src/desc/parser.rs b/alpm-repo-db/src/desc/parser.rs
+--- a/alpm-repo-db/src/desc/parser.rs
++++ b/alpm-repo-db/src/desc/parser.rs
+@@ -10,6 +10,7 @@
+     Base64OpenPGPSignature,
+     BuildDate,
+     CompressedSize,
++    ExtraDataEntry,
+     FullVersion,
+     Group,
+     InstalledSize,
+@@ -186,6 +187,8 @@
+     MakeDepends(Vec<PackageRelation>),
+     /// %CHECKDEPENDS%
+     CheckDepends(Vec<PackageRelation>),
++    /// %DATA%, the extra data libalpm reads, only read by [`parse_libalpm`]
++    Data(Vec<ExtraDataEntry>),
+ }
+ 
+ /// One or multiple newlines.
+@@ -470,6 +473,32 @@
+     .map(|(sections, _)| sections)
+ }
+ 
++/// Parses the value or values of the section with the header `%name%` as libalpm reads them.
++///
++/// Returns [`None`] for a section libalpm does not know.
++///
++/// # Errors
++///
++/// Returns an error if the section body contains malformed values.
++fn libalpm_section<'a>(input: &mut Input<'a>, name: &str) -> PResult<'a, Option<Section>> {
++    let section = match name {
++        // libalpm reads extra data from sync databases, repo-add does not write it yet
++        "DATA" => Section::Data(
++            values(
++                ExtraDataEntry::parser_until_line_ending,
++                "data",
++                ListEnd::Libalpm,
++            )
++            .parse_next(input)?,
++        ),
++        name => match SectionKeyword::from_str(name) {
++            Ok(keyword) => section_value(input, keyword, ListEnd::Libalpm)?,
++            Err(_) => return Ok(None),
++        },
++    };
++    Ok(Some(section))
++}
++
+ /// Parses all sections from the given input the way libalpm's `sync_db_read` reads them.
+ ///
+ /// - Section headers are whole lines compared as they are: an indented header, or one followed
+@@ -488,16 +517,15 @@
+     let mut sections = Vec::new();
+     while !input.is_empty() {
+         let line = libalpm::line.parse_next(input)?;
+-        let keyword = line
++        let name = line
+             .strip_prefix('%')
+             .and_then(|line| line.strip_suffix('%'))
+-            .and_then(|name| SectionKeyword::from_str(name).ok());
+-        match keyword {
+-            Some(keyword) => {
+-                let section =
+-                    (move |i: &mut Input<'a>| section_value(i, keyword.clone(), ListEnd::Libalpm))
+-                        .layer("alpm-repo-desc file value section")
+-                        .parse_next(input)?;
++            .unwrap_or_default();
++        let section = (|i: &mut Input<'a>| libalpm_section(i, name))
++            .layer("alpm-repo-desc file value section")
++            .parse_next(input)?;
++        match section {
++            Some(section) => {
+                 sections.push(section);
+                 alt((line_ending, eof)).parse_next(input)?;
+             }
+@@ -566,6 +594,8 @@
+     #[case::header_in_list("%GROUPS%\na\n%DESC%\n\n%BASE%\nfoo\n", "Groups(2) Base")]
+     #[case::empty_list("%GROUPS%\n\n%BASE%\nfoo\n", "Groups(0) Base")]
+     #[case::repeated("%GROUPS%\na\n\n%GROUPS%\nb\nc\n", "Groups(1) Groups(2)")]
++    #[case::data("%DATA%\npkgtype=pkg\nfoo=bar\n", "Data(2)")]
++    #[case::data_without_pkgtype("%DATA%\nfoo=bar\n", "Data(1)")]
+     fn libalpm_sections_in_file_order(#[case] input: &str, #[case] expected: &str) -> TestResult {
+         let names: Vec<String> = parse_libalpm(input)?
+             .iter()
+@@ -573,6 +603,7 @@
+                 Section::Base(_) => "Base".to_string(),
+                 Section::Desc(_) => "Desc".to_string(),
+                 Section::Groups(groups) => format!("Groups({})", groups.len()),
++                Section::Data(data) => format!("Data({})", data.len()),
+                 other => format!("{other:?}"),
+             })
+             .collect();
+diff -ruN '--exclude=VENDORED' a/alpm-repo-db/src/desc/v1.rs b/alpm-repo-db/src/desc/v1.rs
+--- a/alpm-repo-db/src/desc/v1.rs
++++ b/alpm-repo-db/src/desc/v1.rs
+@@ -433,6 +433,8 @@
+                 Section::CheckDepends(val) => {
+                     set_vec_once!(check_dependencies, val, SectionKeyword::CheckDepends)
+                 }
++                // Not part of alpm-repo-desc, only read by `parse_libalpm`.
++                Section::Data(_) => {}
+             }
+         }
+ 
+diff -ruN '--exclude=VENDORED' a/alpm-repo-db/src/desc/v2.rs b/alpm-repo-db/src/desc/v2.rs
+--- a/alpm-repo-db/src/desc/v2.rs
++++ b/alpm-repo-db/src/desc/v2.rs
+@@ -419,6 +419,8 @@
+                 Section::CheckDepends(val) => {
+                     set_vec_once!(check_dependencies, val, SectionKeyword::CheckDepends)
+                 }
++                // Not part of alpm-repo-desc, only read by `parse_libalpm`.
++                Section::Data(_) => {}
+                 Section::Md5Sum(_) => {
+                     return Err(Error::InvalidSectionForVersion {
+                         section: SectionKeyword::Md5Sum,

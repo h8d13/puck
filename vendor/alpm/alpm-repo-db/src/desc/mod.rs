@@ -17,7 +17,7 @@ pub mod cli;
 pub mod commands;
 
 pub use file::RepoDescFile;
-pub use parser::{Section, SectionKeyword};
+pub use parser::{Section, SectionKeyword, parse_libalpm};
 pub use schema::RepoDescSchema;
 pub use v1::RepoDescFileV1;
 pub use v2::RepoDescFileV2;

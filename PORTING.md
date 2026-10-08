@@ -117,21 +117,24 @@ copied. State: todo until a patch lands, then the patch file name.
 
 | Crate | Divergence to correct | Seen on real data | State |
 |---|---|---|---|
-| alpm-types | `Url` normalised (trailing '/', lowercase, dot segments): keep original text | local 82/804, sync 1330/15334, cache 134/1250 | in progress |
-| alpm-types | `Packager` rejects `Unknown Packager`, `<a@b.c>` | local 1/804 | in progress |
-| alpm-types | `RelationOrSoname` rejects `foo.sound`, `d1.so62r` (no backtracking) | no | in progress |
-| alpm-types | `ExtraDataEntry` empty value swallows next line | no | in progress |
-| alpm-types | `Version` Ord: explicit epoch 0 > none, one-sided pkgrel counted; `is_satisfied_by` with pkgrel | no | in progress |
-| alpm-types | `OptionalDependency` description split at ':'+whitespace, trimmed, empty -> None | no | in progress |
-| alpm-types | pkgrel printed without leading zeros | no | in progress |
-| alpm-types (or owner crate) | `%DESC%`/pkgdesc whitespace normalised, checksums and arch lowercased | no | in progress |
-| alpm-db | v2 detected by `contains("%XDATA%")` anywhere | no | in progress |
-| alpm-db | files: blank line ends `%FILES%` (spec: ignored); absolute paths, missing parents, `usr`+`usr/` refused | no | in progress |
-| alpm-db | backups sorted by path, `(null)` hash entries dropped | local 15/804, 2/804 | in progress |
-| alpm-db | unknown keys, duplicate sections, sections pacman writes only when set treated as required, `%MAKEDEPENDS%`/`%CHECKDEPENDS%`, `%REASON%` other than 0/1, empty desc, CRLF | no | in progress |
-| alpm-repo-db | `%DATA%` (xdata) missing | no (pacman 7 reads it) | in progress |
-| alpm-repo-db | unknown keys, duplicate sections, required sections, `%MD5SUM%` without `%PGPSIG%`, empty `%GROUPS%`, extra blank lines | no | in progress |
-| alpm-repo-db | `RepoFilesV1` dedup/sort as `PathBuf` (`usr` == `usr/`) | no | in progress |
+| alpm-types | `Url` normalised (trailing '/', lowercase, dot segments): keep original text | local 82/804, sync 1330/15334, cache 134/1250 | 0104 (`as_original_str`) |
+| alpm-types | `Packager` rejects `Unknown Packager`, `<a@b.c>` | local 1/804 | 0105 (`email()` now `Option`) |
+| alpm-types | `RelationOrSoname` rejects `foo.sound`, `d1.so62r` (no backtracking) | no | 0106 |
+| alpm-types | `ExtraDataEntry` empty value swallows next line | no | 0107 |
+| alpm-types | `Version` Ord: explicit epoch 0 > none, one-sided pkgrel counted; `is_satisfied_by` with pkgrel | no | 0101, 0102 (`vercmp`, `is_satisfied_by_vercmp`; Ord stays total) |
+| alpm-types | `OptionalDependency` description split at ':'+whitespace, trimmed, empty -> None | no | 0108 (changes 4 upstream test expectations) |
+| alpm-types | pkgrel printed without leading zeros | no | 0103 |
+| alpm-types | `%DESC%`/pkgdesc whitespace normalised | no | 0109 (`as_original_str`) |
+| alpm-types | arch `ANY` and checksums lowercased | no | open: enum/bytes types, case kept only with a type redesign |
+| alpm-types | xdata `a = b` trimmed, `%REASON%` other than 0/1 (no `Unknown` variant), `size = +5`, text dates | no | todo |
+| alpm-db | v2 detected by `contains("%XDATA%")` anywhere | no | 0201 |
+| alpm-db | files: blank line ends `%FILES%` (spec: ignored); absolute paths, missing parents, `usr`+`usr/` refused | no | 0206, 0207 (`from_str_libalpm`) |
+| alpm-db | backups sorted by path, `(null)` hash entries dropped | local 15/804, 2/804 | 0205 (`md5: Option`) |
+| alpm-db | unknown keys, duplicate sections, sections pacman writes only when set treated as required, `%MAKEDEPENDS%`/`%CHECKDEPENDS%`, empty desc, CRLF, blank lines between sections | no | 0202, 0203, 0204 (`parse_libalpm`, sections in file order) |
+| alpm-repo-db | `%DATA%` (xdata) missing | no (pacman 7 reads it) | 0303 |
+| alpm-repo-db | unknown keys, duplicate sections, required sections, `%MD5SUM%` without `%PGPSIG%`, empty `%GROUPS%`, extra blank lines | no | 0301, 0302 (`parse_libalpm`) |
+| alpm-repo-db | `RepoFilesV1` dedup/sort as `PathBuf` (`usr` == `usr/`) | no | 0304, 0305 (`from_str_libalpm`) |
+| alpm-db, alpm-repo-db | backup line without a tab (pacman: NULL hash), `%FILES%` inside a sync desc entry | no | open: no ALPM representation / packager-only |
 | alpm-mtree | entries sorted by path instead of file order; duplicates not merged | 386/804 | in progress |
 | alpm-mtree | `mode` 3-4 digits (docs 3-5), required time/mode/uid/gid/sha256/link, char/block/fifo, unknown keywords, `size` on dirs/links, `\#`, `size=+5`, `/unset all`, v1 relative paths | rare (mode) | in progress |
 | alpm-mtree | `PathType` lacks `PartialEq`; gzip only through `MetadataFile` | api | in progress |
@@ -293,8 +296,11 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
   instead of the C's process-wide `umask(0)`. `copyfile` keeps the C
   behaviour: dest created even if src fails, no truncation, read errors
   count as success. `read_file` on an empty file is `System` like the C.
-- `be_local`/`be_sync` read desc/files with `alpm-db`/`alpm-repo-db` and
-  map the typed values onto `Package`; relations go through their
+- `be_local`/`be_sync` read desc with `parse_libalpm` (sections in file
+  order, folded key by key like the C: repeated values overwrite, lists
+  append, missing sections leave fields unset) and files with
+  `from_str_libalpm`; sync entries are joined with a blank line. Values
+  map onto `Package`, desc/url through `as_original_str`; relations go through their
   alpm-types string form into `dep_from_string`. Lazy loading keeps the C
   infolevel bits; a parse error empties the section and sets the sticky
   `INFRQ_ERROR` (the C keeps lines read before the error).
@@ -418,8 +424,9 @@ Follow-ups raised by port units:
 | be_sync: a non-archive db must fail at open (DB_OPEN, db invalid) like libarchive, not LIBARCHIVE | query | with the mtree/compress patch unit |
 | `%DATA%` in repo dbs, gzip multi-member, `Packager` default, backup `(null)` | db readers | ALPM side, see `UPSTREAM.md` |
 
-Divergences below are to be corrected in vendored ALPM
-(`vendor/patches/`, METHODOLOGY.md); none patched yet.
+Divergences below are corrected in vendored ALPM where listed in "ALPM
+patches for parity" (`vendor/patches/` 0101-0109, 0201-0207, 0301-0305);
+rows still here are the remaining ones.
 
 ## Divergences from pacman (precedent crates)
 

@@ -1,9 +1,10 @@
 // port of lib/libalpm/be_local.c, reading side: validate, populate and
 // local_db_read.
 //
-// the desc and files formats are parsed by the alpm-db crate, not by a
-// translation of the C line reader; its typed values are mapped onto the
-// pacman Package model (see PORTING.md for where the two disagree).
+// the desc and files formats are read by the alpm-db crate's
+// libalpm-compatible readers, not by a translation of the C line reader;
+// their typed values are mapped onto the pacman Package model (see
+// PORTING.md for where the two disagree).
 //
 // lazy loading keeps the C infolevel bits: read() loads the requested
 // sections once, a failed read marks the package INFRQ_ERROR and later
@@ -21,7 +22,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 use alpm_common::MetadataFile;
-use alpm_db::desc::{DbDescFile, DbDescFileV1};
+use alpm_db::desc::{Section, parse_libalpm};
 use alpm_db::files::DbFiles;
 use alpm_mtree::Mtree;
 use alpm_mtree::mtree::v2::Path as MtreePath;
@@ -272,9 +273,8 @@ impl LocalDb {
 			let path = self.pkgpath(pkg, b"desc");
 			let s = fs::read_to_string(os(&path))
 				.map_err(ReadError::Io)?;
-			let desc = s
-				.parse::<DbDescFile>()
-				.map_err(ReadError::Desc)?;
+			let desc =
+				parse_libalpm(&s).map_err(ReadError::Desc)?;
 			apply_desc(pkg, desc);
 			pkg.infolevel |= INFRQ_DESC;
 		}
@@ -282,8 +282,7 @@ impl LocalDb {
 			let path = self.pkgpath(pkg, b"files");
 			let s = fs::read_to_string(os(&path))
 				.map_err(ReadError::Io)?;
-			let files = s
-				.parse::<DbFiles>()
+			let files = DbFiles::from_str_libalpm(&s)
 				.map_err(ReadError::Files)?;
 			apply_files(pkg, &files);
 			pkg.infolevel |= INFRQ_FILES;
@@ -327,51 +326,62 @@ fn validation_bits(v: &[PackageValidation]) -> c_int {
 	})
 }
 
-fn apply_desc(pkg: &mut Package, desc: DbDescFile) {
-	let (d, xdata): (DbDescFileV1, Vec<ExtraDataEntry>) = match desc {
-		DbDescFile::V1(d) => (d, Vec::new()),
-		DbDescFile::V2(d) => {
-			let xdata = d.xdata.clone().into();
-			(d.into(), xdata)
+// the C's per-key assignments: a repeated value overwrites, a repeated
+// list appends, a missing section leaves the field unset
+fn apply_desc(pkg: &mut Package, desc: Vec<Section>) {
+	for section in desc {
+		apply_section(pkg, section);
+	}
+}
+
+fn apply_section(pkg: &mut Package, section: Section) {
+	match section {
+		// only feed the C's mismatch log
+		Section::Name(_) | Section::Version(_) => {}
+		Section::Base(v) => pkg.base = Some(text(&v)),
+		// description and url as read, alpm-types normalizes Display
+		Section::Desc(v) => pkg.desc = Some(text(&v.as_original_str())),
+		// an empty value is alpm-db's None
+		Section::Url(v) => {
+			pkg.url = Some(v
+				.map(|u| text(&u.as_original_str()))
+				.unwrap_or_default())
 		}
-	};
-	// %NAME% and %VERSION% only feed the C's mismatch log
-	pkg.base = Some(text(&d.base));
-	// description and url as read, alpm-types normalizes their Display
-	pkg.desc = Some(text(&d.description.as_original_str()));
-	// %URL% is required, an empty value is alpm-db's None
-	let url = d.url.as_ref().map(|u| text(&u.as_original_str()));
-	pkg.url = Some(url.unwrap_or_default());
-	pkg.arch = Some(text(&d.arch));
-	pkg.builddate = d.builddate;
-	pkg.installdate = d.installdate;
-	pkg.packager = Some(text(&d.packager));
-	// _alpm_strtoofft casts the unsigned long long to off_t: values past
-	// i64::MAX wrap (gcc's implementation-defined conversion)
-	pkg.isize = d.size as i64;
-	pkg.groups = texts(&d.groups);
-	pkg.reason = match d.reason {
-		PackageInstallReason::Explicit => PkgReason::Explicit,
-		PackageInstallReason::Depend => PkgReason::Depend,
-	};
-	pkg.licenses = texts(&d.license);
-	pkg.validation = validation_bits(&d.validation);
-	pkg.replaces = deps(&d.replaces);
-	pkg.depends = deps(&d.depends);
-	pkg.optdepends = deps(&d.optdepends);
-	pkg.conflicts = deps(&d.conflicts);
-	pkg.provides = deps(&d.provides);
-	pkg.xdata = xdata
-		.iter()
-		.map(|x| PkgXData {
-			name: x.key().as_bytes().to_vec(),
-			value: x.value().as_bytes().to_vec(),
-		})
-		.collect();
+		Section::Arch(v) => pkg.arch = Some(text(&v)),
+		Section::BuildDate(v) => pkg.builddate = v,
+		Section::InstallDate(v) => pkg.installdate = v,
+		Section::Packager(v) => pkg.packager = Some(text(&v)),
+		// _alpm_strtoofft casts the unsigned long long to off_t: values
+		// past i64::MAX wrap (gcc's implementation-defined conversion)
+		Section::Size(v) => pkg.isize = v as i64,
+		Section::Groups(v) => pkg.groups.extend(texts(&v)),
+		Section::Reason(PackageInstallReason::Explicit) => {
+			pkg.reason = PkgReason::Explicit
+		}
+		Section::Reason(PackageInstallReason::Depend) => {
+			pkg.reason = PkgReason::Depend
+		}
+		Section::License(v) => pkg.licenses.extend(texts(&v)),
+		Section::Validation(v) => pkg.validation |= validation_bits(&v),
+		Section::Replaces(v) => pkg.replaces.extend(deps(&v)),
+		Section::Depends(v) => pkg.depends.extend(deps(&v)),
+		Section::OptDepends(v) => pkg.optdepends.extend(deps(&v)),
+		Section::Conflicts(v) => pkg.conflicts.extend(deps(&v)),
+		Section::Provides(v) => pkg.provides.extend(deps(&v)),
+		Section::MakeDepends(v) => pkg.makedepends.extend(deps(&v)),
+		Section::CheckDepends(v) => pkg.checkdepends.extend(deps(&v)),
+		Section::XData(v) => {
+			let v: Vec<ExtraDataEntry> = v.into();
+			pkg.xdata.extend(v.iter().map(|x| PkgXData {
+				name: x.key().as_bytes().to_vec(),
+				value: x.value().as_bytes().to_vec(),
+			}))
+		}
+	}
 }
 
 // the C sorts the file list after reading (_alpm_filelist_sort), backups
-// keep the order alpm-db returns
+// keep file order
 fn apply_files(pkg: &mut Package, files: &DbFiles) {
 	let paths: &[PathBuf] = files.as_ref();
 	pkg.files = FileList {
@@ -389,7 +399,11 @@ fn apply_files(pkg: &mut Package, files: &DbFiles) {
 		.iter()
 		.map(|b| Backup {
 			name: b.path.inner().as_os_str().as_bytes().to_vec(),
-			hash: Some(text(&b.md5)),
+			// None is the "(null)" the C wrote for a NULL hash
+			hash: Some(match &b.md5 {
+				Some(md5) => text(md5),
+				None => b"(null)".to_vec(),
+			}),
 		})
 		.collect();
 }

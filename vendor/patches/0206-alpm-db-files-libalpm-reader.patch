@@ -1,0 +1,269 @@
+diff -ruN '--exclude=VENDORED' a/alpm-db/src/desc/parser.rs b/alpm-db/src/desc/parser.rs
+--- a/alpm-db/src/desc/parser.rs
++++ b/alpm-db/src/desc/parser.rs
+@@ -42,9 +42,11 @@
+         terminated,
+     },
+     error::ErrMode,
+-    token::{take_till, take_while},
++    token::take_while,
+ };
+ 
++use crate::libalpm;
++
+ /// A known section name in an [alpm-db-desc] file.
+ ///
+ /// Section names are e.g. `%NAME%` or `%VERSION%`.
+@@ -204,18 +206,11 @@
+     .parse_next(input)
+ }
+ 
+-/// Recognizes the end of a list of values as libalpm sees it, without consuming anything.
+-///
+-/// libalpm splits lines at `\n` only, so a blank line is a single `\n`.
+-fn end_of_block<'a>(input: &mut Input<'a>) -> PResult<'a, ()> {
+-    peek(alt(("\n".void(), eof.void()))).parse_next(input)
+-}
+-
+ /// Recognizes the end of a list of values according to `end`, without consuming anything.
+ fn end_of_list<'a>(end: ListEnd, input: &mut Input<'a>) -> PResult<'a, ()> {
+     match end {
+         ListEnd::Spec => end_of_values(input),
+-        ListEnd::Libalpm => end_of_block(input),
++        ListEnd::Libalpm => libalpm::end_of_block(input),
+     }
+ }
+ 
+@@ -453,11 +448,6 @@
+     .map(|(sections, _)| sections)
+ }
+ 
+-/// Recognizes one line as libalpm reads it: everything up to the next `\n`, which is consumed.
+-fn libalpm_line<'a>(input: &mut Input<'a>) -> PResult<'a, &'a str> {
+-    terminated(take_till(0.., '\n'), alt(("\n", eof))).parse_next(input)
+-}
+-
+ /// Parses the value or values of the section with the header `%name%` as libalpm reads them.
+ ///
+ /// Returns [`None`] for a section libalpm does not know.
+@@ -509,7 +499,7 @@
+ pub(crate) fn libalpm_sections<'a>(input: &mut Input<'a>) -> PResult<'a, Vec<Section>> {
+     let mut sections = Vec::new();
+     while !input.is_empty() {
+-        let line = libalpm_line.parse_next(input)?;
++        let line = libalpm::line.parse_next(input)?;
+         let name = line
+             .strip_prefix('%')
+             .and_then(|line| line.strip_suffix('%'))
+@@ -526,7 +516,7 @@
+             // libalpm warns about an unknown key and skips its values
+             None => {
+                 while !input.is_empty() && !input.starts_with('\n') {
+-                    libalpm_line.parse_next(input)?;
++                    libalpm::line.parse_next(input)?;
+                 }
+             }
+         }
+diff -ruN '--exclude=VENDORED' a/alpm-db/src/files/mod.rs b/alpm-db/src/files/mod.rs
+--- a/alpm-db/src/files/mod.rs
++++ b/alpm-db/src/files/mod.rs
+@@ -57,6 +57,19 @@
+ }
+ 
+ impl DbFiles {
++    /// Creates a new [`DbFiles`] from a string slice the way libalpm reads [alpm-db-files] data.
++    ///
++    /// Delegates to [`DbFilesV1::from_str_libalpm`]: libalpm does not know other versions.
++    ///
++    /// # Errors
++    ///
++    /// Returns an error if [`DbFilesV1::from_str_libalpm`] fails.
++    ///
++    /// [alpm-db-files]: https://alpm.archlinux.page/specifications/alpm-db-files.5.html
++    pub fn from_str_libalpm(s: &str) -> Result<Self, Error> {
++        Ok(DbFiles::V1(DbFilesV1::from_str_libalpm(s)?))
++    }
++
+     /// Returns the backup entries associated with this [`DbFiles`].
+     pub fn backups(&self) -> &[BackupEntry] {
+         match self {
+diff -ruN '--exclude=VENDORED' a/alpm-db/src/files/v1.rs b/alpm-db/src/files/v1.rs
+--- a/alpm-db/src/files/v1.rs
++++ b/alpm-db/src/files/v1.rs
+@@ -10,12 +10,23 @@
+ use fluent_i18n::t;
+ use winnow::{
+     ascii::{line_ending, multispace0, newline, space0, till_line_ending},
+-    combinator::{alt, cut_err, eof, not, opt, peek, repeat, separated_pair, terminated},
++    combinator::{
++        alt,
++        cut_err,
++        eof,
++        not,
++        opt,
++        peek,
++        preceded,
++        repeat,
++        separated_pair,
++        terminated,
++    },
+     stream::AsChar,
+     token::take_while,
+ };
+ 
+-use crate::files::Error;
++use crate::{files::Error, libalpm};
+ 
+ /// The raw data section in [alpm-db-files] data.
+ ///
+@@ -544,6 +555,80 @@
+     }
+ }
+ 
++impl DbFilesV1 {
++    /// Recognizes [alpm-db-files] data the way libalpm's `local_db_read` reads it.
++    ///
++    /// Lines are compared as they are and lines outside of a section are ignored. A section ends
++    /// at a blank line or at the end of the file. A later `%FILES%` section replaces an earlier
++    /// one, `%BACKUP%` sections are appended.
++    ///
++    /// [alpm-db-files]: https://alpm.archlinux.page/specifications/alpm-db-files.5.html
++    fn libalpm_parser<'a>(input: &mut Input<'a>) -> PResult<'a, (Vec<PathBuf>, Vec<BackupEntry>)> {
++        let mut paths = Vec::new();
++        let mut backup = Vec::new();
++        while !input.is_empty() {
++            match libalpm::line.parse_next(input)? {
++                FilesSection::SECTION_KEYWORD => {
++                    paths = repeat(
++                        0..,
++                        preceded(not(libalpm::end_of_block), libalpm::line.map(PathBuf::from)),
++                    )
++                    .parse_next(input)?;
++                }
++                BackupSection::SECTION_KEYWORD => {
++                    let entries: Vec<BackupEntry> = repeat(
++                        0..,
++                        preceded(
++                            not(libalpm::end_of_block),
++                            cut_err(terminated(BackupEntry::parser, alt(("\n", eof)))),
++                        ),
++                    )
++                    .parse_next(input)?;
++                    backup.extend(entries);
++                }
++                _ => {}
++            }
++        }
++        Ok((paths, backup))
++    }
++
++    /// Creates a new [`DbFilesV1`] from a string slice the way libalpm reads [alpm-db-files] data.
++    ///
++    /// This is meant for reading what pacman reads, e.g. files data that was edited by hand.
++    /// Lines are compared as they are (a header followed by `\r\n` is not a header) and lines
++    /// outside of a section are ignored. A section ends at a blank line or at the end of the file.
++    /// A later `%FILES%` section replaces an earlier one, `%BACKUP%` sections are appended.
++    /// Paths are taken as they are.
++    ///
++    /// # Examples
++    ///
++    /// ```
++    /// use std::path::PathBuf;
++    ///
++    /// use alpm_db::files::DbFilesV1;
++    ///
++    /// # fn main() -> Result<(), alpm_db::files::Error> {
++    /// let data = "\n%FILES%\nusr/\n\nusr/bin/\n";
++    /// let files = DbFilesV1::from_str_libalpm(data)?;
++    /// assert_eq!(files.as_ref(), vec![PathBuf::from("usr/")]);
++    /// # Ok(())
++    /// # }
++    /// ```
++    ///
++    /// # Errors
++    ///
++    /// Returns an error if
++    ///
++    /// - a backup entry cannot be parsed,
++    /// - or [`Self::try_from`] [`Vec`] of [`PathBuf`] and [`BackupEntry`] fails.
++    ///
++    /// [alpm-db-files]: https://alpm.archlinux.page/specifications/alpm-db-files.5.html
++    pub fn from_str_libalpm(s: &str) -> Result<Self, Error> {
++        let (paths, backup) = Self::libalpm_parser.parse(Input::new(s))?;
++        DbFilesV1::try_from_parts(paths, backup)
++    }
++}
++
+ impl FromStr for DbFilesV1 {
+     type Err = Error;
+ 
+@@ -923,6 +1008,33 @@
+         }
+     }
+ 
++    /// Ensures that the libalpm reader reads the paths libalpm reads.
++    #[rstest]
++    #[case::empty("", &[])]
++    #[case::blank_line_ends_section("%FILES%\nusr/\n\nusr/bin/\n", &["usr/"])]
++    #[case::lines_outside_sections("\nfoo\n%FOO%\nbar\n\n%FILES%\nusr/\n", &["usr/"])]
++    #[case::crlf("%FILES%\r\nusr/\r\n", &[])]
++    #[case::later_section_replaces("%FILES%\na\n\n%FILES%\nb\n", &["b"])]
++    #[case::header_in_section("%FILES%\na\n%BACKUP%\n", &["%BACKUP%", "a"])]
++    fn filesv1_from_str_libalpm_paths(#[case] data: &str, #[case] expected: &[&str]) -> TestResult {
++        let files = DbFilesV1::from_str_libalpm(data)?;
++        let expected: Vec<PathBuf> = expected.iter().map(PathBuf::from).collect();
++        assert_eq!(files.as_ref(), expected);
++        Ok(())
++    }
++
++    /// Ensures that the libalpm reader appends backup sections and fails on a broken entry.
++    #[test]
++    fn filesv1_from_str_libalpm_backups() -> TestResult {
++        let data = "%FILES%\na\nb\n\n%BACKUP%\nb\t(null)\n\n%BACKUP%\na\t(null)\n";
++        let files = DbFilesV1::from_str_libalpm(data)?;
++        let paths: Vec<String> = files.backups().iter().map(|b| b.path.to_string()).collect();
++        assert_eq!(paths, ["b", "a"]);
++
++        assert!(DbFilesV1::from_str_libalpm("%FILES%\na\n\n%BACKUP%\na\n").is_err());
++        Ok(())
++    }
++
+     /// Ensures that `(null)` backup entries are kept, in file order, and written back.
+     #[test]
+     fn filesv1_from_str_keeps_null_backup_entries() -> TestResult {
+diff -ruN '--exclude=VENDORED' a/alpm-db/src/libalpm.rs b/alpm-db/src/libalpm.rs
+--- a/alpm-db/src/libalpm.rs
++++ b/alpm-db/src/libalpm.rs
+@@ -0,0 +1,21 @@
++//! Line handling of libalpm's local database reader.
++//!
++//! libalpm reads desc and files data line by line and only strips the `\n`: lines end at `\n`
++//! and a blank line is a single `\n`.
++
++use alpm_parsers::prelude::*;
++use winnow::{
++    combinator::{alt, eof, peek, terminated},
++    token::take_till,
++};
++
++/// Recognizes one line: everything up to the next `\n`, which is consumed.
++pub(crate) fn line<'a>(input: &mut Input<'a>) -> PResult<'a, &'a str> {
++    terminated(take_till(0.., '\n'), alt(("\n", eof))).parse_next(input)
++}
++
++/// Recognizes the end of a block of lines, a blank line or the end of the file, without consuming
++/// anything.
++pub(crate) fn end_of_block<'a>(input: &mut Input<'a>) -> PResult<'a, ()> {
++    peek(alt(("\n".void(), eof.void()))).parse_next(input)
++}
+diff -ruN '--exclude=VENDORED' a/alpm-db/src/lib.rs b/alpm-db/src/lib.rs
+--- a/alpm-db/src/lib.rs
++++ b/alpm-db/src/lib.rs
+@@ -7,5 +7,7 @@
+ 
+ pub mod files;
+ 
++mod libalpm;
++
+ // Initialize i18n support.
+ fluent_i18n::i18n!("locales");

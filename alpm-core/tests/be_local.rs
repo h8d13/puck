@@ -192,7 +192,7 @@ fn read_sections() {
 fn read_error_is_sticky() {
 	let t = Tmp::new("sticky");
 	t.init();
-	t.pkg("foo-1.0-1", "%NAME%\nfoo\n", FILES);
+	t.pkg("foo-1.0-1", "%BUILDDATE%\nx\n", FILES);
 	let db = LocalDb::register(&t.dbpath()).unwrap();
 	let fresh = db.populate().unwrap().iter().next().unwrap().clone();
 	let mut p = fresh.clone();

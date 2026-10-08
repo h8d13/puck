@@ -1,0 +1,46 @@
+diff -ruN '--exclude=VENDORED' a/alpm-db/src/desc/parser.rs b/alpm-db/src/desc/parser.rs
+--- a/alpm-db/src/desc/parser.rs
++++ b/alpm-db/src/desc/parser.rs
+@@ -27,7 +27,7 @@
+ };
+ use strum::{Display, EnumString, VariantNames};
+ use winnow::{
+-    ascii::{line_ending, newline, space0, till_line_ending},
++    ascii::{line_ending, space0, till_line_ending},
+     combinator::{
+         alt,
+         cut_err,
+@@ -376,10 +376,8 @@
+ pub(crate) fn sections<'a>(input: &mut Input<'a>) -> PResult<'a, Vec<Section>> {
+     cut_err(repeat_till(
+         0..,
+-        preceded(
+-            opt(newline),
+-            section.layer("alpm-repo-desc file value section"),
+-        ),
++        // Empty lines between sections are ignored.
++        preceded(newlines, section.layer("alpm-repo-desc file value section")),
+         terminated(opt(newlines), eof),
+     ))
+     .parse_next(input)
+diff -ruN '--exclude=VENDORED' a/alpm-db/src/desc/v1.rs b/alpm-db/src/desc/v1.rs
+--- a/alpm-db/src/desc/v1.rs
++++ b/alpm-db/src/desc/v1.rs
+@@ -483,6 +483,17 @@
+         );
+     }
+ 
++    /// Ensures that any number of empty lines between sections is ignored.
++    #[test]
++    fn empty_lines_between_sections_are_ignored() -> TestResult {
++        let spaced = DESC_FULL.replace("\n\n%", "\n\n\n\n%");
++        assert_eq!(
++            DbDescFileV1::from_str(&spaced)?,
++            DbDescFileV1::from_str(DESC_FULL)?
++        );
++        Ok(())
++    }
++
+     #[test]
+     fn missing_required_section_should_fail() {
+         let input = "%VERSION%\n1.0.0-1\n";

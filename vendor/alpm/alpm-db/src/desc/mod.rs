@@ -9,7 +9,7 @@ mod v2;
 pub use v2::DbDescFileV2;
 
 mod parser;
-pub use parser::{Section, SectionKeyword};
+pub use parser::{Section, SectionKeyword, parse_libalpm};
 
 mod schema;
 pub use schema::DbDescSchema;

@@ -388,6 +388,8 @@ impl TryFrom<Vec<Section>> for DbDescFileV1 {
                 Section::Conflicts(v) => set_vec_once!(conflicts, v, SectionKeyword::Conflicts),
                 Section::Provides(v) => set_vec_once!(provides, v, SectionKeyword::Provides),
                 Section::XData(_) => {}
+                // Not part of alpm-db-desc, only read by `parse_libalpm`.
+                Section::MakeDepends(_) | Section::CheckDepends(_) => {}
             }
         }
 
@@ -481,6 +483,17 @@ mod tests {
             pretty_error.contains(error_snippet),
             "Error:\n=====\n{pretty_error}\n=====\nshould contain snippet:\n\n{error_snippet}"
         );
+    }
+
+    /// Ensures that any number of empty lines between sections is ignored.
+    #[test]
+    fn empty_lines_between_sections_are_ignored() -> TestResult {
+        let spaced = DESC_FULL.replace("\n\n%", "\n\n\n\n%");
+        assert_eq!(
+            DbDescFileV1::from_str(&spaced)?,
+            DbDescFileV1::from_str(DESC_FULL)?
+        );
+        Ok(())
     }
 
     #[test]

@@ -57,6 +57,19 @@ impl AsRef<[PathBuf]> for DbFiles {
 }
 
 impl DbFiles {
+    /// Creates a new [`DbFiles`] from a string slice the way libalpm reads [alpm-db-files] data.
+    ///
+    /// Delegates to [`DbFilesV1::from_str_libalpm`]: libalpm does not know other versions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if [`DbFilesV1::from_str_libalpm`] fails.
+    ///
+    /// [alpm-db-files]: https://alpm.archlinux.page/specifications/alpm-db-files.5.html
+    pub fn from_str_libalpm(s: &str) -> Result<Self, Error> {
+        Ok(DbFiles::V1(DbFilesV1::from_str_libalpm(s)?))
+    }
+
     /// Returns the backup entries associated with this [`DbFiles`].
     pub fn backups(&self) -> &[BackupEntry] {
         match self {

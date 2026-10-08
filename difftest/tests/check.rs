@@ -769,7 +769,8 @@ fn segment(rng: &mut Rng) -> String {
 		if rng.below(12) == 0 {
 			s.push('é');
 		}
-		// alpm-db reads a blank line as the end of %FILES%
+		// "." and ".." are no names on disk, alpm-db refuses a
+		// whitespace-only backup path
 		if s != "." && s != ".." && !s.trim().is_empty() {
 			return s;
 		}
@@ -1534,6 +1535,25 @@ fn full_both(fx: &Fixture) -> (String, String) {
 	(show(&c), show(&r))
 }
 
+// -Qkk on a backup entry with hash "(null)": still a backup file, its
+// change is noted, not warned about
+#[test]
+fn null_backup_hash() {
+	let fx = Fixture::new();
+	let me = me(&fx);
+	let mut rng = Rng::new(3);
+	let nodes = [
+		node("etc", MtreeType::Dir, Disk::Intact, me),
+		node("etc/x.conf", MtreeType::File, Disk::Grown, me),
+	];
+	let mtree = gen_mtree(&mut rng, &nodes, me);
+	let files =
+		"%FILES%\netc/\netc/x.conf\n\n%BACKUP%\netc/x.conf\t(null)\n\n";
+	let (c, r) = full_both(&raw_pkg(&nodes, files, &mtree));
+	assert!(c.contains("backup file: p: ") && c.contains("ret 0"), "{c}");
+	assert_eq!(c, r);
+}
+
 // -Qkk where the readers differ: pinned C and port outputs
 #[test]
 fn check_divergences() {
@@ -1541,21 +1561,7 @@ fn check_divergences() {
 		let fx = Fixture::new();
 		me(&fx)
 	};
-	let mut rng = Rng::new(3);
 	let conf = |rel: &str, disk: Disk| node(rel, MtreeType::File, disk, me);
-
-	// backup entry with hash "(null)": alpm-db drops it, so the port
-	// warns where the C notes a modified backup file
-	let nodes = [
-		node("etc", MtreeType::Dir, Disk::Intact, me),
-		conf("etc/x.conf", Disk::Grown),
-	];
-	let mtree = gen_mtree(&mut rng, &nodes, me);
-	let files =
-		"%FILES%\netc/\netc/x.conf\n\n%BACKUP%\netc/x.conf\t(null)\n\n";
-	let (c, r) = full_both(&raw_pkg(&nodes, files, &mtree));
-	assert!(c.contains("backup file: p: ") && c.contains("ret 0"), "{c}");
-	assert!(r.contains("warning: p: ") && r.contains("ret 1"), "{r}");
 
 	// empty mtree file: no mtree for libarchive, no entries for alpm
 	let nodes = [conf("a", Disk::Intact)];

@@ -1,8 +1,9 @@
 // alpm_core::be_local against be_local.c: random local databases are
 // written under /tmp, loaded by the C (alpm_initialize, pkgcache, lazy
-// getters) and by the port, every package field compared. valid alpm-db
-// input must match exactly; pacman-accepted odd input is pinned as the
-// divergence list (PORTING.md)
+// getters) and by the port, every package field compared. desc/files as
+// pacman writes and reads them must match exactly (sections left out,
+// repeated or unknown, odd file lists); what alpm-types still refuses or
+// normalizes is pinned as the divergence list (PORTING.md)
 use std::ffi::c_int;
 use std::fmt::Write as _;
 use std::fs;
@@ -430,6 +431,38 @@ fn gen_desc(rng: &mut Rng, name: &str, version: &str) -> Desc {
 		x.swap(0, at);
 		sections.push(("XDATA".into(), x));
 	}
+	// pacman writes these only when set
+	for key in [
+		"BASE",
+		"DESC",
+		"URL",
+		"ARCH",
+		"BUILDDATE",
+		"INSTALLDATE",
+		"PACKAGER",
+		"VALIDATION",
+	] {
+		if rng.below(12) == 0 {
+			sections.retain(|(k, _)| k != key);
+		}
+	}
+	// read by pacman, never written to a local db
+	for key in ["MAKEDEPENDS", "CHECKDEPENDS"] {
+		if rng.below(8) == 0 {
+			sections.push((key.into(), list(rng, 3, relation)));
+		}
+	}
+	// skipped by pacman up to the next blank line
+	if rng.below(8) == 0 {
+		let key = format!("X{}", word(rng, b"ABCXYZ_", 1, 6));
+		let lines = list(rng, 3, |r| word(r, b"abc%XY =", 1, 8));
+		sections.push((key, lines));
+	}
+	// a repeated value overwrites, a repeated list appends
+	if !sections.is_empty() && rng.below(8) == 0 {
+		let again = sections[rng.below(sections.len())].clone();
+		sections.push(again);
+	}
 	// section order is free in both readers
 	for i in (1..sections.len()).rev() {
 		sections.swap(i, rng.below(i + 1));
@@ -437,19 +470,27 @@ fn gen_desc(rng: &mut Rng, name: &str, version: &str) -> Desc {
 	Desc { sections }
 }
 
-// "." and ".." are path components of their own, blank lines end a
-// section for alpm-db: left to odd_inputs
+// a whitespace-only file name is no backup path for alpm-db: left to
+// odd_inputs
 fn segment(rng: &mut Rng) -> String {
 	loop {
 		let s = word(rng, b"abcz019._-+@ ", 1, 5);
-		if s != "." && s != ".." && !s.trim().is_empty() {
+		if !s.trim().is_empty() {
 			return s;
 		}
 	}
 }
 
-// %FILES% with every parent listed, shuffled (both sides sort), and a
-// %BACKUP% of some files in alpm-db's order (Path ordering)
+fn shuffle<T>(rng: &mut Rng, v: &mut [T]) {
+	for i in (1..v.len()).rev() {
+		v.swap(i, rng.below(i + 1));
+	}
+}
+
+// %FILES% shuffled (both sides sort), parents sometimes missing, paths
+// sometimes repeated or listed as file and directory; %BACKUP% of some
+// files in any order, "(null)" hashes and paths not in %FILES% included.
+// pacman checks none of it
 fn gen_files(rng: &mut Rng) -> String {
 	let mut paths: Vec<String> = Vec::new();
 	let mut files: Vec<String> = Vec::new();
@@ -459,41 +500,54 @@ fn gen_files(rng: &mut Rng) -> String {
 		for _ in 0..depth {
 			let seg = segment(rng);
 			prefix = format!("{prefix}{seg}/");
-			if !paths.contains(&prefix) {
+			if !paths.contains(&prefix) && rng.below(10) != 0 {
 				paths.push(prefix.clone());
 			}
 		}
 		let f = format!("{prefix}{}", segment(rng));
-		if !paths.contains(&f) && !paths.contains(&format!("{f}/")) {
+		if rng.below(10) == 0 {
+			paths.push(format!("{f}/"));
+		}
+		if rng.below(10) == 0 {
 			paths.push(f.clone());
-			files.push(f);
 		}
+		paths.push(f.clone());
+		files.push(f);
 	}
-	// a file named like a listed directory collides in Path terms
-	files.retain(|f| !paths.contains(&format!("{f}/")));
-	paths.retain(|p| p.ends_with('/') || files.contains(p));
-	if paths.is_empty() {
-		return String::new();
+	shuffle(rng, &mut paths);
+	let mut backup: Vec<String> =
+		files.into_iter().filter(|_| rng.below(3) == 0).collect();
+	if rng.below(8) == 0 {
+		backup.push(format!("etc/{}", segment(rng)));
 	}
-	for i in (1..paths.len()).rev() {
-		paths.swap(i, rng.below(i + 1));
+	shuffle(rng, &mut backup);
+	let mut out = String::new();
+	if !paths.is_empty() {
+		out.push_str(&section("FILES", &paths));
 	}
-	let mut out = String::from("%FILES%\n");
-	for p in &paths {
-		writeln!(out, "{p}").unwrap();
-	}
-	out.push('\n');
-	let mut backup: Vec<&String> =
-		files.iter().filter(|_| rng.below(3) == 0).collect();
 	if !backup.is_empty() {
-		backup.sort_by(|a, b| Path::new(a).cmp(Path::new(b)));
-		out.push_str("%BACKUP%\n");
-		for b in backup {
-			writeln!(out, "{b}\t{}", md5(rng)).unwrap();
-		}
-		out.push('\n');
+		let lines: Vec<String> = backup
+			.iter()
+			.map(|b| match rng.below(6) {
+				0 => format!("{b}\t(null)"),
+				_ => format!("{b}\t{}", md5(rng)),
+			})
+			.collect();
+		out.push_str(&section("BACKUP", &lines));
 	}
 	out
+}
+
+fn section(key: &str, lines: &[String]) -> String {
+	format!("%{key}%\n{}\n\n", lines.join("\n"))
+}
+
+// blank lines between sections are skipped by pacman
+fn spaced(rng: &mut Rng, text: String) -> String {
+	match rng.below(6) {
+		0 => text.replace("\n\n%", "\n\n\n%"),
+		_ => text,
+	}
 }
 
 fn dump(entries: &[LocalEntry]) -> String {
@@ -519,12 +573,14 @@ fn gen_entry(rng: &mut Rng) -> LocalEntry {
 	let name = pkgname(rng);
 	let version = full_version(rng);
 	let desc = gen_desc(rng, &name, &version);
+	let desc = spaced(rng, desc.text());
+	let files = gen_files(rng);
+	let files = spaced(rng, files);
 	LocalEntry {
 		dir: format!("{name}-{version}"),
 		// missing files fail on both sides
-		desc: (rng.below(40) != 0).then(|| desc.text().into_bytes()),
-		files: (rng.below(40) != 0)
-			.then(|| gen_files(rng).into_bytes()),
+		desc: (rng.below(40) != 0).then(|| desc.into_bytes()),
+		files: (rng.below(40) != 0).then(|| files.into_bytes()),
 		install: rng.below(3) == 0,
 	}
 }
@@ -794,7 +850,7 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 			"desc crlf",
 			BASE_DESC.replace('\n', "\r\n").into_bytes(),
 			base_f.clone(),
-			"ERR",
+			"",
 		),
 		(
 			"desc line > 1023",
@@ -806,7 +862,7 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 			"unknown key",
 			desc(&|d| d.set("FOO", one("bar"))),
 			base_f.clone(),
-			"ERR",
+			"",
 		),
 		(
 			"reason 2",
@@ -824,33 +880,23 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 			"no validation",
 			desc(&|d| d.remove("VALIDATION")),
 			base_f.clone(),
-			"ERR",
+			"",
 		),
-		(
-			"no base",
-			desc(&|d| d.remove("BASE")),
-			base_f.clone(),
-			"ERR",
-		),
-		("no url", desc(&|d| d.remove("URL")), base_f.clone(), "ERR"),
+		("no base", desc(&|d| d.remove("BASE")), base_f.clone(), ""),
+		("no url", desc(&|d| d.remove("URL")), base_f.clone(), ""),
 		(
 			"no packager",
 			desc(&|d| d.remove("PACKAGER")),
 			base_f.clone(),
-			"ERR",
+			"",
 		),
 		(
 			"no builddate",
 			desc(&|d| d.remove("BUILDDATE")),
 			base_f.clone(),
-			"ERR",
+			"",
 		),
-		(
-			"no arch",
-			desc(&|d| d.remove("ARCH")),
-			base_f.clone(),
-			"ERR",
-		),
+		("no arch", desc(&|d| d.remove("ARCH")), base_f.clone(), ""),
 		(
 			"empty url",
 			desc(&|d| d.set("URL", one(""))),
@@ -886,13 +932,13 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 			"makedepends",
 			desc(&|d| d.set("MAKEDEPENDS", one("gcc"))),
 			base_f.clone(),
-			"ERR",
+			"",
 		),
 		(
 			"checkdepends",
 			desc(&|d| d.set("CHECKDEPENDS", one("chk"))),
 			base_f.clone(),
-			"ERR",
+			"",
 		),
 		(
 			"groups twice",
@@ -904,7 +950,7 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				s.into_bytes()
 			},
 			base_f.clone(),
-			"ERR",
+			"",
 		),
 		(
 			"xdata no pkgtype",
@@ -1105,9 +1151,9 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 			"desc mentions %XDATA%",
 			desc(&|d| d.set("DESC", one("see %XDATA%"))),
 			base_f.clone(),
-			"ERR",
+			"",
 		),
-		("empty desc file", Vec::new(), base_f.clone(), "ERR"),
+		("empty desc file", Vec::new(), base_f.clone(), ""),
 		(
 			"header leading space",
 			{
@@ -1116,7 +1162,7 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 					.into_bytes()
 			},
 			base_f.clone(),
-			"arch",
+			"",
 		),
 		(
 			"no final newline",
@@ -1134,7 +1180,7 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 			"files crlf",
 			base_d.clone(),
 			BASE_FILES.replace('\n', "\r\n").into_bytes(),
-			"backup,files",
+			"",
 		),
 		(
 			"backup (null)",
@@ -1143,7 +1189,7 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				"d41d8cd98f00b204e9800998ecf8427e",
 				"(null)",
 			)),
-			"backup",
+			"",
 		),
 		(
 			"backup no tab",
@@ -1161,7 +1207,7 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				"etc/foo.conf\td41",
 				"etc/bar.conf\td41",
 			)),
-			"ERR",
+			"",
 		),
 		(
 			"backup unsorted",
@@ -1170,7 +1216,7 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 				"%BACKUP%\n",
 				"%BACKUP%\nusr/bin/foo\t00000000000000000000000000000000\n",
 			)),
-			"backup",
+			"",
 		),
 		(
 			"backup md5 upper",
@@ -1191,7 +1237,7 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 			"ERR",
 		),
 		(
-			"backup only",
+			"backup only md5 short",
 			base_d.clone(),
 			files("%BACKUP%\netc/foo.conf\tabc\n\n"),
 			"ERR",
@@ -1200,43 +1246,43 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 			"files blank line inside",
 			base_d.clone(),
 			files("%FILES%\nusr/\n\nusr/bin/\n\n"),
-			"ERR",
+			"",
 		),
 		(
 			"files absolute",
 			base_d.clone(),
 			files("%FILES%\n/etc/\n/etc/x\n\n"),
-			"ERR",
+			"",
 		),
 		(
 			"files no parent",
 			base_d.clone(),
 			files("%FILES%\nusr/bin/foo\n\n"),
-			"ERR",
+			"",
 		),
 		(
 			"files duplicate",
 			base_d.clone(),
 			files("%FILES%\nusr/\nusr/\n\n"),
-			"ERR",
+			"",
 		),
 		(
 			"files dir and file",
 			base_d.clone(),
 			files("%FILES%\nusr\nusr/\n\n"),
-			"ERR",
+			"",
 		),
 		(
 			"files dot segment",
 			base_d.clone(),
 			files("%FILES%\nusr/\nusr/./\n\n"),
-			"ERR",
+			"",
 		),
 		(
 			"files blank path",
 			base_d.clone(),
 			files("%FILES%\nusr/\n \nusr/bin/\n\n"),
-			"ERR",
+			"",
 		),
 		(
 			"files long path",
@@ -1254,13 +1300,84 @@ fn odd_cases() -> Vec<(&'static str, Vec<u8>, Vec<u8>, &'static str)> {
 			"files unknown section",
 			base_d.clone(),
 			files(&format!("{BASE_FILES}%FOO%\nbar\n\n")),
-			"ERR",
+			"",
 		),
 		(
 			"files leading blank",
 			base_d.clone(),
 			files(&format!("\n{BASE_FILES}")),
-			"ERR",
+			"",
+		),
+		("no desc", desc(&|d| d.remove("DESC")), base_f.clone(), ""),
+		(
+			"no installdate",
+			desc(&|d| d.remove("INSTALLDATE")),
+			base_f.clone(),
+			"",
+		),
+		(
+			"url twice",
+			{
+				let mut s = desc_with(|_| {});
+				s.push_str("%URL%\nhttps://b.org/x\n\n");
+				s.into_bytes()
+			},
+			base_f.clone(),
+			"",
+		),
+		(
+			"validation twice",
+			{
+				let mut s = desc_with(|_| {});
+				s.push_str("%VALIDATION%\nsha256\n\n");
+				s.into_bytes()
+			},
+			base_f.clone(),
+			"",
+		),
+		(
+			"header line in a list",
+			desc(&|d| {
+				d.set(
+					"GROUPS",
+					vec!["g1".into(), "%URL%".into()],
+				)
+			}),
+			base_f.clone(),
+			"",
+		),
+		(
+			"stray line after a value",
+			BASE_DESC
+				.replace(
+					"%ARCH%\nx86_64\n",
+					"%ARCH%\nx86_64\nany\n",
+				)
+				.into_bytes(),
+			base_f.clone(),
+			"",
+		),
+		(
+			"backup only",
+			base_d.clone(),
+			files(
+				"%BACKUP%\netc/foo.conf\td41d8cd98f00b204e9800998ecf8427e\n\n",
+			),
+			"",
+		),
+		(
+			"files twice",
+			base_d.clone(),
+			files(&format!("{BASE_FILES}%FILES%\nopt/\n\n")),
+			"",
+		),
+		(
+			"backup twice",
+			base_d.clone(),
+			files(&format!(
+				"{BASE_FILES}%BACKUP%\nusr/bin/foo\t(null)\n\n"
+			)),
+			"",
 		),
 		(
 			"files sorted by strcmp",
@@ -1328,7 +1445,8 @@ fn odd_inputs() {
 
 // the real local db, strictly read only: alpm_initialize only reads
 // ALPM_DB_VERSION when it exists, no transaction or lock is taken.
-// mismatches are counted per field and classified, not asserted
+// mismatches are counted per field; only the url normalization of
+// alpm-types is expected (PORTING.md)
 #[test]
 fn system_local_db() {
 	let dbpath = b"/var/lib/pacman/";
@@ -1342,9 +1460,8 @@ fn system_local_db() {
 	assert_eq!(c.pkgs.len(), r.pkgs.len());
 	let mut by_field: Vec<(&str, usize, String)> = Vec::new();
 	let (mut mismatched, mut errs) = (0, 0);
-	// url: only a '/' appended; backup: only reordered, or "(null)"
-	// entries dropped (then sorted)
-	let (mut url_slash, mut bk_order, mut bk_null) = (0, 0, 0);
+	// url: only a '/' appended
+	let mut url_slash = 0;
 	for (cp, rp) in c.pkgs.iter().zip(&r.pkgs) {
 		assert_eq!(cp.name, rp.name);
 		assert_eq!(cp.version, rp.version);
@@ -1362,15 +1479,6 @@ fn system_local_db() {
 		if cp.url != rp.url && slash(&cp.url) == rp.url {
 			url_slash += 1;
 		}
-		let mut sorted = cp.backup.clone();
-		sorted.sort_by(|a, b| a.name.cmp(&b.name));
-		let null = Some(b"(null)".to_vec());
-		if cp.backup != rp.backup && sorted == rp.backup {
-			bk_order += 1;
-		} else if cp.backup != rp.backup {
-			sorted.retain(|b| b.hash != null);
-			bk_null += usize::from(sorted == rp.backup);
-		}
 		for f in d {
 			match by_field.iter_mut().find(|x| x.0 == f) {
 				Some(x) => x.1 += 1,
@@ -1386,10 +1494,8 @@ fn system_local_db() {
 	for (f, n, first) in &by_field {
 		eprintln!("  {f:12} {n:5} (first: {first})");
 	}
-	eprintln!(
-		"  url only '/' appended: {url_slash}, backup only reordered: \
-		{bk_order}, backup \"(null)\" dropped: {bk_null}"
-	);
-	// alpm-types keeps the url as read (vendor/patches)
+	eprintln!("  url only '/' appended: {url_slash}");
+	// alpm-types keeps the url as read, alpm-db the backups (vendor/patches)
 	assert_eq!(url_slash, 0);
+	assert!(by_field.is_empty(), "new divergence {by_field:?}");
 }

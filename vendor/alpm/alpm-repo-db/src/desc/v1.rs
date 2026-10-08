@@ -433,6 +433,8 @@ impl TryFrom<Vec<Section>> for RepoDescFileV1 {
                 Section::CheckDepends(val) => {
                     set_vec_once!(check_dependencies, val, SectionKeyword::CheckDepends)
                 }
+                // Not part of alpm-repo-desc, only read by `parse_libalpm`.
+                Section::Data(_) => {}
             }
         }
 

@@ -3,11 +3,11 @@
 // branch of db.c's _alpm_db_path.
 //
 // the tar walk follows the C, the entry contents do not: desc/depends go
-// through alpm-repo-db's desc parser and files through its files parser,
-// in place of _alpm_archive_fgets and the READ_AND_STORE macros. what the
-// two accept differs, see PORTING.md. libarchive is replaced by
-// alpm-compress (gzip, bzip2, xz, zstd, none) picked by magic bytes, as
-// the db file name carries no compression suffix.
+// through alpm-repo-db's libalpm-compatible desc reader and files through
+// its files reader, in place of _alpm_archive_fgets and the READ_AND_STORE
+// macros. the typed values still differ, see PORTING.md. libarchive is
+// replaced by alpm-compress (gzip, bzip2, xz, zstd, none) picked by magic
+// bytes, as the db file name carries no compression suffix.
 //
 // sync_db_validate without the status bits db.c keeps: the missing file
 // and the signature check (signing.rs). not ported: alpm_db_update
@@ -20,11 +20,10 @@ use std::fmt::Display;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read, Seek};
 use std::os::unix::ffi::OsStrExt;
-use std::str::FromStr;
 
 use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
 use alpm_compress::tarball::{TarballEntry, TarballReader};
-use alpm_repo_db::desc::{RepoDescFile, RepoDescFileV2};
+use alpm_repo_db::desc::{Section, parse_libalpm};
 use alpm_repo_db::files::RepoFiles;
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
@@ -33,7 +32,7 @@ use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
 use crate::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
-	PKG_VALIDATION_SIGNATURE, Package, PkgFrom,
+	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, PkgXData,
 };
 use crate::pkghash::PkgHash;
 use crate::signing::{
@@ -309,8 +308,12 @@ impl Walk {
 			invalid(&entryname, Reason::Read(io_err(e)))
 		})?;
 		let text = text.get_or_insert_with(Vec::new);
-		// split desc/depends: a section must start on a new line
-		if !text.is_empty() && text.last() != Some(&b'\n') {
+		// the C reads each entry on its own: a blank line ends whatever
+		// section the previous entry left open
+		if !text.is_empty() {
+			if text.last() != Some(&b'\n') {
+				text.push(b'\n');
+			}
 			text.push(b'\n');
 		}
 		text.extend_from_slice(&data);
@@ -348,49 +351,66 @@ fn utf8(data: &[u8]) -> Result<&str, Reason> {
 	std::str::from_utf8(data).map_err(|_| Reason::Utf8)
 }
 
-// what sync_db_read stores from a desc. %NAME% and %VERSION% are only
-// compared with the entry name by the C (logged, never stored), the
-// %MD5SUM% of a v1 desc is dropped like the C skips it. %DATA% (xdata) is
-// not known to alpm-repo-db
+// what sync_db_read stores from a desc, key by key: a repeated value
+// overwrites, a repeated list appends, a missing section leaves the field
+// unset
 fn fill_desc(pkg: &mut Package, data: &[u8]) -> Result<(), Reason> {
-	let desc = match RepoDescFile::from_str(utf8(data)?) {
-		Ok(RepoDescFile::V1(v1)) => RepoDescFileV2::from(v1),
-		Ok(RepoDescFile::V2(v2)) => v2,
-		Err(e) => return Err(Reason::Desc(e)),
-	};
-	let filename = text(&desc.file_name);
-	if !validate_filename(&filename) {
-		return Err(Reason::Filename);
+	let desc = parse_libalpm(utf8(data)?).map_err(Reason::Desc)?;
+	desc.into_iter().try_for_each(|s| fill_section(pkg, s))
+}
+
+fn fill_section(pkg: &mut Package, section: Section) -> Result<(), Reason> {
+	match section {
+		// only compared with the entry name by the C (logged, never
+		// stored); %MD5SUM% is skipped
+		Section::Name(_) | Section::Version(_) | Section::Md5Sum(_) => {
+		}
+		Section::Filename(v) => {
+			let filename = text(&v);
+			if !validate_filename(&filename) {
+				return Err(Reason::Filename);
+			}
+			pkg.filename = Some(filename);
+		}
+		Section::Base(v) => pkg.base = Some(text(&v)),
+		// description and url as read, alpm-types normalizes Display
+		Section::Desc(v) => pkg.desc = Some(text(&v.as_original_str())),
+		Section::Groups(v) => pkg.groups.extend(texts(&v)),
+		// an empty value is alpm-repo-db's None
+		Section::Url(v) => {
+			pkg.url = Some(v
+				.map(|u| text(&u.as_original_str()))
+				.unwrap_or_default())
+		}
+		Section::License(v) => pkg.licenses.extend(texts(&v)),
+		Section::Arch(v) => pkg.arch = Some(text(&v)),
+		Section::BuildDate(v) => pkg.builddate = v,
+		Section::Packager(v) => pkg.packager = Some(text(&v)),
+		Section::CSize(v) => pkg.size = off_t(v),
+		Section::ISize(v) => pkg.isize = off_t(v),
+		Section::Sha256Sum(v) => pkg.sha256sum = Some(text(&v)),
+		Section::PgpSig(v) => pkg.base64_sig = Some(text(&v)),
+		Section::Replaces(v) => pkg.replaces.extend(deps(&v)),
+		Section::Depends(v) => pkg.depends.extend(deps(&v)),
+		Section::OptDepends(v) => pkg.optdepends.extend(deps(&v)),
+		Section::MakeDepends(v) => pkg.makedepends.extend(deps(&v)),
+		Section::CheckDepends(v) => pkg.checkdepends.extend(deps(&v)),
+		Section::Conflicts(v) => pkg.conflicts.extend(deps(&v)),
+		Section::Provides(v) => pkg.provides.extend(deps(&v)),
+		Section::Data(v) => {
+			pkg.xdata.extend(v.iter().map(|x| PkgXData {
+				name: x.key().as_bytes().to_vec(),
+				value: x.value().as_bytes().to_vec(),
+			}))
+		}
 	}
-	pkg.filename = Some(filename);
-	pkg.base = Some(text(&desc.base));
-	// an empty description is what alpm-repo-db gives for a missing one
-	// description and url as read, alpm-types normalizes their Display
-	let d = text(&desc.description.as_original_str());
-	pkg.desc = (!d.is_empty()).then_some(d);
-	pkg.groups = texts(&desc.groups);
-	pkg.url = desc.url.as_ref().map(|u| text(&u.as_original_str()));
-	pkg.licenses = texts(&desc.license);
-	pkg.arch = Some(text(&desc.arch));
-	pkg.builddate = desc.build_date;
-	pkg.packager = Some(text(&desc.packager));
-	pkg.size = off_t(desc.compressed_size);
-	pkg.isize = off_t(desc.installed_size);
-	pkg.sha256sum = Some(text(&desc.sha256_checksum));
-	pkg.base64_sig = desc.pgp_signature.as_ref().map(text);
-	pkg.replaces = deps(&desc.replaces);
-	pkg.depends = deps(&desc.dependencies);
-	pkg.optdepends = deps(&desc.optional_dependencies);
-	pkg.makedepends = deps(&desc.make_dependencies);
-	pkg.checkdepends = deps(&desc.check_dependencies);
-	pkg.conflicts = deps(&desc.conflicts);
-	pkg.provides = deps(&desc.provides);
 	Ok(())
 }
 
 // %FILES%, sorted with _alpm_filelist_sort like the C
 fn fill_files(pkg: &mut Package, data: &[u8]) -> Result<(), Reason> {
-	let files = RepoFiles::from_str(utf8(data)?).map_err(Reason::Files)?;
+	let files = RepoFiles::from_str_libalpm(utf8(data)?)
+		.map_err(Reason::Files)?;
 	let files = files.as_ref().iter().map(|p| PkgFile {
 		name: p.as_os_str().as_bytes().to_vec(),
 		..PkgFile::default()
