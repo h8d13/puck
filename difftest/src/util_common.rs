@@ -20,13 +20,13 @@ unsafe extern "C" {
 	fn wordsplit(str: *const c_char) -> *mut *mut c_char;
 	fn wordsplit_free(ws: *mut *mut c_char);
 
-	fn fmemopen(
+	pub(crate) fn fmemopen(
 		buf: *mut c_void,
 		size: usize,
 		mode: *const c_char,
 	) -> *mut File;
 	fn fopen(path: *const c_char, mode: *const c_char) -> *mut File;
-	fn ftell(f: *mut File) -> c_long;
+	pub(crate) fn ftell(f: *mut File) -> c_long;
 	fn __errno_location() -> *mut c_int;
 }
 

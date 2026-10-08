@@ -49,12 +49,12 @@ struct ConfigRepoC {
 // config_new sets, and by every difftest comparing all of them
 #[repr(C)]
 pub(crate) struct ConfigC {
-	op: u16,
+	pub(crate) op: u16,
 	pub(crate) quiet: u16,
 	verbose: u16,
 	version: u16,
 	help: u16,
-	noconfirm: u16,
+	pub(crate) noconfirm: u16,
 	noprogressbar: u16,
 	pub(crate) logmask: u16,
 	print: u16,
@@ -64,7 +64,7 @@ pub(crate) struct ConfigC {
 	disable_dl_timeout: u16,
 	disable_sandbox_filesystem: u16,
 	disable_sandbox_syscalls: u16,
-	print_format: *mut c_char,
+	pub(crate) print_format: *mut c_char,
 	configfile: *mut c_char,
 	rootdir: *mut c_char,
 	dbpath: *mut c_char,
@@ -90,7 +90,7 @@ pub(crate) struct ConfigC {
 	pub(crate) op_q_locality: u16,
 
 	pub(crate) op_s_clean: u16,
-	op_s_downloadonly: u16,
+	pub(crate) op_s_downloadonly: u16,
 	pub(crate) op_s_info: u16,
 	pub(crate) op_s_sync: u16,
 	pub(crate) op_s_search: u16,
@@ -111,7 +111,7 @@ pub(crate) struct ConfigC {
 	remotefilesiglevel_mask: c_int,
 
 	chomp: u16,
-	verbosepkglists: u16,
+	pub(crate) verbosepkglists: u16,
 	parallel_downloads: c_uint,
 	cleanmethod: u16,
 	holdpkg: *mut CList,
@@ -127,8 +127,8 @@ pub(crate) struct ConfigC {
 
 	pub(crate) handle: *mut c_void,
 
-	explicit_adds: *mut CList,
-	explicit_removes: *mut CList,
+	pub(crate) explicit_adds: *mut CList,
+	pub(crate) explicit_removes: *mut CList,
 
 	pub(crate) colstr: ColStrC,
 
