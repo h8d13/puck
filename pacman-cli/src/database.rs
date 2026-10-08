@@ -236,7 +236,7 @@ fn check_db_local_filelist_conflicts(
 	let mut all: Vec<(&[u8], &Package)> = Vec::new();
 	for &pkg in pkglist {
 		for f in &pkg.files.files {
-			let name = until_nul(&f.name);
+			let name = f.name();
 			if name.last() != Some(&b'/') {
 				all.push((name, pkg));
 			}

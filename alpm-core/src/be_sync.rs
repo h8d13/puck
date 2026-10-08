@@ -697,9 +697,8 @@ impl Walk<'_> {
 				// sorted with _alpm_filelist_sort
 				b"%FILES%" => {
 					let mut files = Vec::new();
-					f.list(&mut files, |l| PkgFile {
-						name: l.to_vec(),
-						..PkgFile::default()
+					f.list(&mut files, |l| {
+						PkgFile::new(l.to_vec(), 0, 0)
 					})?;
 					pkg.files = FileList { files };
 					pkg.files.sort();

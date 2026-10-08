@@ -627,10 +627,8 @@ fn read_files(pkg: &mut Package, f: &mut Lines) {
 			b"%FILES%" => {
 				let mut files = Vec::new();
 				while more(f) && f.strip() != 0 {
-					files.push(PkgFile {
-						name: f.line.clone(),
-						..PkgFile::default()
-					});
+					let name = f.line.clone();
+					files.push(PkgFile::new(name, 0, 0));
 				}
 				pkg.files = FileList { files };
 				pkg.files.sort();
@@ -868,7 +866,7 @@ fn desc_text(pkg: &Package) -> Vec<u8> {
 fn files_text(pkg: &Package) -> Vec<u8> {
 	let mut out = Vec::new();
 	list(&mut out, b"%FILES%", &pkg.files.files, |f| {
-		until_nul(&f.name).to_vec()
+		f.name().to_vec()
 	});
 	list(&mut out, b"%BACKUP%", &pkg.backup, |b| {
 		let hash = b.hash.as_deref().unwrap_or(b"(null)");

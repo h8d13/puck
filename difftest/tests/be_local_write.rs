@@ -224,10 +224,9 @@ fn random_pkg(rng: &mut Rng) -> Package {
 			value: r.bytes(TEXT, 5),
 		}),
 		files: FileList {
-			files: some(rng, 5, |r| File {
-				name: r.bytes(TEXT, 8),
-				size: int(r),
-				mode: r.next_u64() as u32,
+			files: some(rng, 5, |r| {
+				let name = r.bytes(TEXT, 8);
+				File::new(name, int(r), r.next_u64() as u32)
 			}),
 		},
 		backup: some(rng, 3, |r| Backup {
@@ -391,10 +390,7 @@ fn write_cases() {
 		validation: 2,
 		reason: PkgReason::Unknown,
 		files: FileList {
-			files: vec![File {
-				name: b"etc/".to_vec(),
-				..File::default()
-			}],
+			files: vec![File::new(b"etc/".to_vec(), 0, 0)],
 		},
 		backup: vec![
 			Backup {

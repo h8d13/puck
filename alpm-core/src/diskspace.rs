@@ -425,7 +425,7 @@ pub fn calculate_removed_size(
 	ev: &mut dyn Callbacks,
 ) {
 	for file in &files.files {
-		let filename = until_nul(&file.name);
+		let filename = file.name();
 		let path = join_path(handle.root(), filename);
 		let Ok(st) = llstat(&path) else {
 			// alpm_option_match_noextract is nonzero unless a
@@ -470,7 +470,7 @@ pub fn calculate_installed_size(
 		if kind == S_IFDIR || kind == S_IFLNK {
 			continue;
 		}
-		let mut filename = until_nul(&file.name);
+		let mut filename = file.name();
 		if filename.first() == Some(&b'.') {
 			filename = handle.dbpath();
 		}

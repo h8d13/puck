@@ -298,7 +298,7 @@ fn push_file(files: &mut FileList, path: &[u8], mode: u32, size: i64) {
 	if mode & AE_IFMT == AE_IFDIR && name.last() != Some(&b'/') {
 		name.push(b'/');
 	}
-	files.files.push(PkgFile { name, size, mode });
+	files.files.push(PkgFile::new(name, size, mode));
 }
 
 // an entry of libarchive's mtree reader: "./" stripped like

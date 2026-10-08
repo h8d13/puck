@@ -344,7 +344,7 @@ impl CConflictHandle {
 		assert!(all.clone().all(|p| p.name.is_some()), "NULL name");
 		assert!(
 			all.flat_map(|p| &p.files.files)
-				.all(|f| !f.name.is_empty()),
+				.all(|f| !f.name().is_empty()),
 			"empty file name"
 		);
 		let mut recs = FcRecs::default();

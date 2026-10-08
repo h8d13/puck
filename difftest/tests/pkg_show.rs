@@ -725,11 +725,8 @@ fn files_fuzz() {
 	let fx = Fx::new("files");
 	let mut rng = Rng::new(0xf11e);
 	for _ in 0..iters() / 4 {
-		let files = some_of(&mut rng, 6, |r| File {
-			name: text(r, 5),
-			size: 0,
-			mode: 0,
-		});
+		let files =
+			some_of(&mut rng, 6, |r| File::new(text(r, 5), 0, 0));
 		let pkg = Package {
 			files: FileList { files },
 			..named(&text(&mut rng, 4), b"1")

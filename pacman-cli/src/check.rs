@@ -203,7 +203,7 @@ pub fn check_pkg_fast(
 	// file's name after it
 	let mut filepath = root.clone();
 	for file in &files {
-		let path = until_nul(&file.name);
+		let path = file.name();
 		if rootlen + 1 + path.len() > PATH_MAX {
 			let msg = cat(&[b"path too long: ", root, path, b"\n"]);
 			pm_printf(&mut o.stderr, c, LOG_WARNING, &msg);

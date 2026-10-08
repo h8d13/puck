@@ -75,10 +75,9 @@ fn random_origin(rng: &mut Rng) -> Option<PkgFrom> {
 
 // every field drawn, NULL strings included
 fn random_pkg(rng: &mut Rng) -> Package {
-	let files = some_of(rng, |r| File {
-		name: r.bytes(TEXT_ALPHABET, 6),
-		size: r.next_u64() as i64,
-		mode: r.next_u64() as u32,
+	let files = some_of(rng, |r| {
+		let name = r.bytes(TEXT_ALPHABET, 6);
+		File::new(name, r.next_u64() as i64, r.next_u64() as u32)
 	});
 	Package {
 		name_hash: rng.next_u64(),

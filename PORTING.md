@@ -428,6 +428,9 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   `intersection` matches per platform. Empty names count as files.
 - `difference`/`intersection` return names borrowed from `self`, like the
   C list that does not own its strings.
+- `filelist::File` names hold no nul: `File::new`, the only constructor
+  (private field), cuts at the first one like the C's strdup'd strings.
+  Readers (sort, -Qk, -Ql, conflicts, removal) use `name()` uncut.
 - `alpm_strerror`: out of range and `ALPM_ERR_OK` give "unexpected
   error" like the C. difftest runs without `setlocale`, so gettext returns
   the msgid.

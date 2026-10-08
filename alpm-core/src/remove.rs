@@ -625,8 +625,8 @@ fn remove_package_files(
 	let files = &oldpkg.files.files;
 	let pkgname = oldpkg.name_bytes();
 	for file in files {
-		if !should_skip_file(h, skip_remove, newpkg, &file.name)
-			&& !can_remove_file(h, &file.name)
+		if !should_skip_file(h, skip_remove, newpkg, file.name())
+			&& !can_remove_file(h, file.name())
 		{
 			let msg = [
 				b"not removing package '",
@@ -657,15 +657,15 @@ fn remove_package_files(
 	let mut err = 0;
 	for (i, file) in files.iter().enumerate().rev() {
 		// see db_find_fileconflicts for why skip_remove is honoured
-		if should_skip_file(h, skip_remove, newpkg, &file.name) {
+		if should_skip_file(h, skip_remove, newpkg, file.name()) {
 			let msg = [
-				until_nul(&file.name),
+				file.name(),
 				b" is in skip_remove, skipping removal\n",
 			];
 			logv(h.callbacks(), Debug, &msg);
 			continue;
 		}
-		let r = unlink_file(h, oldpkg, newpkg, &file.name, nosave);
+		let r = unlink_file(h, oldpkg, newpkg, file.name(), nosave);
 		if r == Unlinked::Failed {
 			err += 1;
 		}

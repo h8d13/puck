@@ -95,10 +95,7 @@ fn pkg(files: &[&str], backup: &[&str]) -> Package {
 		files: FileList {
 			files: files
 				.iter()
-				.map(|f| File {
-					name: f.as_bytes().to_vec(),
-					..File::default()
-				})
+				.map(|f| File::new(f.as_bytes().to_vec(), 0, 0))
 				.collect(),
 		},
 		backup: backup

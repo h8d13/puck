@@ -419,10 +419,7 @@ fn gen_newpkg(rng: &mut Rng, w: &World) -> Package {
 		.collect();
 	let files = names
 		.into_iter()
-		.map(|name| File {
-			name,
-			..File::default()
-		})
+		.map(|name| File::new(name, 0, 0))
 		.collect();
 	Package {
 		name_hash: hash_sdbm(b"a"),

@@ -297,9 +297,8 @@ impl Trigger {
 		let hit = |name: &[u8]| {
 			fnmatch_patterns(&pats, name) == Some(false)
 		};
-		let files = |p: &'a Package| {
-			p.files.files.iter().map(|f| &f.name[..])
-		};
+		let files =
+			|p: &'a Package| p.files.files.iter().map(|f| f.name());
 		let mut install: Vec<&[u8]> = targets
 			.add
 			.iter()

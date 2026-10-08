@@ -342,11 +342,8 @@ fn add_pkg(rng: &mut Rng, pool: &[String], free: u64) -> Package {
 				.to_string(),
 				_ => pool[rng.below(pool.len())].clone(),
 			};
-			File {
-				name: name.into_bytes(),
-				size: file_size(rng, per_file),
-				mode: pick(rng, &MODES),
-			}
+			let size = file_size(rng, per_file);
+			File::new(name.into_bytes(), size, pick(rng, &MODES))
 		})
 		.collect();
 	Package {

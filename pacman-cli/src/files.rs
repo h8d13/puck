@@ -134,7 +134,7 @@ fn matches(ftarg: &FileTarget, pkg: &Package) -> Vec<Vec<u8>> {
 	};
 	let mut found = Vec::new();
 	for f in &files.files {
-		let name = until_nul(&f.name);
+		let name = f.name();
 		let s = match ftarg.exact_file {
 			true => name,
 			false => match name.iter().rposition(|&c| c == b'/') {
@@ -241,7 +241,7 @@ fn dump_files(config: &Config, repo: &[u8], pkg: &Package, out: &mut Vec<u8>) {
 	let c = &config.colstr;
 	for f in &pkg.files.files {
 		if config.op_f_machinereadable != 0 {
-			machine_line(out, repo, pkg, &f.name);
+			machine_line(out, repo, pkg, f.name());
 			continue;
 		}
 		if config.quiet == 0 {
@@ -252,7 +252,7 @@ fn dump_files(config: &Config, repo: &[u8], pkg: &Package, out: &mut Vec<u8>) {
 				b" ",
 			]));
 		}
-		out.extend(cat(&[until_nul(&f.name), b"\n"]));
+		out.extend(cat(&[f.name(), b"\n"]));
 	}
 }
 
