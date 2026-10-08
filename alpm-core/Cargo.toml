@@ -14,6 +14,7 @@ pacman-common = { path = "../pacman-common" }
 reqwest.workspace = true
 rustix.workspace = true
 tar.workspace = true
+time.workspace = true
 
 [lints]
 workspace = true

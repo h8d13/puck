@@ -181,7 +181,7 @@ makes them; METHODOLOGY.md has the rules.
 | rustix 1.1 (`fs`, `process`, `termios`, `net`; `use-libc`) | util, diskspace, lock, sandbox, frontend util | statvfs, access, umask, getuid/geteuid, fchdir, tty width, tcflush, SCM_RIGHTS to the exec helper | handle unit, process unit |
 | landlock 0.4, libseccomp 0.4 | sandbox | `alpm_sandbox_setup_child` | sandbox unit |
 | signal-hook 0.4 (+ signal-hook-registry) | pacman-cli sighandler | SIGINT/SIGHUP soft interrupt (no safe handler API in std/rustix, none in ALPM; tokio's signals use the same registry) | signals unit |
-| md-5, sha2, base64, time, unicode-width | through alpm-types / directly | precedent crates of ALPM | start |
+| md-5, sha2, base64, time, unicode-width | through alpm-types / directly (time: dload, log, frontend dates, difftest) | precedent crates of ALPM | start |
 
 Removed, with their patches: alpm-db (0201-0207), alpm-repo-db
 (0301-0305), alpm-pkginfo (0501-0506), alpm-package, alpm-buildinfo,
@@ -220,7 +220,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `pacman-cli::package::format_date_utc` | `time` crate | done: time does the calendar; `%c` field layout is a format! (no `formatting` feature) |
 | glibc wcwidth table in `pacman-cli::util` | `unicode-width` | done: unicode-width, glibc -1 mapping |
 | generated glibc class/towupper tables in `alpm-core::regex` | std `char` Unicode methods | done: std classes, `to_uppercase` when single-char; divergence counted (`class_divergence`, `towupper_divergence`) |
-| `dload` http_date/parse_http_date + civil date | `time` crate | open: switch formatting, keep RFC 850/asctime parsing time lacks |
+| `dload` http_date/parse_http_date + civil date | `time` crate | done: If-Modified-Since and log stamps format through time; Last-Modified is curl's parsedate translated (6 parts, names, zones, YYYYMMDD, curl's own time2epoch: years past 9999, Feb 30), which time cannot express; difftest `http_dates` vs `curl_getdate` |
 | `pacman-cli::getopt` | clap (ALPM CLIs) | kept: ops are combinable short flags anywhere (`-yS`, `pkg -S`), letters change meaning per op (two-pass parse), glibc error texts and ambiguity list, permuted argv/optind, POSIXLY_CORRECT; clap offers none of these |
 | `backup::split_backup`, `package::parse_xdata` | `alpm-db`, alpm-types `ExtraData` | translated again for the owned db readers (bytes, NULL hash, the C's '=' split) |
 | md5/sha256 | `md-5`, `sha2` | uses the crates |
@@ -527,7 +527,8 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   them (others reqwest's), no netrc, Basic auth from URL userinfo only,
   HTTP/1.1, no ftp://, rustls with the platform verifier, reqwest's proxy
   env handling, the url crate's normalised URL after a redirect,
-  Last-Modified in RFC 1123/850/asctime forms only. Redirects are
+  If-Modified-Since left out for an mtime past year 9999 (time's range).
+  Last-Modified goes through curl's parsedate (`getdate_capped`). Redirects are
   followed by hand like curl's FOLLOWLOCATION (any 3xx with a Location,
   10 follows, http(s) only, curl's texts for disabled/unknown schemes,
   connect/resolve errors naming the hop, url credentials kept on the

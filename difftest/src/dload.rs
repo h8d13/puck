@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use alpm_core::callbacks::{Callbacks, DownloadEvent, Event, Fetch, LogLevel};
 use alpm_core::dload::Payload;
+use time::OffsetDateTime;
 
 use crate::handle::*;
 use crate::{CFile, CList, TempRoot, alpm_list_add, alpm_list_free, c_free};
@@ -83,6 +84,18 @@ unsafe extern "C" {
 		filename: *const c_char,
 	) -> *mut c_char;
 	fn _alpm_filecache_setup(handle: *mut c_void) -> *const c_char;
+	// time_t is long on glibc's 64-bit targets
+	fn curl_getdate(p: *const c_char, unused: *const c_long) -> c_long;
+}
+
+// curl's date parser, the one CURLINFO_FILETIME reads Last-Modified
+// with (Curl_getdate_capped differs past time_t only). -1 is a failure,
+// curl moves a parsed -1 to 0
+pub fn c_getdate(s: &[u8]) -> c_long {
+	let c = cstr(s);
+	// SAFETY: c is a nul-terminated copy, the second argument is
+	// unused by curl and may be NULL
+	unsafe { curl_getdate(c.as_ptr(), ptr::null()) }
 }
 
 // what the callbacks saw, in order
@@ -626,32 +639,18 @@ pub fn payload_layout_ok() -> bool {
 
 // HTTP dates for Last-Modified, independent of the port's
 pub fn http_date(t: i64) -> String {
-	const WD: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-	const MON: [&str; 12] = [
-		"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep",
-		"Oct", "Nov", "Dec",
-	];
-	let days = t.div_euclid(86400);
-	let secs = t.rem_euclid(86400);
-	// civil_from_days, H. Hinnant
-	let z = days + 719468;
-	let era = z.div_euclid(146097);
-	let doe = z - era * 146097;
-	let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-	let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-	let mp = (5 * doy + 2) / 153;
-	let d = doy - (153 * mp + 2) / 5 + 1;
-	let m = if mp < 10 { mp + 3 } else { mp - 9 };
-	let y = yoe + era * 400 + i64::from(m <= 2);
+	const WD: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+	let d = OffsetDateTime::from_unix_timestamp(t).expect("server mtime");
+	let mon = format!("{}", d.month());
 	format!(
 		"{}, {:02} {} {} {:02}:{:02}:{:02} GMT",
-		WD[days.rem_euclid(7) as usize],
-		d,
-		MON[(m - 1) as usize],
-		y,
-		secs / 3600,
-		secs / 60 % 60,
-		secs % 60
+		WD[d.weekday().number_days_from_monday() as usize],
+		d.day(),
+		&mon[..3],
+		d.year(),
+		d.hour(),
+		d.minute(),
+		d.second()
 	)
 }
 

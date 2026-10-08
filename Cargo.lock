@@ -47,6 +47,7 @@ dependencies = [
  "reqwest",
  "rustix",
  "tar",
+ "time",
 ]
 
 [[package]]
@@ -469,6 +470,7 @@ dependencies = [
  "pacman-common",
  "rustix",
  "testpkg",
+ "time",
 ]
 
 [[package]]
