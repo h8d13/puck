@@ -127,13 +127,34 @@ front-ends (yay, paru via alpm.rs, pamac, pyalpm) keep working.
 
 Gate: those front-ends' basic operations against the Rust libalpm.
 
+## Owned readers (replacing ALPM parser patches)
+
+ALPM's format parsers are spec-strict by design, pacman's readers are
+lenient and byte based (METHODOLOGY.md). Bending the parsers with patches
+grew a third of the series into whole pacman readers inside ALPM crates
+that upstream will not take, and the typed values still could not hold
+NULL/empty/bytes (pactest's sparse desc files and empty `.PKGINFO` values,
+~200 tests). The readers are owned instead, translated from the C; the
+reader patches and crate dependencies go once nothing uses them.
+
+| Reader | C source | Owned in | Drops | State |
+|---|---|---|---|---|
+| local db desc/files | be_local.c `local_db_read`, READ_AND_STORE | `alpm-core::be_local` | 0201-0207, alpm-db | in progress |
+| sync db desc/files | be_sync.c `sync_db_read`, READ_AND_STORE | `alpm-core::be_sync` | 0301-0305, alpm-repo-db | in progress |
+| `.PKGINFO` | be_package.c `parse_descfile` | `alpm-core::be_package` | 0501-0506, alpm-pkginfo | in progress |
+| `.MTREE` / local mtree | libarchive mtree reader (as pacman uses it) | `alpm-core::mtree` | 0401-0411, alpm-mtree | todo |
+| alpm-types patches | whatever still uses ALPM types after the above | - | 01xx no longer used | todo (after the readers) |
+
+Kept and to report upstream: 0551 (gzip members), 0552 (content
+sniffing), and any 01xx/04xx fix that is an ALPM bug on its own terms
+(0401 `PartialEq`, 0403 mtree gzip members, 0411 `Error::Parse` display).
+
 ## ALPM patches for parity
 
-Every place a comparison shows the ALPM crates differing from pacman gets
-one patch in `vendor/patches/` (METHODOLOGY.md). Ranges: 01xx
-alpm-types, 02xx alpm-db, 03xx alpm-repo-db, 04xx alpm-mtree, 05xx
-alpm-pkginfo, 055x alpm-compress. pacman bugs in `UPSTREAM.md` are not
-copied. State: todo until a patch lands, then the patch file name.
+Ranges: 01xx alpm-types, 02xx alpm-db, 03xx alpm-repo-db, 04xx
+alpm-mtree, 05xx alpm-pkginfo, 055x alpm-compress. The reader patches
+below leave with their owned reader (table above); new patches are real
+ALPM bugs only. pacman bugs in `UPSTREAM.md` are not copied.
 
 | Crate | Divergence to correct | Seen on real data | State |
 |---|---|---|---|
@@ -194,9 +215,9 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `version.c` vercmp | `alpm-types` version comparison | keep port (pacman compares arbitrary strings), difftest ALPM vs C on versions ALPM parses |
 | `deps.c` dep strings | `alpm-types` relations | same as above |
 | xdata, base64, checksums | `alpm-types` (`ExtraData`, base64, md-5/sha2) | use ALPM / its crates, no hand-written hashes |
-| `be_local.c` desc/files | `alpm-db` | use `alpm-db`, difftest against C `local_db_read` |
-| `be_sync.c` | `alpm-repo-db` | use `alpm-repo-db` |
-| `be_package.c` | `alpm-package`, `alpm-compress`, `alpm-pkginfo`, `alpm-mtree` | use ALPM |
+| `be_local.c` desc/files | `alpm-db` | translate (spec-strict parser, owned reader) |
+| `be_sync.c` | `alpm-repo-db` | translate (owned reader) |
+| `be_package.c` | `alpm-package`, `alpm-compress`, `alpm-pkginfo`, `alpm-mtree` | alpm-compress decoders; `.PKGINFO` and mtree readers translated |
 | filelist, pkghash, deps resolution, transactions, hooks, frontend | none | translate |
 
 ## Status
@@ -602,8 +623,9 @@ rows still here are the remaining ones.
 
 ## Divergences from pacman (ALPM parsers)
 
-Where the ALPM crates read pacman's files differently. Kept as is
-(`METHODOLOGY.md`), pinned in the `be_local`/`be_sync` difftests.
+Where the ALPM crates read pacman's files differently, pinned in the
+`be_local`/`be_sync` difftests. Leaves with the owned readers (table
+"Owned readers"): each unit removes what its reader fixes.
 
 Seen on real databases:
 
