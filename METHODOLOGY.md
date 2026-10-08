@@ -151,7 +151,9 @@ No real root, and nothing outside `.tmp/` is written.
   checkout's `.cargo/config.toml` sets the same runner). With large swap
   and no oomd, a runaway test never meets the OOM killer and freezes the
   machine; capped, it aborts and fails. Run tests through
-  `scripts/cargo-test.sh`, which allows one suite at a time machine wide.
+  `scripts/cargo-test.sh`, which allows `CARGO_TEST_SLOTS` (3) suites at
+  a time machine wide; the per-process caps keep that within RAM. Run
+  the full suite once at the end of a unit, targeted tests before.
 - Waiting on a background run: never `until ! pgrep -f '<text>'`. The
   waiter's own command line contains `<text>`, so pgrep always finds
   it and the loop never ends (six such loops ran for hours). Wait on a
