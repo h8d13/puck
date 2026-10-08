@@ -7,6 +7,7 @@
 #        pacman/test/pacman/meson.build)
 # needs fakechroot and fakeroot; temporary roots go to $TMPDIR (default
 # .tmp/ of the checkout, never /tmp)
+# PACTEST_LOGS=DIR keeps every failing test's verbose log as DIR/<test>.log
 
 bin=$1
 if [ ! -x "$bin" ]; then
@@ -58,6 +59,10 @@ for t in "${tests[@]}"; do
 		xfailed=$((xfailed + 1)) res="expected fail"
 	else
 		fail=$((fail + 1)) res=FAIL
+	fi
+	if [ -n "${PACTEST_LOGS:-}" ] && [ "$res" != ok ]; then
+		mkdir -p "$PACTEST_LOGS"
+		cp "$log" "$PACTEST_LOGS/$name.log"
 	fi
 	echo "$res  $name"
 done
