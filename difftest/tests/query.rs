@@ -937,6 +937,24 @@ fn fixed() {
 	}
 }
 
+// -Qt on one named package as the first run on fresh worlds, the load
+// lines shown: find_requiredby loads each entry's desc in list order
+// and the target's own at its first depend not matching it literally
+#[test]
+fn requiredby_order() {
+	let mut rng = Rng::new(0x7e_9d);
+	for _ in 0..worlds() {
+		let mut w = open_world(&mut rng);
+		let mut cfg = w.cfg.clone();
+		cfg.op_q_unrequired = 1 + rng.below(2) as u16;
+		cfg.logmask = LOG_ERROR | LOG_WARNING | LOG_FUNCTION;
+		let p = &w.pkgs[rng.below(w.pkgs.len())];
+		let targets = vec![s(p.name)];
+		let path = w.path_env(&mut rng);
+		compare(&mut w, &cfg, &targets, 80, &path);
+	}
+}
+
 #[test]
 fn fuzz() {
 	cwd_clean();
