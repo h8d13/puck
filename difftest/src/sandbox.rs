@@ -616,3 +616,58 @@ pub fn probe_lines<N: AsRef<str>>(r: &[(N, i32)]) -> String {
 	}
 	s
 }
+
+// pretends to be root (getuid 0), every sandbox user is the current
+// user: the parent side runs as it would as root, the helper as us
+pub struct RootHost;
+
+impl alpm_core::sandbox::Host for RootHost {
+	fn uid(&self) -> u32 {
+		0
+	}
+
+	fn getpwnam(
+		&self,
+		_user: &[u8],
+	) -> Result<(u32, u32), Option<io::Error>> {
+		let uid = rustix::process::getuid().as_raw();
+		Ok((uid, rustix::process::getgid().as_raw()))
+	}
+
+	fn raise(&mut self, _sig: c_int) {}
+}
+
+// target/<profile>/deps/<test>-<hash> -> target/<profile>/<name>
+pub fn sibling_bin(name: &str) -> std::path::PathBuf {
+	let exe = std::env::current_exe().unwrap();
+	exe.parent().unwrap().parent().unwrap().join(name)
+}
+
+// a HelperSandbox running difftest's sandbox-helper (instead of
+// /proc/self/exe, it ends itself after 60 s) on RootHost
+pub fn test_helper(
+	user: &[u8],
+	disable_fs: bool,
+	disable_syscalls: bool,
+) -> alpm_core::sandbox::HelperSandbox {
+	let mut sb = alpm_core::sandbox::HelperSandbox::new(
+		user,
+		disable_fs,
+		disable_syscalls,
+	);
+	sb.program = sibling_bin("sandbox-helper");
+	sb.host = Box::new(RootHost);
+	sb
+}
+
+// Handle::set_sandbox_for of tests: _alpm_use_sandbox as for root, the
+// download in test_helper
+pub fn test_sandbox_for(
+	h: &alpm_core::handle::Handle,
+) -> Option<Box<dyn alpm_core::dload::Sandbox>> {
+	let user = h.sandboxuser()?;
+	let fs = h.disable_sandbox_filesystem() != 0;
+	let sc = h.disable_sandbox_syscalls() != 0;
+	alpm_core::sandbox::use_sandbox(0, Some(user), fs, sc)
+		.then(|| Box::new(test_helper(user, fs, sc)) as _)
+}

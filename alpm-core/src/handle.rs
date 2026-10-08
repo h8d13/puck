@@ -7,8 +7,8 @@
 // getters' CHECK_HANDLE reset has nothing to reset). RET_ERR's debug
 // line (C file and line) is not logged, the option setters' own debug
 // lines are. NULL arguments belong to the C ABI layer. alpm_release is
-// Drop. not ported: handle->user (getuid needs rustix "process"),
-// the curl multi handle (reqwest clients are per call).
+// Drop. not ported: the curl multi handle (reqwest clients are per
+// call).
 use std::ffi::{OsStr, c_int, c_uint};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -22,14 +22,15 @@ use crate::be_local::INFRQ_DESC;
 use crate::callbacks::{Callbacks, Fetch, LogLevel};
 use crate::db::{Db, SIG_USE_DEFAULT};
 use crate::deps::{DepMod, Depend};
-use crate::dload::{DownloadState, Downloader, Settings};
+use crate::dload::{DownloadState, Downloader, Sandbox, Settings};
 use crate::error::Errno;
 use crate::log::{Clock, Logger};
 use crate::package::{DbCaches, Package};
+use crate::sandbox::handle_sandbox;
 use crate::signing::Keyring;
 use crate::trans::Trans;
 use crate::util::{
-	CALLER_PREFIX, PATH_MAX, fnmatch_patterns, hash_sdbm, makepath,
+	CALLER_PREFIX, PATH_MAX, fnmatch_patterns, getuid, hash_sdbm, makepath,
 	until_nul,
 };
 
@@ -39,8 +40,15 @@ const SYSHOOKDIR: &[u8] = b"/usr/share/libalpm/hooks/";
 const PASSWD: &str = "/etc/passwd";
 const ENOENT: i32 = 2;
 
+// what runs a download sandboxed: None where _alpm_use_sandbox fails
+pub type SandboxFor = fn(&Handle) -> Option<Box<dyn Sandbox>>;
+
 // alpm_handle_t
 pub struct Handle {
+	// getuid() at alpm_initialize
+	user: u32,
+	// sandbox::handle_sandbox, swapped by tests that cannot be root
+	sandbox_for: SandboxFor,
 	root: Vec<u8>,
 	dbpath: Vec<u8>,
 	dbext: Vec<u8>,
@@ -140,6 +148,7 @@ pub(crate) struct SyncParts<'h> {
 	pub(crate) download: &'h mut DownloadState,
 	pub(crate) cb: &'h mut dyn Callbacks,
 	pub(crate) fetch: Option<&'h mut dyn Fetch>,
+	pub(crate) sandbox: Option<Box<dyn Sandbox>>,
 	pub(crate) dbs: &'h mut [Db],
 }
 
@@ -256,6 +265,8 @@ impl Handle {
 			requested: AtomicBool::new(false),
 		});
 		Ok(Handle {
+			user: getuid(),
+			sandbox_for: handle_sandbox,
 			root,
 			dbpath,
 			dbext: b".db".to_vec(),
@@ -347,11 +358,13 @@ impl Handle {
 
 	// what alpm_db_update works on at once, borrowed apart
 	pub(crate) fn sync_parts(&mut self) -> SyncParts<'_> {
+		let sandbox = (self.sandbox_for)(self);
 		SyncParts {
 			keyring: &mut self.keyring,
 			download: &mut self.download,
 			cb: &mut *self.cb,
 			fetch: self.fetch.as_deref_mut().map(|f| f as _),
+			sandbox,
 			dbs: &mut self.dbs_sync,
 		}
 	}
@@ -629,20 +642,31 @@ impl Handle {
 		&self.download
 	}
 
+	// handle->user
+	pub fn user(&self) -> u32 {
+		self.user
+	}
+
+	// how downloads get their sandbox (sandbox::handle_sandbox), for
+	// tests standing in for root
+	pub fn set_sandbox_for(&mut self, f: SandboxFor) {
+		self.sandbox_for = f;
+	}
+
 	// f with a Downloader on the handle's download settings, state,
-	// callbacks and fetchcb, next to the cachedirs. no sandbox child
-	// yet (sandbox.c)
+	// callbacks, fetchcb and sandbox, next to the cachedirs
 	pub(crate) fn with_downloader<R>(
 		&mut self,
 		f: impl FnOnce(&mut Downloader, &mut Vec<Vec<u8>>) -> R,
 	) -> R {
 		let settings = self.dload_settings();
+		let mut sandbox = (self.sandbox_for)(self);
 		let mut dl = Downloader {
 			settings: &settings,
 			state: &mut self.download,
 			cb: &mut *self.cb,
 			fetch: self.fetch.as_deref_mut().map(|f| f as _),
-			sandbox: None,
+			sandbox: sandbox.as_deref_mut().map(|s| s as _),
 		};
 		f(&mut dl, &mut self.cachedirs)
 	}

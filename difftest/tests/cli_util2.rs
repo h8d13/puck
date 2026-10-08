@@ -14,9 +14,9 @@ use alpm_core::handle::Handle;
 use alpm_core::package::{Package, PkgFrom};
 use alpm_core::util::hash_sdbm;
 use difftest::{
-	CACHED, CIo, CORE_SERVER, Rng, UtilWorld, c_colon_printf,
+	CACHED, CIo, CORE_SERVER, Pty, Rng, UtilWorld, c_colon_printf,
 	c_multiselect_question, c_question, c_rmrf, c_select_question, iters,
-	widths_agree,
+	run_tty_probe, widths_agree,
 };
 use pacman_cli::conf::Config;
 use pacman_cli::package::format_date_utc;
@@ -927,5 +927,51 @@ fn select_display_blocks() {
 			.collect();
 		select_display(&mut out, &cfg.colstr, &pairs, cols);
 		assert_eq!(show(&c.stdout), show(&out), "{pkgs:?} cols {cols}");
+	}
+}
+
+fn tty_probe() -> PathBuf {
+	PathBuf::from(env!("CARGO_BIN_EXE_tty-probe"))
+}
+
+fn probe_result(stderr: &[u8]) -> String {
+	// the answer's echo goes to the terminal, the result line follows
+	// the prompt on stderr
+	let s = String::from_utf8_lossy(stderr);
+	let r = s.split_once("result ").map(|(_, r)| r.trim_end());
+	r.unwrap_or_else(|| panic!("no result in {s:?}"))
+		.to_string()
+}
+
+// getcols on a terminal stdout without COLUMNS: TIOCGWINSZ's width, 80
+// for a width of 0 (the C's -EIO)
+#[test]
+fn getcols_terminal() {
+	for cols in [123, 1, 0, 300] {
+		let pty = Pty::open(cols);
+		let err = run_tty_probe(&tty_probe(), "cols", &pty, b"", b"");
+		let want = if cols == 0 { 80 } else { cols };
+		assert_eq!(probe_result(&err), format!("{want} {want}"));
+	}
+}
+
+// typeahead queued on a terminal stdin before the prompt is dropped
+// (flush_term_input), the answer typed after it counts
+#[test]
+fn prompt_flushes_typeahead() {
+	for side in ["c", "rust"] {
+		let pty = Pty::open(80);
+		let mut m = &pty.master;
+		std::io::Write::write_all(&mut m, b"n\n").unwrap();
+		let mode = format!("yesno-{side}");
+		let err = run_tty_probe(
+			&tty_probe(),
+			&mode,
+			&pty,
+			b"[Y/n] ",
+			b"y\n",
+		);
+		assert_eq!(probe_result(&err), "1", "{side}: {err:?}");
+		assert!(err.starts_with(b":: go? [Y/n] "), "{side}: {err:?}");
 	}
 }

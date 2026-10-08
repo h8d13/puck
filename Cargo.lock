@@ -467,6 +467,7 @@ dependencies = [
  "alpm-types",
  "pacman-cli",
  "pacman-common",
+ "rustix",
  "testpkg",
 ]
 
@@ -1408,6 +1409,7 @@ version = "0.1.0"
 dependencies = [
  "alpm-core",
  "pacman-common",
+ "rustix",
  "signal-hook",
  "time",
  "unicode-width",

@@ -654,6 +654,18 @@ fn access(path: &[u8], mode: Access) -> Result<(), rustix::io::Errno> {
 	accessat(CWD, c_path(path), mode, AtFlags::empty())
 }
 
+// getuid(2), geteuid(2) through libc (rustix use-libc): under fakeroot
+// its LD_PRELOAD answers with the faked ids, as it does for the C. a raw
+// syscall (rustix's default backend, /proc/self/status) shows the real
+// ones
+pub fn getuid() -> u32 {
+	rustix::process::getuid().as_raw()
+}
+
+pub fn geteuid() -> u32 {
+	rustix::process::geteuid().as_raw()
+}
+
 // meson options scriptlet-shell and ldconfig, as in config.h
 pub const SCRIPTLET_SHELL: &[u8] = b"/bin/sh";
 pub const LDCONFIG: &[u8] = b"/sbin/ldconfig";
@@ -841,7 +853,7 @@ fn exec_path(cmd: &[u8]) -> Vec<u8> {
 // cmd directly like the C (no chroot); otherwise chroot(8) execs it,
 // which sets argv[0] to cmd. std resets SIGPIPE and the signal mask in
 // the child, the C's _alpm_reset_signals; other ignored signals stay.
-// umask(0022) is not set: it needs rustix's process feature
+// the child's umask(0022) is set around the spawn (run_chroot)
 fn command(root: &[u8], cmd: &[u8], argv: &[&[u8]]) -> Command {
 	let os = |s: &[u8]| OsStr::from_bytes(until_nul(s)).to_os_string();
 	let path = os(&exec_path(cmd));
@@ -1029,7 +1041,11 @@ pub fn run_chroot(
 	c.stdin(Stdio::from(OwnedFd::from(in_end)))
 		.stdout(Stdio::from(OwnedFd::from(out_end)))
 		.stderr(Stdio::from(OwnedFd::from(err_end)));
+	// the C child's umask(0022): inherited from here, the process mask
+	// put back once the child exists
+	let oldmask = rustix::process::umask(Mode::from_raw_mode(0o022));
 	let spawned = c.spawn();
+	rustix::process::umask(oldmask);
 	// the child's ends close with the Command
 	drop(c);
 	let mut child = match spawned {

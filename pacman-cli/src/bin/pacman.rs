@@ -6,21 +6,6 @@ use std::os::unix::ffi::OsStringExt;
 use pacman_cli::pacman::{Io, Process, run, std_sink, std_term};
 use pacman_cli::sighandler::install_soft_interrupt_handler;
 
-// getuid(). safe std has none: the real uid from /proc. fakeroot
-// answers libc's getuid with its faked uid (FAKEROOTUID, 0 unless set),
-// which /proc does not show, so its session (FAKEROOTKEY) is read here
-fn uid() -> u32 {
-	if std::env::var_os("FAKEROOTKEY").is_some() {
-		let faked = std::env::var("FAKEROOTUID").ok();
-		return faked.and_then(|u| u.parse().ok()).unwrap_or(0);
-	}
-	let status = std::fs::read_to_string("/proc/self/status");
-	let status = status.unwrap_or_default();
-	let line = status.lines().find_map(|l| l.strip_prefix("Uid:"));
-	let real = line.and_then(|v| v.split_whitespace().next());
-	real.and_then(|v| v.parse().ok()).unwrap_or(0)
-}
-
 // freopen(ctermid(NULL), "r", stdin): only the open is checked, std
 // cannot put the terminal in place of fd 0; later prompts read the
 // (exhausted) stdin
@@ -49,7 +34,7 @@ fn main() {
 		let _ = io::stdin().read_to_end(&mut input);
 	}
 	let process = Process {
-		uid: uid(),
+		uid: alpm_core::util::getuid(),
 		stdin: piped.then_some(&input[..]),
 		reopen_tty,
 	};

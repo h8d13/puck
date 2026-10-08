@@ -13,6 +13,7 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::sync::MutexGuard;
 use std::sync::atomic::{AtomicU16, Ordering};
 
 use alpm_core::callbacks::{DownloadEvent, LogLevel};
@@ -23,21 +24,24 @@ use alpm_core::signing::{SIG_DATABASE_OPTIONAL, SIG_DATABASE_UNKNOWN_OK};
 use difftest::{
 	CRun, CUpdate, DbSpec, DbState, GpgFixture, Home, RUpdate, Reply, Req,
 	Rng, Server, TempRoot, UpdRecord, UpdSetup, c_pacman_files_refresh,
-	c_pacman_sync_refresh, front_handle, iters, sync_db,
+	c_pacman_sync_refresh, front_handle, iters, sync_db, test_sandbox_for,
+	umask_lock,
 };
 use pacman_cli::callback::Frontend;
 use pacman_cli::conf::{ColStr, Config};
 use pacman_cli::files::pacman_files;
 use pacman_cli::sync::pacman_sync;
 use pacman_cli::util::{Output, Term};
+use rustix::fs::Mode;
+use rustix::process::umask;
 
 const T0: i64 = 1_000_000_000;
 const DAY: i64 = 86_400;
 const REQUIRED: c_int = SIG_DATABASE;
 const OPTIONAL: c_int = SIG_DATABASE | SIG_DATABASE_OPTIONAL;
 
-// name, contents, mtime when a server set it
-type Files = Vec<(Vec<u8>, Vec<u8>, Option<i64>)>;
+// name, contents, mtime when a server set it, permission bits
+type Files = Vec<(Vec<u8>, Vec<u8>, Option<i64>, u32)>;
 
 // one side of a step, normalized for comparison. logs as text for the
 // assert messages, rec holds the rest
@@ -87,7 +91,8 @@ fn snapshot(dir: &Path) -> Files {
 			false => b"<dir>".to_vec(),
 		};
 		let mtime = (md.mtime() < 1_500_000_000).then_some(md.mtime());
-		out.push((e.file_name().as_bytes().to_vec(), data, mtime));
+		let name = e.file_name().as_bytes().to_vec();
+		out.push((name, data, mtime, md.mode() & 0o7777));
 	}
 	out.sort();
 	out
@@ -130,8 +135,10 @@ fn text(b: &[u8]) -> String {
 fn diff(c: &Outcome, r: &Outcome) -> Option<String> {
 	let files = |o: &Outcome| -> Vec<String> {
 		let f = o.files.iter();
-		f.map(|(n, d, t)| format!("{} {}B {t:?}", text(n), d.len()))
-			.collect()
+		f.map(|(n, d, t, m)| {
+			format!("{} {}B {t:?} {m:o}", text(n), d.len())
+		})
+		.collect()
 	};
 	let states = |o: &Outcome| -> Vec<String> {
 		let st = o.states.iter();
@@ -209,17 +216,33 @@ fn requests(servers: &[&Server]) -> Vec<Req> {
 	r
 }
 
-// a C and a Rust handle built from one setup, each on its own root
+// a C and a Rust handle built from one setup, each on its own root.
+// alpm_db_update sets the umask: the lock is taken before the C handle's
+// and dropped after it, with the process mask put back
 struct Pair {
 	cfx: TempRoot,
 	rfx: TempRoot,
-	c: CUpdate,
+	// None only while renew swaps it
+	c: Option<CUpdate>,
 	r: RUpdate,
 	sorted: bool,
+	// set when sandboxed: the handles are made anew for every step
+	setup: Option<UpdSetup>,
+	oldmask: Option<Mode>,
+	_umask: MutexGuard<'static, ()>,
+}
+
+impl Drop for Pair {
+	fn drop(&mut self) {
+		if let Some(m) = self.oldmask {
+			umask(m);
+		}
+	}
 }
 
 impl Pair {
 	fn new(s: &UpdSetup, prep: &dyn Fn(&TempRoot)) -> Pair {
+		let guard = umask_lock();
 		let (cfx, rfx) =
 			(TempRoot::new("dbupd-c"), TempRoot::new("dbupd-r"));
 		prep(&cfx);
@@ -229,10 +252,38 @@ impl Pair {
 		Pair {
 			cfx,
 			rfx,
-			c,
+			c: Some(c),
 			r,
 			sorted: s.parallel > 1,
+			setup: None,
+			oldmask: None,
+			_umask: guard,
 		}
+	}
+
+	// the Rust side downloads in the sandbox helper (as for root, the
+	// helper as the current user), the C side plainly: the C sandbox
+	// needs real root. the helper's server error counts die with it
+	// (the C's forked child): fresh handles on both sides every step
+	// keep the plain C from counting across steps. the process umask is
+	// 077 meanwhile, the C's umask(0022) has to show in the modes
+	fn sandboxed(mut self, s: &UpdSetup) -> Pair {
+		self.setup = Some(s.clone());
+		self.renew();
+		self.oldmask = Some(umask(Mode::from_raw_mode(0o077)));
+		self
+	}
+
+	fn renew(&mut self) {
+		let Some(s) = &self.setup else {
+			return;
+		};
+		// the C handle (and the ALPM lock) goes before the next
+		self.c = None;
+		self.c = Some(CUpdate::new(&self.cfx, s));
+		self.r = RUpdate::new(&self.rfx, s);
+		assert!(self.r.h.set_sandboxuser(Some(b"root")));
+		self.r.h.set_sandbox_for(test_sandbox_for);
 	}
 
 	// one update on both sides, C first
@@ -245,7 +296,9 @@ impl Pair {
 		for s in servers {
 			s.reset();
 		}
-		let (ret, errno, rec) = self.c.update(dbs, force);
+		self.renew();
+		let c = self.c.as_mut().expect("set outside renew");
+		let (ret, errno, rec) = c.update(dbs, force);
 		let (logs, rec) = norm(rec, &self.cfx, self.sorted);
 		let c = Outcome {
 			ret,
@@ -254,7 +307,7 @@ impl Pair {
 			rec,
 			requests: requests(servers),
 			files: snapshot(&self.cfx.dir().join("db/sync")),
-			states: self.c.states(),
+			states: c.states(),
 		};
 		let (ret, errno, rec) = self.r.update(dbs, force);
 		let (logs, rec) = norm(rec, &self.rfx, self.sorted);
@@ -321,10 +374,13 @@ fn setup(dbs: Vec<DbSpec>, parallel: u32) -> UpdSetup {
 fn no_prep(_: &TempRoot) {}
 
 // first sync, up to date, forced, changed upstream, mirror fallback,
-// failures, subsets and usage, sequentially and in parallel
+// failures, subsets and usage, sequentially and in parallel, the Rust
+// side plain and sandboxed
 #[test]
 fn sequences() {
-	for parallel in [1, 2] {
+	for (parallel, sandbox) in
+		[(1, false), (2, false), (1, true), (2, true)]
+	{
 		let srv = Server::start();
 		let (m1, m2) = (srv.url("/m1"), srv.url("/m2"));
 		let s = setup(
@@ -335,6 +391,9 @@ fn sequences() {
 			parallel,
 		);
 		let mut p = Pair::new(&s, &no_prep);
+		if sandbox {
+			p = p.sandboxed(&s);
+		}
 		let sv = [&srv];
 		let (core0, n0) = sync_db(1, false);
 		let (core1, n1) = sync_db(2, false);
@@ -411,7 +470,12 @@ fn sequences() {
 		p.check("truncated", &sv, &[1], true);
 		srv.route("/m1/extra.db", vec![file(&extra0, T0)]);
 		p.check("subset", &sv, &[1], false);
-		p.check("subset twice", &sv, &[1, 1], true);
+		// one db twice races its own files; sandboxed, the helper's
+		// exit 2 is RETRIEVE where the plain C can leave ALPM_ERR_OK
+		// (UPSTREAM.md) and the rename error names the temporary dir
+		if !sandbox {
+			p.check("subset twice", &sv, &[1, 1], true);
+		}
 		let o = p.check("no dbs", &sv, &[], false);
 		assert_eq!((o.ret, o.errno), (-1, 0));
 	}
@@ -905,6 +969,8 @@ impl Front {
 		files: bool,
 		cols: u16,
 	) -> CRun {
+		// both sides' db updates set the umask
+		let _umask = umask_lock();
 		srv.reset();
 		FRONT_COLS.store(cols, Ordering::SeqCst);
 		let c = {

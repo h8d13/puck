@@ -17,7 +17,7 @@ use alpm_core::callbacks::{DownloadEvent, LogLevel};
 use alpm_core::dload::{DownloadState, Downloader, Payload, Settings};
 use difftest::{
 	CDload, Fetcher, Record, Recorder, Reply, Req, Rng, Server, TempRoot,
-	closed_port, iters, payload_layout_ok, umask_lock,
+	closed_port, iters, payload_layout_ok, test_helper, umask_lock,
 };
 
 const T0: i64 = 1_000_000_000;
@@ -1267,7 +1267,8 @@ fn fetchcb_fuzz() {
 
 // alpm_fetch_pkgurl: cached files, downloads into the cachedir (a
 // missing first cachedir is created), siglevels, temp names for urls
-// without a package name
+// without a package name; the Rust side plain and in the sandbox helper
+// (the C sandbox needs real root)
 #[test]
 fn fetch_pkgurl_cases() {
 	let s = Server::start();
@@ -1330,7 +1331,9 @@ fn fetch_pkgurl_cases() {
 			true,
 		),
 	];
-	for (name, urls, level, cached) in cases {
+	let both = cases.iter().flat_map(|c| [(c, false), (c, true)]);
+	for ((name, urls, level, cached), sandboxed) in both {
+		let (level, cached) = (*level, *cached);
 		let _umask = umask_lock();
 		let fx = TempRoot::new("dload-pkgurl");
 		let side = |tag: &str| {
@@ -1357,7 +1360,7 @@ fn fetch_pkgurl_cases() {
 			for d in &cdirs {
 				h.add_cachedir(d);
 			}
-			let (ret, errno, got, rec) = h.fetch_pkgurl(&urls);
+			let (ret, errno, got, rec) = h.fetch_pkgurl(urls);
 			let dirs = h.cachedirs();
 			pkgurl_outcome(
 				ret,
@@ -1373,20 +1376,20 @@ fn fetch_pkgurl_cases() {
 			let settings = Settings::default();
 			let mut state = DownloadState::default();
 			let mut rec = Recorder::default();
+			let mut helper = test_helper(b"root", false, false);
 			let mut dl = Downloader {
 				settings: &settings,
 				state: &mut state,
 				cb: &mut rec,
 				fetch: None,
-				sandbox: None,
+				sandbox: sandboxed.then_some(&mut helper as _),
 			};
 			let mut dirs = rdirs.clone();
-			let (ret, errno, got) = match dl
-				.fetch_pkgurl(&mut dirs, level, &urls)
-			{
-				Ok(g) => (0, 0, g),
-				Err(e) => (-1, e as c_int, Vec::new()),
-			};
+			let (ret, errno, got) =
+				match dl.fetch_pkgurl(&mut dirs, level, urls) {
+					Ok(g) => (0, 0, g),
+					Err(e) => (-1, e as c_int, Vec::new()),
+				};
 			pkgurl_outcome(
 				ret,
 				errno,
@@ -1397,7 +1400,7 @@ fn fetch_pkgurl_cases() {
 				&s,
 			)
 		};
-		assert_eq!(c, r, "case {name}");
+		assert_eq!(c, r, "case {name}, sandboxed {sandboxed}");
 	}
 }
 

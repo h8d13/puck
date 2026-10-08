@@ -4,8 +4,8 @@
 // &mut. parseconfig stops after setdefaults and keeps the resolved repos
 // in `Config::repos`; setup_libalpm (the C's last step of parseconfig)
 // is separate and returns the Handle instead of setting config->handle,
-// registering the repos and dropping the list like the C. the XferCommand
-// download callback (fetchcb) is not ported. explicit_adds/removes
+// registering the repos and dropping the list like the C, and the
+// XferCommand fetchcb (XferCommand below). explicit_adds/removes
 // (alpm_pkg_t lists) are not modelled.
 //
 // pm_printf goes through `Host::log` with the config as it is at that
@@ -15,22 +15,26 @@
 // messages are the untranslated msgids. paths default to the arch build
 // (configure-time CONFFILE, DBPATH, ... in the C).
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, c_int};
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
+use std::process::Command;
+use std::time::Duration;
 
-use alpm_core::callbacks::Callbacks;
+use alpm_core::callbacks::{Callbacks, Fetch};
 use alpm_core::deps::dep_from_string;
 use alpm_core::error::Errno;
 use alpm_core::handle::Handle;
-use alpm_core::util::{fnmatch, strerror};
+use alpm_core::sandbox::{ExecError, IgnoreSignals, SandboxExec};
+use alpm_core::util::{fnmatch, strerror, until_nul};
 use pacman_common::ini::{Ini, parse_ini};
 use pacman_common::util_common::{PATH_MAX, wordsplit};
 
 use crate::pacman::PM_OP_FILES;
-use crate::util::strreplace;
+use crate::util::{Output, arg_to_string, pm_printf, strreplace};
 
 // meson config.h of the reference build
 pub const CONFFILE: &[u8] = b"/etc/pacman.conf";
@@ -491,6 +495,11 @@ pub trait Host {
 	// pm_printf: config is the state at the time of the call
 	fn log(&mut self, config: &Config, msg: &Msg);
 
+	// where the fetchcb's messages go after setup (Output::sink)
+	fn sink(&self) -> Option<fn(&mut Output)> {
+		None
+	}
+
 	// isatty(fileno(stdout)), for Color
 	fn stdout_is_tty(&mut self) -> bool {
 		io::stdout().is_terminal()
@@ -787,6 +796,8 @@ impl Config {
 		for repo in &self.repos {
 			register_repo(self, &mut handle, host, repo);
 		}
+		// alpm_capabilities has the downloader: no "no XferCommand" note
+		handle.set_fetchcb(self.xfercommand_fetch(host.sink()));
 		handle.set_architectures(&self.architectures);
 		handle.set_checkspace(i32::from(self.checkspace));
 		handle.set_usesyslog(i32::from(self.usesyslog));
@@ -1859,4 +1870,231 @@ fn glob_in_dir(
 		names.push(pattern.to_vec());
 	}
 	names
+}
+
+// ---- XferCommand ----
+//
+// download_with_xfercommand, the fetchcb setup_libalpm registers when
+// XferCommand is set: %u and %o (whole arguments only) replaced by the
+// url and "<localpath><file>.part", the command run in localpath (the
+// process cwd changed and put back like the C), a %o download renamed
+// to its name after exit status 0. 0 downloaded, -1 failed (never 1);
+// failures wait 2 s for the user to cancel. systemvp runs argv itself,
+// or with a sandbox user through the sandbox helper's exec mode
+// (alpm_sandbox_setup_child in the C child). SIGINT/SIGQUIT are ignored
+// meanwhile (sandbox::IgnoreSignals, read by sighandler.rs).
+// messages go out through pm_printf with the config as it was given
+pub struct XferCommand {
+	config: Config,
+	out: Output,
+	pub exec: SandboxExec,
+	pub sleep: fn(Duration),
+}
+
+impl XferCommand {
+	// the fetchcb of config, printing to an Output flushed to sink
+	pub fn new(config: &Config, sink: Option<fn(&mut Output)>) -> Self {
+		XferCommand {
+			config: config.clone(),
+			out: Output {
+				sink,
+				..Output::default()
+			},
+			exec: SandboxExec::default(),
+			sleep: std::thread::sleep,
+		}
+	}
+
+	// pm_printf to stderr, unbuffered like the C's
+	fn print(&mut self, level: u16, msg: &[u8]) {
+		pm_printf(&mut self.out.stderr, &self.config, level, msg);
+		self.out.flush();
+	}
+
+	// systemvp: the wait status, -1 when the command could not be
+	// started. a failed sandbox setup is the C child's error and
+	// _Exit(-1)
+	fn systemvp(&mut self, argv: &[Vec<u8>]) -> i32 {
+		let Some(file) = argv.first() else {
+			return -1;
+		};
+		// SIGINT/SIGQUIT ignored until the command is reaped
+		let _quiet = IgnoreSignals::new();
+		let r = match self.config.sandboxuser.clone() {
+			Some(user) => self.exec.run(&user, argv),
+			None => Command::new(OsStr::from_bytes(file))
+				.args(argv[1..]
+					.iter()
+					.map(|a| OsStr::from_bytes(a)))
+				.status()
+				.map_err(ExecError::Spawn),
+		};
+		match r {
+			Ok(status) => status.into_raw(),
+			Err(ExecError::Spawn(_)) => -1,
+			Err(ExecError::Setup) => {
+				let user = self.config.sandboxuser.clone();
+				let msg = cat(&[
+					b"switching to sandbox user '",
+					&user.unwrap_or_default(),
+					b"' failed!\n",
+				]);
+				self.print(LOG_ERROR, &msg);
+				0xff << 8
+			}
+		}
+	}
+
+	// download_with_xfercommand up to its cleanup's sleep
+	fn download(
+		&mut self,
+		url: &[u8],
+		localpath: &[u8],
+		force: bool,
+	) -> c_int {
+		let Some(template) = self.config.xfercommand_argv.clone()
+		else {
+			return -1;
+		};
+		let (url, localpath) = (until_nul(url), until_nul(localpath));
+		let Some(slash) = url.iter().rposition(|&c| c == b'/') else {
+			return -1;
+		};
+		let filename = &url[slash + 1..];
+		let destfile = cat(&[localpath, filename]);
+		let tempfile = cat(&[localpath, filename, b".part"]);
+		if force {
+			for f in [&tempfile, &destfile] {
+				if fs::metadata(OsStr::from_bytes(f)).is_ok() {
+					let _ = fs::remove_file(
+						OsStr::from_bytes(f),
+					);
+				}
+			}
+		}
+		let mut usepart = false;
+		let argv: Vec<Vec<u8>> = template
+			.iter()
+			.map(|a| match &a[..] {
+				b"%o" => {
+					usepart = true;
+					tempfile.clone()
+				}
+				b"%u" => url.to_vec(),
+				_ => a.clone(),
+			})
+			.collect();
+		// open(".", O_RDONLY) to come back to
+		let cwd = fs::File::open(".");
+		if cwd.is_err() {
+			let msg = b"could not get current working directory\n";
+			self.print(LOG_ERROR, msg);
+		}
+		let ret = self.run_in(
+			&argv, localpath, usepart, &tempfile, &destfile,
+		);
+		if let Ok(cwd) = cwd
+			&& let Err(e) = rustix::process::fchdir(&cwd)
+		{
+			let e = strerror(&e.into());
+			let msg = cat(&[
+				b"could not restore working directory (",
+				&e,
+				b")\n",
+			]);
+			self.print(LOG_ERROR, &msg);
+		}
+		ret
+	}
+
+	// chdir(localpath), the command, the .part rename
+	fn run_in(
+		&mut self,
+		argv: &[Vec<u8>],
+		localpath: &[u8],
+		usepart: bool,
+		tempfile: &[u8],
+		destfile: &[u8],
+	) -> c_int {
+		if std::env::set_current_dir(OsStr::from_bytes(localpath))
+			.is_err()
+		{
+			let msg = cat(&[
+				b"could not chdir to download directory ",
+				localpath,
+				b"\n",
+			]);
+			self.print(LOG_WARNING, &msg);
+			return -1;
+		}
+		if self.config.logmask & LOG_DEBUG != 0
+			&& let Some(cmd) = arg_to_string(argv)
+		{
+			let msg = cat(&[b"running command: ", &cmd, b"\n"]);
+			self.print(LOG_DEBUG, &msg);
+		}
+		let retval = self.systemvp(argv);
+		if retval == -1 {
+			let msg = b"running XferCommand: fork failed!\n";
+			self.print(LOG_WARNING, msg);
+			return -1;
+		}
+		if retval != 0 {
+			let msg = format!(
+				"XferCommand command returned non-zero status code \
+				({retval})\n"
+			);
+			self.print(LOG_DEBUG, msg.as_bytes());
+			return -1;
+		}
+		if usepart
+			&& let Err(e) = fs::rename(
+				OsStr::from_bytes(tempfile),
+				OsStr::from_bytes(destfile),
+			) {
+			let msg = cat(&[
+				b"could not rename ",
+				tempfile,
+				b" to ",
+				destfile,
+				b" (",
+				&strerror(&e),
+				b")\n",
+			]);
+			self.print(LOG_ERROR, &msg);
+			return -1;
+		}
+		0
+	}
+}
+
+impl Fetch for XferCommand {
+	fn fetch(
+		&mut self,
+		url: &[u8],
+		localpath: &[u8],
+		force: bool,
+	) -> c_int {
+		// the early returns before its cleanup do not wait
+		let early = self.config.xfercommand_argv.is_none()
+			|| !until_nul(url).contains(&b'/');
+		let ret = self.download(url, localpath, force);
+		if ret == -1 && !early {
+			// hack to let an user the time to cancel a download
+			(self.sleep)(Duration::from_secs(2));
+		}
+		ret
+	}
+}
+
+impl Config {
+	// the fetchcb for this config: XferCommand when set (the C tests
+	// the string; a failed wordsplit leaves no argv, every fetch fails)
+	pub fn xfercommand_fetch(
+		&self,
+		sink: Option<fn(&mut Output)>,
+	) -> Option<Box<dyn Fetch>> {
+		self.xfercommand.as_ref()?;
+		Some(Box::new(XferCommand::new(self, sink)))
+	}
 }

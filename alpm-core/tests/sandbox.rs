@@ -633,3 +633,84 @@ fn system_host() {
 	let name = uid.to_string();
 	assert!(matches!(System.getpwnam(name.as_bytes()), Err(None)));
 }
+
+// Handle::set_sandbox_for stand-ins: a sandbox user that does not
+// resolve, and one that resolves (to us) in a process that is not root
+fn no_user(h: &Handle) -> Option<Box<dyn Sandbox>> {
+	let mut sb = HelperSandbox::new(h.sandboxuser()?, false, false);
+	sb.host = Box::new(FakeHost {
+		root: true,
+		ids: None,
+	});
+	Some(Box::new(sb))
+}
+
+fn not_root(h: &Handle) -> Option<Box<dyn Sandbox>> {
+	let md = fs::metadata("/proc/self").unwrap();
+	let mut sb = HelperSandbox::new(h.sandboxuser()?, false, false);
+	sb.host = Box::new(FakeHost {
+		root: false,
+		ids: Some((md.uid(), md.gid())),
+	});
+	Some(Box::new(sb))
+}
+
+struct Shared(std::rc::Rc<std::cell::RefCell<Rec>>);
+
+impl Callbacks for Shared {
+	fn log(&mut self, level: LogLevel, msg: &[u8]) {
+		self.0.borrow_mut().log(level, msg);
+	}
+}
+
+// alpm_db_update and alpm_fetch_pkgurl run their downloads through the
+// handle's sandbox: the dir setup's user lookup, then the helper's
+// root check, fail with the C's messages
+#[test]
+fn handle_downloads_use_the_sandbox() {
+	let t = Tmp::new("wired");
+	for d in ["root", "db", "cache"] {
+		fs::create_dir(t.p(d)).unwrap();
+	}
+	let path = |rel| t.p(rel).into_os_string().into_encoded_bytes();
+	let mut h = Handle::initialize(&path("root"), &path("db")).unwrap();
+	let rec = std::rc::Rc::new(std::cell::RefCell::new(Rec::default()));
+	h.set_callbacks(Box::new(Shared(rec.clone())));
+	h.set_cachedirs(&[path("cache")]);
+	assert!(h.set_sandboxuser(Some(b"root")));
+	let db = h.register_syncdb(b"core", 0).unwrap();
+	db.add_server(&mut (), b"file:///nonexistent").unwrap();
+	let errors = |rec: &std::rc::Rc<std::cell::RefCell<Rec>>| {
+		let v = std::mem::take(&mut rec.borrow_mut().0);
+		v.into_iter()
+			.filter(|s| matches!(s, Seen::Log(LogLevel::Error, _)))
+			.collect::<Vec<_>>()
+	};
+	let no_such =
+		log(LogLevel::Error, "download user 'root' does not exist\n");
+	let url = b"file:///nonexistent/a-1-1-any.pkg.tar.zst";
+
+	h.set_sandbox_for(no_user);
+	let r = alpm_core::be_sync::db_update(&mut h, &[0], false);
+	assert_eq!(r, Err(Errno::RetrievePrepare));
+	assert_eq!(errors(&rec), std::slice::from_ref(&no_such));
+	assert_eq!(h.fetch_pkgurl(&[url]), Err(Errno::RetrievePrepare));
+	assert_eq!(errors(&rec), [no_such]);
+
+	h.set_sandbox_for(not_root);
+	let switch = log(
+		LogLevel::Error,
+		"switching to sandbox user 'root' failed!\n",
+	);
+	let r = alpm_core::be_sync::db_update(&mut h, &[0], false);
+	assert_eq!(r, Err(Errno::Retrieve));
+	assert_eq!(errors(&rec), std::slice::from_ref(&switch));
+	assert_eq!(h.fetch_pkgurl(&[url]), Err(Errno::Retrieve));
+	assert_eq!(errors(&rec), [switch]);
+	// the temporary download dirs are gone again
+	let left: Vec<_> = fs::read_dir(t.p("db/sync"))
+		.unwrap()
+		.chain(fs::read_dir(t.p("cache")).unwrap())
+		.collect();
+	assert!(left.is_empty(), "{left:?}");
+}

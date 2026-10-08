@@ -21,7 +21,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use alpm_compress::decompression::DecompressionSettings;
-use rustix::fs::{Access, AtFlags, CWD, accessat};
+use rustix::fs::{Access, AtFlags, CWD, Mode, accessat};
+use rustix::process::umask;
 
 use crate::callbacks::{Callbacks, Event, LogLevel, logv};
 use crate::db::{DB_USAGE_SYNC, Db};
@@ -204,9 +205,7 @@ fn downloader<'a>(
 		state: &mut *parts.download,
 		cb: &mut *parts.cb,
 		fetch: parts.fetch.as_deref_mut().map(|f| f as _),
-		// sandbox.c plugs in here (_alpm_use_sandbox: root, a sandbox
-		// user, a restriction enabled), like for fetch_pkgurl
-		sandbox: None,
+		sandbox: parts.sandbox.as_deref_mut().map(|s| s as _),
 	}
 }
 
@@ -299,8 +298,8 @@ fn update_locked(
 // unless force or the db is invalid. Ok(true) something was downloaded
 // (C 0), Ok(false) every db was up to date (C 1), Err the pm_errno of
 // the failure (C -1). an empty dbs is the C's NULL list: Err(Errno::Ok),
-// the C leaves pm_errno as it was. the C's umask(0022) for the call is
-// left out (rustix "process"), files get the process umask
+// the C leaves pm_errno as it was. umask(0022) from the download dir
+// setup on, like the C: the dbs get 0644 whatever the process umask
 pub fn db_update(
 	handle: &mut Handle,
 	dbs: &[usize],
@@ -315,6 +314,7 @@ pub fn db_update(
 	let mut parts = handle.sync_parts();
 	let tmp = downloader(&mut parts, &settings)
 		.download_dir_setup(&syncpath)?;
+	let oldmask = umask(Mode::from_raw_mode(0o022));
 	let ret = match handle.lock() {
 		Ok(()) => update_locked(
 			handle, &settings, dbs, force, &syncpath, &tmp,
@@ -334,6 +334,7 @@ pub fn db_update(
 	if tmp != syncpath {
 		remove_temporary_download_dir(&tmp);
 	}
+	umask(oldmask);
 	ret
 }
 

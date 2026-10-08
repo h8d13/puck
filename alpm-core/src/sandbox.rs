@@ -20,16 +20,26 @@
 // steps the C runs in the child as root run in the helper as the
 // DownloadUser: chdir, no_new_privs (first, landlock_restrict_self needs
 // it without CAP_SYS_ADMIN), landlock, seccomp. getuid() == 0 and
-// getpwnam are checked by the parent before spawning. SIGINT/SIGQUIT are
-// not ignored in the parent while the helper runs (no safe std API).
+// getpwnam are checked by the parent before spawning. SIGINT/SIGQUIT
+// count as ignored in the parent while the helper runs (IgnoreSignals).
 use std::ffi::{OsStr, OsString, c_int};
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
-use std::os::fd::AsFd;
+use std::fs::File;
+use std::io::{self, IoSlice, IoSliceMut, Read, Write};
+use std::mem::MaybeUninit;
+use std::net::Shutdown;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+
+use rustix::net::{
+	RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags,
+	SendAncillaryBuffer, SendAncillaryMessage, SendFlags, recvmsg, sendmsg,
+};
 
 use crate::callbacks::{Callbacks, DownloadEvent, LogLevel};
 use crate::dload::{
@@ -39,10 +49,11 @@ use crate::error::Errno;
 use crate::handle::Handle;
 use crate::sandbox_fs::restrict_writes_to;
 use crate::sandbox_syscalls::syscalls_filter;
-use crate::util::{PATH_MAX, until_nul};
+use crate::util::{PATH_MAX, getuid, until_nul};
 
-// argv[1] of the helper
+// argv[1] of the helper: a download, or a command to exec (EXEC_ARG)
 pub const HELPER_ARG: &str = "--alpm-sandbox-helper";
+pub const EXEC_ARG: &str = "--alpm-sandbox-exec";
 
 // _alpm_sandbox_callback_t
 pub const CB_LOG: u32 = 0;
@@ -591,11 +602,195 @@ pub fn helper_main() -> i32 {
 // Some(exit status) when this process is the helper
 pub fn helper_entry() -> Option<i32> {
 	let arg = std::env::args_os().nth(1)?;
-	(arg == HELPER_ARG).then(helper_main)
+	match arg.to_str()? {
+		HELPER_ARG => Some(helper_main()),
+		EXEC_ARG => Some(exec_main()),
+		_ => None,
+	}
+}
+
+// the helper in exec mode, after the parent's switch to the sandbox
+// user: the request socket on stdin brings argv and the parent's stdin.
+// no_new_privs, then execvp(argv[0], argv) on that stdin; a failed exec
+// sends its errno back over the socket (the C's err_fd) and exits 127
+fn exec_main() -> i32 {
+	let Ok(sock) = io::stdin().as_fd().try_clone_to_owned() else {
+		return 127;
+	};
+	let mut sock = UnixStream::from(sock);
+	let mut space =
+		[MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+	let mut anc = RecvAncillaryBuffer::new(&mut space);
+	let mut buf = vec![0; 4096];
+	let flags = RecvFlags::CMSG_CLOEXEC;
+	let got = recvmsg(
+		&sock,
+		&mut [IoSliceMut::new(&mut buf)],
+		&mut anc,
+		flags,
+	);
+	let Ok(got) = got else {
+		return 127;
+	};
+	let mut stdin = None;
+	for m in anc.drain() {
+		if let RecvAncillaryMessage::ScmRights(mut fds) = m {
+			stdin = stdin.or(fds.next());
+		}
+	}
+	buf.truncate(got.bytes);
+	if sock.read_to_end(&mut buf).is_err() {
+		return 127;
+	}
+	let Some(argv) = Dec(&buf).list().filter(|a| !a.is_empty()) else {
+		return 127;
+	};
+	Kernel.no_new_privs();
+	let mut cmd = Command::new(OsStr::from_bytes(&argv[0]));
+	cmd.args(argv[1..].iter().map(|a| OsStr::from_bytes(a)));
+	// no stdin to hand on (fd 0 closed in the parent): none here either
+	cmd.stdin(stdin.map_or_else(Stdio::null, Stdio::from));
+	let e = cmd.exec();
+	let errno = e.raw_os_error().unwrap_or(0);
+	let _ = sock.write_all(&errno.to_ne_bytes());
+	127
+}
+
+// why a sandboxed command did not run
+#[derive(Debug)]
+pub enum ExecError {
+	// alpm_sandbox_setup_child failed: not root, no such user
+	Setup,
+	// the helper or the command could not be started: fork, setuid,
+	// execvp errno
+	Spawn(io::Error),
+}
+
+// systemvp's child with alpm_sandbox_setup_child(handle, user, NULL,
+// false): argv run as user with no_new_privs, no write or syscall
+// restriction (XferCommand). the helper in exec mode does the child's
+// part. stdin, stdout and stderr are ours; argv[0] is searched in PATH
+pub struct SandboxExec {
+	// the helper and its arguments (this binary, EXEC_ARG)
+	pub program: PathBuf,
+	pub args: Vec<OsString>,
+	pub host: Box<dyn Host>,
+}
+
+impl Default for SandboxExec {
+	fn default() -> Self {
+		SandboxExec {
+			program: PathBuf::from("/proc/self/exe"),
+			args: vec![EXEC_ARG.into()],
+			host: Box::new(System),
+		}
+	}
+}
+
+impl SandboxExec {
+	// the wait status (waitpid's) of argv run as user. the C child's
+	// getuid() and getpwnam checks are made here before spawning
+	pub fn run(
+		&mut self,
+		user: &[u8],
+		argv: &[Vec<u8>],
+	) -> Result<ExitStatus, ExecError> {
+		if self.host.uid() != 0 {
+			return Err(ExecError::Setup);
+		}
+		let Ok((uid, gid)) = self.host.getpwnam(user) else {
+			return Err(ExecError::Setup);
+		};
+		let (mut ours, theirs) =
+			UnixStream::pair().map_err(ExecError::Spawn)?;
+		let mut child = Command::new(&self.program)
+			.args(&self.args)
+			.uid(uid)
+			.gid(gid)
+			.stdin(OwnedFd::from(theirs))
+			.spawn()
+			.map_err(ExecError::Spawn)?;
+		let mut e = Enc(Vec::new());
+		e.list(argv);
+		// a helper gone early shows in its status
+		let _ = send_with_stdin(&mut ours, &e.0);
+		let _ = ours.shutdown(Shutdown::Write);
+		let status = child.wait().map_err(ExecError::Spawn)?;
+		let mut b = [0; 4];
+		match ours.read_exact(&mut b) {
+			Ok(()) => {
+				let errno = i32::from_ne_bytes(b);
+				let e = io::Error::from_raw_os_error(errno);
+				Err(ExecError::Spawn(e))
+			}
+			Err(_) => Ok(status),
+		}
+	}
+}
+
+// the request, our stdin attached (SCM_RIGHTS) to its first bytes; a
+// stdin that cannot be passed (closed) is left out
+fn send_with_stdin(sock: &mut UnixStream, req: &[u8]) -> io::Result<()> {
+	let stdin = io::stdin();
+	let fds = [stdin.as_fd()];
+	let mut space =
+		[MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+	let mut anc = SendAncillaryBuffer::new(&mut space);
+	anc.push(SendAncillaryMessage::ScmRights(&fds));
+	let iov = [IoSlice::new(req)];
+	let sent = match sendmsg(&*sock, &iov, &mut anc, SendFlags::empty()) {
+		Ok(n) => n,
+		Err(rustix::io::Errno::BADF) => 0,
+		Err(e) => return Err(e.into()),
+	};
+	sock.write_all(&req[sent..])
 }
 
 fn os(p: &[u8]) -> &Path {
 	Path::new(OsStr::from_bytes(until_nul(p)))
+}
+
+// SIGINT and SIGQUIT ignored by this process while a download or
+// command child runs (the C's sigaction SIG_IGN around fork and waitpid;
+// the child gets the default action back): the frontend's signal
+// handling reads these, a handler in safe Rust cannot change the
+// disposition. QUIT_DEFAULT is the flag a SIGQUIT registration falls back
+// to the default action on
+static IGNORED: AtomicBool = AtomicBool::new(false);
+static QUIT_DEFAULT: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+pub fn signals_ignored() -> bool {
+	IGNORED.load(Ordering::SeqCst)
+}
+
+// true while SIGQUIT keeps its default action
+pub fn quit_default() -> Arc<AtomicBool> {
+	let f = QUIT_DEFAULT.get_or_init(|| Arc::new(AtomicBool::new(true)));
+	Arc::clone(f)
+}
+
+// the ignoring window, closed on drop
+pub struct IgnoreSignals(());
+
+impl IgnoreSignals {
+	pub fn new() -> Self {
+		IGNORED.store(true, Ordering::SeqCst);
+		quit_default().store(false, Ordering::SeqCst);
+		IgnoreSignals(())
+	}
+}
+
+impl Default for IgnoreSignals {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+impl Drop for IgnoreSignals {
+	fn drop(&mut self) {
+		quit_default().store(true, Ordering::SeqCst);
+		IGNORED.store(false, Ordering::SeqCst);
+	}
 }
 
 // what the parent asks the system, a trait for tests that do not run
@@ -614,22 +809,12 @@ pub trait Host {
 }
 
 // the running system. getpwnam through getent(1), which asks NSS like
-// the C; getuid from /proc/self/status, kill through kill(1)
+// the C; kill through kill(1)
 pub struct System;
 
 impl Host for System {
 	fn uid(&self) -> u32 {
-		// "Uid:\t<real>\t<effective>\t<saved>\t<fs>"
-		let status = fs::read("/proc/self/status").unwrap_or_default();
-		status.split(|&c| c == b'\n')
-			.find_map(|l| l.strip_prefix(b"Uid:"))
-			.and_then(|l| {
-				let real = l
-					.split(|c| c.is_ascii_whitespace())
-					.find(|f| !f.is_empty())?;
-				std::str::from_utf8(real).ok()?.parse().ok()
-			})
-			.unwrap_or(u32::MAX)
+		getuid()
 	}
 
 	fn getpwnam(
@@ -682,6 +867,13 @@ impl Host for System {
 	}
 }
 
+// the sandbox of a handle's downloads (its default SandboxFor): a
+// HelperSandbox where _alpm_use_sandbox holds for handle->user
+pub fn handle_sandbox(handle: &Handle) -> Option<Box<dyn Sandbox>> {
+	let sb = HelperSandbox::for_handle(handle, handle.user())?;
+	Some(Box::new(sb))
+}
+
 // the dload::Sandbox of a handle with a DownloadUser
 pub struct HelperSandbox {
 	// handle->sandboxuser
@@ -730,6 +922,7 @@ impl HelperSandbox {
 		cb: &mut dyn Callbacks,
 		req: &[u8],
 	) -> (Result<bool, Errno>, c_int) {
+		let _quiet = IgnoreSignals::new();
 		let child = Command::new(&self.program)
 			.args(&self.args)
 			.uid(uid)

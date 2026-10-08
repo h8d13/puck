@@ -14,10 +14,10 @@
 // transaction's add/remove lists) runs on a pkg_show PkgWorld: its sync
 // db "core" gets a server, the handle two cache dirs (one missing, one
 // with package files), and the transaction is set by hand for the call.
-use std::ffi::{CString, c_char, c_int};
-use std::fs;
+use std::ffi::{CString, OsStr, c_char, c_int};
+use std::fs::{self, File};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{OpenOptionsExt, symlink};
 use std::path::Path;
 use std::ptr;
 
@@ -573,4 +573,113 @@ impl UtilWorld {
 		unsafe { alpm_list_free(list) };
 		io.out
 	}
+}
+
+// yesno ("%s", msg) on the process's own stdin and stderr: the tty
+// probe's C side, flush_term_input on a real terminal
+pub fn c_tty_yesno(msg: &[u8]) -> i32 {
+	init();
+	let _guard = FRONTEND.lock().unwrap_or_else(|e| e.into_inner());
+	let msg = cstr(msg);
+	// SAFETY: config is valid after init, FRONTEND holds it; "%s" with
+	// one valid C string
+	unsafe {
+		(*config).noconfirm = 0;
+		yesno(c"%s".as_ptr(), msg.as_ptr())
+	}
+}
+
+// a pty pair: the master end for the test, a slave end opened for the
+// child, the window size set to cols
+pub struct Pty {
+	pub master: File,
+	pub slave: File,
+}
+
+impl Pty {
+	pub fn open(cols: u16) -> Pty {
+		use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname};
+		let flags = OpenptFlags::RDWR | OpenptFlags::NOCTTY;
+		let master = openpt(flags).expect("openpt");
+		grantpt(&master).unwrap();
+		rustix::pty::unlockpt(&master).unwrap();
+		let name = ptsname(&master, Vec::new()).unwrap();
+		let slave = File::options()
+			.read(true)
+			.write(true)
+			.custom_flags(rustix::fs::OFlags::NOCTTY.bits() as i32)
+			.open(OsStr::from_bytes(name.as_bytes()))
+			.unwrap();
+		let ws = rustix::termios::Winsize {
+			ws_row: 24,
+			ws_col: cols,
+			ws_xpixel: 0,
+			ws_ypixel: 0,
+		};
+		rustix::termios::tcsetwinsize(&slave, ws).unwrap();
+		Pty {
+			master: File::from(master),
+			slave,
+		}
+	}
+}
+
+// the tty-probe binary in mode on pty (stdin and stdout the slave,
+// stderr captured). after the first stderr bytes containing wait_for,
+// answer goes to the master. the probe is killed after 20 s; its stderr
+pub fn run_tty_probe(
+	probe: &Path,
+	mode: &str,
+	pty: &Pty,
+	wait_for: &[u8],
+	answer: &[u8],
+) -> Vec<u8> {
+	use std::io::{Read, Write};
+	use std::process::{Command, Stdio};
+	use std::sync::mpsc;
+	use std::time::{Duration, Instant};
+	let mut child = Command::new(probe)
+		.arg(mode)
+		.stdin(pty.slave.try_clone().unwrap())
+		.stdout(pty.slave.try_clone().unwrap())
+		.stderr(Stdio::piped())
+		.spawn()
+		.unwrap();
+	let mut err = child.stderr.take().unwrap();
+	let (tx, rx) = mpsc::channel();
+	let reader = std::thread::spawn(move || {
+		let mut buf = [0; 256];
+		while let Ok(n) = err.read(&mut buf) {
+			if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+				break;
+			}
+		}
+	});
+	let deadline = Instant::now() + Duration::from_secs(20);
+	let mut got = Vec::new();
+	let mut answered = wait_for.is_empty();
+	loop {
+		let left = deadline.saturating_duration_since(Instant::now());
+		match rx.recv_timeout(left) {
+			Ok(b) => got.extend(b),
+			Err(mpsc::RecvTimeoutError::Disconnected) => break,
+			Err(mpsc::RecvTimeoutError::Timeout) => {
+				let _ = child.kill();
+				break;
+			}
+		}
+		if !answered
+			&& got.windows(wait_for.len()).any(|w| w == wait_for)
+		{
+			// the prompt is printed before its tcflush: give it time
+			std::thread::sleep(Duration::from_millis(300));
+			let mut m = &pty.master;
+			m.write_all(answer).unwrap();
+			answered = true;
+		}
+	}
+	let _ = child.kill();
+	child.wait().unwrap();
+	reader.join().unwrap();
+	got
 }

@@ -20,6 +20,7 @@ use std::ffi::{OsStr, c_int, c_long};
 use std::fs;
 use std::io::{self, BufRead, IsTerminal};
 use std::iter::repeat_n;
+use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 
 use alpm_core::db::Db;
@@ -33,6 +34,7 @@ use alpm_core::trans::{
 };
 use alpm_core::util::{strerror, until_nul};
 use pacman_common::util_common::{PATH_MAX, safe_fgets, strtrim};
+use rustix::termios::{QueueSelector, tcflush, tcgetwinsize};
 use unicode_width::UnicodeWidthChar;
 
 pub use crate::conf::ColStr;
@@ -189,9 +191,21 @@ fn strtol_whole(s: &[u8]) -> Option<c_long> {
 	Some(v)
 }
 
+// getcols_fd: 0 for no terminal, the width TIOCGWINSZ gives, -EIO
+// (any negative) when that fails or is 0
+fn getcols_fd<F: AsFd + IsTerminal>(fd: F) -> c_int {
+	if !fd.is_terminal() {
+		return 0;
+	}
+	match tcgetwinsize(fd) {
+		Ok(w) if w.ws_col > 0 => c_int::from(w.ws_col),
+		_ => -5,
+	}
+}
+
 // getcols without the cache: COLUMNS when it is a whole number, cut to
-// int like the C; else 0 when stdout is no terminal. a terminal's width
-// needs ioctl(TIOCGWINSZ) (rustix "termios"), here the C's fallback 80
+// int like the C; else the width of a terminal stdout, 0 for no
+// terminal; 80 when neither gives one
 pub fn getcols() -> u16 {
 	let env = std::env::var_os("COLUMNS");
 	let e = env.as_ref().map(|e| e.as_bytes()).unwrap_or_default();
@@ -199,13 +213,22 @@ pub fn getcols() -> u16 {
 	if !e.is_empty() {
 		c = strtol_whole(e).map_or(-1, |v| v as c_int);
 	}
-	if c < 0 && !io::stdout().is_terminal() {
-		c = 0;
+	if c < 0 {
+		c = getcols_fd(io::stdout());
 	}
 	if c < 0 {
 		c = 80;
 	}
 	c as u16
+}
+
+// flush_term_input(fileno(stdin)): typeahead of a terminal stdin is
+// dropped before a prompt reads; failure is silent like the C's
+pub fn flush_term_input() {
+	let stdin = io::stdin();
+	if stdin.is_terminal() {
+		let _ = tcflush(stdin, QueueSelector::IFlush);
+	}
 }
 
 // alpm_sigstatus_t, alpm_sigvalidity_t and the part of alpm_sigresult_t
@@ -1363,25 +1386,27 @@ pub fn select_display(
 // and stdout are terminals (a terminal stdin echoes the answer itself, a
 // terminal stdout gets the cursor shown while reading), getcols() and
 // the clocks (get_time_ms: CLOCK_MONOTONIC_COARSE in ms; time(NULL) for
-// the PACMAN_DEBUG stamp). tcflush of a terminal stdin
-// (flush_term_input) needs termios, not ported: typeahead is kept
+// the PACMAN_DEBUG stamp), flush_term_input before a prompt reads
 pub struct Term<R> {
 	pub stdin: R,
 	pub stdin_tty: bool,
 	pub stdout_tty: bool,
 	pub cols: fn() -> u16,
+	pub flush_input: fn(),
 	pub now_ms: fn() -> i64,
 	pub now_secs: fn() -> i64,
 }
 
 impl<R> Term<R> {
-	// no terminal size (getcols 0), clocks at 0: what prompts alone need
+	// no terminal size (getcols 0), nothing to flush, clocks at 0: what
+	// prompts alone need
 	pub fn new(stdin: R, stdin_tty: bool, stdout_tty: bool) -> Self {
 		Term {
 			stdin,
 			stdin_tty,
 			stdout_tty,
 			cols: || 0,
+			flush_input: || {},
 			now_ms: || 0,
 			now_secs: || 0,
 		}
@@ -1611,6 +1636,7 @@ pub fn multiselect_question<R: BufRead>(
 			s.push(b'\n');
 			return 0;
 		}
+		(term.flush_input)();
 		if !read_into(out, term, &mut buf, 0, len) {
 			return -1;
 		}
@@ -1657,6 +1683,7 @@ pub fn select_question<R: BufRead>(
 			break;
 		}
 		let size = 32;
+		(term.flush_input)();
 		if let Some(line) = safe_fgets_stdin(out, term, size) {
 			let response = strtrim(&line);
 			if !response.is_empty() {
@@ -1736,6 +1763,7 @@ fn question<R: BufRead>(
 		s.push(b'\n');
 		return preset;
 	}
+	(term.flush_input)();
 	let Some(line) = safe_fgets_stdin(out, term, 32) else {
 		return false;
 	};

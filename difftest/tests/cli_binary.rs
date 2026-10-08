@@ -515,3 +515,239 @@ fn parity() {
 	println!("== {equal}/{total} equal");
 	assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+// the fixture XferCommand: logs its cwd and arguments, then fetches $1
+// (or into $2) with curl, under a timeout. "-exit" variants fail with 7
+// before fetching
+fn xfer_script(dir: &Path, name: &str, body: &str) -> String {
+	let path = dir.join(name);
+	let log = dir.join("xfer.log").display().to_string();
+	let script = format!(
+		"#!/bin/sh\nprintf '%s|%s\\n' \"$PWD\" \"$*\" >> '{log}'\n{body}\n"
+	);
+	fs::write(&path, script).unwrap();
+	let mut perm = fs::metadata(&path).unwrap().permissions();
+	std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+	fs::set_permissions(&path, perm).unwrap();
+	path.display().to_string()
+}
+
+// mkdtemp's "download-XXXXXX" suffix fixed, the C's RET_ERR debug lines
+// (file:line, never logged by the port) dropped
+fn xfer_norm(b: &[u8]) -> Vec<u8> {
+	let mut out = Vec::new();
+	for line in b.split_inclusive(|&c| c == b'\n') {
+		if line.starts_with(b"debug: returning error ") {
+			continue;
+		}
+		let mut l = line.to_vec();
+		let pat = b"download-";
+		let mut i = 0;
+		while i + pat.len() + 6 <= l.len() {
+			if &l[i..i + pat.len()] == pat {
+				let at = i + pat.len();
+				l[at..at + 6].copy_from_slice(b"XXXXXX");
+				i = at + 6;
+			} else {
+				i += 1;
+			}
+		}
+		out.extend(l);
+	}
+	out
+}
+
+// pacman.conf of the world with extra [options] lines and the repos'
+// servers at mirror
+fn xfer_conf(dir: &Path, repos: &[&str], options: &str, mirror: &str) {
+	let mut conf = format!(
+		"[options]\nArchitecture = x86_64\nSigLevel = Never\n{options}"
+	);
+	for r in repos {
+		conf.push_str(&format!("[{r}]\nServer = {mirror}\n"));
+	}
+	fs::write(dir.join("pacman.conf"), conf).unwrap();
+}
+
+// XferCommand (download_with_xfercommand) on both binaries: -Sy/-Syy
+// from a loopback HTTP mirror and file://, -U of a url; with %o and
+// without (the command's cwd), a failing and a missing command, --debug,
+// and DownloadUser (the command run through the sandbox exec helper;
+// fakeroot fakes the user switch on both sides). compared: status,
+// stdout, stderr, the fetched dbs, the cache, what the command saw
+#[test]
+fn xfercommand() {
+	use difftest::{Reply, Server, TcPkg, tc_package};
+	let mut rng = Rng::new(0x7fe7);
+	let w = loop {
+		let w = SyncWorld::generate(&mut rng, "cli-xfer");
+		let valid = !w.repos.is_empty()
+			&& w.dbs.iter().all(|d| {
+				matches!(d, difftest::DbFile::Valid(_))
+			});
+		if valid {
+			break w;
+		}
+	};
+	let paths = setup(&w, Some("Never"));
+	let dir = w.fx.dir().to_path_buf();
+	let srv = Server::start();
+	let file = |b: Vec<u8>| Reply::File {
+		body: b,
+		ranges: false,
+		mtime: Some(1_000_000_000),
+	};
+	for e in fs::read_dir(dir.join("mirror")).unwrap() {
+		let e = e.unwrap();
+		let name = e.file_name().to_string_lossy().into_owned();
+		let body = fs::read(e.path()).unwrap();
+		srv.route(&format!("/m/{name}"), vec![file(body)]);
+	}
+	let pkg = TcPkg {
+		name: "xfer".into(),
+		version: "1-1".into(),
+		..TcPkg::default()
+	};
+	let pkgname = "xfer-1-1-x86_64.pkg.tar";
+	srv.route(&format!("/p/{pkgname}"), vec![file(tc_package(&pkg))]);
+	let curl = "exec timeout 20 curl -sSf";
+	let fetch = xfer_script(
+		&dir,
+		"xfer.sh",
+		&format!("{curl} -o \"$2\" \"$1\""),
+	);
+	let fetch_cwd =
+		xfer_script(&dir, "xfer-O.sh", &format!("{curl} -O \"$1\""));
+	let fail = xfer_script(&dir, "xfer-exit.sh", "exit 7");
+	// ^C and ^\ at pacman while the command runs: the C ignores both
+	let signal = |sig: &str| {
+		let body = format!(
+			"kill -{sig} $PPID\nsleep 0.3\n{curl} -o \"$2\" \"$1\""
+		);
+		xfer_script(&dir, &format!("xfer-{sig}.sh"), &body)
+	};
+	let (int, quit) = (signal("INT"), signal("QUIT"));
+	let http = srv.url("/m");
+	let http = String::from_utf8(http).unwrap();
+	let filem = format!("file://{}", dir.join("mirror").display());
+	let url = String::from_utf8(srv.url(&format!("/p/{pkgname}"))).unwrap();
+	let opts: Vec<(&str, String, &str)> = vec![
+		("%o", format!("XferCommand = {fetch} %u %o\n"), &http),
+		("file", format!("XferCommand = {fetch} %u %o\n"), &filem),
+		("cwd", format!("XferCommand = {fetch_cwd} %u\n"), &http),
+		("exit", format!("XferCommand = {fail} %u %o\n"), &http),
+		("missing", "XferCommand = /nonexistent/xfer %u %o\n".into(), &http),
+		(
+			"user",
+			format!("XferCommand = {fetch} %u %o\nDownloadUser = nobody\n"),
+			&http,
+		),
+		(
+			"user missing",
+			"XferCommand = /nonexistent/xfer %u %o\nDownloadUser = nobody\n"
+				.into(),
+			&http,
+		),
+		("sigint", format!("XferCommand = {int} %u %o\n"), &http),
+		("sigquit", format!("XferCommand = {quit} %u %o\n"), &http),
+		(
+			"user sigint",
+			format!("XferCommand = {int} %u %o\nDownloadUser = nobody\n"),
+			&http,
+		),
+		// the built-in downloader in the sandbox child (seccomp on).
+		// landlock stays off: the C applies it before no_new_privs,
+		// which only real root may (UPSTREAM.md)
+		(
+			"sandbox",
+			"DownloadUser = nobody\nDisableSandboxFilesystem\n".into(),
+			&http,
+		),
+		(
+			"sandbox file",
+			"DownloadUser = nobody\nDisableSandboxFilesystem\n".into(),
+			&filem,
+		),
+	];
+	let cmds: [&[&str]; 4] =
+		[&["-Sy"], &["-Syy"], &["-Sy", "--debug"], &["-U", &url]];
+	let (c, r) = (c_pacman(), rust_pacman());
+	let mut failures = Vec::new();
+	for (tag, opt, mirror) in &opts {
+		xfer_conf(&dir, &w.repos, opt, mirror);
+		for cmd in cmds {
+			// the failing ones sleep 2 s per file: -Sy only
+			let failing = matches!(
+				*tag,
+				"exit" | "missing" | "user missing"
+			);
+			if failing
+				&& cmd != ["-Sy"] && cmd != ["-Sy", "--debug"]
+			{
+				continue;
+			}
+			// the built-in downloader's debug lines are not ported
+			// (dload logs errors and warnings, PORTING.md)
+			if tag.starts_with("sandbox")
+				&& cmd.contains(&"--debug")
+			{
+				continue;
+			}
+			let mut args: Vec<String> =
+				cmd.iter().map(|s| s.to_string()).collect();
+			args.extend(paths.iter().cloned());
+			let side = |bin: &Path| {
+				restore_sync(&dir);
+				restore_local(&dir);
+				let _ = fs::remove_dir_all(dir.join("cache"));
+				fs::create_dir(dir.join("cache")).unwrap();
+				let _ = fs::remove_file(dir.join("xfer.log"));
+				let run = run(bin, &args, &dir, true);
+				let run = Run {
+					out: xfer_norm(&run.out),
+					err: xfer_norm(&run.err),
+					..run
+				};
+				let log = fs::read(dir.join("xfer.log"))
+					.unwrap_or_default();
+				let log = xfer_norm(&log);
+				let mut cache: Vec<_> =
+					fs::read_dir(dir.join("cache"))
+						.unwrap()
+						.map(|e| e.unwrap().file_name())
+						.collect();
+				cache.sort();
+				// the C keeps a sandbox download dir after a failed
+				// fetchcb, the port removes it (UPSTREAM.md)
+				let mut synced = snapshot_sync(&dir);
+				synced.retain(|(n, _)| {
+					!n.starts_with("download-")
+				});
+				(run, synced, cache, log)
+			};
+			let (cs, rs) = (side(&c), side(&r));
+			let label = format!("{tag}: {}", cmd.join(" "));
+			println!(
+				"{}  {label}  [{}]",
+				if cs == rs { "equal" } else { "DIFF" },
+				cs.0.status
+			);
+			if cs != rs {
+				failures.push(format!(
+					"{label}\n-- C\n{}\n{}\n{:?}\n{}\n-- Rust\n{}\n{}\n{:?}\n{}",
+					lossy(&cs.0.out),
+					lossy(&cs.0.err),
+					cs.2,
+					lossy(&cs.3),
+					lossy(&rs.0.out),
+					lossy(&rs.0.err),
+					rs.2,
+					lossy(&rs.3),
+				));
+			}
+		}
+	}
+	restore_sync(&dir);
+	restore_local(&dir);
+	assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
