@@ -18,7 +18,7 @@ use alpm_core::dload::{DownloadState, Downloader, Payload, Settings};
 use difftest::{
 	CDload, Fetcher, Record, Recorder, Reply, Req, Rng, Server, Style,
 	TempRoot, closed_port, iters, payload_layout_ok, test_helper,
-	umask_lock,
+	umask_lock, unsandbox,
 };
 
 const T0: i64 = 1_000_000_000;
@@ -1477,6 +1477,12 @@ fn redirect_cases() {
 // (Curl_retry_request, at most 5), so on a server that promises
 // keep-alive and closes, the 6th same-host hop fails. the port never
 // reuses a connection and follows all 10
+// the error lines of an outcome, its debug lines left out
+fn errors(o: &Outcome) -> Vec<&[u8]> {
+	let e = o.logs.iter().filter(|l| l.0 == LogLevel::Error);
+	e.map(|l| &l.1[..]).collect()
+}
+
 #[test]
 fn drop_loop_divergence() {
 	let s = styled(
@@ -1491,7 +1497,7 @@ fn drop_loop_divergence() {
 	});
 	let (c, r) = scn.run();
 	let tail = |o: &Outcome| {
-		let m = String::from_utf8_lossy(&o.logs[0].1).into_owned();
+		let m = String::from_utf8_lossy(errors(o)[0]).into_owned();
 		(o.requests.len(), m.split(" : ").nth(1).map(str::to_string))
 	};
 	let died = "Connection died, tried 5 times before giving up\n";
@@ -1573,10 +1579,10 @@ fn http10_chunked_divergence() {
 		vec![db_payload(d, "core.db", &[v("@0")])]
 	});
 	let (c, r) = scn.run();
-	assert_eq!((c.ret, c.logs.len()), (0, 0));
+	assert_eq!((c.ret, errors(&c).len()), (0, 0));
 	assert_eq!(c.files[0].1, b);
 	assert_eq!((r.ret, r.files.len()), (-1, 0));
-	let m = String::from_utf8_lossy(&r.logs[0].1).into_owned();
+	let m = String::from_utf8_lossy(errors(&r)[0]).into_owned();
 	assert!(m.contains(" : Recv failure: "), "{m}");
 }
 
@@ -1881,6 +1887,9 @@ fn compare_pkgurl(
 				Ok(g) => (0, 0, g),
 				Err(e) => (-1, e as c_int, Vec::new()),
 			};
+		if sandboxed {
+			unsandbox(&mut rec.0.logs);
+		}
 		pkgurl_outcome(
 			ret,
 			errno,

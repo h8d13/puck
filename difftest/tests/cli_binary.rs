@@ -14,8 +14,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use difftest::{
-	Comp, DbFile, LocalEntry, Rng, SyncWorld, c_pacman, rust_pacman,
-	section, snapshot, write_package,
+	Comp, DbFile, LocalEntry, Rng, Stamped, SyncWorld, c_pacman,
+	rust_pacman, section, snapshot, stamped, write_package,
 };
 
 // --debug in the world with the default SigLevel (Required, unsigned
@@ -28,27 +28,28 @@ fn known(label: &str, siglevel: Option<&str>) -> bool {
 	siglevel.is_none() && label.contains("--debug")
 }
 
-// "[HH:MM:SS] " before stamped lines: both binaries read the clock
-fn unstamp(err: &[u8]) -> Vec<u8> {
-	let mut out = Vec::new();
-	for line in err.split_inclusive(|&c| c == b'\n') {
-		let stamped = line.len() >= 11
-			&& line[0] == b'[' && line[3] == b':'
-			&& line[6] == b':' && line[9] == b']';
-		out.extend_from_slice(if stamped { &line[11..] } else { line });
-	}
-	out
-}
-
+// stderr's PACMAN_DEBUG stamps equal within the time between the runs
 #[derive(Debug, PartialEq, Eq)]
 struct Run {
 	status: i32,
 	out: Vec<u8>,
-	err: Vec<u8>,
+	err: Stamped,
 }
 
 // fake root: fakeroot runs bin as uid 0, for the root-only refreshes
 fn run(bin: &Path, args: &[String], cwd: &Path, root: bool) -> Run {
+	run_in(bin, args, cwd, (root, Some("UTC")), <[u8]>::to_vec)
+}
+
+// run as (fake) root or not, in the zone tz (None: no TZ, so
+// /etc/localtime); norm applies to both streams before stamps are read
+fn run_in(
+	bin: &Path,
+	args: &[String],
+	cwd: &Path,
+	(root, tz): (bool, Option<&str>),
+	norm: fn(&[u8]) -> Vec<u8>,
+) -> Run {
 	let mut cmd = match root {
 		true => {
 			let mut c = Command::new("fakeroot");
@@ -61,12 +62,12 @@ fn run(bin: &Path, args: &[String], cwd: &Path, root: bool) -> Run {
 			c
 		}
 	};
+	cmd.args(args).current_dir(cwd).env_clear();
+	if let Some(tz) = tz {
+		cmd.env("TZ", tz);
+	}
 	let o = cmd
-		.args(args)
-		.current_dir(cwd)
-		.env_clear()
 		.env("LC_ALL", "C.UTF-8")
-		.env("TZ", "UTC")
 		.env("COLUMNS", "80")
 		.env("PATH", "/usr/bin:/bin")
 		.stdin(Stdio::null())
@@ -74,8 +75,8 @@ fn run(bin: &Path, args: &[String], cwd: &Path, root: bool) -> Run {
 		.unwrap();
 	Run {
 		status: o.status.code().expect("killed by a signal"),
-		out: o.stdout,
-		err: unstamp(&o.stderr),
+		out: norm(&o.stdout),
+		err: stamped(&norm(&o.stderr)),
 	}
 }
 
@@ -379,14 +380,14 @@ fn world(
 				rr.status,
 				lossy(&cr.out),
 				lossy(&rr.out),
-				lossy(&cr.err),
-				lossy(&rr.err)
+				lossy(&cr.err.text),
+				lossy(&rr.err.text)
 			)
 		});
 		if verbose {
 			let mark =
 				if diff.is_none() { "equal" } else { "DIFF" };
-			let (o, e) = (cr.out.len(), cr.err.len());
+			let (o, e) = (cr.out.len(), cr.err.text.len());
 			println!("{mark:5}  {label}  [{} {o}/{e}]", cr.status);
 		}
 		out.push((label, diff.is_none(), diff));
@@ -513,6 +514,88 @@ fn parity() {
 		}
 	}
 	println!("== {equal}/{total} equal");
+	assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+// the zones local_time runs the binaries in: no TZ (/etc/localtime),
+// DST, offsets at :30, :45 and +1345, a POSIX rule string
+const ZONES: [Option<&str>; 6] = [
+	None,
+	Some("Europe/Brussels"),
+	Some("America/St_Johns"),
+	Some("Asia/Kathmandu"),
+	Some("Pacific/Chatham"),
+	Some("EST5EDT,M3.2.0,M11.1.0"),
+];
+
+// local time in the binaries: -Qi build and install dates, %b of
+// --print-format, PACMAN_DEBUG stamps and the pacman.log leaders of -Sy
+// (its "Running" line with the binary as pacman), per zone. stamps
+// compared like parity, within CLOCK_SLACK
+#[test]
+fn local_time() {
+	let mut rng = Rng::new(0x71e);
+	let w = loop {
+		let w = SyncWorld::generate(&mut rng, "cli-tz");
+		let valid = !w.repos.is_empty()
+			&& w.dbs.iter().all(
+				|d| matches!(d, DbFile::Valid(p) if !p.is_empty()),
+			);
+		if valid {
+			break w;
+		}
+	};
+	owner_pkg(&w);
+	let paths = setup(&w, Some("Never"));
+	let dir = w.fx.dir();
+	let sync = w.pkg_names()[0];
+	let cmds: [&[&str]; 7] = [
+		&["-Qi", "owner"],
+		&["-Qii"],
+		&["-Si"],
+		&["-Sp", "--print-format", "%n %b", sync],
+		&["-Q", "--debug"],
+		&["-Sy"],
+		&["-Sy", "--debug"],
+	];
+	let (c, r) = (c_pacman(), rust_pacman());
+	let log = dir.join("log/pacman.log");
+	let mut failures = Vec::new();
+	for tz in ZONES {
+		for cmd in cmds {
+			let mut args: Vec<String> =
+				cmd.iter().map(|s| s.to_string()).collect();
+			args.extend(paths.iter().cloned());
+			let root = refresh(&args);
+			let side = |bin: &Path| {
+				restore_sync(dir);
+				let _ = fs::remove_file(&log);
+				let run = run_in(
+					bin,
+					&args,
+					dir,
+					(root, tz),
+					<[u8]>::to_vec,
+				);
+				let text = fs::read(&log).unwrap_or_default();
+				let text = lossy(&text).replace(
+					&bin.display().to_string(),
+					"pacman",
+				);
+				(run, stamped(text.as_bytes()))
+			};
+			let (cs, rs) = (side(&c), side(&r));
+			let label = format!("TZ={tz:?} {}", cmd.join(" "));
+			let mark = if cs == rs { "equal" } else { "DIFF" };
+			println!("{mark:5}  {label}");
+			if cs != rs {
+				failures.push(format!(
+					"{label}\n{cs:?}\n{rs:?}"
+				));
+			}
+		}
+	}
+	restore_sync(dir);
 	assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -686,13 +769,6 @@ fn xfercommand() {
 			{
 				continue;
 			}
-			// the built-in downloader's debug lines are not ported
-			// (dload logs errors and warnings, PORTING.md)
-			if tag.starts_with("sandbox")
-				&& cmd.contains(&"--debug")
-			{
-				continue;
-			}
 			let mut args: Vec<String> =
 				cmd.iter().map(|s| s.to_string()).collect();
 			args.extend(paths.iter().cloned());
@@ -702,12 +778,10 @@ fn xfercommand() {
 				let _ = fs::remove_dir_all(dir.join("cache"));
 				fs::create_dir(dir.join("cache")).unwrap();
 				let _ = fs::remove_file(dir.join("xfer.log"));
-				let run = run(bin, &args, &dir, true);
-				let run = Run {
-					out: xfer_norm(&run.out),
-					err: xfer_norm(&run.err),
-					..run
-				};
+				let utc = (true, Some("UTC"));
+				let run = run_in(
+					bin, &args, &dir, utc, xfer_norm,
+				);
 				let log = fs::read(dir.join("xfer.log"))
 					.unwrap_or_default();
 				let log = xfer_norm(&log);
@@ -736,11 +810,11 @@ fn xfercommand() {
 				failures.push(format!(
 					"{label}\n-- C\n{}\n{}\n{:?}\n{}\n-- Rust\n{}\n{}\n{:?}\n{}",
 					lossy(&cs.0.out),
-					lossy(&cs.0.err),
+					lossy(&cs.0.err.text),
 					cs.2,
 					lossy(&cs.3),
 					lossy(&rs.0.out),
-					lossy(&rs.0.err),
+					lossy(&rs.0.err.text),
 					rs.2,
 					lossy(&rs.3),
 				));

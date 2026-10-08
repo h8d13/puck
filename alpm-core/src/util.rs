@@ -1133,7 +1133,7 @@ pub fn ldconfig(h: &mut Handle) -> bool {
 }
 
 // _alpm_filecache_find: "<cachedir><filename>" of the first cachedir
-// holding it as a regular file
+// holding it as a regular file, logged
 pub fn filecache_find(
 	cachedirs: &[Vec<u8>],
 	filename: &[u8],
@@ -1144,7 +1144,11 @@ pub fn filecache_find(
 		// snprintf into char[PATH_MAX]
 		p.truncate(PATH_MAX - 1);
 		match fs::metadata(c_path(&p)) {
-			Ok(md) if md.is_file() => return Some(p),
+			Ok(md) if md.is_file() => {
+				let m = [b"found cached pkg: ", &p[..], b"\n"];
+				cb.log(LogLevel::Debug, &m.concat());
+				return Some(p);
+			}
 			Ok(md) => {
 				let m = format!(": mode={}\n", md.mode());
 				let m = [
@@ -1254,11 +1258,13 @@ pub fn filecache_setup(
 		}
 		_ => b"/tmp".to_vec(),
 	};
-	// alpm_option_add_cachedir's canonicalize_path
+	// alpm_option_add_cachedir: canonicalize_path, its debug line
 	let mut dir = tmpdir;
 	if dir.last() != Some(&b'/') {
 		dir.push(b'/');
 	}
+	let m = [b"option 'cachedir' = ", &dir[..], b"\n"].concat();
+	cb.log(LogLevel::Debug, &m);
 	cachedirs.push(dir.clone());
 	using(cb, &dir);
 	let m = [

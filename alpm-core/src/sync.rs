@@ -449,17 +449,6 @@ pub fn find_group_pkgs(
 	})
 }
 
-// _alpm_filecache_find with its "found cached pkg" debug line
-fn filecache_lookup(
-	h: &Handle,
-	cb: &mut dyn Callbacks,
-	filename: &[u8],
-) -> Option<Vec<u8>> {
-	let path = filecache_find(h.cachedirs(), filename, cb)?;
-	log(cb, Debug, &[b"found cached pkg: ", &path, b"\n"]);
-	Some(path)
-}
-
 // compute_download_size (static in C): what is left to download of a
 // sync package (0 when cached, size minus a cached .part), stored with
 // INFRQ_DSIZE. other origins download nothing. Ok(true) is a partial
@@ -477,11 +466,11 @@ pub fn compute_download_size(
 	let fname = newpkg.filename.as_deref().ok_or(Errno::PkgInvalidName)?;
 	let fname = until_nul(fname).to_vec();
 	let mut partial = false;
-	let size = if filecache_lookup(h, cb, &fname).is_some() {
+	let size = if filecache_find(h.cachedirs(), &fname, cb).is_some() {
 		0
 	} else {
 		let part = [&fname[..], b".part"].concat();
-		match filecache_lookup(h, cb, &part) {
+		match filecache_find(h.cachedirs(), &part, cb) {
 			Some(path) => {
 				partial = true;
 				match fs::metadata(OsStr::from_bytes(&path)) {
@@ -916,11 +905,12 @@ fn find_dl_candidates(
 		let fname = fname.ok_or(Errno::PkgInvalidName)?;
 		let siglevel = db.siglevel(h.default_siglevel());
 		let mut need = t.pkg.download_size != 0
-			|| filecache_lookup(h, cb, fname).is_none();
+			|| filecache_find(h.cachedirs(), fname, cb).is_none();
 		// a cached package without its .sig is fetched again with it
 		if !need && siglevel & SIG_PACKAGE != 0 {
 			let sig = [fname, b".sig"].concat();
-			need = filecache_lookup(h, cb, &sig).is_none();
+			need = filecache_find(h.cachedirs(), &sig, cb)
+				.is_none();
 		}
 		if need {
 			files.push(i);
@@ -1020,7 +1010,8 @@ fn pkg_get_sig(
 		return decode_signature(b64).map_err(|_| Errno::SigInvalid);
 	}
 	let fname = pkg.filename.as_deref().unwrap_or_default();
-	let path = filecache_lookup(h, cb, fname).ok_or(Errno::PkgNotFound)?;
+	let path = filecache_find(h.cachedirs(), fname, cb)
+		.ok_or(Errno::PkgNotFound)?;
 	let sig = sigpath(&path);
 	if !readable(&sig, cb) {
 		return Err(Errno::SigMissing);
@@ -1201,7 +1192,8 @@ fn validate_all(
 		let siglevel = db.siglevel(h.default_siglevel());
 		current_bytes = current_bytes.wrapping_add(t.pkg.size as u64);
 		let fname = t.pkg.filename.as_deref().unwrap_or_default();
-		let Some(path) = filecache_lookup(h, cb, fname) else {
+		let Some(path) = filecache_find(h.cachedirs(), fname, cb)
+		else {
 			let msg = b": could not find package in cache\n";
 			log(cb, Error, &[name(&t.pkg), msg]);
 			return Err(Errno::PkgNotFound);
@@ -1404,7 +1396,8 @@ fn load_all(
 		}
 		current_bytes = current_bytes.wrapping_add(t.pkg.size as u64);
 		let fname = t.pkg.filename.clone().unwrap_or_default();
-		let Some(path) = filecache_lookup(h, cb, &fname) else {
+		let Some(path) = filecache_find(h.cachedirs(), &fname, cb)
+		else {
 			let msg = b": could not find package in cache\n";
 			log(cb, Error, &[name(&t.pkg), msg]);
 			return Err(Errno::PkgNotFound);

@@ -25,7 +25,7 @@ use difftest::{
 	CRun, CUpdate, DbSpec, DbState, GpgFixture, Home, RUpdate, Reply, Req,
 	Rng, Server, TempRoot, UpdRecord, UpdSetup, c_pacman_files_refresh,
 	c_pacman_sync_refresh, front_handle, iters, sync_db, test_sandbox_for,
-	umask_lock,
+	umask_lock, unsandbox,
 };
 use pacman_cli::callback::Frontend;
 use pacman_cli::conf::{ColStr, Config};
@@ -309,7 +309,10 @@ impl Pair {
 			files: snapshot(&self.cfx.dir().join("db/sync")),
 			states: c.states(),
 		};
-		let (ret, errno, rec) = self.r.update(dbs, force);
+		let (ret, errno, mut rec) = self.r.update(dbs, force);
+		if self.setup.is_some() {
+			unsandbox(&mut rec.logs);
+		}
 		let (logs, rec) = norm(rec, &self.rfx, self.sorted);
 		let r = Outcome {
 			ret,

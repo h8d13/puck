@@ -6,8 +6,8 @@
 //
 // a CDload is one alpm_initialize'd handle holding the ALPM lock, with
 // log/download/event/fetch callbacks recording into a Record like the
-// Rust side's Recorder. only error and warning logs are kept (debug logs
-// carry __FILE__/__LINE__). payloads are alpm_core Payloads copied into
+// Rust side's Recorder. logs are kept but function lines and the debug
+// lines of RET_ERR/GOTO_ERR, which carry __FILE__/__LINE__. payloads are alpm_core Payloads copied into
 // calloc'd struct dload_payload mirrors, released through
 // _alpm_dload_payload_reset.
 use std::collections::HashMap;
@@ -85,11 +85,47 @@ unsafe extern "C" {
 	fn _alpm_filecache_setup(handle: *mut c_void) -> *const c_char;
 }
 
+// the log lines both sides record: RET_ERR/GOTO_ERR's carry the C's
+// source file and line, the port never logs them
+fn kept(level: LogLevel, msg: &[u8]) -> bool {
+	match level {
+		LogLevel::Error | LogLevel::Warning => true,
+		LogLevel::Debug => {
+			!msg.starts_with(b"returning error ")
+				&& !msg.starts_with(b"got error ")
+		}
+		LogLevel::Function => false,
+	}
+}
+
+// the log of a Rust download in the sandbox helper as the C's when its
+// handle has no DownloadUser and downloads in place: the setter's line,
+// the child's setup lines (sandbox_fs.c, sandbox_syscalls.c) and the
+// download-XXXXXX/ dir of its tempfile lines go
+pub fn unsandbox(logs: &mut Vec<(LogLevel, Vec<u8>)>) {
+	let setup = |m: &[u8]| {
+		m.starts_with(b"option 'sandboxuser' = ")
+			|| m.starts_with(
+				b"filesystem access has been restricted to ",
+			) || m.starts_with(b"successfully restricted ")
+	};
+	logs.retain(|(_, m)| !setup(m));
+	for (_, m) in logs {
+		let pat = b"/download-";
+		let Some(i) = m.windows(pat.len()).position(|w| w == pat)
+		else {
+			continue;
+		};
+		// "download-", its six random characters and the '/'
+		m.drain(i + 1..i + pat.len() + 7);
+	}
+}
+
 // what the callbacks saw, in order
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Record {
 	pub downloads: Vec<(Vec<u8>, DownloadEvent)>,
-	// error and warning logs
+	// error, warning and debug logs (kept)
 	pub logs: Vec<(LogLevel, Vec<u8>)>,
 	pub events: Vec<Event<'static>>,
 }
@@ -100,7 +136,7 @@ pub struct Recorder(pub Record);
 
 impl Callbacks for Recorder {
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {
-		if matches!(level, LogLevel::Error | LogLevel::Warning) {
+		if kept(level, msg) {
 			self.0.logs.push((level, msg.to_vec()));
 		}
 	}
@@ -232,6 +268,7 @@ unsafe extern "C" fn log_cb(
 	let level = match level {
 		1 => LogLevel::Error,
 		2 => LogLevel::Warning,
+		4 => LogLevel::Debug,
 		_ => return,
 	};
 	let mut buf = vec![0 as c_char; 8192];
@@ -241,7 +278,10 @@ unsafe extern "C" fn log_cb(
 		vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
 		&mut *ctx.cast::<Ctx>()
 	};
-	ctx.rec.logs.push((level, bytes(buf.as_ptr())));
+	let msg = bytes(buf.as_ptr());
+	if kept(level, &msg) {
+		ctx.rec.logs.push((level, msg));
+	}
 }
 
 unsafe extern "C" fn event_cb(ctx: *mut c_void, event: *mut c_void) {
@@ -475,6 +515,12 @@ impl CDload {
 		std::mem::take(&mut self.ctx.rec)
 	}
 
+	// the setters' debug lines ("option 'cachedir' = ...") stay out of
+	// the call's record
+	fn clear_record(&mut self) {
+		self.ctx.rec = Record::default();
+	}
+
 	// pm_errno to ALPM_ERR_OK through a getter's CHECK_HANDLE
 	fn reset_errno(&self) {
 		// SAFETY: h is live
@@ -499,6 +545,7 @@ impl CDload {
 		});
 		let (lp, tp) = (cstr(localpath), cstr(temporary_localpath));
 		self.reset_errno();
+		self.clear_record();
 		// SAFETY: h live, list of live payload mirrors, valid paths
 		let ret = unsafe {
 			_alpm_download(self.h, list, lp.as_ptr(), tp.as_ptr())
@@ -518,6 +565,7 @@ impl CDload {
 	) -> (c_int, c_int, Vec<Vec<u8>>, Record) {
 		let list = str_list(urls);
 		let mut fetched: *mut CList = ptr::null_mut();
+		self.clear_record();
 		// SAFETY: h is live, list of C strings, fetched starts NULL
 		let ret = unsafe {
 			alpm_fetch_pkgurl(self.h, list, &mut fetched)
@@ -558,6 +606,7 @@ impl CDload {
 		name: &[u8],
 	) -> (Option<Vec<u8>>, Record) {
 		let n = cstr(name);
+		self.clear_record();
 		// SAFETY: h is live, the result is malloc'd
 		let r = take(unsafe {
 			_alpm_filecache_find(self.h, n.as_ptr())

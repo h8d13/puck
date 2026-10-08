@@ -6,9 +6,8 @@
 // downloads, the import key answer and the sync dbs (name, siglevel,
 // servers, usage). CUpdate builds it on a C handle with recording
 // log/event/question/download callbacks, RUpdate on an alpm_core Handle
-// with an UpdRecorder. kept logs: errors, warnings and be_sync's own
-// debug lines (other debug lines carry __FILE__/__LINE__ or are
-// dload/gpgme internals the port does not log).
+// with an UpdRecorder. kept logs: all but function lines and the debug
+// lines carrying __FILE__/__LINE__.
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
@@ -33,6 +32,7 @@ use crate::signing::{
 use crate::sync_ro::{
 	CRun, FrontHandle, gen_pkgs, pacman_sync, run_op, sync_tar,
 };
+use crate::trans_commit::{sig_unreadable, signing_debug};
 use crate::{CList, Rng, alpm_list_add, alpm_list_free, cstr, vsnprintf};
 
 unsafe extern "C" {
@@ -47,18 +47,16 @@ unsafe extern "C" {
 const QUESTION_IMPORT_KEY: c_int = 1 << 6;
 const EVENT_DATABASE_MISSING: c_int = 27;
 
-// be_sync's debug lines, compared like errors and warnings
-const DEBUG_KEPT: [&[u8]; 3] = [
-	b"failed to validate db: ",
-	b"failed to sync dbs: ",
-	b"database dir '",
-];
-
+// debug lines left out: RET_ERR/GOTO_ERR's carry the C's file and
+// line, signing.c's own (its _alpm_access of the .sig included) are not
+// ported yet (PORTING.md follow-up)
 fn kept(level: LogLevel, msg: &[u8]) -> bool {
 	match level {
 		LogLevel::Error | LogLevel::Warning => true,
 		LogLevel::Debug => {
-			DEBUG_KEPT.iter().any(|p| msg.starts_with(p))
+			!msg.starts_with(b"returning error ")
+				&& !msg.starts_with(b"got error ")
+				&& !signing_debug(msg) && !sig_unreadable(msg)
 		}
 		LogLevel::Function => false,
 	}

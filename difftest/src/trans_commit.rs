@@ -519,7 +519,7 @@ const SIGNING_DEBUG: [&[u8]; 24] = [
 	b"validity: ",
 ];
 
-fn signing_debug(m: &[u8]) -> bool {
+pub(crate) fn signing_debug(m: &[u8]) -> bool {
 	let found = |m: &[u8]| {
 		m.starts_with(b"key ") && m.ends_with(b" found in cache\n")
 	};
@@ -531,10 +531,8 @@ fn signing_debug(m: &[u8]) -> bool {
 
 // the records compared: no FUNCTION lines (the lazy loads: the port
 // loads every local file list before the file conflict check, the C as
-// it goes), no debug lines of C_ONLY, and no debug lines inside a
-// download (dload's internals)
+// it goes), no debug lines of C_ONLY or signing.c
 pub fn kept(recs: Vec<TcRec>) -> Vec<TcRec> {
-	let mut quiet = false;
 	let mut out: Vec<TcRec> = Vec::new();
 	for r in recs {
 		let after_sig_data = matches!(
@@ -542,11 +540,9 @@ pub fn kept(recs: Vec<TcRec>) -> Vec<TcRec> {
 			Some(TcRec::Log(LOG_DEBUG, m)) if m.starts_with(b"sig data: ")
 		);
 		match &r {
-			TcRec::Retrieve(EV_RETRIEVE_START, ..) => quiet = true,
-			TcRec::Retrieve(..) => quiet = false,
 			TcRec::Log(LOG_FUNCTION, _) => continue,
 			TcRec::Log(LOG_DEBUG, m)
-				if quiet || signing_debug(m)
+				if signing_debug(m)
 					|| (after_sig_data
 						&& sig_unreadable(m)) || C_ONLY
 					.iter()
@@ -564,7 +560,7 @@ pub fn kept(recs: Vec<TcRec>) -> Vec<TcRec> {
 // _alpm_access's line for a .sig: right after be_package's "sig data:"
 // line it is _alpm_gpgme_checksig's (signing.c), the port's checksig
 // does not log it. be_package's own check of the same path comes before
-fn sig_unreadable(m: &[u8]) -> bool {
+pub(crate) fn sig_unreadable(m: &[u8]) -> bool {
 	let key: &[u8] = b".sig\" is not readable: ";
 	m.windows(key.len()).any(|w| w == key)
 }

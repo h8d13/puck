@@ -915,7 +915,8 @@ impl<R: BufRead, L: Lookup> Frontend<R, L> {
 				depend,
 				..
 			} => {
-				let p = (&providers[..], &dbs[..]);
+				let p: (&[&Package], &[&[u8]]) =
+					(providers, dbs);
 				ask_provider(out, config, term, p, depend)
 			}
 			Question::CorruptedPkg {

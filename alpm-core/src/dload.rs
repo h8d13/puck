@@ -12,10 +12,10 @@
 //
 // handle state is DownloadState (handle->server_errors and the
 // dload_interrupted static, both kept across calls), handle options are
-// Settings. _alpm_log, dlcb and eventcb go through Callbacks (error and
-// warning logs only), fetchcb through Fetch, the forked sandbox child
-// through Sandbox. pm_errno comes back in Err, as the C leaves it: it can
-// be Errno::Ok where the C fails without setting it.
+// Settings. _alpm_log, dlcb and eventcb go through Callbacks, fetchcb
+// through Fetch, the forked sandbox child through Sandbox. pm_errno comes
+// back in Err, as the C leaves it: it can be Errno::Ok where the C fails
+// without setting it.
 
 use std::ffi::{OsStr, c_int};
 use std::fs::{self, File, OpenOptions};
@@ -519,6 +519,24 @@ pub fn parse_http_date(s: &[u8]) -> Option<i64> {
 	Some(days * 86400 + time? - zone)
 }
 
+// the CURLcodes the transfers end with (curl.h)
+const CURLE_UNSUPPORTED_PROTOCOL: c_int = 1;
+const CURLE_URL_MALFORMAT: c_int = 3;
+const CURLE_COULDNT_RESOLVE_HOST: c_int = 6;
+const CURLE_COULDNT_CONNECT: c_int = 7;
+const CURLE_PARTIAL_FILE: c_int = 18;
+const CURLE_WRITE_ERROR: c_int = 23;
+const CURLE_READ_ERROR: c_int = 26;
+const CURLE_OPERATION_TIMEDOUT: c_int = 28;
+const CURLE_RANGE_ERROR: c_int = 33;
+const CURLE_BAD_DOWNLOAD_RESUME: c_int = 36;
+const CURLE_FILE_COULDNT_READ_FILE: c_int = 37;
+const CURLE_ABORTED_BY_CALLBACK: c_int = 42;
+const CURLE_TOO_MANY_REDIRECTS: c_int = 47;
+const CURLE_GOT_NOTHING: c_int = 52;
+const CURLE_RECV_ERROR: c_int = 56;
+const CURLE_FILESIZE_EXCEEDED: c_int = 63;
+
 // one download stream's result, what curl reports through
 // curl_easy_getinfo and the CURLMsg
 #[derive(Debug)]
@@ -529,7 +547,19 @@ enum Code {
 	// CURLE_COULDNT_RESOLVE_HOST
 	Resolve,
 	// every other CURLcode
-	Failed,
+	Failed(c_int),
+}
+
+impl Code {
+	// the CURLcode
+	fn curle(&self) -> c_int {
+		match *self {
+			Code::Ok => 0,
+			Code::Aborted => CURLE_ABORTED_BY_CALLBACK,
+			Code::Resolve => CURLE_COULDNT_RESOLVE_HOST,
+			Code::Failed(c) => c,
+		}
+	}
 }
 
 #[derive(Debug)]
@@ -553,8 +583,8 @@ struct Transfer {
 
 type Fail = (Code, Vec<u8>);
 
-fn failed(msg: impl Into<Vec<u8>>) -> Fail {
-	(Code::Failed, msg.into())
+fn failed(code: c_int, msg: impl Into<Vec<u8>>) -> Fail {
+	(Code::Failed(code), msg.into())
 }
 
 enum Msg {
@@ -630,31 +660,38 @@ const TOO_SLOW: &str = "Operation too slow. \
 fn send_error(e: &reqwest::Error, url: &Url, start: Instant) -> Fail {
 	let ms = start.elapsed().as_millis();
 	if e.is_connect() && e.is_timeout() {
-		return failed(format!(
-			"Connection timed out after {ms} milliseconds"
-		));
+		return failed(
+			CURLE_OPERATION_TIMEDOUT,
+			format!("Connection timed out after {ms} milliseconds"),
+		);
 	}
 	if e.is_timeout() {
-		return failed(TOO_SLOW);
+		return failed(CURLE_OPERATION_TIMEDOUT, TOO_SLOW);
 	}
 	if e.is_connect() {
 		let host = url.host_str().unwrap_or_default();
 		let port = url.port_or_known_default().unwrap_or_default();
-		return failed(format!(
-			"Failed to connect to {host}:{port} after {ms} ms: \
+		return failed(
+			CURLE_COULDNT_CONNECT,
+			format!(
+				"Failed to connect to {host}:{port} after {ms} ms: \
 			 Could not connect to server"
-		));
+			),
+		);
 	}
 	// hyper's IncompleteMessage
 	let mut src: Option<&dyn std::error::Error> = Some(e);
 	while let Some(s) = src {
 		let text = s.to_string();
 		if text.contains("connection closed before message completed") {
-			return failed("Empty reply from server");
+			return failed(
+				CURLE_GOT_NOTHING,
+				"Empty reply from server",
+			);
 		}
 		src = s.source();
 	}
-	failed(format!("Recv failure: {e}"))
+	failed(CURLE_RECV_ERROR, format!("Recv failure: {e}"))
 }
 
 // the schemes curl 8.22 knows besides http(s) (curl -V, Arch's build).
@@ -671,7 +708,7 @@ const CURL_SCHEMES: &[&str] = &[
 fn ensure_fetchable(url: &Url) -> Result<(), Fail> {
 	if !matches!(url.scheme(), "http" | "https") {
 		let m = format!("Protocol \"{}\" not supported", url.scheme());
-		return Err(failed(m));
+		return Err(failed(CURLE_UNSUPPORTED_PROTOCOL, m));
 	}
 	let host = url.host_str().unwrap_or_default();
 	let port = url.port_or_known_default().unwrap_or(80);
@@ -696,7 +733,7 @@ fn location(resp: &Response, url: &Url) -> Option<Result<Url, Fail>> {
 	let next = std::str::from_utf8(loc).ok().and_then(|s| url.join(s).ok());
 	let Some(next) = next else {
 		let m = format!("{parse}: Malformed input to a URL function");
-		return Some(Err(failed(m)));
+		return Some(Err(failed(CURLE_URL_MALFORMAT, m)));
 	};
 	let scheme = next.scheme();
 	if matches!(scheme, "http" | "https" | "ftp" | "ftps") {
@@ -708,7 +745,7 @@ fn location(resp: &Response, url: &Url) -> Option<Result<Url, Fail>> {
 		),
 		false => format!("{parse}: Unsupported URL scheme"),
 	};
-	Some(Err(failed(m)))
+	Some(Err(failed(CURLE_UNSUPPORTED_PROTOCOL, m)))
 }
 
 // the url a hop is sent to: userinfo of the first url only on the same
@@ -827,15 +864,19 @@ impl Worker {
 		}
 		if job.file.write_all(&chunk[..take]).is_err() {
 			return Err(failed(
+				CURLE_WRITE_ERROR,
 				"Failure writing output to destination",
 			));
 		}
 		xfer.bytes_dl += take as i64;
 		if over {
-			return Err(failed(format!(
-				"Exceeded the maximum allowed file size ({}) with {} bytes",
-				job.max_size, xfer.bytes_dl
-			)));
+			return Err(failed(
+				CURLE_FILESIZE_EXCEEDED,
+				format!(
+					"Exceeded the maximum allowed file size ({}) with {} bytes",
+					job.max_size, xfer.bytes_dl
+				),
+			));
 		}
 		self.progress(job, xfer.respcode, xfer.bytes_dl, dltotal)
 	}
@@ -887,9 +928,12 @@ impl Worker {
 				return Ok(resp);
 			};
 			if follows == MAX_REDIRS {
-				return Err(failed(format!(
-					"Maximum ({MAX_REDIRS}) redirects followed"
-				)));
+				return Err(failed(
+					CURLE_TOO_MANY_REDIRECTS,
+					format!(
+						"Maximum ({MAX_REDIRS}) redirects followed"
+					),
+				));
 			}
 			follows += 1;
 			url = next?;
@@ -900,8 +944,9 @@ impl Worker {
 		self.progress(job, xfer.respcode, 0, 0)?;
 		let bad = "URL rejected: Malformed input to a URL function";
 		let s = std::str::from_utf8(&job.url)
-			.map_err(|_| failed(bad))?;
-		let url = Url::parse(s).map_err(|_| failed(bad))?;
+			.map_err(|_| failed(CURLE_URL_MALFORMAT, bad))?;
+		let url = Url::parse(s)
+			.map_err(|_| failed(CURLE_URL_MALFORMAT, bad))?;
 		let resp = self.follow(job, xfer, url)?;
 		let status = xfer.respcode;
 		// Last-Modified is only read from 2xx responses
@@ -925,7 +970,10 @@ impl Worker {
 			});
 		let size: i64 = if chunked { -1 } else { length.unwrap_or(-1) };
 		if job.max_size > 0 && size > job.max_size {
-			return Err(failed("Maximum file size exceeded"));
+			return Err(failed(
+				CURLE_FILESIZE_EXCEEDED,
+				"Maximum file size exceeded",
+			));
 		}
 		xfer.remote_size = size;
 		// a resumed GET needs its offset back in Content-Range; "*/size"
@@ -952,6 +1000,7 @@ impl Worker {
 				return self.progress(job, status, 0, size);
 			}
 			return Err(failed(
+				CURLE_RANGE_ERROR,
 				"HTTP server does not seem to support byte ranges. \
 				 Cannot resume.",
 			));
@@ -959,7 +1008,9 @@ impl Worker {
 		if let Some(t) = job.time_cond
 			&& resume_from == 0 && !meets_timecondition(timeofdoc, t)
 		{
+			// curl answers for the server: httpcode becomes 304
 			xfer.timecond = true;
+			xfer.respcode = 304;
 			return Ok(());
 		}
 		self.http_body(job, xfer, resp, size)
@@ -980,10 +1031,14 @@ impl Worker {
 				Ok(0) => break,
 				Ok(n) => n,
 				Err(e) if is_timeout(&e) => {
-					return Err(failed(TOO_SLOW));
+					return Err(failed(
+						CURLE_OPERATION_TIMEDOUT,
+						TOO_SLOW,
+					));
 				}
 				Err(_) if size < 0 => {
 					return Err(failed(
+						CURLE_PARTIAL_FILE,
 						"transfer closed with outstanding read data \
 						 remaining",
 					));
@@ -994,9 +1049,12 @@ impl Worker {
 		}
 		if size >= 0 && xfer.bytes_dl < size {
 			let left = size - xfer.bytes_dl;
-			return Err(failed(format!(
-				"end of response with {left} bytes missing"
-			)));
+			return Err(failed(
+				CURLE_PARTIAL_FILE,
+				format!(
+					"end of response with {left} bytes missing"
+				),
+			));
 		}
 		Ok(())
 	}
@@ -1008,21 +1066,22 @@ impl Worker {
 		self.progress(job, xfer.respcode, 0, 0)?;
 		let Some(p) = file_url_path(&job.url) else {
 			return Err(failed(
+				CURLE_URL_MALFORMAT,
 				"URL using bad/illegal format or missing URL",
 			));
 		};
 		let open = File::open(path(&p));
 		let Ok(mut src) = open else {
-			return Err(failed(cat(&[
-				b"Could not open file ",
-				&p,
-			])));
+			return Err(failed(
+				CURLE_FILE_COULDNT_READ_FILE,
+				cat(&[b"Could not open file ", &p]),
+			));
 		};
 		let Ok(md) = src.metadata() else {
-			return Err(failed(cat(&[
-				b"Could not open file ",
-				&p,
-			])));
+			return Err(failed(
+				CURLE_FILE_COULDNT_READ_FILE,
+				cat(&[b"Could not open file ", &p]),
+			));
 		};
 		xfer.filetime = md.mtime();
 		let mut dltotal = 0;
@@ -1064,6 +1123,7 @@ impl Worker {
 		xfer.remote_size = size;
 		if job.resume_from > size {
 			return Err(failed(
+				CURLE_BAD_DOWNLOAD_RESUME,
 				"failed to resume file:// transfer",
 			));
 		}
@@ -1075,7 +1135,8 @@ impl Worker {
 		// the .part is open at its end: appending, emptied or new
 		let skip = job.resume_from.max(0) as u64;
 		let bad = "Could not seek stream";
-		src.seek(SeekFrom::Start(skip)).map_err(|_| failed(bad))?;
+		src.seek(SeekFrom::Start(skip))
+			.map_err(|_| failed(CURLE_BAD_DOWNLOAD_RESUME, bad))?;
 		let mut buf = vec![0; 64 * 1024];
 		loop {
 			let n = match src.read(&mut buf) {
@@ -1083,6 +1144,7 @@ impl Worker {
 				Ok(n) => n,
 				Err(_) => {
 					return Err(failed(
+						CURLE_READ_ERROR,
 						"Failed to read the file",
 					));
 				}
@@ -1156,8 +1218,8 @@ fn open_tempfile(p: &Payload) -> io::Result<File> {
 }
 
 // "failed retrieving file" with the curl error or libalpm's reason
-fn log_failed(cb: &mut dyn Callbacks, name: &[u8], host: &[u8], why: &[u8]) {
-	let m = cat(&[
+fn failed_line(name: &[u8], host: &[u8], why: &[u8]) -> Vec<u8> {
+	cat(&[
 		b"failed retrieving file '",
 		name,
 		b"' from ",
@@ -1165,8 +1227,27 @@ fn log_failed(cb: &mut dyn Callbacks, name: &[u8], host: &[u8], why: &[u8]) {
 		b" : ",
 		why,
 		b"\n",
-	]);
-	cb.log(LogLevel::Error, &m);
+	])
+}
+
+fn log_failed(cb: &mut dyn Callbacks, name: &[u8], host: &[u8], why: &[u8]) {
+	cb.log(LogLevel::Error, &failed_line(name, host, why));
+}
+
+fn debug(cb: &mut dyn Callbacks, parts: &[&[u8]]) {
+	cb.log(LogLevel::Debug, &cat(parts));
+}
+
+// a .part to resume from, its size the new initial_size
+fn continuation(cb: &mut dyn Callbacks, p: &Payload) {
+	let n = p.initial_size.to_string();
+	let m: [&[u8]; 4] = [
+		&p.remote_name,
+		b": tempfile found, attempting continuation from ",
+		n.as_bytes(),
+		b" bytes\n",
+	];
+	debug(cb, &m);
 }
 
 impl Engine<'_> {
@@ -1227,15 +1308,33 @@ impl Engine<'_> {
 		// curl_set_handle_opts after curl_easy_reset
 		p.resume_from = 0;
 		p.time_cond = false;
+		let name = &p.remote_name;
+		debug(self.cb, &[name, b": url is ", &url, b"\n"]);
+		if p.max_size != 0 {
+			let n = p.max_size.to_string();
+			debug(
+				self.cb,
+				&[name, b": maxsize ", n.as_bytes(), b"\n"],
+			);
+		}
 		let part = fs::metadata(path(&p.tempfile_name));
 		if !p.force && p.mtime_existing_file != 0 {
 			p.time_cond = true;
+			let t = p.mtime_existing_file.to_string();
+			let m: [&[u8]; 4] = [
+				name,
+				b": using time condition ",
+				t.as_bytes(),
+				b"\n",
+			];
+			debug(self.cb, &m);
 		} else if let Ok(md) = part
 			&& p.allow_resume
 		{
 			p.append = true;
 			p.resume_from = md.len() as i64;
 			p.initial_size = md.len() as i64;
+			continuation(self.cb, p);
 		}
 		if p.max_size == p.initial_size && p.max_size != 0 {
 			return Ok(false);
@@ -1258,6 +1357,17 @@ impl Engine<'_> {
 				}
 			},
 		};
+		let mode: &[u8] = if p.append { b"ab" } else { b"wb" };
+		let m: [&[u8]; 7] = [
+			&p.remote_name,
+			b": opened tempfile for download: ",
+			&p.tempfile_name,
+			b" (",
+			mode,
+			b")",
+			b"\n",
+		];
+		debug(self.cb, &m);
 		self.worker.spawn(Self::job(p, slot, file));
 		let init = DownloadEvent::Init {
 			optional: p.errors_ok,
@@ -1296,11 +1406,20 @@ impl Engine<'_> {
 	) -> Result<bool, ()> {
 		let p = slot_mut(payloads, &mut self.sigs, slot);
 		let Some(server) = next_server(self.state, p) else {
+			let m: [&[u8]; 2] = [
+				&p.remote_name,
+				b": no more servers to retry\n",
+			];
+			debug(self.cb, &m);
 			p.localf = Some(file);
 			return Ok(false);
 		};
 		let fp = p.filepath.clone().unwrap_or_default();
-		p.url = Some(cat(&[&server, b"/", &fp]));
+		let url = cat(&[&server, b"/", &fp]);
+		let m: [&[u8]; 4] =
+			[&p.remote_name, b": retrying from ", &url, b"\n"];
+		debug(self.cb, &m);
+		p.url = Some(url);
 		let part = fs::metadata(path(&p.tempfile_name));
 		if let Ok(md) = part
 			&& p.allow_resume
@@ -1308,6 +1427,7 @@ impl Engine<'_> {
 			p.append = true;
 			p.resume_from = md.len() as i64;
 			p.initial_size = md.len() as i64;
+			continuation(self.cb, p);
 		} else {
 			// the file stays for the retry, its data goes
 			if file.set_len(0).is_err() {
@@ -1404,6 +1524,11 @@ impl Engine<'_> {
 		}
 		let p = slot_mut(payloads, &mut self.sigs, slot);
 		if xfer.timecond && xfer.bytes_dl == 0 {
+			let m: [&[u8]; 2] = [
+				&p.remote_name,
+				b": file met time condition\n",
+			];
+			debug(self.cb, &m);
 			// nothing came: the empty .part goes
 			let _ = fs::remove_file(path(&p.tempfile_name));
 			return (1, started);
@@ -1484,6 +1609,24 @@ impl Engine<'_> {
 		let host = gethost(&url).unwrap_or_default();
 		let name = p.remote_name.clone();
 		let report = !p.request_errors_ok;
+		let code = xfer.code.curle().to_string();
+		let m: [&[u8]; 4] = [
+			&name,
+			b": curl returned result ",
+			code.as_bytes(),
+			b" from transfer\n",
+		];
+		debug(self.cb, &m);
+		if let Code::Ok = xfer.code {
+			let c = p.respcode.to_string();
+			let m: [&[u8]; 4] = [
+				&name,
+				b": response code ",
+				c.as_bytes(),
+				b"\n",
+			];
+			debug(self.cb, &m);
+		}
 		match xfer.code {
 			Code::Ok if p.respcode >= 400 => {
 				if report {
@@ -1580,7 +1723,7 @@ impl Engine<'_> {
 					0,
 				)
 			}
-			Code::Failed => {
+			Code::Failed(_) => {
 				if report {
 					self.errno = Errno::Libcurl;
 					log_failed(
@@ -1590,6 +1733,13 @@ impl Engine<'_> {
 						&xfer.error,
 					);
 					self.state.soft_error(&url, self.cb);
+				} else {
+					let m = failed_line(
+						&name,
+						&host,
+						&xfer.error,
+					);
+					self.cb.log(LogLevel::Debug, &m);
 				}
 				let Some(f) = self
 					.retry_or_keep(payloads, slot, file)
@@ -1687,6 +1837,15 @@ impl Engine<'_> {
 				}
 			}
 		}
+		let ret = match (err, updated) {
+			(true, _) => -1,
+			(false, true) => 0,
+			(false, false) => 1,
+		};
+		let m = format!(
+			"curl_download_internal return code is {ret}\n"
+		);
+		self.cb.log(LogLevel::Debug, m.as_bytes());
 		if err { Err(self.errno) } else { Ok(updated) }
 	}
 }
