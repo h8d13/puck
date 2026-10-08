@@ -16,10 +16,9 @@ use std::process::{Command, Stdio};
 use std::ptr;
 use std::sync::MutexGuard;
 
+use alpm_core::callbacks::{Callbacks, LogLevel, Question};
 use alpm_core::package::Package;
-use alpm_core::signing::{
-	LogLevel, PgpKey, SigCallbacks, SigResult, SigStatus, SigValidity,
-};
+use alpm_core::signing::{PgpKey, SigResult, SigStatus, SigValidity};
 
 use crate::fixtures::{TempRoot, tar_file, ustar};
 use crate::handle::{
@@ -194,11 +193,19 @@ pub struct RecordingCallbacks {
 	pub events: SigEvents,
 }
 
-impl SigCallbacks for RecordingCallbacks {
-	fn import_key(&mut self, uid: Option<&[u8]>, fpr: &[u8]) -> bool {
-		let q = (uid.map(<[u8]>::to_vec), fpr.to_vec());
-		self.events.questions.push(q);
-		self.answer
+impl Callbacks for RecordingCallbacks {
+	fn question(&mut self, q: &mut Question<'_>) {
+		let Question::ImportKey {
+			import,
+			uid,
+			fingerprint,
+		} = q
+		else {
+			panic!("signing asks import_key only: {q:?}");
+		};
+		let item = (uid.map(<[u8]>::to_vec), fingerprint.to_vec());
+		self.events.questions.push(item);
+		*import = c_int::from(self.answer);
 	}
 
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {

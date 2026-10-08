@@ -14,13 +14,13 @@ use std::ffi::c_int;
 use std::ptr;
 
 use alpm_core::be_local::INFRQ_DESC;
+use alpm_core::callbacks::{Callbacks, LogLevel, Question};
 use alpm_core::db::{
 	DB_USAGE_ALL, DB_USAGE_INSTALL, DB_USAGE_SEARCH, DB_USAGE_UPGRADE,
 };
 use alpm_core::deps::{
-	DbPkgs, DepMissing, DepsEnv, Log, LogLevel, Question, Questions,
-	checkdeps, dep_from_string, find_dbs_satisfier, recursedeps,
-	resolvedeps, sortbydeps,
+	DbPkgs, DepMissing, DepsEnv, checkdeps, dep_from_string,
+	find_dbs_satisfier, recursedeps, resolvedeps, sortbydeps,
 };
 use alpm_core::error::Errno;
 use alpm_core::handle::Handle;
@@ -313,7 +313,7 @@ impl<'r> Script<'r> {
 	}
 }
 
-impl Questions for Script<'_> {
+impl Callbacks for Script<'_> {
 	fn question(&mut self, q: &mut Question<'_>) {
 		let answer = self.answers.pop_front();
 		match q {
@@ -344,11 +344,10 @@ impl Questions for Script<'_> {
 					*use_index = a;
 				}
 			}
+			_ => unreachable!("deps asks two questions"),
 		}
 	}
-}
 
-impl Log for Script<'_> {
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {
 		self.calls.logs.push((level as c_int, msg.to_vec()));
 	}

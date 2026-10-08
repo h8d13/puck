@@ -129,6 +129,7 @@ mod resolve {
 	use std::fs;
 	use std::path::PathBuf;
 
+	use alpm_core::callbacks::{Callbacks, LogLevel, Question};
 	use alpm_core::db::{DB_USAGE_ALL, DB_USAGE_SEARCH};
 	use alpm_core::deps::*;
 	use alpm_core::error::Errno;
@@ -204,7 +205,7 @@ mod resolve {
 		logs: Vec<(LogLevel, String)>,
 	}
 
-	impl Questions for Cb {
+	impl Callbacks for Cb {
 		fn question(&mut self, q: &mut Question<'_>) {
 			let a = self.answers.pop_front();
 			match q {
@@ -224,11 +225,10 @@ mod resolve {
 					self.asked.push(format!("select {n}"));
 					*use_index = a.unwrap_or(*use_index);
 				}
+				_ => unreachable!("deps asks two questions"),
 			}
 		}
-	}
 
-	impl Log for Cb {
 		fn log(&mut self, level: LogLevel, msg: &[u8]) {
 			let m = String::from_utf8_lossy(msg).into_owned();
 			self.logs.push((level, m));

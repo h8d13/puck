@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use alpm_core::callbacks::{Callbacks, DownloadEvent, Event, Fetch, LogLevel};
 use alpm_core::dload::Payload;
-use alpm_core::dload::{Callbacks, DownloadEvent, Event, Fetch, LogLevel};
 
 use crate::handle::*;
 use crate::{CFile, CList, TempRoot, alpm_list_add, alpm_list_free, c_free};
@@ -91,7 +91,7 @@ pub struct Record {
 	pub downloads: Vec<(Vec<u8>, DownloadEvent)>,
 	// error and warning logs
 	pub logs: Vec<(LogLevel, Vec<u8>)>,
-	pub events: Vec<Event>,
+	pub events: Vec<Event<'static>>,
 }
 
 // the Rust side's callbacks, recording like the C ones
@@ -109,8 +109,24 @@ impl Callbacks for Recorder {
 		self.0.downloads.push((filename.to_vec(), event));
 	}
 
-	fn event(&mut self, event: Event) {
-		self.0.events.push(event);
+	fn event(&mut self, event: &Event<'_>) {
+		self.0.events.push(pkg_retrieve(event));
+	}
+}
+
+// an event dload sends (pkg_retrieve only, they borrow nothing), owned
+pub fn pkg_retrieve(e: &Event<'_>) -> Event<'static> {
+	match *e {
+		Event::PkgRetrieveStart { num, total_size } => {
+			Event::PkgRetrieveStart { num, total_size }
+		}
+		Event::PkgRetrieveDone { num, total_size } => {
+			Event::PkgRetrieveDone { num, total_size }
+		}
+		Event::PkgRetrieveFailed { num, total_size } => {
+			Event::PkgRetrieveFailed { num, total_size }
+		}
+		e => panic!("dload sent {e:?}"),
 	}
 }
 

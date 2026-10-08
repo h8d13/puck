@@ -4,8 +4,8 @@
 //
 // handle state comes in as a DepsEnv (ignore lists through the Handle,
 // assumeinstalled, the NODEPVERSION trans flag, db caches and usage).
-// QUESTION and _alpm_log go to the caller's Questions/Log impls, pm_errno
-// comes back as Err. alpm_dep_free, depmiss_new/alpm_depmissing_free and
+// QUESTION and _alpm_log go to the caller's Callbacks, pm_errno comes
+// back as Err. alpm_dep_free, depmiss_new/alpm_depmissing_free and
 // _alpm_dep_dup are Drop and Clone.
 
 use std::borrow::Cow;
@@ -13,6 +13,7 @@ use std::cmp::Ordering;
 use std::ffi::{c_int, c_ulong};
 use std::ptr;
 
+use crate::callbacks::{Callbacks, LogLevel, Question};
 use crate::db::{DB_USAGE_INSTALL, DB_USAGE_UPGRADE};
 use crate::error::Errno;
 use crate::graph::{Graph, State};
@@ -210,53 +211,6 @@ pub struct DepMissing {
 	pub causingpkg: Option<Vec<u8>>,
 }
 
-// alpm_question_t for the two questions deps.c asks. the answer fields
-// start at the C defaults: a callback that leaves them acts like no
-// questioncb
-#[derive(Debug)]
-pub enum Question<'q> {
-	// ALPM_QUESTION_INSTALL_IGNOREPKG: nonzero installs pkg anyway
-	InstallIgnorepkg {
-		install: c_int,
-		pkg: &'q Package,
-	},
-	// ALPM_QUESTION_SELECT_PROVIDER: position in providers, out of
-	// range picks none
-	SelectProvider {
-		use_index: c_int,
-		providers: &'q [&'q Package],
-		depend: &'q Depend,
-	},
-}
-
-// handle->questioncb
-pub trait Questions {
-	fn question(&mut self, q: &mut Question<'_>);
-}
-
-impl Questions for () {
-	fn question(&mut self, _: &mut Question<'_>) {}
-}
-
-// alpm_loglevel_t, discriminants as in alpm.h
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LogLevel {
-	Error = 1,
-	Warning = 2,
-	Debug = 4,
-	Function = 8,
-}
-
-// handle->logcb, one formatted message per _alpm_log call. translated
-// messages are their msgids (gettext without a locale)
-pub trait Log {
-	fn log(&mut self, level: LogLevel, msg: &[u8]);
-}
-
-impl Log for () {
-	fn log(&mut self, _: LogLevel, _: &[u8]) {}
-}
-
 // a db as the resolver reads it: alpm_db_t usage and the loaded cache
 // (list order for scans, the hash for lookups by name)
 #[derive(Clone, Copy, Debug)]
@@ -282,7 +236,7 @@ pub struct DepsEnv<'a> {
 	pub sync: &'a [DbPkgs<'a>],
 }
 
-fn logv(log: &mut impl Log, level: LogLevel, parts: &[&[u8]]) {
+fn logv(log: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
 	log.log(level, &parts.concat());
 }
 
@@ -354,7 +308,7 @@ pub fn checkdeps(
 	rem: &[&Package],
 	upgrade: &[&Package],
 	reversedeps: bool,
-	log: &mut impl Log,
+	log: &mut dyn Callbacks,
 ) -> Vec<DepMissing> {
 	let touched = |p: &&Package| {
 		let n = p.name_bytes();
@@ -476,7 +430,7 @@ fn is_target(targets: &[&Package], pkg: &Package) -> bool {
 // child of ancestor. only logged when vertex is a target and a target
 // ancestor other than vertex itself exists
 fn warn_dep_cycle(
-	log: &mut impl Log,
+	log: &mut dyn Callbacks,
 	vertices: &[Graph<&Package>],
 	targets: &[&Package],
 	ancestor: usize,
@@ -516,7 +470,7 @@ pub fn sortbydeps<'a>(
 	targets: &[&'a Package],
 	ignore: &[&Package],
 	reverse: bool,
-	log: &mut impl Log,
+	log: &mut dyn Callbacks,
 ) -> Vec<&'a Package> {
 	if targets.is_empty() {
 		return Vec::new();
@@ -603,7 +557,7 @@ pub fn recursedeps(
 	db: &PkgHash<Package>,
 	targs: &mut Vec<Package>,
 	include_explicit: bool,
-	log: &mut impl Log,
+	log: &mut dyn Callbacks,
 ) {
 	let mut keep: Vec<&Package> = db.iter().collect();
 	for t in targs.iter() {
@@ -643,7 +597,7 @@ pub fn recursedeps(
 // the ignored-package branch of resolvedep: with prompt the question,
 // else a warning and the default (skip). true installs anyway
 fn install_ignored(
-	cb: &mut (impl Questions + Log),
+	cb: &mut dyn Callbacks,
 	pkg: &Package,
 	prompt: bool,
 ) -> bool {
@@ -656,10 +610,7 @@ fn install_ignored(
 			[b"ignoring package ", name, b"-", ver, b"\n"];
 		logv(cb, LogLevel::Warning, &line);
 	}
-	match q {
-		Question::InstallIgnorepkg { install, .. } => install != 0,
-		Question::SelectProvider { .. } => unreachable!(),
-	}
+	q.answer() != 0
 }
 
 // resolvedep (static in C): a satisfier of dep in the dbs used for
@@ -673,7 +624,7 @@ fn resolvedep<'a>(
 	dbs: &[DbPkgs<'a>],
 	excluding: &[&Package],
 	prompt: bool,
-	cb: &mut (impl Questions + Log),
+	cb: &mut dyn Callbacks,
 ) -> Result<&'a Package, Errno> {
 	let usable = |db: &&DbPkgs<'a>| {
 		db.usage & (DB_USAGE_INSTALL | DB_USAGE_UPGRADE) != 0
@@ -738,10 +689,7 @@ fn resolvedep<'a>(
 		if providers.len() > 1 {
 			cb.question(&mut q);
 		}
-		let Question::SelectProvider { use_index, .. } = q else {
-			unreachable!()
-		};
-		let chosen = usize::try_from(use_index).ok();
+		let chosen = usize::try_from(q.answer()).ok();
 		if let Some(&pkg) = chosen.and_then(|i| providers.get(i)) {
 			return Ok(pkg);
 		}
@@ -758,7 +706,7 @@ pub fn find_dbs_satisfier<'a>(
 	env: &DepsEnv<'a>,
 	dbs: &[DbPkgs<'a>],
 	depstring: &[u8],
-	cb: &mut (impl Questions + Log),
+	cb: &mut dyn Callbacks,
 ) -> Result<&'a Package, Errno> {
 	if dbs.is_empty() {
 		return Err(Errno::WrongArgs);
@@ -784,7 +732,7 @@ pub fn resolvedeps<'a>(
 	packages: &mut Vec<&'a Package>,
 	rem: &[&'a Package],
 	data: &mut Vec<DepMissing>,
-	cb: &mut (impl Questions + Log),
+	cb: &mut dyn Callbacks,
 ) -> Result<(), Errno> {
 	let r = Resolve {
 		env,
@@ -812,7 +760,7 @@ impl<'a> Resolve<'_, 'a> {
 		dep: &Depend,
 		dbs: &[DbPkgs<'a>],
 		excluding: &[&Package],
-		cb: &mut (impl Questions + Log),
+		cb: &mut dyn Callbacks,
 	) -> Option<&'a Package> {
 		resolvedep(self.env, dep, dbs, excluding, false, cb).ok()
 	}
@@ -822,7 +770,7 @@ impl<'a> Resolve<'_, 'a> {
 		pkg: &'a Package,
 		packages: &mut Vec<&'a Package>,
 		data: &mut Vec<DepMissing>,
-		cb: &mut (impl Questions + Log),
+		cb: &mut dyn Callbacks,
 	) -> bool {
 		if find_name(packages, pkg.name_bytes()).is_some() {
 			return true;

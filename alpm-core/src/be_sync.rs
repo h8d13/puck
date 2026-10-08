@@ -28,6 +28,7 @@ use alpm_repo_db::desc::{RepoDescFile, RepoDescFileV2};
 use alpm_repo_db::files::RepoFiles;
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
+use crate::callbacks::Callbacks;
 use crate::deps::{Depend, dep_from_string};
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
@@ -38,8 +39,7 @@ use crate::package::{
 use crate::pkghash::PkgHash;
 use crate::signing::{
 	Keyring, SIG_DATABASE, SIG_DATABASE_MARGINAL_OK, SIG_DATABASE_OPTIONAL,
-	SIG_DATABASE_UNKNOWN_OK, SigCallbacks, check_pgp_helper,
-	process_siglist,
+	SIG_DATABASE_UNKNOWN_OK, check_pgp_helper, process_siglist,
 };
 use crate::util::{fnmatch, hash_sdbm, splitname, until_nul};
 
@@ -113,7 +113,7 @@ pub fn db_path(dbpath: &[u8], treename: &[u8], dbext: &[u8]) -> Vec<u8> {
 // Err(DbInvalidSig) marks the db invalid
 pub fn sync_db_validate(
 	kr: &mut Keyring,
-	cb: &mut dyn SigCallbacks,
+	cb: &mut dyn Callbacks,
 	path: &[u8],
 	treename: &[u8],
 	siglevel: c_int,

@@ -4,12 +4,13 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
+use alpm_core::callbacks::{Callbacks, LogLevel, Progress};
 use alpm_core::diskspace::{
-	Events, FsInfo, FsInfoState, LogLevel, MountEntry, MountPoint, Mounts,
-	SpaceError, System, USED_INSTALL, USED_REMOVE,
-	calculate_installed_size, calculate_removed_size, check_diskspace,
-	check_downloadspace, check_mountpoint, load_fsinfo, match_mount_point,
-	mount_point_list, parse_mntent,
+	FsInfo, FsInfoState, MountEntry, MountPoint, Mounts, SpaceError,
+	System, USED_INSTALL, USED_REMOVE, calculate_installed_size,
+	calculate_removed_size, check_diskspace, check_downloadspace,
+	check_mountpoint, load_fsinfo, match_mount_point, mount_point_list,
+	parse_mntent,
 };
 use alpm_core::error::Errno;
 use alpm_core::filelist::{File, FileList};
@@ -25,13 +26,24 @@ enum Ev {
 #[derive(Default)]
 struct Rec(Vec<Ev>);
 
-impl Events for Rec {
+impl Callbacks for Rec {
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {
 		let msg = String::from_utf8(msg.to_vec()).unwrap();
 		self.0.push(Ev::Log(level, msg));
 	}
 
-	fn progress(&mut self, percent: c_int, howmany: usize, current: usize) {
+	fn progress(
+		&mut self,
+		progress: Progress,
+		pkg: &[u8],
+		percent: c_int,
+		howmany: usize,
+		current: usize,
+	) {
+		assert_eq!(
+			(progress, pkg),
+			(Progress::DiskspaceStart, &b""[..])
+		);
 		self.0.push(Ev::Progress(percent, howmany, current));
 	}
 }

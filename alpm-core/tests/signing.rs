@@ -1,4 +1,5 @@
 // unit tests for alpm_core::signing: the paths that do not reach gpg
+use alpm_core::callbacks::{Callbacks, LogLevel, Question};
 use alpm_core::error::Errno;
 use alpm_core::signing::*;
 
@@ -18,10 +19,16 @@ struct Log {
 	lines: Vec<(LogLevel, String)>,
 }
 
-impl SigCallbacks for Log {
-	fn import_key(&mut self, uid: Option<&[u8]>, fpr: &[u8]) -> bool {
-		self.questions.push((uid.map(<[u8]>::to_vec), fpr.to_vec()));
-		false
+impl Callbacks for Log {
+	fn question(&mut self, q: &mut Question<'_>) {
+		let Question::ImportKey {
+			uid, fingerprint, ..
+		} = q
+		else {
+			panic!("signing asks import_key only: {q:?}");
+		};
+		let uid = uid.map(<[u8]>::to_vec);
+		self.questions.push((uid, fingerprint.to_vec()));
 	}
 
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {

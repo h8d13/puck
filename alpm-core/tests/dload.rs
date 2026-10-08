@@ -9,13 +9,14 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use alpm_core::callbacks::{Callbacks, DownloadEvent, Event, Fetch, LogLevel};
 use alpm_core::dload::{
-	Callbacks, DownloadEvent, DownloadState, Downloader, Event, Fetch,
-	LogLevel, Payload, Sandbox, Settings, download_internal,
-	filecache_find, filecache_setup, gethost, http_date, parse_http_date,
+	DownloadState, Downloader, Payload, Sandbox, Settings,
+	download_internal, gethost, http_date, parse_http_date,
 	remove_temporary_download_dir,
 };
 use alpm_core::error::Errno;
+use alpm_core::util::{filecache_find, filecache_setup};
 
 struct Tmp(PathBuf);
 
@@ -62,7 +63,7 @@ impl Drop for Tmp {
 struct Rec {
 	logs: Vec<(LogLevel, String)>,
 	events: Vec<(String, DownloadEvent)>,
-	alpm: Vec<Event>,
+	alpm: Vec<Event<'static>>,
 }
 
 impl Callbacks for Rec {
@@ -75,8 +76,21 @@ impl Callbacks for Rec {
 		self.events.push((f, event));
 	}
 
-	fn event(&mut self, event: Event) {
-		self.alpm.push(event);
+	// dload sends the pkg_retrieve events only, they borrow nothing
+	fn event(&mut self, event: &Event<'_>) {
+		let e = match *event {
+			Event::PkgRetrieveStart { num, total_size } => {
+				Event::PkgRetrieveStart { num, total_size }
+			}
+			Event::PkgRetrieveDone { num, total_size } => {
+				Event::PkgRetrieveDone { num, total_size }
+			}
+			Event::PkgRetrieveFailed { num, total_size } => {
+				Event::PkgRetrieveFailed { num, total_size }
+			}
+			e => panic!("unexpected event {e:?}"),
+		};
+		self.alpm.push(e);
 	}
 }
 

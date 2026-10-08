@@ -2,6 +2,7 @@
 use std::ffi::c_int;
 use std::fs;
 
+use alpm_core::callbacks::{Callbacks, Progress};
 use alpm_core::conflict::*;
 use alpm_core::deps::dep_from_string;
 use alpm_core::filelist::{File, FileList};
@@ -70,7 +71,7 @@ fn outer_checks_both_directions() {
 #[derive(Default)]
 struct Rec(Vec<(Progress, c_int, usize, usize)>);
 
-impl ProgressCb for Rec {
+impl Callbacks for Rec {
 	fn progress(
 		&mut self,
 		p: Progress,

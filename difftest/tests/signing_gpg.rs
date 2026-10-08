@@ -119,7 +119,16 @@ impl Bench {
 	fn db_check(&mut self, name: &str) -> Vec<SigResult> {
 		let c = self.c.db_check(name.as_bytes());
 		let dbpath = self.fx.dbpath();
-		let db = Db::register_sync(&dbpath, b".db", name.as_bytes(), 0);
+		let (kr, n) = (&mut self.kr, name.as_bytes());
+		let db = Db::register_sync(
+			&dbpath,
+			b".db",
+			n,
+			0,
+			0,
+			kr,
+			&mut (),
+		);
 		let mut cb = self.cb();
 		let r = db_check_pgp_signature(&mut self.kr, &mut cb, &db);
 		assert_eq!(c, listed(r, cb), "db_check {name}");

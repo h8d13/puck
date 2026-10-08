@@ -13,7 +13,7 @@
 //
 // file packages have no mtree stream: default_pkg_ops.mtree_open returns
 // NULL, nothing to port. logging is not modelled, it never changes the
-// result; the signature messages go through SigCallbacks.
+// result; the signature messages go through Callbacks.
 
 use std::ffi::{OsStr, c_int};
 use std::fmt::Display;
@@ -34,6 +34,7 @@ use rustix::fs::{Access, AtFlags, CWD, accessat};
 
 use crate::backup::Backup;
 use crate::be_local::{INFRQ_BASE, INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET};
+use crate::callbacks::{Callbacks, LogLevel};
 use crate::deps::{Depend, dep_from_string};
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
@@ -42,9 +43,9 @@ use crate::package::{
 	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, PkgXData,
 };
 use crate::signing::{
-	Keyring, LogLevel, NoCallbacks, SIG_PACKAGE, SIG_PACKAGE_MARGINAL_OK,
-	SIG_PACKAGE_OPTIONAL, SIG_PACKAGE_UNKNOWN_OK, SigCallbacks, SigResult,
-	check_pgp_helper, extract_keyid, key_import, key_in_keychain, sigpath,
+	Keyring, SIG_PACKAGE, SIG_PACKAGE_MARGINAL_OK, SIG_PACKAGE_OPTIONAL,
+	SIG_PACKAGE_UNKNOWN_OK, SigResult, check_pgp_helper, extract_keyid,
+	key_import, key_in_keychain, sigpath,
 };
 use crate::util::{fnmatch, hash_sdbm, until_nul};
 
@@ -453,7 +454,7 @@ pub struct Validated {
 // must pass _alpm_check_pgp_helper, a missing one only when optional
 pub fn pkg_validate(
 	kr: &mut Keyring,
-	cb: &mut dyn SigCallbacks,
+	cb: &mut dyn Callbacks,
 	pkgfile: &[u8],
 	syncpkg: Option<&Package>,
 	level: c_int,
@@ -512,7 +513,7 @@ pub fn pkg_validate_internal(
 	syncpkg: Option<&Package>,
 ) -> Result<c_int, Error> {
 	let mut kr = Keyring::new(b"");
-	pkg_validate(&mut kr, &mut NoCallbacks, pkgfile, syncpkg, 0)
+	pkg_validate(&mut kr, &mut (), pkgfile, syncpkg, 0)
 		.map(|v| v.validation)
 }
 
@@ -533,7 +534,7 @@ fn read_sigfile(sigpath: &[u8]) -> Option<Vec<u8>> {
 // keychain lacks is offered for import. a failed extraction skips it
 fn import_missing_keys(
 	kr: &mut Keyring,
-	cb: &mut dyn SigCallbacks,
+	cb: &mut dyn Callbacks,
 	filename: &[u8],
 	full: bool,
 ) -> Result<(), Error> {
@@ -580,7 +581,7 @@ fn import_missing_keys(
 // validation bits
 pub fn pkg_load_level(
 	kr: &mut Keyring,
-	cb: &mut dyn SigCallbacks,
+	cb: &mut dyn Callbacks,
 	filename: &[u8],
 	full: bool,
 	level: c_int,
@@ -598,7 +599,7 @@ pub fn pkg_load_level(
 // alpm_pkg_load at level 0
 pub fn pkg_load(filename: &[u8], full: bool) -> Result<Package, Error> {
 	let mut kr = Keyring::new(b"");
-	pkg_load_level(&mut kr, &mut NoCallbacks, filename, full, 0)
+	pkg_load_level(&mut kr, &mut (), filename, full, 0)
 }
 
 // _package_changelog_open/read/close in one: the .CHANGELOG entry of the

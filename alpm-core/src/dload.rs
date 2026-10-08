@@ -1,7 +1,5 @@
-// port of lib/libalpm/dload.c, plus the util.c helpers its callers need
-// (_alpm_download_dir_setup, _alpm_remove_temporary_download_dir,
-// _alpm_filecache_find/exists/setup), kept here until cachedirs live in
-// Handle.
+// port of lib/libalpm/dload.c, plus the util.c helpers only its callers
+// need (_alpm_download_dir_setup, _alpm_remove_temporary_download_dir).
 //
 // libcurl is replaced by reqwest (blocking, rustls), one thread per
 // transfer, the curl behaviour libalpm relies on rebuilt around it: the
@@ -40,8 +38,12 @@ use reqwest::header;
 use reqwest::redirect::Policy;
 use rustix::fs::{AtFlags, CWD, Timespec, Timestamps};
 
+use crate::callbacks::{Callbacks, DownloadEvent, Event, Fetch, LogLevel};
 use crate::error::Errno;
-use crate::util::{get_fullpath, makepath, until_nul};
+use crate::util::{
+	filecache_exists, filecache_find, filecache_setup, get_fullpath,
+	strerror, until_nul,
+};
 
 // ALPM_SIG_PACKAGE, ALPM_SIG_PACKAGE_OPTIONAL
 pub const SIG_PACKAGE: c_int = 1;
@@ -59,50 +61,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LOW_SPEED_TIME: Duration = Duration::from_secs(10);
 const MAX_REDIRS: usize = 10;
 const KEEPALIVE: Duration = Duration::from_secs(60);
-
-// alpm_loglevel_t
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(i32)]
-pub enum LogLevel {
-	Error = 1,
-	Warning = 1 << 1,
-	Debug = 1 << 2,
-	Function = 1 << 3,
-}
-
-// alpm_download_event_type_t with its alpm_download_event_*_t data
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DownloadEvent {
-	Init { optional: bool },
-	Progress { downloaded: i64, total: i64 },
-	Retry { resume: bool },
-	// result 0 downloaded, 1 up to date, -1 error (optional files too)
-	Completed { total: i64, result: c_int },
-}
-
-// the alpm_event_t alpm_fetch_pkgurl sends, alpm_event_pkg_retrieve_t
-// data on all three like the C's reused struct
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Event {
-	PkgRetrieveStart { num: usize, total_size: i64 },
-	PkgRetrieveDone { num: usize, total_size: i64 },
-	PkgRetrieveFailed { num: usize, total_size: i64 },
-}
-
-// handle->logcb, dlcb and eventcb. messages are the formatted C text,
-// '\n' included
-pub trait Callbacks {
-	fn log(&mut self, _level: LogLevel, _msg: &[u8]) {}
-	fn download(&mut self, _filename: &[u8], _event: DownloadEvent) {}
-	fn event(&mut self, _event: Event) {}
-}
-
-// handle->fetchcb (the frontend's XferCommand): 0 downloaded, 1 up to
-// date, -1 error
-pub trait Fetch {
-	fn fetch(&mut self, url: &[u8], localpath: &[u8], force: bool)
-	-> c_int;
-}
 
 // the sandbox side of the handle, set when _alpm_use_sandbox holds (root,
 // a sandbox user, one of the restrictions enabled)
@@ -297,19 +255,6 @@ fn path(p: &[u8]) -> &Path {
 	Path::new(OsStr::from_bytes(until_nul(p)))
 }
 
-// strerror(errno): std formats "<text> (os error N)"
-fn strerror(e: &io::Error) -> Vec<u8> {
-	let s = e.to_string();
-	let s = match e.raw_os_error() {
-		Some(n) => s
-			.strip_suffix(&format!(" (os error {n})"))
-			.unwrap_or(&s)
-			.to_string(),
-		None => s,
-	};
-	s.into_bytes()
-}
-
 fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
 	if needle.is_empty() {
 		return Some(0);
@@ -465,7 +410,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 	era * 146097 + doe - 719468
 }
 
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
+pub(crate) fn civil_from_days(z: i64) -> (i64, i64, i64) {
 	let z = z + 719468;
 	let era = z.div_euclid(146097);
 	let doe = z - era * 146097;
@@ -477,7 +422,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 	(yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
-const MONTHS: [&[u8]; 12] = [
+pub(crate) const MONTHS: [&[u8]; 12] = [
 	b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep",
 	b"Oct", b"Nov", b"Dec",
 ];
@@ -2062,17 +2007,17 @@ impl Downloader<'_> {
 			return Ok(fetched);
 		}
 		let (num, total_size) = (payloads.len(), 0);
-		self.cb.event(Event::PkgRetrieveStart { num, total_size });
+		self.cb.event(&Event::PkgRetrieveStart { num, total_size });
 		if self.download(&mut payloads, &cachedir, &tmp).is_err() {
 			let m = b"failed to retrieve some files\n";
 			self.cb.log(LogLevel::Warning, m);
-			self.cb.event(Event::PkgRetrieveFailed {
+			self.cb.event(&Event::PkgRetrieveFailed {
 				num,
 				total_size,
 			});
 			return Err(Errno::Retrieve);
 		}
-		self.cb.event(Event::PkgRetrieveDone { num, total_size });
+		self.cb.event(&Event::PkgRetrieveDone { num, total_size });
 		for p in &payloads {
 			let name = p
 				.destfile_name
@@ -2118,112 +2063,4 @@ pub fn remove_temporary_download_dir(dir: &[u8]) {
 		])));
 	}
 	let _ = fs::remove_dir(path(dir));
-}
-
-// _alpm_filecache_find: "<cachedir><filename>" of the first cachedir
-// holding it as a regular file
-pub fn filecache_find(
-	cachedirs: &[Vec<u8>],
-	filename: &[u8],
-	cb: &mut dyn Callbacks,
-) -> Option<Vec<u8>> {
-	for dir in cachedirs {
-		let mut p = cat(&[dir, until_nul(filename)]);
-		// snprintf into char[PATH_MAX]
-		p.truncate(PATH_MAX - 1);
-		match fs::metadata(path(&p)) {
-			Ok(md) if md.is_file() => return Some(p),
-			Ok(md) => {
-				let m = format!(": mode={}\n", md.mode());
-				let m = cat(&[
-					b"cached pkg '",
-					&p,
-					b"' is not a regular file",
-					m.as_bytes(),
-				]);
-				cb.log(LogLevel::Warning, &m);
-			}
-			Err(e) if e.raw_os_error() != Some(2) => {
-				let m = cat(&[
-					b"could not open '",
-					&p,
-					b"'\n: ",
-					&strerror(&e),
-				]);
-				cb.log(LogLevel::Warning, &m);
-			}
-			Err(_) => {}
-		}
-	}
-	None
-}
-
-// _alpm_filecache_exists
-pub fn filecache_exists(
-	cachedirs: &[Vec<u8>],
-	filename: &[u8],
-	cb: &mut dyn Callbacks,
-) -> bool {
-	filecache_find(cachedirs, filename, cb).is_some()
-}
-
-// _alpm_filecache_setup: the first cachedir that exists (or can be made)
-// and is a writable directory with a write bit. without one, "/tmp/" is
-// added to the cachedirs and used. the C takes TMPDIR instead only when
-// stat(TMPDIR) fails and the last cachedir it stat'ed was a directory
-pub fn filecache_setup(
-	cachedirs: &mut Vec<Vec<u8>>,
-	cb: &mut dyn Callbacks,
-) -> Vec<u8> {
-	let mut last_dir = None;
-	for dir in cachedirs.iter() {
-		let md = match fs::metadata(path(dir)) {
-			Err(_) => {
-				let m = cat(&[
-					b"no ",
-					dir,
-					b" cache exists, creating...\n",
-				]);
-				cb.log(LogLevel::Warning, &m);
-				if makepath(dir).is_ok() {
-					return dir.clone();
-				}
-				continue;
-			}
-			Ok(md) => md,
-		};
-		last_dir = Some(md.is_dir());
-		let writable = rustix::fs::accessat(
-			CWD,
-			path(dir),
-			rustix::fs::Access::WRITE_OK,
-			AtFlags::SYMLINK_NOFOLLOW,
-		)
-		.is_ok();
-		if md.is_dir() && writable && md.mode() & 0o222 != 0 {
-			return dir.clone();
-		}
-	}
-	let tmpdir = std::env::var_os("TMPDIR").map(|t| t.as_bytes().to_vec());
-	let tmpdir = match tmpdir {
-		Some(t) if fs::metadata(path(&t)).is_err()
-			&& last_dir == Some(true) =>
-		{
-			t
-		}
-		_ => b"/tmp".to_vec(),
-	};
-	// alpm_option_add_cachedir's canonicalize_path
-	let mut dir = tmpdir;
-	if dir.last() != Some(&b'/') {
-		dir.push(b'/');
-	}
-	cachedirs.push(dir.clone());
-	let m = cat(&[
-		b"couldn't find or create package cache, using ",
-		&dir,
-		b" instead\n",
-	]);
-	cb.log(LogLevel::Warning, &m);
-	dir
 }

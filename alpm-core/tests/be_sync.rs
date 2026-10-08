@@ -169,15 +169,12 @@ fn estimate_follows_dbext() {
 #[test]
 fn validate_without_signature() {
 	use alpm_core::be_sync::sync_db_validate;
+	use alpm_core::callbacks::{Callbacks, LogLevel};
 	use alpm_core::signing::{
-		Keyring, LogLevel, NoCallbacks, SIG_DATABASE,
-		SIG_DATABASE_OPTIONAL, SigCallbacks,
+		Keyring, SIG_DATABASE, SIG_DATABASE_OPTIONAL,
 	};
 	struct Lines(Vec<Vec<u8>>);
-	impl SigCallbacks for Lines {
-		fn import_key(&mut self, _: Option<&[u8]>, _: &[u8]) -> bool {
-			false
-		}
+	impl Callbacks for Lines {
 		fn log(&mut self, _: LogLevel, msg: &[u8]) {
 			self.0.push(msg.to_vec());
 		}
@@ -186,7 +183,7 @@ fn validate_without_signature() {
 	let mut kr = Keyring::new(b"/nonexistent/");
 	kr.set_gpg("/nonexistent/gpg");
 	let path = db.path();
-	let cb = &mut NoCallbacks;
+	let cb = &mut ();
 	// missing file: valid without a check
 	let r = sync_db_validate(&mut kr, cb, &path, b"repo", SIG_DATABASE);
 	assert_eq!(r, Ok(false));
