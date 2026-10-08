@@ -4,6 +4,7 @@ use std::io::{self, IsTerminal, Read};
 use std::os::unix::ffi::OsStringExt;
 
 use pacman_cli::pacman::{Io, Process, run, std_sink, std_term};
+use pacman_cli::sighandler::install_soft_interrupt_handler;
 
 // freopen(ctermid(NULL), "r", stdin): only the open is checked, std
 // cannot put the terminal in place of fd 0; later prompts read the
@@ -20,6 +21,9 @@ fn main() {
 	if let Some(c) = alpm_core::sandbox::helper_entry() {
 		std::process::exit(c)
 	}
+	// before the stdin targets are read, like the C's main. the C
+	// ignores sigaction's result
+	let _ = install_soft_interrupt_handler();
 	let mut argv: Vec<Vec<u8>> =
 		std::env::args_os().map(OsStringExt::into_vec).collect();
 	// stdin is read only for a "-" target, prompts need it otherwise

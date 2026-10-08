@@ -38,6 +38,7 @@ reqwest = { version = "0.13", default-features = false, features = ["blocking", 
 rustix = { version = "1.1", features = ["fs", "net", "process", "termios", "use-libc"] }
 landlock = "0.4"
 libseccomp = "0.4"
+signal-hook = "0.4"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

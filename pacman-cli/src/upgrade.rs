@@ -91,7 +91,7 @@ pub fn pacman_upgrade<R: BufRead, S: AsRef<[u8]>>(
 	}
 	if config.print == 0 {
 		ui.out.stdout.extend_from_slice(b"loading packages...\n");
-		// one stdout in the C: ahead of the callbacks' lines
+		// one stdout in the C: ahead of the prepare's event lines
 		ui.out.flush();
 	}
 	let mut retval = load_packages(ui, h, &local, h.local_file_siglevel());
