@@ -431,6 +431,11 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
 - `filelist::File` names hold no nul: `File::new`, the only constructor
   (private field), cuts at the first one like the C's strdup'd strings.
   Readers (sort, -Qk, -Ql, conflicts, removal) use `name()` uncut.
+- `llstat_buf` (-Qk/-Qkk): llstat on the caller's path buffer, a nul
+  written at the '/' strip and taken back like the C's in-place cut,
+  then rustix `statat` (glibc fstatat, the C's lstat). std's
+  `symlink_metadata` would copy the path into a C string and scan it
+  again per file.
 - `alpm_strerror`: out of range and `ALPM_ERR_OK` give "unexpected
   error" like the C. difftest runs without `setlocale`, so gettext returns
   the msgid.
