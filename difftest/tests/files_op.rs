@@ -9,7 +9,6 @@ use difftest::{
 };
 use pacman_cli::conf::{ColStr, Config, LOG_ERROR, LOG_WARNING};
 use pacman_cli::files::pacman_files;
-use pacman_cli::sync::Unported;
 use pacman_cli::util::Output;
 
 // a fixture and four handles per case: far slower than string fuzz
@@ -31,7 +30,7 @@ fn rust_handle(w: &SyncWorld) -> Handle {
 fn compare(w: &SyncWorld, cfg: &Config, targets: &[Vec<u8>]) -> bool {
 	let mut h = rust_handle(w);
 	let mut out = Output::default();
-	let ret = pacman_files(cfg, &mut h, targets, &mut out).unwrap();
+	let ret = pacman_files(cfg, &mut h, targets, &mut out);
 	let fh = w.c_handle(b".files");
 	let c = c_pacman_files(&fh, cfg, targets);
 	let rust = difftest::CRun {
@@ -190,23 +189,6 @@ fn edges() {
 			compare(&w, &cfg, &t);
 		}
 	}
-}
-
-// -Fy stops the Rust side, after the repository check like the C
-#[test]
-fn unported() {
-	let mut rng = Rng::new(5);
-	let mut w = SyncWorld::generate(&mut rng, "files-op-unported");
-	while w.repos.is_empty() {
-		w = SyncWorld::generate(&mut rng, "files-op-unported");
-	}
-	let mut h = rust_handle(&w);
-	let mut cfg = Config::new();
-	cfg.op_s_sync = 1;
-	let mut out = Output::default();
-	let none: [&[u8]; 0] = [];
-	let r = pacman_files(&cfg, &mut h, &none, &mut out);
-	assert_eq!(r, Err(Unported::Refresh));
 }
 
 #[test]

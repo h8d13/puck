@@ -32,7 +32,7 @@ use crate::{
 };
 
 unsafe extern "C" {
-	fn pacman_sync(targets: *mut CList) -> c_int;
+	pub(crate) fn pacman_sync(targets: *mut CList) -> c_int;
 }
 
 // a real handle on a fixture, released on drop
@@ -83,6 +83,12 @@ impl FrontHandle {
 				.collect();
 			FrontHandle { h, dbs }
 		}
+	}
+
+	// the handle and its dbs in registration order, for callers setting
+	// more options on them
+	pub(crate) fn raw(&self) -> (*mut c_void, &[*mut CDb]) {
+		(self.h, &self.dbs)
 	}
 
 	// alpm_db_get_pkgcache on every sync db, so a broken db file is
@@ -513,7 +519,7 @@ pub enum DbFile {
 	Truncated,
 }
 
-fn sync_tar(pkgs: &[GenPkg], files: bool) -> Vec<u8> {
+pub(crate) fn sync_tar(pkgs: &[GenPkg], files: bool) -> Vec<u8> {
 	let mut entries: Vec<TarEntry> = Vec::new();
 	for p in pkgs {
 		let dir = format!("{}-{}/", p.name, p.version);
@@ -539,7 +545,7 @@ fn sync_tar(pkgs: &[GenPkg], files: bool) -> Vec<u8> {
 	ustar(&entries)
 }
 
-fn gen_pkgs(rng: &mut Rng, min: usize, max: usize) -> Vec<GenPkg> {
+pub(crate) fn gen_pkgs(rng: &mut Rng, min: usize, max: usize) -> Vec<GenPkg> {
 	let mut names: Vec<&str> = NAMES.to_vec();
 	let n = min + rng.below(max - min + 1);
 	(0..n).map(|_| {

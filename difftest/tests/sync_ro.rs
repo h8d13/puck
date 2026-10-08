@@ -220,7 +220,6 @@ fn unported() {
 		pacman_sync(&cfg, &mut h, t, 0, &mut out)
 	};
 	assert_eq!(run(|c| c.op_s_clean = 1, &none), Err(Unported::Clean));
-	assert_eq!(run(|c| c.op_s_sync = 1, &none), Err(Unported::Refresh));
 	assert_eq!(run(|c| c.op_s_search = 1, &none), Err(Unported::Search));
 	assert_eq!(
 		run(|c| c.op_s_upgrade = 1, &none),
