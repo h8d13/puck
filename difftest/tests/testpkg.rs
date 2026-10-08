@@ -19,8 +19,8 @@ use alpm_core::signing::{
 	SIG_PACKAGE_UNKNOWN_OK,
 };
 use difftest::{
-	COMPS, CSigHandle, FILES, GpgFixture, Home, c_testpkg, output_capped,
-	tar_dir, tar_file, ustar, write_db,
+	COMPS, CSigHandle, FILES, GpgFixture, Home, c_testpkg,
+	cut_archive_text, output_capped, tar_dir, tar_file, ustar, write_db,
 };
 use testpkg::{Output, Setup, run};
 
@@ -61,9 +61,15 @@ fn run_bin(bin: &Path, args: &[&[u8]]) -> Run {
 	let o = output_capped(&mut cmd, 60);
 	Run {
 		status: o.status.code().expect("killed by a signal"),
-		out: o.stdout,
-		err: o.stderr,
+		out: cut(&o.stdout),
+		err: cut(&o.stderr),
 	}
+}
+
+// each line with libarchive's text cut (cut_archive_text)
+fn cut(text: &[u8]) -> Vec<u8> {
+	let lines = text.split_inclusive(|&c| c == b'\n');
+	lines.flat_map(cut_archive_text).collect()
 }
 
 fn lossy(b: &[u8]) -> String {
@@ -137,26 +143,9 @@ fn known(label: &str) -> bool {
 	label == "text file"
 }
 
-// testpkg's own line: the verdict after the library's log lines
-fn verdict(out: &[u8]) -> &[u8] {
-	let body = out.strip_suffix(b"\n").unwrap_or(out);
-	let start = body.iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1);
-	&out[start..]
-}
-
-// equal but for the "error: " lines be_package logs: the port leaves
-// out libarchive's error texts ("could not open file ...: <text>",
-// "error while reading package ...: <text>") and logs .PKGINFO/check_meta
-// refusals through its own reader (PORTING.md be_package row, the
-// pkgreader unit). status, stderr and the verdict must still match
-fn same_verdict(c: (i32, &[u8], &[u8]), r: (i32, &[u8], &[u8])) -> bool {
-	c.0 == r.0 && c.2 == r.2 && verdict(c.1) == verdict(r.1)
-}
-
 #[derive(Default)]
 struct Tally {
 	equal: usize,
-	logs: usize,
 	total: usize,
 	failures: Vec<String>,
 }
@@ -167,20 +156,11 @@ impl Tally {
 		let r = run_bin(&rust_bin(), args);
 		self.total += 1;
 		let ok = c == r;
-		let logs = !ok && same_verdict(
-			(c.status, &c.out, &c.err),
-			(r.status, &r.out, &r.err),
-		);
 		self.equal += usize::from(ok);
-		self.logs += usize::from(logs);
-		let mark = match (ok, logs) {
-			(true, _) => "equal",
-			(_, true) => "LOGS",
-			_ => "DIFF",
-		};
+		let mark = if ok { "equal" } else { "DIFF" };
 		let (o, e) = (c.out.len(), c.err.len());
 		println!("{mark:5}  {label}  [{} {o}/{e}]", c.status);
-		if !ok && !logs && !known(label) {
+		if !ok && !known(label) {
 			self.failures.push(format!(
 				"{label}\nstatus C {} Rust {}\n-- C out\n{}\
 				-- Rust out\n{}-- C err\n{}-- Rust err\n{}",
@@ -195,10 +175,7 @@ impl Tally {
 	}
 
 	fn finish(self, what: &str) {
-		println!(
-			"== {what}: {}/{} equal, {} with be_package log lines only",
-			self.equal, self.total, self.logs
-		);
+		println!("== {what}: {}/{} equal", self.equal, self.total);
 		assert!(
 			self.failures.is_empty(),
 			"{}",
@@ -265,7 +242,7 @@ fn module() {
 	let (root, db) = (fx.root_dir(), fx.db_dir());
 	let root_b = root.as_os_str().as_bytes().to_vec();
 	let db_b = db.as_os_str().as_bytes().to_vec();
-	let (mut equal, mut logs_only, mut total) = (0, 0, 0);
+	let (mut equal, mut total) = (0, 0);
 	let mut failures = Vec::new();
 	for home in [Home::Pgp, Home::Direct, Home::ReadOnly] {
 		let gpgdir = fx.home(home);
@@ -292,15 +269,10 @@ fn module() {
 					&mut o,
 				);
 				total += 1;
-				let ok = c == (ret, o.out.clone())
+				let ok = (c.0, cut(&c.1)) == (ret, cut(&o.out))
 					&& o.err.is_empty();
-				let logs = !ok && same_verdict(
-					(c.0, &c.1, b""),
-					(ret, &o.out, &o.err),
-				);
 				equal += usize::from(ok);
-				logs_only += usize::from(logs);
-				if !ok && !logs && !known(label) {
+				if !ok && !known(label) {
 					failures.push(format!(
 						"{home:?} level {level:#x} {label}\n\
 						C {} {}\nRust {ret} {}{}",
@@ -313,9 +285,6 @@ fn module() {
 			}
 		}
 	}
-	println!(
-		"== testpkg module: {equal}/{total} equal, {logs_only} with \
-		be_package log lines only"
-	);
+	println!("== testpkg module: {equal}/{total} equal");
 	assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

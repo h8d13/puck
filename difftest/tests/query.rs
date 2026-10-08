@@ -23,7 +23,7 @@ use alpm_core::handle::Handle;
 use alpm_types::{Md5Checksum, Sha256Checksum};
 use difftest::{
 	CQuery, Comp, QueryWorld, Rng, TempRoot, iters, section, tar_dir,
-	tar_file, unstamp, ustar, write_db,
+	tar_file, tz_utc, unstamp, ustar, write_db,
 };
 use pacman_cli::callback::Frontend;
 use pacman_cli::conf::{
@@ -718,6 +718,8 @@ fn rust_run(
 	cfg: &Config,
 	f: impl FnOnce(&mut Handle, &mut Output) -> i32,
 ) -> CQuery {
+	// -Qi dates in the C side's zone
+	tz_utc();
 	// what the last world's handle logged on release
 	SINK.with(|s| s.take());
 	let term = Term::new(&b""[..], false, false);

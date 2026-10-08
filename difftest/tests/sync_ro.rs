@@ -6,7 +6,7 @@
 use alpm_core::handle::Handle;
 use difftest::{
 	CRun, GROUPS, NAMES, REPOS, Rng, SyncWorld, c_pacman_sync, iters,
-	sync_read_only,
+	sync_read_only, tz_utc,
 };
 use pacman_cli::conf::{ColStr, Config, LOG_ERROR, LOG_WARNING};
 use pacman_cli::sync::{Deferred, pacman_sync};
@@ -44,6 +44,8 @@ fn compare(
 	warmed: bool,
 ) -> Option<bool> {
 	let mut h = rust_handle(w, b".db");
+	// -Si dates in the C side's zone
+	tz_utc();
 	if warmed {
 		warm(&mut h);
 	}

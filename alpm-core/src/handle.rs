@@ -24,7 +24,7 @@ use crate::db::{Db, SIG_USE_DEFAULT};
 use crate::deps::{DepMod, Depend, DepsOpts};
 use crate::dload::{DownloadState, Downloader, Sandbox, Settings};
 use crate::error::Errno;
-use crate::log::{Clock, Logger};
+use crate::log::Logger;
 use crate::package::{DbCaches, Package};
 use crate::sandbox::handle_sandbox;
 use crate::signing::Keyring;
@@ -349,15 +349,6 @@ impl Handle {
 		std::mem::replace(&mut self.trans, trans)
 	}
 
-	// set_callbacks giving the old set back, for a caller that swaps
-	// them for one call
-	pub fn replace_callbacks(
-		&mut self,
-		cb: Box<dyn Callbacks>,
-	) -> Box<dyn Callbacks> {
-		std::mem::replace(&mut self.cb, cb)
-	}
-
 	// what alpm_db_update works on at once, borrowed apart
 	pub(crate) fn sync_parts(&mut self) -> SyncParts<'_> {
 		let sandbox = (self.sandbox_for)(self);
@@ -383,11 +374,6 @@ impl Handle {
 		msg: &[u8],
 	) -> Result<(), Errno> {
 		self.logger.logaction(prefix, msg)
-	}
-
-	// the clock logfile and syslog lines are stamped with
-	pub fn set_log_clock(&mut self, clock: Clock) {
-		self.logger.set_clock(clock);
 	}
 
 	// alpm_option_get_logfile

@@ -338,7 +338,7 @@ pub fn sync_read_only<S>(cfg: &Config, targets: &[S]) -> bool {
 // pacman_sync(targets) on fh. C preconditions: sync_read_only, and the
 // dump_pkg_full ones of PkgWorld::dump_full for every package -Si shows
 // (the generated worlds keep to them: dates localtime takes, no ESC,
-// no %PGPSIG%)
+// %PGPSIG% from random_sig)
 pub fn c_pacman_sync<S: AsRef<[u8]>>(
 	fh: &FrontHandle,
 	cfg: &Config,

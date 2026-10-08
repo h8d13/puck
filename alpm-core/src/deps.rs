@@ -210,12 +210,14 @@ pub struct DepMissing {
 	pub causingpkg: Option<Vec<u8>>,
 }
 
-// a db as the resolver reads it: alpm_db_t usage and the loaded cache
-// (list order for scans, the hash for lookups by name)
+// a db as the resolver reads it: alpm_db_t usage, the loaded cache
+// (list order for scans, the hash for lookups by name) and its name, what
+// alpm_pkg_get_db gives a provider in the select question
 #[derive(Clone, Copy, Debug)]
 pub struct DbPkgs<'a> {
 	pub usage: c_int,
 	pub cache: &'a PkgHash<Package>,
+	pub name: &'a [u8],
 }
 
 // the handle options deps.c reads (Handle::deps_opts)
@@ -669,7 +671,7 @@ fn resolvedep<'a>(
 	}
 
 	let name = until_nul(&dep.name);
-	let mut providers = Vec::new();
+	let (mut providers, mut provider_dbs) = (Vec::new(), Vec::new());
 	for db in dbs.iter().filter(usable) {
 		for pkg in db.cache.iter() {
 			if has_name(pkg, name, dep.name_hash)
@@ -696,6 +698,7 @@ fn resolvedep<'a>(
 				return Ok(pkg);
 			}
 			providers.push(pkg);
+			provider_dbs.push(db.name);
 		}
 	}
 
@@ -703,6 +706,7 @@ fn resolvedep<'a>(
 		let mut q = Question::SelectProvider {
 			use_index: 0,
 			providers: &providers,
+			dbs: &provider_dbs,
 			depend: dep,
 		};
 		if providers.len() > 1 {

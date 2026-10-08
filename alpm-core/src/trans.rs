@@ -400,6 +400,7 @@ impl<'a> View<'a> {
 		let sync = h.syncdbs().iter().map(|db| DbPkgs {
 			usage: db.usage(),
 			cache: db.loaded_pkgcache().unwrap_or(empty),
+			name: db.name(),
 		});
 		View {
 			handle: h,
@@ -418,6 +419,7 @@ impl<'a> View<'a> {
 			local: DbPkgs {
 				usage: self.local_usage,
 				cache: self.local,
+				name: b"local",
 			},
 			sync: &self.sync,
 		}

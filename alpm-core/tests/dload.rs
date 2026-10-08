@@ -67,8 +67,14 @@ struct Rec {
 }
 
 impl Callbacks for Rec {
+	// errors and warnings: the debug lines are compared against the C
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {
-		self.logs.push((level, String::from_utf8_lossy(msg).into()));
+		if level != LogLevel::Debug {
+			self.logs.push((
+				level,
+				String::from_utf8_lossy(msg).into(),
+			));
+		}
 	}
 
 	fn download(&mut self, filename: &[u8], event: DownloadEvent) {

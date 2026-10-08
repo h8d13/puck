@@ -24,7 +24,8 @@ use alpm_core::callbacks::{Callbacks, LogLevel};
 use alpm_core::package::Package;
 use alpm_core::signing::Keyring;
 use difftest::{
-	COMPS, CPkgHandle, Comp, Rng, TarNode, iters, pax_record, ustar_nodes,
+	COMPS, CPkgHandle, Comp, Rng, TarNode, cut_archive_text, iters,
+	pax_record, ustar_nodes,
 };
 
 // alpm_loglevel_t and message of each log line
@@ -87,67 +88,15 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 // the C's lines the port does not log: RET_ERR/GOTO_ERR's debug lines (C
-// source position) and those carrying libarchive's tar and filter texts
+// source position)
 fn c_only(msg: &[u8]) -> bool {
-	let heads: [&[u8]; 3] = [
-		b"returning error ",
-		b"got error ",
-		b"error while reading package ",
-	];
-	heads.iter().any(|h| msg.starts_with(h))
-}
-
-// the texts of libarchive's mtree reader, which the port has too
-const MTREE_TEXTS: [&[u8]; 20] = [
-	b"Unrecognized archive format\n",
-	b"Can't parse line ",
-	b"Line too long\n",
-	b"/unset shall not contain",
-	b"Missing type keyword",
-	b"Malformed attribute ",
-	b"Unrecognized key ",
-	b"Unrecognized file type ",
-	b"Symbolic or non-octal mode ",
-	b"incorrect digest length",
-	b"invalid digest data",
-	b"Unknown format `",
-	b"Missing number\n",
-	b"Too many arguments\n",
-	b"Not enough arguments\n",
-	b"invalid major number\n",
-	b"invalid minor number\n",
-	b"too many fields for format\n",
-	b"invalid unit number\n",
-	b"invalid subunit number\n",
-];
-
-// an open failure's text is strerror, libarchive's or the port's reader's,
-// an mtree failure's the filter's unless the mtree reader's: cut after
-// the path
-fn cut_text(mut msg: Vec<u8>) -> Vec<u8> {
-	let mtree = b"error while reading mtree of package ";
-	for head in [&b"could not open file "[..], mtree] {
-		if !msg.starts_with(head) {
-			continue;
-		}
-		let Some(i) = find(&msg[head.len()..], b": ") else {
-			continue;
-		};
-		let at = head.len() + i + 2;
-		let text = &msg[at..];
-		if head != mtree
-			|| !MTREE_TEXTS.iter().any(|t| text.starts_with(t))
-		{
-			msg.truncate(at);
-		}
-	}
-	msg
+	msg.starts_with(b"returning error ") || msg.starts_with(b"got error ")
 }
 
 fn norm(logs: CLogs) -> CLogs {
 	logs.into_iter()
 		.filter(|(_, m)| !c_only(m))
-		.map(|(l, m)| (l, cut_text(m)))
+		.map(|(l, m)| (l, cut_archive_text(&m)))
 		.collect()
 }
 
@@ -173,7 +122,8 @@ fn load_rust(path: &Path, full: bool) -> Outcome {
 	let (mut kr, mut cb) = (Keyring::new(b""), Logs::default());
 	let r = pkg_load_level(&mut kr, &mut cb, bytes(path), full, 0);
 	let r = r.map_err(|e| e.errno() as i32).map(|pkg| {
-		let log = match changelog(&pkg) {
+		// the C side's changelog lines are taken apart (loaded)
+		let log = match changelog(&mut (), &pkg) {
 			Ok(log) => Some(log),
 			Err(Error::NotFound) => None,
 			Err(e) => {

@@ -367,8 +367,20 @@ pub fn pkg_load_internal(
 	};
 	let (mut config, mut hit_mtree) = (false, false);
 
+	// a header or data read failing: "error while reading package"
+	// with the reader's text (the C: libarchive's)
+	let read_err = |cb: &mut dyn Callbacks, e: io::Error| {
+		let text = e.to_string();
+		let head = b"error while reading package ";
+		logv(
+			cb,
+			LogLevel::Error,
+			&[head, pkgfile, b": ", text.as_bytes(), b"\n"],
+		);
+		Error::Archive(e)
+	};
 	for entry in archive.entries() {
-		let mut entry = entry.map_err(Error::Archive)?;
+		let mut entry = entry.map_err(|e| read_err(cb, e))?;
 		let name = entry.path_bytes().to_vec();
 		// the .PKGINFO and .MTREE branches continue before the break
 		// check below, so the walk always goes one entry further
@@ -416,7 +428,7 @@ pub fn pkg_load_internal(
 			let (mode, size) = (entry.mode(), entry.size());
 			push_file(&mut pkg.files, &name, mode, size);
 		}
-		entry.skip().map_err(Error::Archive)?;
+		entry.skip().map_err(|e| read_err(cb, e))?;
 		if (!full || hit_mtree) && config {
 			break;
 		}
@@ -627,11 +639,14 @@ pub fn pkg_load(filename: &[u8], full: bool) -> Result<Package, Error> {
 // _package_changelog_open/read/close in one: the .CHANGELOG entry of the
 // package's file. NotFound when there is none (the C sets errno ENOENT),
 // a read error is ALPM_ERR_LIBARCHIVE like _package_changelog_read
-pub fn changelog(pkg: &Package) -> Result<Vec<u8>, Error> {
+pub fn changelog(
+	cb: &mut dyn Callbacks,
+	pkg: &Package,
+) -> Result<Vec<u8>, Error> {
 	let Some(PkgFrom::File(path)) = &pkg.origin else {
 		return Err(Error::WrongArgs);
 	};
-	let (archive, _) = open_archive(&mut (), until_nul(path))?;
+	let (archive, _) = open_archive(cb, until_nul(path))?;
 	// a header error ends the search like the C's while loop
 	for mut entry in archive.entries().map_while(Result::ok) {
 		if *entry.path_bytes() == *b".CHANGELOG" {

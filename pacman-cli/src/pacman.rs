@@ -39,7 +39,7 @@ use crate::database::pacman_database;
 use crate::deptest::pacman_deptest;
 use crate::files::pacman_files;
 use crate::getopt::{Getopt, HasArg, LongOpt};
-use crate::package::format_date_utc;
+use crate::package::format_date;
 use crate::query::{QueryEnv, pacman_query};
 use crate::remove::pacman_remove;
 use crate::sighandler::{remove_soft_interrupt_handler, set_handle};
@@ -265,6 +265,10 @@ impl Host for Io {
 fn pm_error(config: &Config, io: &mut Io, parts: &[&[u8]]) {
 	if config.logmask & LOG_ERROR == 0 {
 		return;
+	}
+	// pm_vfprintf's PACMAN_DEBUG stamp, --debug may come first
+	if io.debug_stamps && config.logmask & LOG_DEBUG != 0 {
+		io.err.extend_from_slice(&debug_stamp(now_secs()));
 	}
 	let c = &config.colstr;
 	io.err.extend_from_slice(c.err);
@@ -1653,7 +1657,7 @@ pub fn run<R: BufRead + 'static>(
 				cols: (term.cols)(),
 				term: &mut term,
 				out: &mut out,
-				format_date: &format_date_utc,
+				format_date: &format_date,
 				explicit_adds: Vec::new(),
 				explicit_removes: Vec::new(),
 			};

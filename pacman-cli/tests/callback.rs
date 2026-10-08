@@ -1,5 +1,5 @@
-// unit tests of pacman_cli::callback and the util.rs prompts: Lookup
-// hooks, unknown download files and pinned outputs of the common paths
+// unit tests of pacman_cli::callback and the util.rs prompts: optdepend
+// status lists, unknown download files and pinned outputs of the common paths
 
 use alpm_core::callbacks::{
 	Callbacks, DownloadEvent, Event, LogLevel, PackageOp, PackageOperation,
@@ -8,9 +8,9 @@ use alpm_core::callbacks::{
 use alpm_core::deps::dep_from_string;
 use alpm_core::package::Package;
 use alpm_core::util::hash_sdbm;
-use pacman_cli::callback::{Frontend, Lookup};
+use pacman_cli::callback::Frontend;
 use pacman_cli::conf::{Config, LOG_DEBUG, LOG_ERROR, LOG_WARNING};
-use pacman_cli::util::{Output, Term};
+use pacman_cli::util::{Output, Term, debug_stamp};
 use std::cell::Cell;
 use std::io::Cursor;
 
@@ -51,35 +51,24 @@ fn s(b: &[u8]) -> &str {
 	std::str::from_utf8(b).unwrap()
 }
 
-struct Installed;
-
-impl Lookup for Installed {
-	fn db_name(&mut self, pkg: &Package) -> Option<Vec<u8>> {
-		match pkg.name_bytes() {
-			b"a" | b"b" => Some(b"core".to_vec()),
-			_ => Some(b"extra".to_vec()),
-		}
-	}
-
-	// "x" is installed
-	fn installed(&mut self) -> (Vec<Package>, Vec<Package>) {
-		(vec![pkg("x", &[])], Vec::new())
-	}
-}
-
 #[test]
 fn optdepends_with_status() {
-	let mut f = Frontend::with_lookup(Config::new(), term(b""), Installed);
-	let p = pkg("p", &["x: for x", "y"]);
+	let mut f = Frontend::new(Config::new(), term(b""));
+	let p = pkg("p", &["x: for x", "y", "z"]);
+	// "x" is installed, "z" comes with the transaction
+	let (x, z) = (pkg("x", &[]), pkg("z", &[]));
 	let op = PackageOp {
 		operation: PackageOperation::Install,
 		oldpkg: None,
 		newpkg: Some(&p),
+		local: &[&x],
+		pending: &[&z],
 	};
 	f.event(&Event::PackageOperationDone(op));
 	assert_eq!(
 		s(&f.out.stdout),
-		"Optional dependencies for p\n    x: for x [installed]\n    y\n"
+		"Optional dependencies for p\n    x: for x [installed]\n    y\n    \
+		z [pending]\n"
 	);
 	// the status goes after the computed dep string, desc included:
 	// only "x" itself matches here
@@ -89,6 +78,8 @@ fn optdepends_with_status() {
 		operation: PackageOperation::Upgrade,
 		oldpkg: Some(&p),
 		newpkg: Some(&q),
+		local: &[&x],
+		pending: &[],
 	};
 	f.event(&Event::PackageOperationDone(op));
 	assert_eq!(
@@ -103,10 +94,11 @@ fn provider_prompt() {
 	let providers = [&a, &b, &c];
 	let dep = dep_from_string(b"sh");
 	let term = term(b"9\n3\n");
-	let mut f = Frontend::with_lookup(Config::new(), term, Installed);
+	let mut f = Frontend::new(Config::new(), term);
 	let mut q = Question::SelectProvider {
 		use_index: 0,
 		providers: &providers,
+		dbs: &[b"core", b"core", b"extra"],
 		depend: &dep,
 	};
 	f.question(&mut q);
@@ -198,8 +190,9 @@ fn log_lines() {
 	f.log(LogLevel::Debug, b"d\n");
 	f.log(LogLevel::Function, b"hidden\n");
 	f.log(LogLevel::Error, b"");
-	// stamped with the clock: 3723 s is 01:02:03
-	assert_eq!(s(&f.out.stderr), "[01:02:03] debug: d\n");
+	// stamped with the clock (3723 s, local time: tz-probe checks it)
+	let want = [&debug_stamp(3723)[..], b"debug: d\n"].concat();
+	assert_eq!(s(&f.out.stderr), s(&want));
 	// delayed while a retrieve runs, unstamped, flushed at its end
 	f.out = Output::default();
 	f.event(&Event::DbRetrieveStart);

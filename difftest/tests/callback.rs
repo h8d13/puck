@@ -56,7 +56,6 @@ fn setup(config: Config, cols: u16, now_ms: i64) -> CbSetup {
 		cols,
 		now_ms,
 		input: Vec::new(),
-		dbs: Vec::new(),
 	}
 }
 
@@ -112,6 +111,9 @@ fn events() {
 		operation,
 		oldpkg: old,
 		newpkg: new,
+		// the C side's handle has no local db or transaction
+		local: &[],
+		pending: &[],
 	};
 	let a: &'static Package = Box::leak(Box::new(a));
 	let b: &'static Package = Box::leak(Box::new(b));
@@ -342,11 +344,13 @@ fn questions_with<'a>(q: &Asked<'a>) -> Vec<Question<'a>> {
 		Question::SelectProvider {
 			use_index: 0,
 			providers: pkgs3,
+			dbs: &[b"core", b"core", b"extra"],
 			depend: dep,
 		},
 		Question::SelectProvider {
 			use_index: 0,
 			providers: pkgs1,
+			dbs: &[b"core"],
 			depend: dep,
 		},
 	]
@@ -428,11 +432,6 @@ fn questions() {
 				let what = format!("{q:?}");
 				let s = CbSetup {
 					input: input.to_vec(),
-					dbs: vec![
-						b"core".to_vec(),
-						b"core".to_vec(),
-						b"extra".to_vec(),
-					],
 					..setup(cfg.clone(), 60, 1_000)
 				};
 				check(&s, Call::Question(q), &what);

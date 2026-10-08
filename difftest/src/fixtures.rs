@@ -18,6 +18,7 @@ use alpm_compress::compression::{
 };
 
 use crate::Rng;
+use crate::signing::random_sig;
 
 // the C binary of PACMAN_BUILD
 pub fn c_pacman() -> PathBuf {
@@ -591,6 +592,14 @@ fn gen_pkg(rng: &mut Rng, name: &str) -> GenPkg {
 			word(rng, 1, 6)
 		);
 		desc.push_str(&section("URL", &one(url)));
+	}
+	// -Sii's keys: packets alpm_extract_keyid is defined on. its own
+	// rng, the worlds other tests draw stay as they were
+	let seed = name.bytes().chain(version.bytes());
+	let seed = seed.fold(0x5195, |h: u64, b| h.wrapping_mul(31) ^ b as u64);
+	if let (Some(sig), _) = random_sig(&mut Rng::new(seed)) {
+		let sig = String::from_utf8(sig).expect("base64 is ascii");
+		desc.push_str(&section("PGPSIG", &one(sig)));
 	}
 	GenPkg {
 		name: name.to_string(),

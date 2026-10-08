@@ -162,7 +162,8 @@ impl PkgEnv for Env<'_> {
 	fn changelog(&mut self, pkg: &Package) -> Option<Vec<u8>> {
 		match pkg.origin {
 			Some(PkgFrom::File(_)) => {
-				be_package::changelog(pkg).ok()
+				let cb = self.handle.callbacks();
+				be_package::changelog(cb, pkg).ok()
 			}
 			Some(PkgFrom::LocalDb) => {
 				let local = self.handle.localdb()?.local()?;

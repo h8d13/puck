@@ -489,17 +489,13 @@ const Q_IMPORT_KEY: c_int = 1 << 6;
 
 // the records compared: no FUNCTION lines (the lazy loads: the port
 // loads every local file list before the file conflict check, the C as
-// it goes), no RET_ERR/GOTO_ERR lines (C only), and no debug lines
-// inside a download (dload's internals)
+// it goes), no RET_ERR/GOTO_ERR lines (C only)
 pub fn kept(recs: Vec<TcRec>) -> Vec<TcRec> {
-	let mut quiet = false;
 	let mut out: Vec<TcRec> = Vec::new();
 	for r in recs {
 		match &r {
-			TcRec::Retrieve(EV_RETRIEVE_START, ..) => quiet = true,
-			TcRec::Retrieve(..) => quiet = false,
 			TcRec::Log(LOG_FUNCTION, _) => continue,
-			TcRec::Log(LOG_DEBUG, m) if quiet || c_only(m) => {
+			TcRec::Log(LOG_DEBUG, m) if c_only(m) => {
 				continue;
 			}
 			_ => {}
