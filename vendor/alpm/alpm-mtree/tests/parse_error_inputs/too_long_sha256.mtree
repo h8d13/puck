@@ -1,3 +1,0 @@
-#mtree
-/set mode=755
-./testfile sha256digest=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0 type=file

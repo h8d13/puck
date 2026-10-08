@@ -8,7 +8,7 @@
 use std::cell::Cell;
 use std::ffi::{OsStr, OsString, c_char, c_ulong};
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
-use std::io::{self, ErrorKind, Read, Seek, Write};
+use std::io::{self, BufRead, BufReader, Cursor, ErrorKind, Read, Seek, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{
@@ -480,7 +480,7 @@ fn skip(p: &[u8], mut pi: usize, not: bool) -> Bracket {
 }
 
 // C path from bytes, cut at the first nul
-fn c_path(path: &[u8]) -> &Path {
+pub(crate) fn c_path(path: &[u8]) -> &Path {
 	Path::new(OsStr::from_bytes(until_nul(path)))
 }
 
@@ -1308,8 +1308,8 @@ const UNPACK_UMASK: u32 = 0o022;
 // that block is never seen, and the filter stays failed. the decoders
 // themselves deliver every byte up to the cut, so the blocks are redone
 // here. no filter (plain tar) reads the file as it is
-pub struct Filter {
-	decoder: CompressionDecoder<'static>,
+pub struct Filter<R: Source = BufReader<File>> {
+	decoder: CompressionDecoder<'static, R>,
 	// out_block_size, 0 without a filter
 	size: usize,
 	// blocks read ahead, data[pos..] not consumed yet
@@ -1332,14 +1332,33 @@ fn out_block_size(s: &DecompressionSettings) -> usize {
 	}
 }
 
+// what a filter decodes: a file, or a .MTREE read into memory
+// (archive_read_open_memory)
+pub trait Source: BufRead {
+	// bytes of it the decoder has read
+	fn offset(&self) -> u64;
+}
+
+impl Source for BufReader<File> {
+	fn offset(&self) -> u64 {
+		self.get_ref().stream_position().unwrap_or_default()
+	}
+}
+
+impl Source for Cursor<Vec<u8>> {
+	fn offset(&self) -> u64 {
+		self.position()
+	}
+}
+
 // bytes uudecode_bidder_bid's line scan goes on over (its ascii table)
 fn is_uu_text(c: &u8) -> bool {
 	matches!(c, b' '..=b'~' | b'\n' | b'\r')
 }
 
-impl Filter {
+impl<R: Source> Filter<R> {
 	pub fn new(
-		decoder: CompressionDecoder<'static>,
+		decoder: CompressionDecoder<'static, R>,
 		s: &DecompressionSettings,
 	) -> Self {
 		Filter {
@@ -1350,17 +1369,6 @@ impl Filter {
 			end: false,
 			failed: None,
 			consumed: Rc::default(),
-		}
-	}
-
-	// the file under the decoder
-	fn file(&self) -> &File {
-		match &self.decoder {
-			CompressionDecoder::Bzip2(d) => d.get_ref().get_ref(),
-			CompressionDecoder::Gzip(d) => d.get_ref().get_ref(),
-			CompressionDecoder::Xz(d) => d.get_ref().get_ref(),
-			CompressionDecoder::Zstd(d) => d.get_ref().get_ref(),
-			CompressionDecoder::None(r) => r.get_ref(),
 		}
 	}
 
@@ -1399,8 +1407,7 @@ impl Filter {
 		let start = self.data.len();
 		self.data.resize(start + self.size, 0);
 		let r = read_full(&mut self.decoder, &mut self.data[start..]);
-		let pos = self.file().stream_position();
-		self.consumed.set(pos.unwrap_or_default());
+		self.consumed.set(self.decoder.get_ref().offset());
 		match r {
 			Ok(n) => {
 				self.end = n < self.size;
@@ -1430,7 +1437,7 @@ fn read_full(r: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
 	Ok(n)
 }
 
-impl Read for Filter {
+impl<R: Source> Read for Filter<R> {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		if self.size == 0 {
 			return self.decoder.read(buf);

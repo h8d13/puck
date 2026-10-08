@@ -3,7 +3,7 @@
 use std::{
     fmt::Debug,
     fs::File,
-    io::{BufReader, Read},
+    io::{BufRead, BufReader, Read},
 };
 
 use bzip2::bufread::BzDecoder;
@@ -17,23 +17,25 @@ use crate::{Error, decompression::DecompressionSettings};
 ///
 /// Wraps [`BzDecoder`], [`MultiGzDecoder`], [`XzDecoder`] and [`Decoder`]
 /// and provides a unified [`Read`] implementation across all of them.
-pub enum CompressionDecoder<'a> {
+///
+/// The compressed data is read from `R`, a [`BufReader`] over a [`File`] by default.
+pub enum CompressionDecoder<'a, R: BufRead = BufReader<File>> {
     /// The bzip2 decompression decoder.
-    Bzip2(BzDecoder<BufReader<File>>),
+    Bzip2(BzDecoder<R>),
 
     /// The gzip decompression decoder.
     ///
     /// Like `gzip` and libarchive, it reads all concatenated gzip members.
-    Gzip(MultiGzDecoder<BufReader<File>>),
+    Gzip(MultiGzDecoder<R>),
 
     /// The xz decompression decoder.
-    Xz(XzDecoder<BufReader<File>>),
+    Xz(XzDecoder<R>),
 
     /// The zstd decompression decoder.
-    Zstd(Decoder<'a, BufReader<File>>),
+    Zstd(Decoder<'a, R>),
 
     /// No compression.
-    None(BufReader<File>),
+    None(R),
 }
 
 impl CompressionDecoder<'_> {
@@ -47,21 +49,61 @@ impl CompressionDecoder<'_> {
     /// Returns an error if creating the decoder for zstd compression fails
     /// (all other decoder initializations are infallible).
     pub fn new(file: File, settings: DecompressionSettings) -> Result<Self, Error> {
+        Self::from_reader(BufReader::new(file), settings)
+    }
+}
+
+impl<R: BufRead> CompressionDecoder<'_, R> {
+    /// Creates a new [`CompressionDecoder`] that reads the compressed data from `reader`.
+    ///
+    /// Allows decompressing data that is not in a [`File`], e.g. a buffer in memory.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::io::Read;
+    ///
+    /// use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let data: &[u8] = b"plain data";
+    /// let mut decoder = CompressionDecoder::from_reader(data, DecompressionSettings::None)?;
+    /// let mut out = String::new();
+    /// decoder.read_to_string(&mut out)?;
+    /// assert_eq!(out, "plain data");
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if creating the decoder for zstd compression fails
+    /// (all other decoder initializations are infallible).
+    pub fn from_reader(reader: R, settings: DecompressionSettings) -> Result<Self, Error> {
         match settings {
-            DecompressionSettings::Bzip2 => Ok(Self::Bzip2(BzDecoder::new(BufReader::new(file)))),
-            DecompressionSettings::Gzip => {
-                Ok(Self::Gzip(MultiGzDecoder::new(BufReader::new(file))))
-            }
-            DecompressionSettings::Xz => Ok(Self::Xz(XzDecoder::new(BufReader::new(file)))),
+            DecompressionSettings::Bzip2 => Ok(Self::Bzip2(BzDecoder::new(reader))),
+            DecompressionSettings::Gzip => Ok(Self::Gzip(MultiGzDecoder::new(reader))),
+            DecompressionSettings::Xz => Ok(Self::Xz(XzDecoder::new(reader))),
             DecompressionSettings::Zstd => Ok(Self::Zstd(
-                Decoder::new(file).map_err(Error::CreateZstandardDecoder)?,
+                Decoder::with_buffer(reader).map_err(Error::CreateZstandardDecoder)?,
             )),
-            DecompressionSettings::None => Ok(Self::None(BufReader::new(file))),
+            DecompressionSettings::None => Ok(Self::None(reader)),
+        }
+    }
+
+    /// Returns a reference to the reader of the compressed data.
+    pub fn get_ref(&self) -> &R {
+        match self {
+            CompressionDecoder::Bzip2(decoder) => decoder.get_ref(),
+            CompressionDecoder::Gzip(decoder) => decoder.get_ref(),
+            CompressionDecoder::Xz(decoder) => decoder.get_ref(),
+            CompressionDecoder::Zstd(decoder) => decoder.get_ref(),
+            CompressionDecoder::None(reader) => reader,
         }
     }
 }
 
-impl Debug for CompressionDecoder<'_> {
+impl<R: BufRead> Debug for CompressionDecoder<'_, R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -77,7 +119,7 @@ impl Debug for CompressionDecoder<'_> {
     }
 }
 
-impl Read for CompressionDecoder<'_> {
+impl<R: BufRead> Read for CompressionDecoder<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             CompressionDecoder::Bzip2(decoder) => decoder.read(buf),
@@ -153,13 +195,23 @@ mod tests {
 
         // Rewind the file
         file.rewind()?;
+        let mut compressed = Vec::new();
+        file.read_to_end(&mut compressed)?;
+        file.rewind()?;
 
         // Decompress it
-        let mut decoder = CompressionDecoder::new(file, decompression_settings)?;
+        let mut decoder = CompressionDecoder::new(file, decompression_settings.clone())?;
         let mut output = Vec::new();
         decoder.read_to_end(&mut output)?;
 
         // Check data integrity
+        assert_eq!(output, input_data);
+
+        // Decompress it from memory
+        let mut decoder =
+            CompressionDecoder::from_reader(compressed.as_slice(), decompression_settings)?;
+        let mut output = Vec::new();
+        decoder.read_to_end(&mut output)?;
         assert_eq!(output, input_data);
         Ok(())
     }
