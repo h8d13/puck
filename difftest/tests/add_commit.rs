@@ -722,13 +722,98 @@ fn fuzz_commit() {
 	let mut rng = Rng::new(0xadd_c0de);
 	let n = (iters() / 200).max(200);
 	let (mut failed, mut pacnew) = (0, 0);
+	// branches every run must reach
+	let marks = [
+		"action: installing new file",
+		"leaving existing file in place",
+		"is in NoExtract",
+		"not overwriting dir with file",
+		"overwriting file with dir",
+		"directory permissions differ",
+		"Can't set user=0/group=0",
+		"removing old package first",
+		"is in skip_remove",
+		"warning given when extracting",
+		"extracting db files",
+	];
+	let mut seen = vec![0; marks.len()];
 	for i in 0..n {
 		let c = gen_case(&mut rng);
 		let r = compare(&format!("ac-fuzz-{i}"), &c);
 		failed += usize::from(r.rc != 0);
 		pacnew += pacnews(&r);
+		for (m, k) in marks.iter().zip(&mut seen) {
+			*k += usize::from(has_log(&r, m));
+		}
 	}
 	// both outcomes and the backup paths are reached
 	assert!(failed > 0 && failed < n, "failed {failed} of {n}");
 	assert!(pacnew > 0, "no .pacnew in {n} cases");
+	for (m, k) in marks.iter().zip(&seen) {
+		assert!(*k > 0, "{m:?} never reached in {n} cases");
+	}
+}
+
+// ---- scriptlets, for real under fakechroot(1) ----
+
+const FC_CHILD: &str = "DIFFTEST_IN_FAKECHROOT";
+
+fn in_fakechroot() -> bool {
+	std::env::var_os(FC_CHILD).is_some()
+}
+
+// re-runs this binary's fc_ tests under fakechroot, like run_chroot.rs
+#[test]
+fn under_fakechroot() {
+	if in_fakechroot() || std::env::var_os(SDE_CHILD).is_some() {
+		return;
+	}
+	let exe = std::env::current_exe().unwrap();
+	let out = std::process::Command::new("fakechroot")
+		.arg(exe)
+		.args(["fc_", "--test-threads=1"])
+		.env(FC_CHILD, "1")
+		.output()
+		.expect("fakechroot not found");
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	assert!(
+		out.status.success() && stdout.contains("1 passed"),
+		"fakechroot run: {}\n{stdout}\n{}",
+		out.status,
+		String::from_utf8_lossy(&out.stderr)
+	);
+}
+
+const INSTALL: &[u8] = b"pre_install() { echo pre \"$@\"; }
+post_install() { echo post \"$@\"; }
+pre_upgrade() { echo preup \"$@\"; }
+post_upgrade() { echo postup \"$@\"; exit 3; }
+";
+
+#[test]
+fn fc_scriptlets() {
+	if !in_fakechroot() {
+		return;
+	}
+	let sh = std::fs::read("/bin/sh").unwrap();
+	let mut c = case(vec![
+		file(".INSTALL", 0o644, INSTALL),
+		dir("usr/", 0o755),
+		file("usr/a", 0o644, b"a"),
+	]);
+	c.root = vec![
+		AcFs::File(b"bin/sh".to_vec(), 0o755, sh),
+		AcFs::Dir(b"tmp".to_vec(), 0o1777),
+	];
+	let r = compare("ac-fc-install", &c);
+	let lines = r.recs.iter().filter(|x| matches!(x, AcRec::Scriptlet(_)));
+	assert_eq!(lines.count(), 2, "{}", show(&r));
+	let mut o = old("0.5-1", &["usr/", "usr/a"]);
+	o.install = true;
+	c.old = Some(o);
+	let r = compare("ac-fc-upgrade", &c);
+	let postup = AcRec::Scriptlet(b"postup 1.0-1 0.5-1\n".to_vec());
+	assert!(r.recs.contains(&postup), "{}", show(&r));
+	c.flags = 1 << 10; // NOSCRIPTLET
+	compare("ac-fc-noscriptlet", &c);
 }

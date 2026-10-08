@@ -279,6 +279,20 @@ fn mask_installdate(data: &[u8]) -> Vec<u8> {
 	[&data[..start], b"<now>", &data[end..]].concat()
 }
 
+// the scriptlet's mkdtemp name: alpm_ and six random characters
+fn mask_tmpdir(msg: &[u8]) -> Vec<u8> {
+	let key = b"/tmp/alpm_";
+	let mut out = msg.to_vec();
+	let mut i = 0;
+	while let Some(n) = out[i..].windows(key.len()).position(|w| w == key) {
+		let start = i + n + key.len();
+		let end = (start + 6).min(out.len());
+		out[start..end].fill(b'X');
+		i = end;
+	}
+	out
+}
+
 fn ac_node(path: &Path, node: Node, mask: bool) -> AcNode {
 	match node {
 		Node::File(m, n, data) => {
@@ -326,6 +340,13 @@ fn finish(
 ) -> AcResult {
 	let log = fs::read(logfile).unwrap_or_default();
 	let _ = fs::remove_file(logfile);
+	let recs = recs
+		.into_iter()
+		.map(|r| match r {
+			AcRec::Log(l, m) => AcRec::Log(l, mask_tmpdir(&m)),
+			r => r,
+		})
+		.collect();
 	AcResult {
 		rc,
 		errno,
