@@ -1,9 +1,9 @@
 // port of src/pacman/sync.c: -Si/-Sii (sync_info), -Sl (sync_list),
 // -Sg/-Sgg (sync_group), -Ss (sync_search), -Sy/-Syy (util.c's
-// sync_syncdbs, shared with -Fy), the pacman_sync dispatch up to them,
-// util.c's check_syncdbs they rely on, and the transaction of -S/-Su up
-// and through the commit (sync_trans, sync_prepare_execute, also run by
-// -U)
+// sync_syncdbs, shared with -Fy), -Sc/-Scc (sync_cleancache,
+// sync_cleandb_all), the pacman_sync dispatch up to them, util.c's
+// check_syncdbs they rely on, and the transaction of -S/-Su up and
+// through the commit (sync_trans, sync_prepare_execute, also run by -U)
 //
 // the C prints to stdout and through pm_printf to stderr, both go into an
 // Output. config is the C global, handle config->handle; cols is what
@@ -16,18 +16,18 @@
 // callbacks (callback.rs); out is flushed (Output::flush) before, so the
 // header goes out first.
 //
-// not ported, returned as Unported where pacman_sync reaches them: -Sc
-// (trans_init takes the db lock, then interactive prompts and unlinks
-// in the cache dirs). the transaction is sync_trans; pacman_sync
-// returns Unported::Transaction for it, the dispatch runs sync_trans.
+// the branches that prompt need a Ui: pacman_sync returns Deferred where
+// it reaches them, the dispatch runs sync_clean or sync_trans.
 // multibar_move_completed_up(true) before the commit is not modelled:
 // the callbacks sit boxed in the handle.
 
-use std::fs::File;
-use std::io::BufRead;
+use std::ffi::OsStr;
+use std::fs::{self, File};
+use std::io::{self, BufRead, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
 
 use alpm_core::add::add_pkg;
+use alpm_core::be_package::pkg_load_level;
 use alpm_core::be_sync::{db_update, get_validation};
 use alpm_core::callbacks::Callbacks;
 use alpm_core::conflict::FileConflictType;
@@ -41,22 +41,27 @@ use alpm_core::trans::{
 	CommitData, CommitError, PrepareData, PrepareError, TransPkg,
 	trans_commit, trans_get_add, trans_get_remove, trans_prepare,
 };
-use alpm_core::util::until_nul;
+use alpm_core::util::{PATH_MAX, fnmatch, strerror, until_nul};
+use alpm_core::version::vercmp;
 
-use crate::conf::{Config, LOG_ERROR, LOG_WARNING, cat};
+use crate::conf::{
+	Config, LOG_DEBUG, LOG_ERROR, LOG_WARNING, PM_CLEAN_KEEPCUR,
+	PM_CLEAN_KEEPINST, cat,
+};
 use crate::package::{
 	FileProbe, PkgEnv, dump_pkg_full, dump_pkg_search, print_installed,
 };
 use crate::util::{
 	DbPkg, Output, SigResult, TransTargets, Ui, check_syncdbs,
-	colon_printf, display_targets, multiselect_question, pm_printf,
-	print_packages, select_display, trans_init, trans_release, yesno,
+	colon_printf, display_targets, multiselect_question, noyes, pm_printf,
+	print_packages, rmrf_errno, select_display, trans_init, trans_release,
+	yesno,
 };
 
-// a pacman_sync/pacman_files branch this port does not have yet
+// a pacman_sync branch that prompts, left to the dispatch (it has the Ui)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Unported {
-	// -Sc/-Scc: sync_cleancache, sync_cleandb_all
+pub enum Deferred {
+	// -Sc/-Scc: sync_clean
 	Clean,
 	// sync_trans: -S <targets>, -Su
 	Transaction,
@@ -162,6 +167,341 @@ fn show_full(
 	let colstr = &config.colstr;
 	dump_pkg_full(&mut out.stdout, &mut env, &pkg, extra, cols, colstr);
 	out.stderr.extend(env.stderr);
+}
+
+fn os(path: &[u8]) -> &OsStr {
+	OsStr::from_bytes(path)
+}
+
+fn debug(out: &mut Output, config: &Config, msg: &[&[u8]]) {
+	pm_printf(&mut out.stderr, config, LOG_DEBUG, &cat(msg));
+}
+
+// unlink_verbose: the C's unlink return value, -1 when it failed (also
+// what -Sc sums up), a missing file is fine with ignore_missing
+fn unlink_verbose(
+	out: &mut Output,
+	config: &Config,
+	path: &[u8],
+	ignore_missing: bool,
+) -> i32 {
+	let Err(e) = fs::remove_file(os(path)) else {
+		return 0;
+	};
+	if ignore_missing && e.kind() == ErrorKind::NotFound {
+		return 0;
+	}
+	error(
+		out,
+		config,
+		&[b"could not remove ", path, b": ", &strerror(&e), b"\n"],
+	);
+	-1
+}
+
+// the db name of a sync dir file: "<name>.db", ".db.sig", ".files",
+// ".files.sig" with a name before the suffix
+fn db_stem(file: &[u8]) -> Option<&[u8]> {
+	let suffixes: [&[u8]; 4] =
+		[b".db", b".db.sig", b".files", b".files.sig"];
+	suffixes.iter()
+		.find_map(|s| file.strip_suffix(*s).filter(|n| !n.is_empty()))
+}
+
+// one entry of sync_cleandb: directories go (rmrf, not counted), files
+// not of a registered db are unlinked
+fn cleandb_entry(
+	out: &mut Output,
+	config: &Config,
+	syncdbs: &[Db],
+	dbpath: &[u8],
+	dname: &[u8],
+) -> i32 {
+	let mut path = [dbpath, dname].concat();
+	if path.len() >= PATH_MAX {
+		let msg: [&[u8]; 4] = [
+			b"could not remove ",
+			dbpath,
+			dname,
+			b": path exceeds PATH_MAX\n",
+		];
+		error(out, config, &msg);
+		// the C goes on with the cut snprintf result
+		path.truncate(PATH_MAX - 1);
+	}
+	match fs::metadata(os(&path)) {
+		// the C then reads the uninitialised st_mode: taken as no
+		// directory here (UPSTREAM.md)
+		Err(e) => {
+			let msg = [b"could not remove ", &path[..], b": "];
+			error(
+				out,
+				config,
+				&[&msg.concat(), &strerror(&e), b"\n"],
+			);
+		}
+		Ok(m) if m.is_dir() => {
+			let (n, e) = rmrf_errno(&path);
+			if n != 0 {
+				// errno 0 when rmrf left none: "Success"
+				let e = e.unwrap_or_else(|| {
+					io::Error::from_raw_os_error(0)
+				});
+				let msg = [
+					b"could not remove ",
+					&path[..],
+					b": ",
+				];
+				error(
+					out,
+					config,
+					&[&msg.concat(), &strerror(&e), b"\n"],
+				);
+			}
+			return 0;
+		}
+		Ok(_) => {}
+	}
+	match db_stem(dname) {
+		Some(name) if syncdbs.iter().any(|db| db.name() == name) => 0,
+		_ => unlink_verbose(out, config, &path, false),
+	}
+}
+
+// sync_cleandb: everything in the sync dir but the files of registered
+// dbs, 1 when the dir cannot be read
+fn sync_cleandb(
+	out: &mut Output,
+	config: &Config,
+	syncdbs: &[Db],
+	dbpath: &[u8],
+) -> i32 {
+	let Ok(dir) = fs::read_dir(os(dbpath)) else {
+		error(out, config, &[b"could not access database directory\n"]);
+		return 1;
+	};
+	let mut ret = 0;
+	// readdir ends the loop on an error as on the end
+	for ent in dir.map_while(Result::ok) {
+		let name = ent.file_name();
+		let dname = name.as_bytes();
+		ret += cleandb_entry(out, config, syncdbs, dbpath, dname);
+	}
+	ret
+}
+
+// sync_cleandb_all: the sync dir of dbpath after a yes (the default)
+fn sync_cleandb_all<R: BufRead>(ui: &mut Ui<R>, h: &Handle) -> i32 {
+	let (config, dbpath) = (ui.config, h.dbpath());
+	let msg = [b"Database directory: ", dbpath, b"\n"];
+	ui.out.stdout.extend(cat(&msg));
+	let ask = b"Do you want to remove unused repositories?";
+	if !yesno(ui.out, config, ui.term, ask) {
+		return 0;
+	}
+	let msg = b"removing unused sync repositories...\n";
+	ui.out.stdout.extend_from_slice(msg);
+	let syncdir = [dbpath, b"sync/"].concat();
+	sync_cleandb(ui.out, config, h.syncdbs(), &syncdir)
+}
+
+// what -Sc never removes: signatures go with their package
+const GLOB_SKIPS: [&[u8]; 4] =
+	[b"*.sig", b"*.db*", b"*.files*", b"*.src.tar.*"];
+
+// a cache file kept by db: the package of that name there has its
+// version (a NULL version equals none)
+fn kept_by(
+	ui: &mut Ui<'_, impl BufRead>,
+	h: &mut Handle,
+	db: Option<usize>,
+	pkg: &Package,
+) -> bool {
+	// the lookup may load the cache, its log lines come after ours
+	ui.out.flush();
+	let dbs = h.dbs_mut();
+	let db = match db {
+		None => dbs.local,
+		Some(i) => dbs.sync.get_mut(i),
+	};
+	let Some(db) = db else {
+		return false;
+	};
+	let version = pkg.version.as_deref().unwrap_or_default();
+	db.get_pkg(dbs.dbext, dbs.cb, pkg.name_bytes())
+		.is_ok_and(|p| {
+			p.version
+				.as_deref()
+				.is_some_and(|v| vercmp(version, v).is_eq())
+		})
+}
+
+// one entry of a cache dir: -cc unlinks it, -c loads it as a package and
+// unlinks it with its .sig unless cleanmethod keeps it
+fn cleancache_entry<R: BufRead>(
+	ui: &mut Ui<R>,
+	h: &mut Handle,
+	cachedir: &[u8],
+	name: &[u8],
+	method: u16,
+) -> i32 {
+	let config = ui.config;
+	let level = config.op_s_clean;
+	if level <= 1 && GLOB_SKIPS.iter().any(|g| fnmatch(g, name)) {
+		return 0;
+	}
+	let path = [cachedir, name].concat();
+	if path.len() >= PATH_MAX {
+		let msg: [&[u8]; 4] = [
+			b"skipping ",
+			cachedir,
+			name,
+			b": path exceeds PATH_MAX\n",
+		];
+		error(ui.out, config, &msg);
+		return 0;
+	}
+	if level > 1 {
+		return unlink_verbose(ui.out, config, &path, false);
+	}
+	ui.out.flush();
+	// alpm_pkg_load(handle, path, 0, 0): metadata only, siglevel 0
+	let loaded = h.with_callbacks(|h, cb| {
+		pkg_load_level(h.keyring_mut(), cb, &path, false, 0)
+	});
+	let Ok(pkg) = loaded else {
+		let msg = [
+			b"skipping ",
+			&path[..],
+			b", could not load as package\n",
+		];
+		debug(ui.out, config, &msg);
+		return 0;
+	};
+	let version = pkg.version.as_deref().unwrap_or_default();
+	let found = |ui: &mut Ui<R>, which: &[u8]| {
+		let msg = [b"package ", pkg.name_bytes(), b"-", version, which];
+		debug(ui.out, config, &msg);
+	};
+	let mut delete = true;
+	if method & PM_CLEAN_KEEPINST != 0 && kept_by(ui, h, None, &pkg) {
+		found(ui, b" found in local db\n");
+		delete = false;
+	}
+	if method & PM_CLEAN_KEEPCUR != 0 {
+		for i in 0..h.syncdbs().len() {
+			if !delete {
+				break;
+			}
+			if kept_by(ui, h, Some(i), &pkg) {
+				found(ui, b" found in sync db\n");
+				delete = false;
+			}
+		}
+	}
+	if !delete {
+		return 0;
+	}
+	let mut ret = unlink_verbose(ui.out, config, &path, false);
+	// strcpy of ".sig" into the PATH_MAX buffer, when it fits
+	if path.len() <= PATH_MAX - 5 {
+		let sig = [&path[..], b".sig"].concat();
+		ret += unlink_verbose(ui.out, config, &sig, true);
+	}
+	ret
+}
+
+// sync_cleancache(level): every cache dir after its question (-c yes by
+// default, -cc no). a dir that cannot be read counts 1
+fn sync_cleancache<R: BufRead>(ui: &mut Ui<R>, h: &mut Handle) -> i32 {
+	let config = ui.config;
+	let level = config.op_s_clean;
+	// the C writes the default back into config, read only here
+	let method = match config.cleanmethod {
+		0 => PM_CLEAN_KEEPINST,
+		m => m,
+	};
+	let out = &mut ui.out.stdout;
+	if level == 1 {
+		out.extend_from_slice(b"Packages to keep:\n");
+		if method & PM_CLEAN_KEEPINST != 0 {
+			let msg = b"  All locally installed packages\n";
+			out.extend_from_slice(msg);
+		}
+		if method & PM_CLEAN_KEEPCUR != 0 {
+			let msg = b"  All current sync database packages\n";
+			out.extend_from_slice(msg);
+		}
+	}
+	out.push(b'\n');
+
+	let mut ret = 0;
+	for cachedir in h.cachedirs().to_vec() {
+		let msg = [b"Cache directory: ", &cachedir[..], b"\n"];
+		ui.out.stdout.extend(cat(&msg));
+		let (yes, doing): (bool, &[u8]) = match level {
+			1 => (
+				yesno(
+					ui.out,
+					config,
+					ui.term,
+					b"Do you want to remove all other \
+					  packages from cache?",
+				),
+				b"removing old packages from cache...\n",
+			),
+			_ => (
+				noyes(
+					ui.out,
+					config,
+					ui.term,
+					b"Do you want to remove ALL files \
+					  from cache?",
+				),
+				b"removing all files from cache...\n",
+			),
+		};
+		if !yes {
+			ui.out.stdout.push(b'\n');
+			continue;
+		}
+		ui.out.stdout.extend_from_slice(doing);
+		let Ok(dir) = fs::read_dir(os(&cachedir)) else {
+			let msg = [
+				b"could not access cache directory ",
+				&cachedir[..],
+				b"\n",
+			];
+			error(ui.out, config, &msg);
+			ret += 1;
+			continue;
+		};
+		// readdir ends the loop on an error as on the end
+		for ent in dir.map_while(Result::ok) {
+			let name = ent.file_name();
+			let name = name.as_bytes();
+			ret += cleancache_entry(ui, h, &cachedir, name, method);
+		}
+		ui.out.stdout.push(b'\n');
+	}
+	ret
+}
+
+// pacman_sync's -Sc/-Scc branch: the cache dirs, then the sync dir,
+// under the db lock (trans_init without flags). the sum of what the
+// steps return, a failed unlink counting -1
+pub fn sync_clean<R: BufRead>(ui: &mut Ui<R>, h: &mut Handle) -> i32 {
+	let config = ui.config;
+	if !trans_init(ui.out, config, h, 0, false) {
+		return 1;
+	}
+	let mut ret = sync_cleancache(ui, h);
+	ret += sync_cleandb_all(ui, h);
+	ui.out.flush();
+	if !trans_release(ui.out, config, h) {
+		ret += 1;
+	}
+	ret
 }
 
 // sync_group: with targets each group's members per db ("<group> <pkg>",
@@ -437,17 +777,17 @@ pub fn sync_search<S: AsRef<[u8]>>(
 	i32::from(found == 0)
 }
 
-// pacman_sync: the read-only operations, Err for the branches not ported
-// (in the order the C reaches them). Ok is the C return value
+// pacman_sync: the read-only operations, Err for the branches that
+// prompt (in the order the C reaches them). Ok is the C return value
 pub fn pacman_sync<S: AsRef<[u8]>>(
 	config: &Config,
 	handle: &mut Handle,
 	targets: &[S],
 	cols: u16,
 	out: &mut Output,
-) -> Result<i32, Unported> {
+) -> Result<i32, Deferred> {
 	if config.op_s_clean != 0 {
-		return Err(Unported::Clean);
+		return Err(Deferred::Clean);
 	}
 	if check_syncdbs(&mut out.stderr, config, handle, true, false) != 0 {
 		return Ok(1);
@@ -484,7 +824,7 @@ pub fn pacman_sync<S: AsRef<[u8]>>(
 		error(out, config, &[msg]);
 		return Ok(1);
 	}
-	Err(Unported::Transaction)
+	Err(Deferred::Transaction)
 }
 
 // sync_syncdbs(level, every sync db): alpm_db_update, forced from -yy.
