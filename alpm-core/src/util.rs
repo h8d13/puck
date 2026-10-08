@@ -19,7 +19,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
-use alpm_compress::tarball::{TarballEntry, TarballReader};
 use rustix::fs::{
 	Access, AtFlags, CWD, FileType, Mode, accessat, makedev, mknodat,
 };
@@ -1079,7 +1078,10 @@ pub fn run_chroot(
 		loop {
 			match child.wait() {
 				Err(e) if e.kind()
-					== ErrorKind::Interrupted => {}
+					== ErrorKind::Interrupted =>
+				{
+					continue;
+				}
 				Err(e) => {
 					logv(h, LogLevel::Error, &[
 					b"call to waitpid failed (",
@@ -1223,10 +1225,11 @@ pub fn filecache_setup(
 // archive extraction: _alpm_open_archive, _alpm_unpack and
 // _alpm_unpack_single
 //
-// libarchive is replaced by alpm-compress (filter picked by magic bytes
-// like libarchive's bidding, for the four filters it has) and its tar
-// reader. archive_read_extract(archive, entry, 0) is translated for what
-// a tar carries: without ARCHIVE_EXTRACT_* flags no owner, times, ACLs or
+// libarchive is replaced by alpm-compress's decoders (filter picked by
+// magic bytes like libarchive's bidding, for the four filters it has)
+// read in libarchive's filter blocks (Filter), and the tar crate.
+// archive_read_extract(archive, entry, 0) is translated for what a tar
+// carries: without ARCHIVE_EXTRACT_* flags no owner, times, ACLs or
 // xattrs are restored, permissions obey the umask (_alpm_unpack sets
 // 0022) and lose SUID/SGID/sticky. an object in the way is unlinked (an
 // empty directory rmdir'd, a directory kept for a directory), missing
@@ -1246,10 +1249,141 @@ const S_IFIFO: u32 = 0o010000;
 // the umask _alpm_unpack extracts under
 const UNPACK_UMASK: u32 = 0o022;
 
+// libarchive's decompression filters hand data on in output blocks:
+// gzip_filter_read, bzip2_filter_read and xz_filter_read (64 KiB) and
+// zstd_filter_read (ZSTD_DStreamOutSize, 128 KiB) fill a whole block or
+// reach the stream's clean end before returning any of it. a stream cut
+// short fails the read of the block it ends in, what was decoded into
+// that block is never seen, and the filter stays failed. the decoders
+// themselves deliver every byte up to the cut, so the blocks are redone
+// here. no filter (plain tar) reads the file as it is
+pub struct Filter {
+	decoder: CompressionDecoder<'static>,
+	// out_block_size, 0 without a filter
+	size: usize,
+	// blocks read ahead, data[pos..] not consumed yet
+	data: Vec<u8>,
+	pos: usize,
+	// a short block: the stream's clean end
+	end: bool,
+	failed: Option<ErrorKind>,
+}
+
+// bytes uudecode_bidder_bid's line scan goes on over (its ascii table)
+fn is_uu_text(c: &u8) -> bool {
+	matches!(c, b' '..=b'~' | b'\n' | b'\r')
+}
+
+impl Filter {
+	pub fn new(
+		decoder: CompressionDecoder<'static>,
+		s: &DecompressionSettings,
+	) -> Self {
+		let size = match s {
+			DecompressionSettings::None => 0,
+			DecompressionSettings::Zstd => 128 * 1024,
+			_ => 64 * 1024,
+		};
+		Filter {
+			decoder,
+			size,
+			data: Vec::new(),
+			pos: 0,
+			end: false,
+			failed: None,
+		}
+	}
+
+	// what archive_read_open reads through the filter: its first block
+	// (choose_filters asks for data), and while that block is text lines
+	// the uudecode bidder reads ahead to 128 KiB (UUENCODE_BID_MAX_READ).
+	// a failure here is an open failure. a "begin " line, which makes
+	// the bidder read on, is not modelled
+	pub fn open(&mut self) -> io::Result<()> {
+		if self.size == 0 {
+			return Ok(());
+		}
+		self.ensure(1)?;
+		if self.data.iter().all(is_uu_text) {
+			self.ensure(128 * 1024)?;
+		}
+		Ok(())
+	}
+
+	// __archive_read_filter_ahead(n): blocks until n bytes are buffered
+	// or the stream ended
+	fn ensure(&mut self, n: usize) -> io::Result<()> {
+		if let Some(kind) = self.failed {
+			return Err(kind.into());
+		}
+		while self.data.len() - self.pos < n && !self.end {
+			self.fill()?;
+		}
+		Ok(())
+	}
+
+	// the filter's read callback: a full block, or less at the end
+	fn fill(&mut self) -> io::Result<()> {
+		self.data.drain(..self.pos);
+		self.pos = 0;
+		let start = self.data.len();
+		self.data.resize(start + self.size, 0);
+		match read_full(&mut self.decoder, &mut self.data[start..]) {
+			Ok(n) => {
+				self.end = n < self.size;
+				self.data.truncate(start + n);
+				Ok(())
+			}
+			Err(e) => {
+				self.data.truncate(start);
+				self.failed = Some(e.kind());
+				Err(e)
+			}
+		}
+	}
+}
+
+// reads until buf is full or the reader ends: the count read
+fn read_full(r: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+	let mut n = 0;
+	while n < buf.len() {
+		match r.read(&mut buf[n..]) {
+			Ok(0) => break,
+			Ok(k) => n += k,
+			Err(e) if e.kind() == ErrorKind::Interrupted => {}
+			Err(e) => return Err(e),
+		}
+	}
+	Ok(n)
+}
+
+impl Read for Filter {
+	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		if self.size == 0 {
+			return self.decoder.read(buf);
+		}
+		self.ensure(1)?;
+		let n = buf.len().min(self.data.len() - self.pos);
+		buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+		self.pos += n;
+		Ok(n)
+	}
+}
+
+// a tar entry read through the filter
+pub type Entry<'a> = tar::Entry<'a, Filter>;
+
+// the rest of an entry's data
+pub fn content(entry: &mut Entry) -> io::Result<Vec<u8>> {
+	let mut data = Vec::new();
+	entry.read_to_end(&mut data)?;
+	Ok(data)
+}
+
 // _alpm_open_archive: the reader over the file and its fstat. libarchive
 // also reads the first header to pick the format, which unpack does next
 pub struct Archive {
-	pub reader: TarballReader<'static>,
+	pub reader: tar::Archive<Filter>,
 	pub meta: fs::Metadata,
 	// the filter picked, None: tar offsets are file offsets
 	pub settings: DecompressionSettings,
@@ -1263,9 +1397,10 @@ pub(crate) fn archive_io_err(e: alpm_compress::Error) -> io::Error {
 }
 
 // the error is errno at the failing step (open, fstat, the first read
-// of archive_read_open_fd: EISDIR for a directory). the filter is the
-// one libarchive's bidding would pick, for the four alpm-compress has;
-// anything else is read as a plain tar
+// of archive_read_open_fd: EISDIR for a directory), or the decoder's
+// error in what archive_read_open reads through the filter. the filter
+// is the one libarchive's bidding would pick, for the four alpm-compress
+// has; anything else is read as a plain tar
 pub fn open_archive(path: &[u8]) -> io::Result<Archive> {
 	let mut file = File::open(c_path(path))?;
 	let meta = file.metadata()?;
@@ -1276,8 +1411,10 @@ pub fn open_archive(path: &[u8]) -> io::Result<Archive> {
 	let settings = DecompressionSettings::from_magic(&magic);
 	let decoder = CompressionDecoder::new(file, settings.clone())
 		.map_err(archive_io_err)?;
+	let mut filter = Filter::new(decoder, &settings);
+	filter.open()?;
 	Ok(Archive {
-		reader: TarballReader::new(decoder),
+		reader: tar::Archive::new(filter),
 		meta,
 		settings,
 	})
@@ -1382,11 +1519,11 @@ fn wanted<L: AsRef<[u8]>>(list: &[L], name: &[u8]) -> bool {
 // so it is checked against the length of a plain archive; past a filter
 // a missing padding only shows at the next header
 fn check_padding(
-	entry: &TarballEntry,
+	entry: &Entry,
 	size: u64,
 	plain_len: Option<u64>,
 ) -> io::Result<()> {
-	let end = entry.raw().raw_file_position() + size.next_multiple_of(512);
+	let end = entry.raw_file_position() + size.next_multiple_of(512);
 	match plain_len.is_some_and(|len| end > len) {
 		true => Err(ErrorKind::UnexpectedEof.into()),
 		false => Ok(()),
@@ -1395,7 +1532,7 @@ fn check_padding(
 
 // archive_read_data_skip
 fn skip_data(
-	entry: &mut TarballEntry,
+	entry: &mut Entry,
 	size: u64,
 	plain_len: Option<u64>,
 ) -> io::Result<()> {
@@ -1612,13 +1749,13 @@ impl Disk<'_> {
 	// archive_read_extract(archive, entry, 0) on the entry named name
 	fn extract(
 		&self,
-		entry: &mut TarballEntry,
+		entry: &mut Entry,
 		name: &[u8],
 		mode: u32,
 		size: u64,
 	) -> Result<(), Failure> {
-		let header = entry.raw().header();
-		let target = entry.raw().link_name_bytes().unwrap_or_default();
+		let header = entry.header();
+		let target = entry.link_name_bytes().unwrap_or_default();
 		let rdev = || {
 			let major = header
 				.device_major()
@@ -1676,7 +1813,7 @@ impl Disk<'_> {
 // failure ends the entry with a warning. either way the file is extended
 // with zeros to the entry size
 fn copy_data(
-	entry: &mut TarballEntry,
+	entry: &mut Entry,
 	mut file: File,
 	size: u64,
 ) -> Result<(), Failure> {
@@ -1688,11 +1825,7 @@ fn copy_data(
 	r
 }
 
-fn pour(
-	entry: &mut TarballEntry,
-	file: &mut File,
-	size: u64,
-) -> Result<(), Failure> {
+fn pour(entry: &mut Entry, file: &mut File, size: u64) -> Result<(), Failure> {
 	let mut buf = vec![0; 64 * 1024];
 	let mut got = 0;
 	while got < size {
@@ -1747,12 +1880,10 @@ pub fn unpack<L: AsRef<[u8]>>(
 	let plain = archive.settings == DecompressionSettings::None;
 	let plain_len = plain.then_some(meta.len());
 	let skip_file = meta.is_file().then(|| (meta.dev(), meta.ino()));
-	let mut entries = archive
-		.reader
-		.entries()
-		.map_err(|e| open_failed(cb, archive_io_err(e)))?;
+	let mut entries =
+		archive.reader.entries().map_err(|e| open_failed(cb, e))?;
 	let first = match entries.next() {
-		Some(Err(e)) => return Err(open_failed(cb, archive_io_err(e))),
+		Some(Err(e)) => return Err(open_failed(cb, e)),
 		first => first,
 	};
 	if let Err(e) = enter(prefix) {
@@ -1778,8 +1909,7 @@ pub fn unpack<L: AsRef<[u8]>>(
 			break;
 		};
 		let size = size as u64;
-		let name =
-			until_nul(entry.path().as_os_str().as_bytes()).to_vec();
+		let name = until_nul(&entry.path_bytes()).to_vec();
 		if !list.is_empty() {
 			if !wanted(list, &name) {
 				skip_data(&mut entry, size, plain_len)

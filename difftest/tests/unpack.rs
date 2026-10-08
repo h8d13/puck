@@ -438,35 +438,76 @@ fn compressions() {
 	}
 }
 
-// a short compressed package: libarchive's filter read fails as a whole
-// when its input ends early, the C fails to open. alpm-compress's bzip2
-// and zstd decoders fail the same way at this cut. pinned divergence: its
-// gzip and xz decoders (and bzip2 cut early) end a short stream like a
-// complete one, the port extracts what was decoded and succeeds (ALPM
-// finding)
+// a package spanning several of libarchive's filter blocks (64 KiB, 128
+// KiB for zstd; bzip2 decodes in 900 KiB blocks of its own): headers at
+// and across block boundaries, random sizes between them. the data is
+// random so the compressed stream grows with it and cuts land all over
+// the archive
+fn big_package() -> Vec<TarNode> {
+	const BLOCK: usize = 64 * 1024;
+	let mut rng = Rng::new(0x5107_c0de);
+	let mut nodes = vec![file(".PKGINFO", "pkgname = foo\n"), dir("usr/")];
+	// tar offset of the next header
+	let mut off: usize = 3 * 512;
+	for i in 0.. {
+		if off > 1300 * 1024 {
+			break;
+		}
+		// the next header at a block boundary, or straddling one
+		let next = (off + 512 + 20000).next_multiple_of(BLOCK);
+		let len = match i % 4 {
+			0 => next - off - 512,
+			1 => next - off - 512 - 256,
+			_ => rng.below(9000),
+		};
+		let data: Vec<u8> =
+			(0..len).map(|_| rng.next_u64() as u8).collect();
+		off += 512 + len.next_multiple_of(512);
+		let name = format!("usr/f{i}");
+		nodes.push(node(&name, b'0', 0o644, "", &data));
+	}
+	nodes.push(dir("etc/"));
+	nodes.push(file("etc/foo.conf", "a=b\n"));
+	nodes
+}
+
+// cut points: the start, evenly spread, random, and the stream's tail
+// (gzip's trailer, xz's index and footer, zstd's checksum)
+fn cuts(len: usize, rng: &mut Rng) -> Vec<usize> {
+	let mut v: Vec<usize> = [1, 2, 10, 100].into();
+	v.extend((1..48).map(|i| len * i / 48));
+	v.extend((0..16).map(|_| rng.below(len)));
+	v.extend([1, 4, 8, 9, 12, 20, 64].map(|d| len - d));
+	v
+}
+
+// a compressed package cut short. libarchive's filter fails the block
+// the stream ends in: inside the first one the C fails to open
+// (PKG_OPEN); later, a data read reaching it fails the extraction and a
+// header read reaching it ends the loop like the archive's end (rc 0,
+// the entries before it extracted)
 #[test]
-fn compressed_cut() {
-	let raw = tar(&package());
+fn compressed_cuts() {
+	let mut rng = Rng::new(0x0c07_5eed);
+	let raw = tar(&big_package());
+	let mut outcomes = std::collections::BTreeSet::new();
 	for comp in [Comp::Gzip, Comp::Bzip2, Comp::Xz, Comp::Zstd] {
 		let data = compressed(comp, &raw);
-		let cut = data[..data.len() * 2 / 3].to_vec();
-		let case = Case::new(&format!("{comp:?} cut"), cut);
-		if matches!(comp, Comp::Bzip2 | Comp::Zstd) {
-			compare(&case, &none);
-			continue;
+		for (i, n) in cuts(data.len(), &mut rng).into_iter().enumerate()
+		{
+			let what =
+				format!("{comp:?} cut at {n}/{}", data.len());
+			let mut case = Case::new(&what, data[..n].to_vec());
+			// odd cases skip the usr/ data (archive_read_data_skip)
+			if i % 2 == 1 {
+				case = case.list(&[".PKGINFO", "etc/"], false);
+			}
+			let out = compare(&case, &none);
+			outcomes.insert((out.rc, out.errno, out.logs.len()));
 		}
-		let [(c, _), (r, _)] = run_both(&case, &none);
-		assert_eq!(
-			(c.rc, c.errno),
-			(1, Errno::PkgOpen as c_int),
-			"{case:?}"
-		);
-		assert_eq!(
-			(r.rc, r.errno),
-			(0, 0),
-			"{case:?}: no longer diverges"
-		);
 	}
+	// open failures, failed extractions and early ends all seen
+	assert!(outcomes.len() >= 3, "{outcomes:?}");
 }
 
 #[test]
@@ -872,7 +913,7 @@ fn fuzz_extract() {
 			archive = fs::read(&p).unwrap();
 		}
 		// plain archives cut anywhere: data reads fail or headers end.
-		// compressed ones see compressed_cut
+		// compressed ones see compressed_cuts
 		if matches!(comp, Comp::None) && rng.below(6) == 0 {
 			archive.truncate(rng.below(archive.len()));
 		}

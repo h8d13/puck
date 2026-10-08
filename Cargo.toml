@@ -26,6 +26,7 @@ alpm-repo-db = { path = "vendor/alpm/alpm-repo-db" }
 alpm-types = { path = "vendor/alpm/alpm-types" }
 # crates ALPM itself depends on, same versions
 base64 = "0.23.0"
+tar = "0.4.44"
 time = "0.3.47"
 unicode-width = "0.2"
 # system-level, see METHODOLOGY.md

@@ -38,7 +38,9 @@ use crate::package::{
 	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, PkgReason, PkgXData,
 };
 use crate::pkghash::PkgHash;
-use crate::util::{hash_sdbm, makepath, mkdir_mode, splitname, until_nul};
+use crate::util::{
+	Filter, hash_sdbm, makepath, mkdir_mode, splitname, until_nul,
+};
 
 // ALPM_LOCAL_DB_VERSION
 pub const LOCAL_DB_VERSION: u64 = 9;
@@ -511,9 +513,15 @@ pub fn read_mtree(path: &[u8]) -> Result<Vec<MtreeEntry>, MtreeError> {
 		.and_then(|_| file.rewind())
 		.map_err(|e| read_err("read", e))?;
 	let settings = DecompressionSettings::from_magic(&magic);
-	let decoder = CompressionDecoder::new(file, settings)
+	let decoder = CompressionDecoder::new(file, settings.clone())
 		.map_err(|e| read_err("decompress", io::Error::other(e)))?;
-	parse_mtree(decoder)
+	let mut filter = Filter::new(decoder, &settings);
+	filter.open().map_err(|e| read_err("read", e))?;
+	// after the open a failed read is the end of the data to
+	// libarchive's mtree readline (a NULL read_ahead returns 0)
+	let mut data = Vec::new();
+	let _ = filter.read_to_end(&mut data);
+	parse_mtree(&data[..])
 }
 
 impl LocalDb {

@@ -743,6 +743,64 @@ fn mtree_odd_inputs() {
 	assert_eq!(r_read(&r), Read::Entries(2, 1), "{r:?}");
 }
 
+// a compressed mtree cut short, over several of libarchive's filter
+// blocks: inside the first the C's open fails (no mtree), later its first
+// mtree_next does (libarchive's reader reads the whole file there)
+#[test]
+fn mtree_cuts() {
+	let mut text =
+		String::from("#mtree\n/set type=file uid=0 gid=0 mode=644\n");
+	let mut rng = Rng::new(0x3e7_c07);
+	for i in 0..6000 {
+		let word: String = (0..rng.below(40))
+			.map(|_| (b'a' + rng.below(26) as u8) as char)
+			.collect();
+		text.push_str(&line(
+			&format!("./usr/{word}{i}"),
+			&format!(
+				"time={i}.0 size={} sha256digest={SHA_A}",
+				rng.below(99999)
+			),
+		));
+	}
+	let mut seen = std::collections::BTreeSet::new();
+	for settings in [
+		CompressionSettings::Gzip {
+			compression_level: Default::default(),
+		},
+		CompressionSettings::Xz {
+			compression_level: Default::default(),
+		},
+		CompressionSettings::Zstd {
+			compression_level: Default::default(),
+			threads: Default::default(),
+		},
+		CompressionSettings::Bzip2 {
+			compression_level: Default::default(),
+		},
+	] {
+		let data = compress(&settings, text.as_bytes());
+		let len = data.len();
+		let mut cuts: Vec<usize> = vec![1, 2, 10, 100];
+		cuts.extend((1..32).map(|i| len * i / 32));
+		cuts.extend((0..8).map(|_| rng.below(len)));
+		cuts.extend([1, 4, 8, 9, 12, 20, 64].map(|d| len - d));
+		for n in cuts {
+			let (c, r) = read_both(&data[..n]);
+			let what = format!("{settings:?} cut at {n}/{len}");
+			let c_err = c.as_ref().map(|m| &m.error);
+			let r_err = r.as_ref().err();
+			assert_eq!(
+				c_read(&c),
+				r_read(&r),
+				"{what}\nC {c_err:?}\nrust {r_err:?}"
+			);
+			seen.insert(format!("{:?}", c_read(&c)));
+		}
+	}
+	assert!(seen.len() >= 2, "{seen:?}");
+}
+
 // a path of the fuzzed mtree text: escapes the C decodes, full ("./",
 // "/" inside, ".") or relative names, ".." now and then
 fn fuzz_path(rng: &mut Rng, seen: &[String]) -> String {
