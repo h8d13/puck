@@ -89,9 +89,10 @@ the same `--root`/`--dbpath`/`--config` on generated test roots and a
 read-only copy of a real system db; byte-identical stdout, stderr, exit.
 Now: `scripts/cli-parity-fixtures.sh` (-D runs under fakeroot with the
 written db compared), 550/550 equal; pacman-conf 554/554; testpkg
-binary 45/54 equal, 8 differing only in be_package's log lines, 1
-known (text file), testpkg module 486/550 + 64 log lines only (the
-mtree lines now carry libarchive's texts);
+binary 46/54 equal, 7 differing only in be_package's log lines, 1
+known (text file), testpkg module 494/550 + 56 log lines only (the
+mtree lines carry libarchive's texts; the tar reader's since the xattr
+unit);
 pacman-conf drop-in 13/13. On pacman, the two `--debug` runs in the
 default-SigLevel world compare with the C's GOTO_ERR lines (`got error
 <n> at <func> (<C file>: <line>)`) dropped, and only those: they carry
