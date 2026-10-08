@@ -12,6 +12,4 @@ alpm-core = { path = "../alpm-core" }
 pacman-common = { path = "../pacman-common" }
 pacman-cli = { path = "../pacman-cli" }
 alpm-compress.workspace = true
-alpm-db.workspace = true
-alpm-repo-db.workspace = true
 alpm-types.workspace = true

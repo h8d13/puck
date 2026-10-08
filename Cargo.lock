@@ -64,11 +64,9 @@ version = "0.1.0"
 dependencies = [
  "alpm-common",
  "alpm-compress",
- "alpm-db",
  "alpm-mtree",
  "alpm-package",
  "alpm-pkginfo",
- "alpm-repo-db",
  "alpm-types",
  "base64",
  "landlock",
@@ -77,21 +75,6 @@ dependencies = [
  "reqwest",
  "rustix",
  "tar",
-]
-
-[[package]]
-name = "alpm-db"
-version = "0.2.3"
-dependencies = [
- "alpm-common",
- "alpm-parsers",
- "alpm-types",
- "fluent-i18n",
- "serde",
- "serde_with",
- "strum",
- "thiserror",
- "winnow",
 ]
 
 [[package]]
@@ -150,20 +133,6 @@ dependencies = [
  "serde_with",
  "strum",
  "thiserror",
-]
-
-[[package]]
-name = "alpm-repo-db"
-version = "0.1.3"
-dependencies = [
- "alpm-common",
- "alpm-parsers",
- "alpm-types",
- "fluent-i18n",
- "serde",
- "strum",
- "thiserror",
- "winnow",
 ]
 
 [[package]]
@@ -571,8 +540,6 @@ version = "0.1.0"
 dependencies = [
  "alpm-compress",
  "alpm-core",
- "alpm-db",
- "alpm-repo-db",
  "alpm-types",
  "pacman-cli",
  "pacman-common",
