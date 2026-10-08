@@ -610,6 +610,19 @@ fn xfercommand() {
 				.into(),
 			&http,
 		),
+		// the built-in downloader in the sandbox child (seccomp on).
+		// landlock stays off: the C applies it before no_new_privs,
+		// which only real root may (UPSTREAM.md)
+		(
+			"sandbox",
+			"DownloadUser = nobody\nDisableSandboxFilesystem\n".into(),
+			&http,
+		),
+		(
+			"sandbox file",
+			"DownloadUser = nobody\nDisableSandboxFilesystem\n".into(),
+			&filem,
+		),
 	];
 	let cmds: [&[&str]; 4] =
 		[&["-Sy"], &["-Syy"], &["-Sy", "--debug"], &["-U", &url]];
@@ -625,6 +638,13 @@ fn xfercommand() {
 			);
 			if failing
 				&& cmd != ["-Sy"] && cmd != ["-Sy", "--debug"]
+			{
+				continue;
+			}
+			// the built-in downloader's debug lines are not ported
+			// (dload logs errors and warnings, PORTING.md)
+			if tag.starts_with("sandbox")
+				&& cmd.contains(&"--debug")
 			{
 				continue;
 			}
