@@ -498,6 +498,26 @@ declarations. No existing MR found for it.
   (be_package.c:419, from libarchive). **packager**, cosmetic
 - the swapped `_alpm_pkg_check_meta` check lets `pkgname = f*` load
   (be_package.c:667). See above. **packager**
+- a nul byte in `.PKGINFO` ends a line only when no '\n' follows in the
+  same libarchive data block (`_alpm_archive_fgets`, util.c:1263-1266),
+  so `a = b\0c = d\n` reads as one line or two depending on compression
+  and where the entry sits in the archive. **packager**
+- `size = ` past `LLONG_MAX` is cast to a negative `off_t` (util.c:1435,
+  be_package.c:220), up to `ULLONG_MAX` (which gives -1). **packager**
+- an `xdata` value without '=' refuses the whole package with only
+  "could not parse package description file", no line naming the cause
+  (be_package.c:248-251). **packager**, message only
+- a line whose first space does not start " = " (`key\t= v`, an indented
+  key) is dropped with a debug line only (be_package.c:182-186); unknown
+  key lines read before `pkgname` name the package "error"
+  (be_package.c:254). **packager**, cosmetic
+- the first `_alpm_archive_fgets` allocation skips the `max_line_size`
+  check (util.c:1269-1279): a first line inside the first data block may
+  pass 512 KiB. Data blocks stay below that (64/128 KiB filters, fd reads
+  of st_blksize), so **none**
+- `_alpm_pkg_check_meta`'s "invalid package metadata (name or version
+  missing)" lacks its '\n' (package.c:835). **none** from be_package (the
+  load refuses both before)
 
 ## `src/pacman/check.c` minor
 
@@ -919,8 +939,9 @@ parity"): epoch Ord 0101, one-sided pkgrel 0102, pkgrel text 0103, Url
 OptionalDependency 0108, PackageDescription 0109, desc v2 detection 0201,
 blank lines 0202/0301, backups 0205, files blank line 0206, `%DATA%` 0303,
 `usr` == `usr/` 0305, mtree order/duplicates/defaults/types/keywords
-0401-0410, mtree gzip members 0403, pkginfo strictness 0501-0506, gzip
-members 0551, content sniffing 0552. Further notes from the patch work:
+0401-0410, mtree gzip members 0403, pkginfo strictness 0501-0506 (gone
+with the owned `.PKGINFO` reader), gzip members 0551, content sniffing
+0552. Further notes from the patch work:
 
 - alpm-mtree `Error::Parse` display broken (`error-parse` wants `$source`,
   code passes `error`), fixed in 0411. **api**
