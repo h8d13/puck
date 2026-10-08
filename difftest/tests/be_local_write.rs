@@ -7,7 +7,6 @@ use std::ffi::c_int;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
-use std::sync::Mutex;
 
 use alpm_core::backup::Backup;
 use alpm_core::be_local::{
@@ -22,11 +21,8 @@ use alpm_core::pkghash::PkgHash;
 use alpm_core::util::hash_sdbm;
 use difftest::{
 	Break, OpResult, Rng, TempRoot, WriteOp, break_local, c_local_db_ops,
-	iters, snapshot,
+	iters, snapshot, umask_lock,
 };
-
-// prepare runs under umask(0), which is process wide: one case at a time
-static SERIAL: Mutex<()> = Mutex::new(());
 
 // a handle and two fixture roots per case
 fn case_iters() -> usize {
@@ -112,7 +108,7 @@ fn compare(
 	setup: &dyn Fn(&TempRoot),
 	ops: &[WriteOp],
 ) -> Vec<OpResult> {
-	let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+	let _umask = umask_lock();
 	let (c, r) = (TempRoot::new("dbw-c"), TempRoot::new("dbw-r"));
 	c.reset_local();
 	r.reset_local();
@@ -645,7 +641,7 @@ fn set_reason_cases() {
 // full disk is written short and reported as success
 #[test]
 fn write_error_divergence() {
-	let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+	let _umask = umask_lock();
 	let foo = pkg("foo", "1.0-1");
 	let (c, r) = (TempRoot::new("dbw-c"), TempRoot::new("dbw-r"));
 	for t in [&c, &r] {
