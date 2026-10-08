@@ -73,6 +73,7 @@ dependencies = [
  "base64",
  "landlock",
  "libseccomp",
+ "pacman-common",
  "reqwest",
  "rustix",
 ]

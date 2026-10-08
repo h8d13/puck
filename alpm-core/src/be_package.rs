@@ -154,7 +154,7 @@ fn io_err(e: alpm_compress::Error) -> io::Error {
 // filter libarchive's bidding would pick, for the four alpm-compress
 // has. anything else is read as a plain tar.
 // copy of be_sync's sniff without the size estimate, to dedupe later
-fn sniff(magic: &[u8]) -> DecompressionSettings {
+pub(crate) fn sniff(magic: &[u8]) -> DecompressionSettings {
 	if magic.starts_with(&[0x1f, 0x8b]) {
 		DecompressionSettings::Gzip
 	} else if magic.starts_with(b"BZh") {

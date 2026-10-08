@@ -14,10 +14,12 @@ pub mod filelist;
 pub mod graph;
 pub mod group;
 pub mod handle;
+pub mod hook;
 pub mod package;
 pub mod pkghash;
 pub mod regex;
 pub mod signing;
+pub mod trans;
 pub mod util;
 pub mod version;
 
