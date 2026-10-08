@@ -1161,11 +1161,12 @@ fn compare_all(scns: Vec<Scn>) {
 	assert!(bad.is_empty(), "mismatches: {bad:?}");
 }
 
-const STYLES: [(Style, &str); 4] = [
+const STYLES: [(Style, &str); 5] = [
 	(Style::Close, "close"),
 	(Style::Drop, "drop"),
 	(Style::KeepAlive, "keep-alive"),
 	(Style::Http10, "http/1.0"),
+	(Style::Stale, "stale"),
 ];
 
 fn redir(code: u16, to: &str) -> Reply {
@@ -1295,8 +1296,8 @@ fn styled_redirects(out: &mut Vec<Scn>, style: Style, sname: &str) {
 	));
 }
 
-// redirect loops end at curl's 10 follows. on a Drop server every hop
-// reuses a dead connection in curl: see drop_loop_divergence
+// redirect loops end at curl's 10 follows. on a Drop or Stale server
+// every hop reuses a dead connection in curl: see drop_loop_divergence
 fn redirect_loops(out: &mut Vec<Scn>, style: Style, sname: &str) {
 	let s = styled(
 		style,
@@ -1462,7 +1463,7 @@ fn redirect_cases() {
 	let mut out = Vec::new();
 	for (style, sname) in STYLES {
 		styled_redirects(&mut out, style, sname);
-		if style != Style::Drop {
+		if !matches!(style, Style::Drop | Style::Stale) {
 			redirect_loops(&mut out, style, sname);
 		}
 	}

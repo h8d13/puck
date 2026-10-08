@@ -730,6 +730,10 @@ pub enum Style {
 	KeepAlive,
 	// HTTP/1.0 without keep-alive, one response per connection
 	Http10,
+	// KeepAlive whose kept connections die: a later request on one is
+	// read, not logged, and the connection closed without a reply (a
+	// keep-alive timeout racing the client's reuse)
+	Stale,
 }
 
 // 127.0.0.1:<random port>, a thread per connection, framed by its Style
@@ -1001,12 +1005,17 @@ fn serve(
 	peak: &AtomicUsize,
 ) {
 	let mut wait = Duration::from_secs(5);
+	let mut first = true;
 	while let Some(req) = read_request(&mut s, wait) {
-		let reply = route(st, &req);
-		let more = respond(&mut s, style, &req, reply, stalls, peak);
-		if !more || style != Style::KeepAlive {
+		if style == Style::Stale && !first {
 			break;
 		}
+		let reply = route(st, &req);
+		let more = respond(&mut s, style, &req, reply, stalls, peak);
+		if !more || !matches!(style, Style::KeepAlive | Style::Stale) {
+			break;
+		}
+		first = false;
 		wait = Duration::from_secs(1);
 	}
 	let _ = s.flush();
