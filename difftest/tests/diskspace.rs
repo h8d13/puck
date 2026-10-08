@@ -342,7 +342,11 @@ fn rust_remove(h: &mut Handle, names: &[&[u8]]) -> Vec<Package> {
 	let dbext = h.dbext().to_vec();
 	let db = h.localdb_mut().unwrap();
 	names.iter()
-		.map(|n| db.load_pkg(&dbext, n, INFRQ_FILES).unwrap().clone())
+		.map(|n| {
+			db.load_pkg(&dbext, &mut (), n, INFRQ_FILES)
+				.unwrap()
+				.clone()
+		})
 		.collect()
 }
 

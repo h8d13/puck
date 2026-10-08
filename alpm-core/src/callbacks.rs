@@ -314,6 +314,11 @@ pub trait Callbacks {
 
 impl Callbacks for () {}
 
+// _alpm_log of a message given in parts, joined before the call
+pub fn logv(cb: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
+	cb.log(level, &parts.concat());
+}
+
 // handle->fetchcb (the frontend's XferCommand): 0 downloaded, 1 up to
 // date, -1 error. dload uses its own downloader when there is none
 pub trait Fetch {

@@ -207,16 +207,20 @@ fn rust_side(fx: &TempRoot) -> Caches {
 	let reader = LocalDb::register(handle.dbpath()).unwrap();
 	let dbext = handle.dbext().to_vec();
 	let db = handle.localdb_mut().unwrap();
-	let mut local: Vec<Package> =
-		db.pkgcache(&dbext).unwrap().iter().cloned().collect();
+	let mut local: Vec<Package> = db
+		.pkgcache(&dbext, &mut ())
+		.unwrap()
+		.iter()
+		.cloned()
+		.collect();
 	for p in &mut local {
-		reader.read(p, INFRQ_DESC).unwrap();
+		reader.read(p, INFRQ_DESC, &mut ()).unwrap();
 	}
 	// a cache that fails to load (gone) is an empty list, like NULL
 	let sync = handle
 		.syncdbs_mut()
 		.iter_mut()
-		.map(|d| match d.pkgcache(&dbext) {
+		.map(|d| match d.pkgcache(&dbext, &mut ()) {
 			Ok(c) => c.iter().cloned().collect(),
 			Err(_) => Vec::new(),
 		})

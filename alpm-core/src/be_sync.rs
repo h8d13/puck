@@ -28,7 +28,7 @@ use alpm_repo_db::desc::{Section, parse_libalpm};
 use alpm_repo_db::files::RepoFiles;
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
-use crate::callbacks::{Callbacks, Event, LogLevel};
+use crate::callbacks::{Callbacks, Event, LogLevel, logv};
 use crate::db::{DB_USAGE_SYNC, Db};
 use crate::deps::{Depend, dep_from_string};
 use crate::dload::{
@@ -288,7 +288,7 @@ fn update_locked(
 	let mut failed = None;
 	for i in synced {
 		let db = &mut parts.dbs[i];
-		db.free_pkgcache();
+		db.free_pkgcache(parts.cb);
 		let res = db.validate(default, parts.keyring, parts.cb);
 		if let Err(e) = res {
 			let msg =
@@ -419,10 +419,12 @@ struct Loading {
 
 // the walk state of sync_db_populate. index replaces the lookups in
 // db->pkgcache and likely_pkg: both find the one package of that name
-#[derive(Default)]
-struct Walk {
+struct Walk<'a> {
 	pkgs: Vec<Loading>,
 	index: HashMap<Vec<u8>, usize>,
+	// db->treename and handle->logcb
+	treename: &'a [u8],
+	cb: &'a mut dyn Callbacks,
 }
 
 fn invalid(entry: &[u8], reason: Reason) -> Error {
@@ -432,7 +434,7 @@ fn invalid(entry: &[u8], reason: Reason) -> Error {
 	}
 }
 
-impl Walk {
+impl Walk<'_> {
 	// load_pkg_for_entry: the package named by the entry, created on
 	// first sight with name and version from the entry name
 	fn pkg_for_entry(&mut self, entryname: &[u8]) -> Result<usize, Error> {
@@ -444,6 +446,14 @@ impl Walk {
 		if !check_meta(name, version) {
 			return Err(invalid(entryname, Reason::Meta));
 		}
+		let parts: [&[u8]; 5] = [
+			b"adding '",
+			name,
+			b"' to package cache for db '",
+			self.treename,
+			b"'\n",
+		];
+		logv(self.cb, LogLevel::Function, &parts);
 		let pkg = Package {
 			name_hash: hash_sdbm(name),
 			name: Some(name.to_vec()),
@@ -467,6 +477,12 @@ impl Walk {
 		entry: &mut TarballEntry,
 	) -> Result<(), Error> {
 		let entryname = entry.path().as_os_str().as_bytes().to_vec();
+		let parts: [&[u8]; 3] = [
+			b"loading package data from archive entry ",
+			&entryname,
+			b"\n",
+		];
+		logv(self.cb, LogLevel::Function, &parts);
 		let i = self.pkg_for_entry(&entryname)?;
 		// strrchr: the last '/', where splitname cut at the first
 		let Some(slash) = entryname.iter().rposition(|&c| c == b'/')
@@ -618,13 +634,28 @@ fn finish(l: Loading) -> Result<Package, Error> {
 //
 // errors rank like the C: an entry that fails makes the db invalid even
 // when the archive breaks later, a broken archive with good entries so
-// far is an archive error
-pub fn populate(path: &[u8], dbext: &[u8]) -> Result<PkgHash<Package>, Error> {
+// far is an archive error.
+//
+// logs through cb the opening, entry and count lines of the C; not
+// modelled: the error lines (the C goes on past a bad entry, its archive
+// error texts are libarchive's)
+pub fn populate(
+	path: &[u8],
+	dbext: &[u8],
+	treename: &[u8],
+	cb: &mut dyn Callbacks,
+) -> Result<PkgHash<Package>, Error> {
 	let path = until_nul(path);
+	logv(cb, LogLevel::Debug, &[b"opening archive ", path, b"\n"]);
 	let (mut archive, est) = open_archive(path, until_nul(dbext))?;
 	let mut cache = PkgHash::new(est as u32).ok_or(Error::Memory)?;
 
-	let mut walk = Walk::default();
+	let mut walk = Walk {
+		pkgs: Vec::new(),
+		index: HashMap::new(),
+		treename,
+		cb,
+	};
 	let mut broken = None;
 	let entries =
 		archive.entries().map_err(|e| Error::Archive(io_err(e)))?;
@@ -662,5 +693,14 @@ pub fn populate(path: &[u8], dbext: &[u8]) -> Result<PkgHash<Package>, Error> {
 		cache.add_sorted(pkg)
 			.map_err(|_| invalid(&name, Reason::Cache))?;
 	}
+	let count = cache.len().to_string();
+	let parts: [&[u8]; 5] = [
+		b"added ",
+		count.as_bytes(),
+		b" packages to package cache for db '",
+		treename,
+		b"'\n",
+	];
+	logv(walk.cb, LogLevel::Debug, &parts);
 	Ok(cache)
 }

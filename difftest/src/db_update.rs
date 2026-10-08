@@ -487,11 +487,12 @@ impl RUpdate {
 			h.set_gpgdir(g);
 		}
 		for d in &s.dbs {
-			let db = h
-				.register_syncdb(d.name.as_bytes(), d.siglevel);
-			let db = db.unwrap();
+			h.register_syncdb(d.name.as_bytes(), d.siglevel)
+				.unwrap();
+			let dbs = h.dbs_mut();
+			let db = dbs.sync.last_mut().expect("just registered");
 			for srv in &d.servers {
-				db.add_server(srv).unwrap();
+				db.add_server(dbs.cb, srv).unwrap();
 			}
 			db.set_usage(d.usage);
 		}
@@ -516,16 +517,17 @@ impl RUpdate {
 	}
 
 	pub fn states(&mut self) -> Vec<DbState> {
-		let dbext = self.h.dbext().to_vec();
+		let dbs = self.h.dbs_mut();
+		let (dbext, cb) = (dbs.dbext, dbs.cb);
 		let out =
-			self.h.syncdbs_mut()
-				.iter_mut()
+			dbs.sync.iter_mut()
 				.map(|db| {
 					let valid = match db.valid() {
 						Ok(()) => (0, 0),
 						Err(e) => (-1, e as c_int),
 					};
-					let cache = match db.pkgcache(&dbext) {
+					let cache = match db.pkgcache(dbext, cb)
+					{
 						Ok(c) => {
 							Ok(c.iter()
 								.map(|p| {

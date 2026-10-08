@@ -27,7 +27,7 @@ type Loaded = Result<CLocalDb, c_int>;
 
 fn rust_local_db(dbpath: &[u8], loads: Loads) -> Loaded {
 	let db = LocalDb::register(dbpath).map_err(|e| e.errno() as c_int)?;
-	let cache = db.populate().map_err(|e| e.errno() as c_int)?;
+	let cache = db.populate(&mut ()).map_err(|e| e.errno() as c_int)?;
 	let counts = (cache.len(), cache.buckets(), cache.limit());
 	let pkgs = cache
 		.iter()
@@ -40,7 +40,7 @@ fn rust_local_db(dbpath: &[u8], loads: Loads) -> Loaded {
 				(loads.scriptlet, INFRQ_SCRIPTLET),
 			] {
 				if on {
-					let _ = db.read(&mut p, bit);
+					let _ = db.read(&mut p, bit, &mut ());
 				}
 			}
 			p
@@ -56,7 +56,7 @@ fn port_error(dbpath: &[u8], pkg: &Package) -> String {
 		infolevel: 0,
 		..pkg.clone()
 	};
-	match db.read(&mut p, INFRQ_DESC | INFRQ_FILES) {
+	match db.read(&mut p, INFRQ_DESC | INFRQ_FILES, &mut ()) {
 		Ok(()) => "none".into(),
 		Err(e) => format!("{e:?}"),
 	}

@@ -64,12 +64,12 @@ pub fn sync_get_new_version(
 	h: &mut Handle,
 	pkg: &Package,
 ) -> Option<(usize, Package)> {
-	let dbext = h.dbext().to_vec();
-	let found =
-		h.syncdbs_mut().iter_mut().enumerate().find_map(|(i, db)| {
-			let spkg = db.get_pkg(&dbext, pkg.name_bytes()).ok()?;
-			Some((i, spkg.clone()))
-		});
+	let dbs = h.dbs_mut();
+	let (dbext, cb) = (dbs.dbext, dbs.cb);
+	let found = dbs.sync.iter_mut().enumerate().find_map(|(i, db)| {
+		let spkg = db.get_pkg(dbext, cb, pkg.name_bytes()).ok()?;
+		Some((i, spkg.clone()))
+	});
 	let cb = h.callbacks();
 	let Some((i, spkg)) = found else {
 		let msg = [
@@ -369,13 +369,13 @@ pub fn find_group_pkgs(
 	dbs: &[usize],
 	group: &[u8],
 ) -> Vec<TransPkg> {
-	let dbext = h.dbext().to_vec();
 	let mut members = Vec::new();
 	for &i in dbs {
-		let Some(db) = h.syncdbs_mut().get_mut(i) else {
+		let d = h.dbs_mut();
+		let Some(db) = d.sync.get_mut(i) else {
 			continue;
 		};
-		if let Ok(Some(grp)) = db.get_group(&dbext, group) {
+		if let Ok(Some(grp)) = db.get_group(d.dbext, d.cb, group) {
 			for p in grp.packages {
 				members.push(TransPkg::new(p.clone(), Some(i)));
 			}
@@ -513,10 +513,10 @@ pub fn dbs_satisfier(
 		.trans()
 		.is_some_and(|t| t.flags & TRANS_FLAG_NODEPVERSION != 0);
 	load_caches(h, false);
-	let dbext = h.dbext().to_vec();
 	for &i in dbs {
-		if let Some(db) = h.syncdbs_mut().get_mut(i) {
-			let _ = db.pkgcache(&dbext);
+		let d = h.dbs_mut();
+		if let Some(db) = d.sync.get_mut(i) {
+			let _ = db.pkgcache(d.dbext, d.cb);
 		}
 	}
 	with_view(h, |view, cb| {

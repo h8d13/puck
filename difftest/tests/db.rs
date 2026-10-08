@@ -3,7 +3,9 @@
 // broken), driven through the same operation sequences on a C handle and
 // a Rust Handle. every result and pm_errno is compared, cached packages
 // field by field (lazy loads stay in the cache entry on both sides), then
-// the registered dbs, their servers, usage, siglevel and path.
+// the registered dbs, their servers, usage, siglevel and path. the fuzz
+// compares the log lines of every op and of the release too.
+use std::cell::RefCell;
 use std::ffi::c_int;
 use std::fmt::Write as _;
 use std::fs;
@@ -12,6 +14,7 @@ use std::os::unix::fs::symlink;
 use alpm_core::be_local::{
 	INFRQ_ALL, INFRQ_DESC, INFRQ_ERROR, INFRQ_FILES, INFRQ_SCRIPTLET,
 };
+use alpm_core::callbacks::{Callbacks, LogLevel};
 use alpm_core::db::{Db, SIG_USE_DEFAULT, db_cmp};
 use alpm_core::error::Errno;
 use alpm_core::group::Group;
@@ -22,6 +25,48 @@ use difftest::{
 	CHandle, LocalEntry, Rng, StrList, TarEntry, TempRoot, iters, section,
 	tar_dir, tar_file, ustar,
 };
+
+type Logs = Vec<(c_int, Vec<u8>)>;
+
+thread_local! {
+	// what the Rust side logged: the handle and the Db calls
+	static LOGS: RefCell<Logs> = const { RefCell::new(Vec::new()) };
+}
+
+// the Rust handle's callbacks, and the ones every Db call here takes:
+// log lines go to LOGS
+struct Rec;
+
+impl Callbacks for Rec {
+	fn log(&mut self, level: LogLevel, msg: &[u8]) {
+		let line = (level as c_int, msg.to_vec());
+		LOGS.with(|l| l.borrow_mut().push(line));
+	}
+}
+
+fn take_rust_logs() -> Logs {
+	LOGS.with(|l| std::mem::take(&mut *l.borrow_mut()))
+}
+
+// C lines the port does not log: RET_ERR/GOTO_ERR (C file and line),
+// and be_sync's error lines carrying libarchive texts
+fn modelled(line: &(c_int, Vec<u8>)) -> bool {
+	const NOT: [&[u8]; 4] = [
+		b"returning error ",
+		b"got error ",
+		b"could not read db '",
+		b"could not open file ",
+	];
+	let m = &line.1;
+	// be_local's open failures are modelled, be_sync's are not
+	let local_open = m.starts_with(b"could not open file ")
+		&& !m.windows(6).any(|w| w == b"/sync/");
+	local_open || !NOT.iter().any(|p| m.starts_with(p))
+}
+
+fn c_logs(c: Logs) -> Logs {
+	c.into_iter().filter(modelled).collect()
+}
 
 // one fixture and two handles per case, each case a sequence of ops
 fn cases() -> usize {
@@ -229,7 +274,7 @@ fn positions(
 	let any = groups.iter().any(|g| !g.packages.is_empty());
 	let list: Vec<*const Package> = match any {
 		true => db
-			.pkgcache(dbext)
+			.pkgcache(dbext, &mut Rec)
 			.unwrap()
 			.iter()
 			.map(|p| p as *const _)
@@ -259,7 +304,7 @@ fn raw(g: Group<&Package>) -> Group<*const Package> {
 }
 
 fn rust_groupcache(db: &mut Db, dbext: &[u8]) -> (Vec<Group<usize>>, c_int) {
-	let (groups, e) = match db.groupcache(dbext) {
+	let (groups, e) = match db.groupcache(dbext, &mut Rec) {
 		Ok(g) => (g.into_iter().map(raw).collect(), 0),
 		Err(e) => (Vec::new(), e as c_int),
 	};
@@ -271,7 +316,7 @@ fn rust_get_group(
 	dbext: &[u8],
 	name: &[u8],
 ) -> (Option<Group<usize>>, c_int) {
-	let (g, e) = match db.get_group(dbext, name) {
+	let (g, e) = match db.get_group(dbext, &mut Rec, name) {
 		Ok(g) => (g.map(raw), 0),
 		Err(e) => (None, e as c_int),
 	};
@@ -321,13 +366,20 @@ struct Seen {
 	added: usize,
 	removed: usize,
 	registered: usize,
+	// log lines compared, by level
+	errors: usize,
+	debug: usize,
+	function: usize,
 }
 
 impl Both {
 	fn new(fx: &TempRoot, dbpath: &[u8]) -> Both {
 		let root = fx.path("root");
 		let c = CHandle::new(&root, dbpath).expect("C initialize");
-		let r = Handle::initialize(&root, dbpath).expect("initialize");
+		let mut r =
+			Handle::initialize(&root, dbpath).expect("initialize");
+		r.set_callbacks(Box::new(Rec));
+		take_rust_logs();
 		Both {
 			c,
 			r,
@@ -359,6 +411,27 @@ impl Both {
 		let sync = sync
 			.map(|d| String::from_utf8(d.name().to_vec()).unwrap());
 		local.into_iter().chain(sync).collect()
+	}
+
+	// the lines both sides logged since the last compare
+	fn compare_logs(&mut self, what: &str) {
+		let c = c_logs(self.c.take_logs());
+		for (level, _) in &c {
+			match *level {
+				1 => self.seen.errors += 1,
+				4 => self.seen.debug += 1,
+				8 => self.seen.function += 1,
+				_ => {}
+			}
+		}
+		let lines = |l: &Logs| -> Vec<(c_int, String)> {
+			l.iter().map(|(lv, m)| {
+				(*lv, String::from_utf8_lossy(m).into())
+			})
+			.collect()
+		};
+		let r = take_rust_logs();
+		check!(self, &format!("{what} logs"), lines(&c), lines(&r));
 	}
 
 	// everything observable without loading a cache
@@ -510,8 +583,13 @@ fn step(b: &mut Both, rng: &mut Rng) {
 			let c = b.c.add_server(nb, url.as_bytes(), cache);
 			let db = b.db(&n);
 			let r = match cache {
-				false => db.add_server(url.as_bytes()),
-				true => db.add_cache_server(url.as_bytes()),
+				false => {
+					db.add_server(&mut Rec, url.as_bytes())
+				}
+				true => db.add_cache_server(
+					&mut Rec,
+					url.as_bytes(),
+				),
 			};
 			check!(b, "add server", c, unit(r));
 		}
@@ -523,8 +601,14 @@ fn step(b: &mut Both, rng: &mut Rng) {
 			let c = b.c.remove_server(nb, url.as_bytes(), cache);
 			let db = b.db(&n);
 			let r = match cache {
-				false => db.remove_server(url.as_bytes()),
-				true => db.remove_cache_server(url.as_bytes()),
+				false => db.remove_server(
+					&mut Rec,
+					url.as_bytes(),
+				),
+				true => db.remove_cache_server(
+					&mut Rec,
+					url.as_bytes(),
+				),
 			};
 			check!(b, "remove server", c, found(r));
 		}
@@ -538,8 +622,8 @@ fn step(b: &mut Both, rng: &mut Rng) {
 			let c = b.c.set_servers(nb, &urls, cache);
 			let db = b.db(&n);
 			let r = match cache {
-				false => db.set_servers(&urls),
-				true => db.set_cache_servers(&urls),
+				false => db.set_servers(&mut Rec, &urls),
+				true => db.set_cache_servers(&mut Rec, &urls),
 			};
 			check!(b, "set servers", c, unit(r));
 		}
@@ -555,7 +639,10 @@ fn step(b: &mut Both, rng: &mut Rng) {
 		(8 | 9, Some(_)) => {
 			let (c, ce) = b.c.pkgcache(nb);
 			let ext = b.ext();
-			let (r, re, counts) = match b.db(&n).pkgcache(&ext) {
+			let (r, re, counts) = match b
+				.db(&n)
+				.pkgcache(&ext, &mut Rec)
+			{
 				Ok(cache) => (
 					cache.iter().cloned().collect(),
 					0,
@@ -579,9 +666,11 @@ fn step(b: &mut Both, rng: &mut Rng) {
 			writeln!(b.log, "  get_pkg {name:?}").unwrap();
 			let c = b.c.get_pkg(nb, name.as_bytes());
 			let ext = b.ext();
-			let r = pkg_or_err(
-				b.db(&n).get_pkg(&ext, name.as_bytes()),
-			);
+			let r = pkg_or_err(b.db(&n).get_pkg(
+				&ext,
+				&mut Rec,
+				name.as_bytes(),
+			));
 			b.seen.pkg_hits += usize::from(c.0.is_some());
 			check!(b, "get_pkg", c, r);
 		}
@@ -608,12 +697,16 @@ fn step(b: &mut Both, rng: &mut Rng) {
 			let pkg = gen_add_pkg(rng);
 			writeln!(b.log, "  add {pkg:?}").unwrap();
 			let (cr, ce, new) = b.c.add_pkg_in_cache(nb, &pkg);
-			let r = cache_err(b.db(&n).add_pkg_in_cache(&pkg));
+			let r = cache_err(
+				b.db(&n).add_pkg_in_cache(&mut Rec, &pkg),
+			);
 			check!(b, "add pkg", (cr, ce), r);
 			b.seen.added += usize::from(new.is_some());
 			if let Some((i, cpkg)) = new {
 				let ext = b.ext();
-				let cache = b.db(&n).pkgcache(&ext).unwrap();
+				let cache =
+					b.db(&n).pkgcache(&ext, &mut Rec)
+						.unwrap();
 				let rpkg = cache.iter().nth(i).unwrap().clone();
 				check!(b, "added entry", cpkg, rpkg);
 			}
@@ -633,12 +726,14 @@ fn step(b: &mut Both, rng: &mut Rng) {
 				.unwrap();
 			let c = b.c.remove_pkg_from_cache(nb, &key);
 			b.seen.removed += usize::from(c.0 == 0);
-			let r = b.db(&n).remove_pkg_from_cache(&key).map(drop);
+			let r =
+				b.db(&n).remove_pkg_from_cache(&mut Rec, &key)
+					.map(drop);
 			check!(b, "remove pkg", c, cache_err(r));
 		}
 		(17, Some(_)) if rng.below(3) == 0 => {
 			b.c.free_pkgcache(nb);
-			b.db(&n).free_pkgcache();
+			b.db(&n).free_pkgcache(&mut Rec);
 		}
 		(18, Some(_)) => {
 			let c = b.c.valid(nb);
@@ -676,6 +771,7 @@ fn step(b: &mut Both, rng: &mut Rng) {
 			let db = b.db(&n);
 			let r = pkg_or_err(db.load_pkg(
 				&ext,
+				&mut Rec,
 				name.as_bytes(),
 				inforeq,
 			));
@@ -683,9 +779,11 @@ fn step(b: &mut Both, rng: &mut Rng) {
 			check!(b, "load_pkg", c, r);
 			// the same cache entry, read again
 			let c = b.c.get_pkg(nb, name.as_bytes());
-			let r = pkg_or_err(
-				b.db(&n).get_pkg(&ext, name.as_bytes()),
-			);
+			let r = pkg_or_err(b.db(&n).get_pkg(
+				&ext,
+				&mut Rec,
+				name.as_bytes(),
+			));
 			check!(b, "get_pkg after load", c, r);
 		}
 		(25, _) if rng.below(2) == 0 => {
@@ -697,6 +795,7 @@ fn step(b: &mut Both, rng: &mut Rng) {
 		}
 		_ => {}
 	}
+	b.compare_logs(&format!("op {op}"));
 	b.compare_state();
 }
 
@@ -727,6 +826,7 @@ fn fuzz_sequences() {
 			b.r.set_default_siglevel(level).unwrap();
 		}
 		b.compare_state();
+		b.compare_logs("setup");
 		for _ in 0..OPS {
 			step(&mut b, &mut rng);
 		}
@@ -736,6 +836,15 @@ fn fuzz_sequences() {
 		seen.added += b.seen.added;
 		seen.removed += b.seen.removed;
 		seen.registered += b.seen.registered;
+		seen.errors += b.seen.errors;
+		seen.debug += b.seen.debug;
+		seen.function += b.seen.function;
+		// alpm_release: unlock, then the dbs unregistered
+		let Both { c, r, log, .. } = b;
+		let c = c_logs(c.release_logs());
+		drop(r);
+		let r = take_rust_logs();
+		assert_eq!(c, r, "release logs\nops:\n{log}");
 	}
 	eprintln!("{} cases of {OPS} ops: {seen:?}", cases());
 	let n = cases();
@@ -743,6 +852,8 @@ fn fuzz_sequences() {
 	assert!(seen.loaded > n, "{seen:?}");
 	assert!(seen.added > n && seen.removed > n / 2, "{seen:?}");
 	assert!(seen.registered > n, "{seen:?}");
+	assert!(seen.errors > n / 4 && seen.debug > 10 * n, "{seen:?}");
+	assert!(seen.function > n, "{seen:?}");
 }
 
 // alpm_initialize: what root and dbpath become, and its errors
@@ -906,7 +1017,9 @@ fn server_urls() {
 				url.as_bytes(),
 				false,
 			);
-			let r = unit(b.db(db).add_server(url.as_bytes()));
+			let r = unit(b
+				.db(db)
+				.add_server(&mut Rec, url.as_bytes()));
 			check!(b, url, c, r);
 		}
 	}
@@ -914,14 +1027,21 @@ fn server_urls() {
 	assert_eq!(b.db("core").servers()[0], b"");
 	for url in ["a//", "a/", "/", "/", "", "zz"] {
 		let c = b.c.remove_server(b"core", url.as_bytes(), false);
-		let r = found(b.db("core").remove_server(url.as_bytes()));
+		let r = found(b
+			.db("core")
+			.remove_server(&mut Rec, url.as_bytes()));
 		check!(b, url, c, r);
 		b.compare_state();
 	}
 	let urls: Vec<Vec<u8>> =
 		vec![b"x/".to_vec(), b"".to_vec(), b"y".to_vec()];
 	let c = b.c.set_servers(b"core", &urls, true);
-	check!(b, "set", c, unit(b.db("core").set_cache_servers(&urls)));
+	check!(
+		b,
+		"set",
+		c,
+		unit(b.db("core").set_cache_servers(&mut Rec, &urls))
+	);
 	b.compare_state();
 	assert_eq!(b.db("core").cache_servers(), [b"x".to_vec()]);
 }
@@ -977,7 +1097,10 @@ fn stale_group_cache() {
 	write_sync(&fx, "core.db", &good);
 	let c = b.c.pkgcache(b"core");
 	assert_eq!((c.0.len(), c.1), (1, 0));
-	assert_eq!(b.db("core").pkgcache(DBEXT).map(|p| p.len()), Ok(1));
+	assert_eq!(
+		b.db("core").pkgcache(DBEXT, &mut Rec).map(|p| p.len()),
+		Ok(1)
+	);
 	for _ in 0..2 {
 		let c = b.c.groupcache(b"core");
 		check!(b, "stale", &c, &rust_groupcache(b.db("core"), DBEXT));
@@ -985,7 +1108,7 @@ fn stale_group_cache() {
 	}
 	// freeing a loaded cache drops the group cache with it
 	b.c.free_pkgcache(b"core");
-	b.db("core").free_pkgcache();
+	b.db("core").free_pkgcache(&mut Rec);
 	let c = b.c.groupcache(b"core");
 	check!(b, "rebuilt", &c, &rust_groupcache(b.db("core"), DBEXT));
 	assert_eq!(c.0.len(), 1);
@@ -1036,7 +1159,10 @@ fn invalid_sync_dbs() {
 				unit(b.db(tree).valid())
 			);
 			let c = b.c.pkgcache(n);
-			let r = b.db(tree).pkgcache(DBEXT).map(|p| p.len());
+			let r = b
+				.db(tree)
+				.pkgcache(DBEXT, &mut Rec)
+				.map(|p| p.len());
 			check!(
 				b,
 				tree,
@@ -1057,8 +1183,10 @@ fn invalid_sync_dbs() {
 				b,
 				"get_pkg",
 				c,
-				b.db(tree).get_pkg(DBEXT, b"a").err().unwrap()
-					as c_int
+				b.db(tree)
+					.get_pkg(DBEXT, &mut Rec, b"a")
+					.err()
+					.unwrap() as c_int
 			);
 		}
 	}
@@ -1261,19 +1389,22 @@ fn load_cached_package() {
 		let db = b.db("local");
 		let r = pkg_or_err(db.load_pkg(
 			DBEXT,
+			&mut Rec,
 			name.as_bytes(),
 			inforeq,
 		));
 		check!(b, &what, &c, &r);
 		let again = b.c.get_pkg(b"local", name.as_bytes());
 		check!(b, &what, &again, &c);
-		let r = pkg_or_err(
-			b.db("local").get_pkg(DBEXT, name.as_bytes()),
-		);
+		let r = pkg_or_err(b.db("local").get_pkg(
+			DBEXT,
+			&mut Rec,
+			name.as_bytes(),
+		));
 		check!(b, &what, again, r);
 	}
 	let c = b.c.pkgcache(b"local");
-	let r = b.db("local").pkgcache(DBEXT).unwrap();
+	let r = b.db("local").pkgcache(DBEXT, &mut Rec).unwrap();
 	let r: Vec<Package> = r.iter().cloned().collect();
 	check!(b, "cache", &c, &(r.clone(), 0));
 	let level = |name: &[u8]| {
@@ -1311,7 +1442,7 @@ fn dbext_at_load_time() {
 		let n = tree.as_bytes();
 		let c = b.c.pkgcache(n);
 		let ext = b.ext();
-		let r = b.db(tree).pkgcache(&ext).unwrap();
+		let r = b.db(tree).pkgcache(&ext, &mut Rec).unwrap();
 		let counts = (r.len(), r.buckets(), r.limit());
 		let r: Vec<Package> = r.iter().cloned().collect();
 		check!(b, tree, c, (r, 0));

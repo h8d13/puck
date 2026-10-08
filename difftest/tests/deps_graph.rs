@@ -249,16 +249,16 @@ impl RustSide {
 		let dbext = handle.dbext().to_vec();
 		let db = handle.localdb_mut().unwrap();
 		let names: Vec<Vec<u8>> = db
-			.pkgcache(&dbext)
+			.pkgcache(&dbext, &mut ())
 			.unwrap()
 			.iter()
 			.map(|p| p.name_bytes().to_vec())
 			.collect();
 		for n in &names {
-			db.load_pkg(&dbext, n, INFRQ_DESC).unwrap();
+			db.load_pkg(&dbext, &mut (), n, INFRQ_DESC).unwrap();
 		}
 		for d in handle.syncdbs_mut() {
-			d.pkgcache(&dbext).unwrap();
+			d.pkgcache(&dbext, &mut ()).unwrap();
 		}
 		RustSide { handle }
 	}

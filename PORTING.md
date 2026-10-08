@@ -77,13 +77,14 @@ already downloaded sync dbs.
 | db search, `DbCaches` for `Handle`, `query.c` (-Q*), `deptest.c` (-T) | done |
 | read-only `sync.c` (-Si, -Sl, -Sg) and `files.c` (-F, -Fl, -Fx) | done |
 | `-Ss`, `setup_libalpm`, `callback.c`, main dispatch, `pacman` binary | done |
-| `database.c` (`-D`, `-Dk`), db.c debug log lines | in progress |
+| `database.c` (-D, -Dk, -Dkk), db.c/backend log lines | done |
 
 Gate: `scripts/cli-parity.sh` between C `pacman` and the Rust binary with
 the same `--root`/`--dbpath`/`--config` on generated test roots and a
 read-only copy of a real system db; byte-identical stdout, stderr, exit.
-Now: `scripts/cli-parity-fixtures.sh`, 475/495 equal (99 command lines x
-5 worlds); the 20 left are `-Dk`/`-Dkk` and `-Q`/`-Si --debug`.
+Now: `scripts/cli-parity-fixtures.sh` (-D runs under fakeroot with the
+written db compared), 533/535 equal; the two left are `--debug` in the
+default-SigLevel world (signing debug lines, GOTO_ERR's C file:line).
 
 ### 2. Sync databases (`-Sy`)
 
@@ -216,7 +217,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `lib/libalpm/be_package.c` | 778 | `alpm-core::be_package` (partial) | pkg_load_internal (full and metadata-only walk, .PKGINFO via alpm-pkginfo, .MTREE via alpm-mtree with archive fallback, file list, check_meta), pkg_load/pkg_validate at every level (.sig, base64 sig, sha256 skip), key import question, changelog: difftest on generated packages (gz/bz2/xz/zst/none, full on/off, every field + changelog), 82 pinned odd inputs, real cached packages (`DIFFTEST_PKG_CORPUS`); gpgme/.sig pending |
 | `lib/libalpm/be_local.c` | 1232 | `alpm-core::be_local` (partial) | register/validate (ALPM_DB_VERSION, creation), populate, local_db_read via `alpm-db`: difftest on random v1/v2 dbs (every field, cache counts), version-file fuzz, 69 pinned odd inputs, /var/lib/pacman read-only; local_db_prepare/write/remove, set_reason: difftest `be_local_write` (written trees byte for byte, modes, rc); mtree, changelog pending |
 | `lib/libalpm/be_sync.c` | 762 | `alpm-core::be_sync` (partial) | populate (tar walk, load_pkg_for_entry, check_meta subset, validate_filename, error ranking), get_validation, db_path, sync_db_validate (missing file, signature, import retry) via `alpm-repo-db` + `alpm-compress`: difftest on generated .db/.files in gz/bz2/xz/zst/none (fields, cache order, table counts), real sync db copies; alpm_db_update + get_sync_dir: difftest vs C on loopback mirrors with gpg-signed fixture dbs (sequences, edges, signatures, fuzz) |
-| `lib/libalpm/db.c` | 773 | `alpm-core::db` (partial) | register/unregister, servers (sanitize_url), usage, siglevel, get_valid, pkgcache/get_pkg, groupcache/get_group (load_grpcache order), add/remove pkg in cache, load_pkg (lazy loads in place), dbext read at load, db_path, db_cmp: difftest op-sequence fuzz (results, errno, db state each step); search (difftest fuzz), load_all/walk/find_satisfier; update pending |
+| `lib/libalpm/db.c` | 773 | `alpm-core::db` (partial) | register/unregister, servers (sanitize_url), usage, siglevel, get_valid, pkgcache/get_pkg, groupcache/get_group (load_grpcache order), add/remove pkg in cache, load_pkg (lazy loads in place), dbext read at load, db_path, db_cmp: difftest op-sequence fuzz (results, errno, db state each step); search (difftest fuzz), load_all/walk/find_satisfier; log lines (db.c, be_local populate/read, be_sync populate): the op fuzz compares every line of each op and of the release; update pending |
 | `lib/libalpm/log.c` | 112 | `alpm-core::log` | logaction (logfile, errno), leader format, syslog packet: difftest (stamps stripped), clock injectable, UTC default |
 | `lib/libalpm/handle.c` | 1017 | `alpm-core::handle` (all but handle->user, trans) | options, lock, logfile, callbacks, keyring, dload state: difftest option fuzz, lock, logaction; earlier: | alpm_initialize path checks/normalisation, dbext, architectures, siglevels, ignore/noupgrade/noextract lists + match: difftest; callbacks, lock, cachedirs, hookdirs, gpgdir, logfile, sandbox, downloads pending |
 | `lib/libalpm/alpm.c` | 132 | - | |
@@ -242,6 +243,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `src/pacman/deptest.c` (in the above) | 57 | `pacman-cli::deptest` | difftest vs C pacman_deptest |
 | `src/pacman/sync.c` (in the above) | 978 | `pacman-cli::sync` (partial) | sync_info, sync_list, sync_group, dispatch, check_syncdbs: difftest vs C pacman_sync (4 db states, warm caches); -Sy/-Syy: difftest vs C pacman_sync with the frontend callbacks (no bars); sync_trans/sync_prepare_execute up to the commit: difftest `frontend_fuzz` (C never commits: --print or a declined question); -Sc, -Ss pending |
 | `src/pacman/remove.c`, `upgrade.c` | 309 | `pacman-cli::{remove,upgrade}` (up to the commit) | difftest `frontend_fuzz` vs C pacman_remove/pacman_upgrade (rc, stdout, stderr, input consumed); -U url fetch wired, untested (network) |
+| `src/pacman/database.c` (in the above) | 305 | `pacman-cli::database` | -D --asdeps/--asexplicit, -Dk, -Dkk: difftest vs C pacman_database on two copies of each fixture (ret, stdout, stderr, local db tree after), -Dkk on sync worlds; unit tests |
 | `src/pacman/files.c` (in the above) | 341 | `pacman-cli::files` | -F, -Fx, -Fq, --machinereadable, -Fl: difftest vs C pacman_files on .files dbs; -Fy: same, with the frontend callbacks |
 | `src/pacman/package.c` (in the above) | 587 | `pacman-cli::package` | dump_pkg_full (all origins, -i/-ii), dump_pkg_backups, dump_pkg_files, print_installed, print_groups, dump_pkg_search: difftest on a real C handle with refilled db caches and real files under the root, strftime %c vs `format_date_utc` fuzz + localtime limits; changelog and gpgme results: unit tests |
 | `src/pacman/conf.c` (in the above) | 1468 | `pacman-cli::conf` (partial) | config model, parseconfigfile, setdefaults (include, siglevel, cleanmethod, usage, repeating options, $repo/$arch, sysroot), glob(3) subset: difftest on random config trees (return, stderr, whole config_t), glob vs libc; setup_libalpm, register_repo: difftest reading the handle back through every getter; XferCommand download pending |
@@ -358,7 +360,16 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
 - `Handle`/`Db` return `Result<_, Errno>` instead of setting pm_errno.
   `Db` cache calls (`pkgcache`, `get_pkg`, `load_pkg`, `groupcache`,
   `get_group`) take handle->dbext at call time; the path is fixed at
-  registration like the C's cached `_path`.
+  registration like the C's cached `_path`. `Db` calls that log take the
+  `Callbacks` (handle->logcb), `Handle::dbs_mut` lends dbext, callbacks
+  and the dbs together (`DbsMut`). RET_ERR/GOTO_ERR lines and be_sync's
+  error lines (libarchive texts, the C reads on past a bad entry) are not
+  logged. local lazy loads read one section per call like one getter per
+  section, so the "loading package data" lines match.
+- `database`: trans_init(0, 0)/trans_release are the db lock
+  (`Handle::lock`/`handle_unlock`), the getters' lazy loads happen up
+  front. checkdeps logs through the handle's callbacks, swapped out for
+  the call because `DepsEnv` borrows the `Handle`.
 - lazy loads (`load_pkg`, the group cache) write into the cache entry like
   the C. `Package` has no ops pointer, so every local cache entry
   lazy-loads through be_local (the C keeps default ops for a package added
@@ -510,7 +521,13 @@ Follow-ups raised by port units:
 | `Question::SelectProvider` carries provider db names (today through `Lookup`); `Handle::replace_callbacks` has no frontend caller left | frontend | todo |
 | sandbox in `be_sync::downloader` (like `fetch_pkgurl`) | dbupdate | todo |
 | `umask(0022)` around `alpm_db_update` (rustix process) | dbupdate | todo |
-| one `logv(cb, ...)` helper (copies in hook.rs, deps.rs, trans.rs, util's `log_parts`) | integrate2 | todo |
+| one `logv(cb, ...)` helper (copies in hook.rs, deps.rs, trans.rs, util's `log_parts`) | integrate2 | in progress: `callbacks::logv`, used by db, be_local, be_sync |
+| `-D` dispatch arm: `pacman_database(config, handle, targets, &mut o)` | m1close | done |
+| setup_libalpm's server adds through `Handle::dbs_mut()` (`Db::add_server` takes the callbacks) | m1close | done |
+| query: -Qk/-Qkk lazy loads per package like the C (-Qkk loads files up front), op stderr flushed per package so callback lines interleave; then drop cli_binary's empty files lists | m1close | todo |
+| signing debug lines (`_alpm_access` "is not readable", "sig path ... could not be opened", "missing required signature") | m1close | todo |
+| difftest C log callbacks (deps_graph, dload, diskspace, db_update) onto `handle::record_log` | m1close | todo |
+| `DepsEnv` without `&Handle` (assumeinstalled, ignore lists), so checkdeps logs without swapping the callbacks | m1close | todo |
 | difftest: `read_deps` pub(crate) (drops conflict's `CDepend`), `SyncWorld` into fixtures.rs | conflict, sync | todo |
 | be_sync: a non-archive db must fail at open (DB_OPEN, db invalid) like libarchive, not LIBARCHIVE | query | done |
 | `%DATA%` in repo dbs, gzip multi-member, `Packager` default, backup `(null)` | db readers | ALPM side, see `UPSTREAM.md` |

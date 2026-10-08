@@ -3,15 +3,16 @@
 // same read-only command lines on generated fixture roots (local db,
 // sync .db and .files, a pacman.conf, every path option pointing into
 // the fixture), stdout, stderr and exit status compared byte for byte.
-// prints one line per command; commands of operations not ported yet
-// are expected to differ (KNOWN), every other one must be equal.
+// prints one line per command; every one must be equal but the --debug
+// lines known() explains. root-only commands (-Sy, -Fy, -D) run under
+// fakeroot, the dbs they fetch or write compared too.
 // scripts/cli-parity-fixtures.sh runs it with the table shown
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use difftest::{LocalEntry, Rng, SyncWorld, section};
+use difftest::{LocalEntry, Rng, SyncWorld, section, snapshot};
 
 fn c_pacman() -> PathBuf {
 	let dir = match std::env::var_os("PACMAN_BUILD") {
@@ -34,8 +35,15 @@ fn rust_pacman() -> PathBuf {
 	bin
 }
 
-// commands whose operation is not ported: -Dk (database.c)
-const KNOWN: &[&str] = &["-Dk", "-Dkk"];
+// --debug in the world with the default SigLevel (Required, unsigned
+// dbs): the C logs the failed .sig lookup (util.c _alpm_access, signing.c
+// "sig path ... could not be opened", "missing required signature") and
+// GOTO_ERR's "got error ... (signing.c: <line>)"; the port's signing
+// logs errors and warnings only and never RET_ERR/GOTO_ERR lines
+// (PORTING.md)
+fn known(label: &str, siglevel: Option<&str>) -> bool {
+	siglevel.is_none() && label.contains("--debug")
+}
 
 // "[HH:MM:SS] " before stamped lines: both binaries read the clock
 fn unstamp(err: &[u8]) -> Vec<u8> {
@@ -109,6 +117,8 @@ fn setup(w: &SyncWorld, siglevel: Option<&str>) -> Vec<String> {
 	for d in ["mirror", "sync.orig"] {
 		fs::create_dir_all(dir.join(d)).unwrap();
 	}
+	// the local db -D runs start from
+	copy_dir(&dir.join("db/local"), &dir.join("local.orig"));
 	for e in fs::read_dir(dir.join("db/sync")).unwrap() {
 		let e = e.unwrap();
 		fs::copy(e.path(), dir.join("mirror").join(e.file_name()))
@@ -128,10 +138,11 @@ fn setup(w: &SyncWorld, siglevel: Option<&str>) -> Vec<String> {
 	]
 }
 
-// an installed package owning real files under the root, for -Ql/-Qo/-Qk
-// every generated local entry gets an empty files list like a real db:
-// a missing one is a libalpm error log the port's db layer does not
-// emit (PORTING.md follow-up)
+// an installed package owning real files under the root, for -Ql/-Qo/-Qk.
+// every generated local entry gets an empty files list like a real db: a
+// missing one logs "could not open file" from its lazy load, which query
+// does up front for -Qkk and prints apart from the op's buffered stderr
+// (PORTING.md follow-up)
 fn owner_pkg(w: &SyncWorld) {
 	for e in fs::read_dir(w.fx.local()).unwrap() {
 		let dir = e.unwrap().path();
@@ -271,6 +282,14 @@ fn commands(w: &SyncWorld) -> Vec<Vec<String>> {
 		vec!["-Fy"],
 		vec!["-Dk"],
 		vec!["-Dkk"],
+		vec!["-Dk", "-q"],
+		vec!["-D", "--asdeps", "owner"],
+		vec!["-D", "--asexplicit", "owner"],
+		vec!["-D", "--asdeps", "nope", "owner", sync],
+		vec!["-Dq", "--asdeps", "owner"],
+		vec!["-D", "owner"],
+		vec!["-D", "--asdeps"],
+		vec!["-Dk", "--asdeps", "owner"],
 		vec!["-Qv"],
 		vec!["-Q", "--color=always", "-i", "owner"],
 		vec!["-Ss", "--color=always", "a"],
@@ -299,23 +318,31 @@ fn world(
 	for cmd in commands(w) {
 		let mut args = cmd.clone();
 		args.extend(paths.iter().cloned());
-		let root = refresh(&cmd);
+		let root = refresh(&cmd) || writes_local(&cmd);
 		let dir = w.fx.dir();
-		if root {
-			restore_sync(dir);
-		}
+		let restore = || {
+			if root {
+				restore_sync(dir);
+				restore_local(dir);
+			}
+		};
+		let written = || {
+			root.then(|| {
+				(
+					snapshot_sync(dir),
+					snapshot(&dir.join("db/local")),
+				)
+			})
+		};
+		restore();
 		let cr = run(&c, &args, dir, root);
-		let synced_c = root.then(|| snapshot_sync(dir));
-		if root {
-			restore_sync(dir);
-		}
+		let synced_c = written();
+		restore();
 		let rr = run(&r, &args, dir, root);
-		let synced_r = root.then(|| snapshot_sync(dir));
-		if root {
-			restore_sync(dir);
-		}
+		let synced_r = written();
+		restore();
 		let rr = Run {
-			// the fetched dbs count as output
+			// the fetched or written dbs count as output
 			status: if synced_c == synced_r {
 				rr.status
 			} else {
@@ -355,6 +382,34 @@ fn refresh(cmd: &[String]) -> bool {
 		.is_some_and(|c| c.starts_with("-Sy") || c.starts_with("-Fy"))
 }
 
+// -D without -k: root only, writes the local db
+fn writes_local(cmd: &[String]) -> bool {
+	cmd.first()
+		.is_some_and(|c| c.starts_with("-D") && !c.contains('k'))
+		&& !cmd.iter().any(|a| a == "-k")
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+	fs::create_dir_all(to).unwrap();
+	for e in fs::read_dir(from).unwrap() {
+		let e = e.unwrap();
+		let dest = to.join(e.file_name());
+		match e.file_type().unwrap().is_dir() {
+			true => copy_dir(&e.path(), &dest),
+			false => {
+				fs::copy(e.path(), dest).unwrap();
+			}
+		}
+	}
+}
+
+// db/local back to what the fixture wrote
+fn restore_local(dir: &Path) {
+	let local = dir.join("db/local");
+	fs::remove_dir_all(&local).unwrap();
+	copy_dir(&dir.join("local.orig"), &local);
+}
+
 // db/sync back to what the fixture wrote, with an old mtime so a
 // refresh sees the mirror's copies as newer
 fn restore_sync(dir: &Path) {
@@ -391,12 +446,6 @@ fn snapshot_sync(dir: &Path) -> Vec<(String, Vec<u8>)> {
 	v
 }
 
-fn known(label: &str) -> bool {
-	KNOWN.iter()
-		.any(|k| label == *k || label.starts_with(&format!("{k} ")))
-		|| label.contains("--debug")
-}
-
 #[test]
 fn parity() {
 	let mut rng = Rng::new(0xc11);
@@ -425,7 +474,7 @@ fn parity() {
 		for (label, ok, diff) in world(w, level, true) {
 			total += 1;
 			equal += usize::from(ok);
-			if !ok && !known(&label) {
+			if !ok && !known(&label, level) {
 				failures.push(format!(
 					"world {i}: {label}\n{}",
 					diff.unwrap_or_default()

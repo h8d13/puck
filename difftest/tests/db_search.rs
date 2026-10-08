@@ -173,7 +173,7 @@ fn rust_search(h: &mut Handle, db: &str, needles: &[Vec<u8>]) -> CSearch {
 			.find(|d| d.name() == name.as_bytes())
 			.unwrap(),
 	};
-	match db.search(&dbext, needles) {
+	match db.search(&dbext, &mut (), needles) {
 		Ok(pkgs) => CSearch {
 			ret: 0,
 			names: pkgs
@@ -222,12 +222,17 @@ fn open_case(local: &[Pkg], sync: &[SyncSpec], log: String) -> Case {
 	let dbext = r.dbext().to_vec();
 	let ldb = r.localdb_mut().unwrap();
 	for p in local {
-		let pkg = ldb.load_pkg(&dbext, p.name.as_bytes(), INFRQ_DESC);
+		let pkg = ldb.load_pkg(
+			&dbext,
+			&mut (),
+			p.name.as_bytes(),
+			INFRQ_DESC,
+		);
 		let level = pkg.map(|p| p.infolevel).unwrap_or(INFRQ_ERROR);
 		assert_eq!(level & INFRQ_ERROR, 0, "alpm-db refuses {p:?}");
 	}
 	for db in r.syncdbs_mut() {
-		let e = db.pkgcache(&dbext).err();
+		let e = db.pkgcache(&dbext, &mut ()).err();
 		assert!(
 			matches!(
 				e,

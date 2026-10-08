@@ -50,53 +50,56 @@ fn rust_ops(dbpath: &[u8], ops: &[WriteOp]) -> Result<Vec<OpResult>, c_int> {
 	};
 	let mut out = Vec::new();
 	for op in ops {
-		let r =
-			match op {
-				WriteOp::Prepare(p) => res(db
-					.prepare(p)
-					.map_err(|e| e.errno())),
-				WriteOp::Write(p, inforeq) => match db
-					.write(p, *inforeq)
-				{
+		let r = match op {
+			WriteOp::Prepare(p) => {
+				res(db.prepare(p).map_err(|e| e.errno()))
+			}
+			WriteOp::Write(p, inforeq) => {
+				match db.write(p, *inforeq) {
 					Err(WriteError::Write(e)) => {
 						panic!("write failed: {e}")
 					}
 					r => res(r.map_err(|_| None)),
-				},
-				WriteOp::Remove(p) => {
-					res(db.remove(p).map_err(|_| None))
 				}
-				WriteOp::SetReason(name, reason) => {
-					if cache.is_none() {
-						cache = db.populate().ok();
-					}
-					let pkg = cache
-						.as_mut()
-						.and_then(|c| c.find_mut(name));
-					match pkg {
+			}
+			WriteOp::Remove(p) => {
+				res(db.remove(p).map_err(|_| None))
+			}
+			WriteOp::SetReason(name, reason) => {
+				if cache.is_none() {
+					cache = db.populate(&mut ()).ok();
+				}
+				let pkg = cache
+					.as_mut()
+					.and_then(|c| c.find_mut(name));
+				match pkg {
 					None => OpResult {
 						rc: -1,
-						errno: Errno::PkgNotFound as c_int,
+						errno: Errno::PkgNotFound
+							as c_int,
 						reason: None,
 					},
 					Some(pkg) => {
-						let r = db.set_reason(pkg, *reason);
+						let r = db.set_reason(
+							pkg,
+							*reason,
+							&mut (),
+						);
 						OpResult {
 							reason: Some(pkg.reason as c_int),
 							..res(r.map_err(Some))
 						}
 					}
 				}
-				}
-				WriteOp::SetReasonDetached(p, reason) => res(
-					db.set_reason(&mut p.clone(), *reason)
-						.map_err(Some),
-				),
-				WriteOp::Break(how) => {
-					break_local(&local, *how);
-					res(Ok(()))
-				}
-			};
+			}
+			WriteOp::SetReasonDetached(p, reason) => res(db
+				.set_reason(&mut p.clone(), *reason, &mut ())
+				.map_err(Some)),
+			WriteOp::Break(how) => {
+				break_local(&local, *how);
+				res(Ok(()))
+			}
+		};
 		out.push(r);
 	}
 	Ok(out)

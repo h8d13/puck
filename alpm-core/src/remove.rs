@@ -17,11 +17,10 @@ use pacman_common::util_common::{mbasename, mdirname};
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
 use crate::backup::needbackup;
-use crate::be_local::{INFRQ_ALL, INFRQ_FILES, scan_zu};
+use crate::be_local::{INFRQ_FILES, scan_zu};
 use crate::callbacks::{
 	Callbacks, Event, LogLevel, PackageOp, PackageOperation, Progress,
 };
-use crate::db::CacheError;
 use crate::deps::{
 	DepMissing, checkdeps, dep_compute_string, find_satisfier, recursedeps,
 };
@@ -62,11 +61,12 @@ pub fn remove_pkg(h: &mut Handle, pkg: &Package) -> Result<(), Errno> {
 		b" to the transaction remove list\n",
 	];
 	log(h.callbacks(), Debug, &msg);
-	let dbext = h.dbext().to_vec();
-	let full = h
-		.localdb_mut()
+	let dbs = h.dbs_mut();
+	let (dbext, cb) = (dbs.dbext, dbs.cb);
+	let full = dbs
+		.local
 		.and_then(|db| {
-			db.load_pkg(&dbext, pkg.name_bytes(), INFRQ_ALL).ok()
+			db.force_load_pkg(dbext, cb, pkg.name_bytes()).ok()
 		})
 		.map(Package::dup);
 	let copy = full.unwrap_or_else(|| pkg.dup());
@@ -477,9 +477,9 @@ fn unlink_dir(
 	}
 	// the dup in trans->remove is not the cache entry: skip by name
 	let (oname, ohash) = (oldpkg.name_bytes(), oldpkg.name_hash);
-	let dbext = h.dbext().to_vec();
-	let owner = h.localdb_mut().and_then(|db| {
-		let found = db.walk(&dbext, INFRQ_FILES, |_, p| {
+	let dbs = h.dbs_mut();
+	let owner = dbs.local.and_then(|db| {
+		let found = db.walk(dbs.dbext, dbs.cb, INFRQ_FILES, |_, p| {
 			if has_name(p, oname, ohash)
 				|| p.files.contains(name).is_none()
 			{
@@ -787,19 +787,16 @@ pub fn remove_single_package(
 	files
 }
 
-// the local db entry and the cache entry of _alpm_remove_single_package
+// the local db entry and the cache entry of _alpm_remove_single_package.
+// Db::remove_pkg_from_cache logs its own "removing entry" lines
 fn remove_db_entry(h: &mut Handle, oldpkg: &Package) {
 	let pkgname = opt_str(&oldpkg.name);
 	let pkgver = opt_str(&oldpkg.version);
-	let Some(db) = h.localdb_mut() else {
+	let dbs = h.dbs_mut();
+	let Some(db) = dbs.local else {
 		return;
 	};
-	let written = db.local().map(|l| l.remove(oldpkg));
-	let loaded = db.loaded_pkgcache().is_some();
-	let treename = db.name().to_vec();
-	let cached = db.remove_pkg_from_cache(oldpkg).map(drop);
-	let cb = h.callbacks();
-	if let Some(Err(_)) = written {
+	if let Some(Err(_)) = db.local().map(|l| l.remove(oldpkg)) {
 		let msg = [
 			b"could not remove database entry ",
 			pkgname,
@@ -807,34 +804,14 @@ fn remove_db_entry(h: &mut Handle, oldpkg: &Package) {
 			pkgver,
 			b"\n",
 		];
-		log(cb, Error, &msg);
+		log(dbs.cb, Error, &msg);
 	}
-	if loaded {
-		let msg = [
-			b"removing entry '",
-			pkgname,
-			b"' from '",
-			&treename,
-			b"' cache\n",
-		];
-		log(cb, Debug, &msg);
-	}
-	if cached == Err(CacheError::NotFound) {
-		let msg = [
-			b"cannot remove entry '",
-			pkgname,
-			b"' from '",
-			&treename,
-			b"' cache: not found\n",
-		];
-		log(cb, Debug, &msg);
-	}
-	if cached.is_err() {
+	if db.remove_pkg_from_cache(dbs.cb, oldpkg).is_err() {
 		let msg = [
 			b"could not remove entry '",
 			pkgname,
 			b"' from cache\n",
 		];
-		log(cb, Error, &msg);
+		log(dbs.cb, Error, &msg);
 	}
 }
