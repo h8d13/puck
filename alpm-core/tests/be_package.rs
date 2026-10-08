@@ -85,13 +85,13 @@ fn metadata_fields() {
 	assert_eq!(p.name.as_deref(), Some(&b"foo"[..]));
 	assert_eq!(p.version.as_deref(), Some(&b"1:1.0-2"[..]));
 	assert_eq!(p.isize, 2358);
-	assert_eq!(p.depends[0].name, b"bar");
+	assert_eq!(&*p.depends[0].name, b"bar");
 	assert_eq!(p.optdepends[0].desc.as_deref(), Some(&b"for baz"[..]));
-	assert_eq!(p.backup[0].name, b"etc/foo.conf");
+	assert_eq!(&*p.backup[0].name, b"etc/foo.conf");
 	assert_eq!(p.backup[0].hash, None);
 	assert_eq!(p.xdata.len(), 2);
 	assert_eq!(p.scriptlet, 1);
-	assert_eq!(p.origin, Some(PkgFrom::File(pkg.path().to_vec())));
+	assert_eq!(p.origin, Some(PkgFrom::File(pkg.path().to_vec().into())));
 	assert_eq!(p.validation, PKG_VALIDATION_NONE);
 	assert!(p.files.files.is_empty());
 }
@@ -151,7 +151,7 @@ fn validate_and_changelog() {
 	let p = pkg_load(pkg.path(), false).unwrap();
 	assert_eq!(changelog(&mut (), &p).unwrap(), b"log\n");
 	let bad = Package {
-		sha256sum: Some(b"00".to_vec()),
+		sha256sum: Some(b"00"[..].into()),
 		..Package::default()
 	};
 	assert!(matches!(
@@ -162,7 +162,7 @@ fn validate_and_changelog() {
 		fs::read(&pkg.0).unwrap(),
 	);
 	let good = Package {
-		sha256sum: Some(sum.to_string().into_bytes()),
+		sha256sum: Some(sum.to_string().into_bytes().into()),
 		..Package::default()
 	};
 	assert_eq!(

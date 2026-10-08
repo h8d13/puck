@@ -209,16 +209,18 @@ fn target(g: &Gen, origin: PkgFrom) -> Package {
 	};
 	Package {
 		name_hash: hash_sdbm(g.name.as_bytes()),
-		name: Some(g.name.as_bytes().to_vec()),
-		version: Some(g.version.as_bytes().to_vec()),
-		filename: Some(format!("{}.pkg.tar", g.name).into_bytes()),
+		name: Some(g.name.as_bytes().into()),
+		version: Some(g.version.as_bytes().into()),
+		filename: Some(format!("{}.pkg.tar", g.name)
+			.into_bytes()
+			.into()),
 		files: filelist(&g.files),
 		backup: g
 			.backup
 			.iter()
 			.map(|b| Backup {
-				name: b.clone(),
-				hash: Some(MD5.as_bytes().to_vec()),
+				name: b.clone().into(),
+				hash: Some(MD5.as_bytes().into()),
 			})
 			.collect(),
 		conflicts: deps(&g.conflicts),
@@ -333,7 +335,7 @@ impl Fix {
 		let names: Vec<Vec<u8>> = self
 			.cache
 			.iter()
-			.map(|p| p.name.clone().unwrap())
+			.map(|p| p.name.as_deref().unwrap().to_vec())
 			.collect();
 		assert_eq!(c.local_names(), names, "local caches differ");
 		c
@@ -475,7 +477,7 @@ fn mk(name: &str, files: &[&str]) -> Gen {
 }
 
 fn tgt(name: &str, files: &[&str]) -> Package {
-	target(&mk(name, files), PkgFrom::File(b"/x.pkg.tar".to_vec()))
+	target(&mk(name, files), PkgFrom::File(b"/x.pkg.tar"[..].into()))
 }
 
 fn files_of(r: &FileConflicts) -> Vec<(String, String, FileConflictType)> {
@@ -745,7 +747,7 @@ fn fuzz() {
 						0 => PkgFrom::LocalDb,
 						1..=3 => PkgFrom::SyncDb,
 						_ => PkgFrom::File(
-							b"/t".to_vec(),
+							b"/t"[..].into(),
 						),
 					};
 					target(g, origin)

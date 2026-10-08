@@ -72,12 +72,12 @@ fn names(db: &LocalDb) -> Vec<String> {
 		.unwrap()
 		.iter()
 		.map(|p| {
-			let n = p.name.clone().unwrap();
-			let v = p.version.clone().unwrap();
+			let n = p.name.as_deref().unwrap();
+			let v = p.version.as_deref().unwrap();
 			format!(
 				"{}-{}",
-				String::from_utf8(n).unwrap(),
-				String::from_utf8(v).unwrap()
+				std::str::from_utf8(n).unwrap(),
+				std::str::from_utf8(v).unwrap()
 			)
 		})
 		.collect()
@@ -166,7 +166,7 @@ fn read_sections() {
 	// u64::MAX wraps through the off_t cast
 	assert_eq!(p.isize, -1);
 	assert_eq!(p.reason, PkgReason::Depend);
-	assert_eq!(p.groups, [b"g1".to_vec(), b"g2".to_vec()]);
+	assert_eq!(*p.groups, [Box::from(&b"g1"[..]), Box::from(&b"g2"[..])]);
 	// md5 maps to no bit, like the C table
 	assert_eq!(
 		p.validation,
@@ -174,7 +174,7 @@ fn read_sections() {
 	);
 	assert_eq!(p.depends.len(), 2);
 	assert_eq!(p.depends[0].depmod, DepMod::Ge);
-	assert_eq!(p.depends[1].name, b"libx.so");
+	assert_eq!(&*p.depends[1].name, b"libx.so");
 	let optdesc = p.optdepends[0].desc.as_deref();
 	assert_eq!(optdesc, Some(&b"does things"[..]));
 	assert_eq!(p.xdata.len(), 1);
@@ -186,7 +186,7 @@ fn read_sections() {
 	let want: [&[u8]; 4] =
 		[b"usr/", b"usr/lib-x", b"usr/lib/", b"usr/lib/a"];
 	assert_eq!(files, want);
-	assert_eq!(p.backup[0].name, b"usr/lib/a");
+	assert_eq!(&*p.backup[0].name, b"usr/lib/a");
 	assert_eq!(p.scriptlet, 1);
 }
 

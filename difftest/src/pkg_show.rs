@@ -363,7 +363,8 @@ impl PkgWorld {
 			&pkg.conflicts,
 			&pkg.replaces,
 		];
-		let items = pkg.licenses.iter().chain(&pkg.groups).cloned();
+		let items = pkg.licenses.iter().chain(&pkg.groups);
+		let items = items.map(|s| s.to_vec());
 		let deps = deps.into_iter().flatten().map(dep_compute_string);
 		let items = items.chain(deps);
 		for s in items {
@@ -484,7 +485,7 @@ impl Drop for PkgWorld {
 // no origin, no dates: the least dump_pkg_full asks for
 fn named_pkg() -> Package {
 	Package {
-		name: Some(b"x".to_vec()),
+		name: Some(b"x"[..].into()),
 		builddate: -1,
 		installdate: -1,
 		..Package::default()

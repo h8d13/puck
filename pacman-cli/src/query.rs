@@ -186,7 +186,7 @@ impl PkgEnv for Env<'_> {
 		p.scriptlet != 0
 	}
 
-	fn backup(&mut self, pkg: &Package) -> Vec<Backup> {
+	fn backup(&mut self, pkg: &Package) -> Box<[Backup]> {
 		let p = self.loaded(INFRQ_FILES).unwrap_or(pkg);
 		p.backup.clone()
 	}
@@ -223,7 +223,7 @@ struct Checks<'a> {
 	handle: &'a mut Handle,
 	pos: Option<usize>,
 	// alpm_pkg_get_backup once loaded
-	backup: Option<Vec<Backup>>,
+	backup: Option<Box<[Backup]>>,
 }
 
 impl CheckEnv for Checks<'_> {

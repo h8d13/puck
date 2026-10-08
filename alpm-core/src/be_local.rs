@@ -33,12 +33,12 @@ use crate::mtree;
 use crate::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
 	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, PkgReason, check_meta,
-	parse_xdata,
+	extend_xdata,
 };
 use crate::pkghash::PkgHash;
 use crate::util::{
 	hash_sdbm, makepath, mkdir_mode, parsedate, splitname, strerror,
-	strtoofft, until_nul,
+	strtoofft, until_nul, with_vec,
 };
 
 // ALPM_LOCAL_DB_VERSION
@@ -247,8 +247,8 @@ impl LocalDb {
 			}
 			let mut pkg = Package {
 				name_hash: hash_sdbm(name),
-				name: Some(name.to_vec()),
-				version: Some(version.to_vec()),
+				name: Some(name.into()),
+				version: Some(version.into()),
 				origin: Some(PkgFrom::LocalDb),
 				..Package::default()
 			};
@@ -298,7 +298,6 @@ impl LocalDb {
 		];
 		logv(cb, LogLevel::Function, &parts);
 		let r = self.read_sections(pkg, inforeq, cb);
-		pkg.shrink_lists();
 		if r.is_err() {
 			pkg.infolevel |= INFRQ_ERROR;
 		}
@@ -422,8 +421,8 @@ impl Lines {
 	}
 
 	// READ_AND_STORE
-	fn store(&mut self) -> io::Result<Option<Vec<u8>>> {
-		Ok(Some(self.next()?.to_vec()))
+	fn store(&mut self) -> io::Result<Option<Box<[u8]>>> {
+		Ok(Some(self.next()?.into()))
 	}
 
 	// READ_AND_STORE_ALL and READ_AND_SPLITDEP: lines up to a blank
@@ -438,10 +437,24 @@ impl Lines {
 		}
 		Ok(())
 	}
+
+	// a list section onto a package's list, appended to what an
+	// earlier one left
+	fn append<T>(
+		&mut self,
+		out: &mut Box<[T]>,
+		f: impl Fn(&[u8]) -> T,
+	) -> io::Result<()> {
+		with_vec(out, |v| self.list(v, f))
+	}
 }
 
 fn line_vec(s: &[u8]) -> Vec<u8> {
 	s.to_vec()
+}
+
+fn line_box(s: &[u8]) -> Box<[u8]> {
+	s.into()
 }
 
 // _read_pkgreason
@@ -534,12 +547,12 @@ fn read_desc(
 			}
 			b"%BASE%" => pkg.base = f.store().map_err(io)?,
 			b"%DESC%" => pkg.desc = f.store().map_err(io)?,
-			b"%GROUPS%" => {
-				f.list(&mut pkg.groups, line_vec).map_err(io)?
-			}
+			b"%GROUPS%" => f
+				.append(&mut pkg.groups, line_box)
+				.map_err(io)?,
 			b"%URL%" => pkg.url = f.store().map_err(io)?,
 			b"%LICENSE%" => f
-				.list(&mut pkg.licenses, line_vec)
+				.append(&mut pkg.licenses, line_box)
 				.map_err(io)?,
 			b"%ARCH%" => pkg.arch = f.store().map_err(io)?,
 			// _alpm_parsedate: 0 for anything but a number
@@ -570,35 +583,33 @@ fn read_desc(
 				pkg.isize = v.map_or(-1, |v| v as i64);
 			}
 			b"%REPLACES%" => {
-				f.list(&mut pkg.replaces, deps).map_err(io)?
+				f.append(&mut pkg.replaces, deps).map_err(io)?
 			}
 			b"%DEPENDS%" => {
-				f.list(&mut pkg.depends, deps).map_err(io)?
+				f.append(&mut pkg.depends, deps).map_err(io)?
 			}
-			b"%OPTDEPENDS%" => {
-				f.list(&mut pkg.optdepends, deps).map_err(io)?
-			}
+			b"%OPTDEPENDS%" => f
+				.append(&mut pkg.optdepends, deps)
+				.map_err(io)?,
 			b"%MAKEDEPENDS%" => f
-				.list(&mut pkg.makedepends, deps)
+				.append(&mut pkg.makedepends, deps)
 				.map_err(io)?,
 			b"%CHECKDEPENDS%" => f
-				.list(&mut pkg.checkdepends, deps)
+				.append(&mut pkg.checkdepends, deps)
 				.map_err(io)?,
-			b"%CONFLICTS%" => {
-				f.list(&mut pkg.conflicts, deps).map_err(io)?
-			}
+			b"%CONFLICTS%" => f
+				.append(&mut pkg.conflicts, deps)
+				.map_err(io)?,
 			b"%PROVIDES%" => {
-				f.list(&mut pkg.provides, deps).map_err(io)?
+				f.append(&mut pkg.provides, deps).map_err(io)?
 			}
 			b"%XDATA%" => {
 				let mut lines = Vec::new();
 				f.list(&mut lines, line_vec).map_err(io)?;
-				// entries before a bad line stay
-				for l in lines {
-					let x = parse_xdata(&l)
-						.ok_or(ReadError::XData(l))?;
-					pkg.xdata.push(x);
-				}
+				with_vec(&mut pkg.xdata, |x| {
+					extend_xdata(x, lines)
+				})
+				.map_err(ReadError::XData)?;
 			}
 			_ => {
 				let parts: [&[u8]; 4] = [
@@ -630,14 +641,16 @@ fn read_files(pkg: &mut Package, f: &mut Lines) {
 					let name = f.line.clone();
 					files.push(PkgFile::new(name, 0, 0));
 				}
+				// exact like the C's list, for the cache's life
+				files.shrink_to_fit();
 				pkg.files = FileList { files };
 				pkg.files.sort();
 			}
-			b"%BACKUP%" => {
+			b"%BACKUP%" => with_vec(&mut pkg.backup, |b| {
 				while more(f) && f.strip() != 0 {
-					pkg.backup.push(split_backup(&f.line));
+					b.push(split_backup(&f.line));
 				}
-			}
+			}),
 			_ => {}
 		}
 	}
@@ -824,9 +837,12 @@ fn desc_text(pkg: &Package) -> Vec<u8> {
 	// only the installed size, csize is irrelevant once installed
 	number(&mut out, b"%SIZE%", pkg.isize);
 	number(&mut out, b"%REASON%", pkg.reason as i64);
-	let text = |s: &Vec<u8>| until_nul(s).to_vec();
-	list(&mut out, b"%GROUPS%", &pkg.groups, text);
-	list(&mut out, b"%LICENSE%", &pkg.licenses, text);
+	list(&mut out, b"%GROUPS%", &pkg.groups, |s| {
+		until_nul(s).to_vec()
+	});
+	list(&mut out, b"%LICENSE%", &pkg.licenses, |s| {
+		until_nul(s).to_vec()
+	});
 	if pkg.validation != 0 {
 		// the known bits in a fixed order, md5 is never written
 		let methods: Vec<&[u8]> = [

@@ -470,7 +470,7 @@ fn diskspace_read_only_and_full() {
 	ro.read_only = true;
 	let mut f = fake_for(&tmp, fs(4096, 1000, 100), ro);
 	let pkg = Package {
-		name: Some(b"p".to_vec()),
+		name: Some(b"p"[..].into()),
 		files: files(&[file("usr/x", 1, 0), file("big", 49 * 4096, 0)]),
 		..Default::default()
 	};
@@ -497,7 +497,7 @@ fn diskspace_read_only_and_full() {
 		Ok(())
 	);
 	let pkg = Package {
-		name: Some(b"p".to_vec()),
+		name: Some(b"p"[..].into()),
 		files: files(&[file("big", 50 * 4096, 0)]),
 		..Default::default()
 	};
@@ -525,7 +525,7 @@ fn diskspace_removal_only_on_read_only() {
 	ro.read_only = true;
 	let mut f = fake_for(&tmp, fs(4096, 1000, 1000), ro);
 	let old = Package {
-		name: Some(b"old".to_vec()),
+		name: Some(b"old"[..].into()),
 		files: files(&[file("usr/f", 0, 0)]),
 		..Default::default()
 	};
@@ -545,7 +545,7 @@ fn diskspace_progress_and_max() {
 	let mut h = tmp.handle();
 	let mut f = fake_for(&tmp, fs(4096, 1000, 1000), fs(4096, 1000, 1000));
 	let pkg = |n: &str, size| Package {
-		name: Some(n.into()),
+		name: Some(n.as_bytes().into()),
 		files: files(&[file("f", size, 0)]),
 		..Default::default()
 	};

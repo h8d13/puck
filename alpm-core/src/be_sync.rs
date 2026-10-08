@@ -34,7 +34,7 @@ use crate::filter::Code;
 use crate::handle::{Handle, SyncParts};
 use crate::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
-	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, check_meta, parse_xdata,
+	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, check_meta, extend_xdata,
 };
 use crate::pkghash::PkgHash;
 use crate::signing::{
@@ -45,7 +45,7 @@ use crate::tar;
 use crate::util::{
 	self, ArchiveFgets, DataBlocks, Entry, PATH_MAX, S_IFDIR, S_IFMT,
 	alpm_access, get_fullpath, hash_sdbm, makepath, parsedate, splitname,
-	strtoofft, until_nul,
+	strtoofft, until_nul, with_vec,
 };
 
 // hard upper limit of a db download
@@ -445,8 +445,8 @@ impl<'e, 'a> Lines<'e, 'a> {
 		}
 	}
 
-	fn store(&mut self) -> Result<Option<Vec<u8>>, Reason> {
-		Ok(Some(self.next()?.to_vec()))
+	fn store(&mut self) -> Result<Option<Box<[u8]>>, Reason> {
+		Ok(Some(self.next()?.into()))
 	}
 
 	// READ_AND_STORE_ALL, READ_AND_SPLITDEP, the %FILES% loop: lines up
@@ -466,10 +466,24 @@ impl<'e, 'a> Lines<'e, 'a> {
 			out.push(f(line));
 		}
 	}
+
+	// a list section onto a package's list, appended to what an
+	// earlier one left
+	fn append<T>(
+		&mut self,
+		out: &mut Box<[T]>,
+		f: impl Fn(&[u8]) -> T,
+	) -> Result<(), Reason> {
+		with_vec(out, |v| self.list(v, f))
+	}
 }
 
 fn line_vec(s: &[u8]) -> Vec<u8> {
 	s.to_vec()
+}
+
+fn line_box(s: &[u8]) -> Box<[u8]> {
+	s.into()
 }
 
 // _alpm_strtoofft: -1 for anything but bare digits, the unsigned long
@@ -524,8 +538,8 @@ impl Walk<'_> {
 		logv(self.cb, LogLevel::Function, &parts);
 		let pkg = Package {
 			name_hash: hash_sdbm(name),
-			name: Some(name.to_vec()),
-			version: Some(version.to_vec()),
+			name: Some(name.into()),
+			version: Some(version.into()),
 			origin: Some(PkgFrom::SyncDb),
 			..Package::default()
 		};
@@ -571,7 +585,6 @@ impl Walk<'_> {
 		}
 		let mut lines = Lines::new(entry);
 		let r = self.read_data(i, &mut lines);
-		self.pkgs[i].shrink_lists();
 		// the filename check returns without this line
 		if r.as_ref().is_err_and(|r| !matches!(r, Reason::Filename)) {
 			let parts: [&[u8]; 3] = [
@@ -652,11 +665,11 @@ impl Walk<'_> {
 				b"%BASE%" => pkg.base = f.store()?,
 				b"%DESC%" => pkg.desc = f.store()?,
 				b"%GROUPS%" => {
-					f.list(&mut pkg.groups, line_vec)?
+					f.append(&mut pkg.groups, line_box)?
 				}
 				b"%URL%" => pkg.url = f.store()?,
 				b"%LICENSE%" => {
-					f.list(&mut pkg.licenses, line_vec)?
+					f.append(&mut pkg.licenses, line_box)?
 				}
 				b"%ARCH%" => pkg.arch = f.store()?,
 				// _alpm_parsedate: 0 for anything but a number
@@ -674,25 +687,25 @@ impl Walk<'_> {
 				b"%SHA256SUM%" => pkg.sha256sum = f.store()?,
 				b"%PGPSIG%" => pkg.base64_sig = f.store()?,
 				b"%REPLACES%" => {
-					f.list(&mut pkg.replaces, deps)?
+					f.append(&mut pkg.replaces, deps)?
 				}
 				b"%DEPENDS%" => {
-					f.list(&mut pkg.depends, deps)?
+					f.append(&mut pkg.depends, deps)?
 				}
 				b"%OPTDEPENDS%" => {
-					f.list(&mut pkg.optdepends, deps)?
+					f.append(&mut pkg.optdepends, deps)?
 				}
 				b"%MAKEDEPENDS%" => {
-					f.list(&mut pkg.makedepends, deps)?
+					f.append(&mut pkg.makedepends, deps)?
 				}
 				b"%CHECKDEPENDS%" => {
-					f.list(&mut pkg.checkdepends, deps)?
+					f.append(&mut pkg.checkdepends, deps)?
 				}
 				b"%CONFLICTS%" => {
-					f.list(&mut pkg.conflicts, deps)?
+					f.append(&mut pkg.conflicts, deps)?
 				}
 				b"%PROVIDES%" => {
-					f.list(&mut pkg.provides, deps)?
+					f.append(&mut pkg.provides, deps)?
 				}
 				// sorted with _alpm_filelist_sort
 				b"%FILES%" => {
@@ -700,19 +713,19 @@ impl Walk<'_> {
 					f.list(&mut files, |l| {
 						PkgFile::new(l.to_vec(), 0, 0)
 					})?;
+					// exact like the C's list, for the
+					// cache's life
+					files.shrink_to_fit();
 					pkg.files = FileList { files };
 					pkg.files.sort();
 				}
 				b"%DATA%" => {
 					let mut lines = Vec::new();
 					f.list(&mut lines, line_vec)?;
-					// entries before a bad line stay
-					for l in lines {
-						let x = parse_xdata(&l).ok_or(
-							Reason::XData(l),
-						)?;
-						pkg.xdata.push(x);
-					}
+					with_vec(&mut pkg.xdata, |x| {
+						extend_xdata(x, lines)
+					})
+					.map_err(Reason::XData)?;
 				}
 				_ => {
 					let parts: [&[u8]; 4] = [

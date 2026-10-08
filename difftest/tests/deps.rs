@@ -88,9 +88,9 @@ fn random_dep(rng: &mut Rng) -> Depend {
 	let name = rng.bytes(b"ab", 2);
 	let name_hash = hash_sdbm(&name);
 	Depend {
-		name,
-		version: opt_bytes(rng, VER_ALPHABET, 6),
-		desc: opt_bytes(rng, b"x: ", 4),
+		name: name.into(),
+		version: opt_bytes(rng, VER_ALPHABET, 6).map(Box::from),
+		desc: opt_bytes(rng, b"x: ", 4).map(Box::from),
 		name_hash,
 		depmod: MODS[rng.below(MODS.len())],
 	}
@@ -188,8 +188,8 @@ fn random_pkg(rng: &mut Rng) -> Package {
 	};
 	Package {
 		name_hash,
-		name: Some(name),
-		version: opt_bytes(rng, VER_ALPHABET, 6),
+		name: Some(name.into()),
+		version: opt_bytes(rng, VER_ALPHABET, 6).map(Box::from),
 		provides: (0..rng.below(4)).map(|_| random_dep(rng)).collect(),
 		..Package::default()
 	}

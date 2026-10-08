@@ -176,9 +176,9 @@ fn random_dep(rng: &mut Rng) -> Depend {
 	let name = rng.bytes(TEXT, 6);
 	Depend {
 		name_hash: hash_sdbm(&name),
-		name,
-		version: opt(rng, b"01.-:a", 5),
-		desc: opt(rng, TEXT, 6),
+		name: name.into(),
+		version: opt(rng, b"01.-:a", 5).map(Box::from),
+		desc: opt(rng, TEXT, 6).map(Box::from),
 		depmod: MODS[rng.below(MODS.len())],
 	}
 }
@@ -196,33 +196,34 @@ fn random_pkg(rng: &mut Rng) -> Package {
 	let (name, version) = ident(rng);
 	Package {
 		name_hash: hash_sdbm(&name),
-		name: Some(name),
-		version: Some(version),
-		base: opt(rng, TEXT, 6),
-		desc: opt(rng, TEXT, 12),
-		url: opt(rng, TEXT, 8),
-		arch: opt(rng, TEXT, 5),
-		packager: opt(rng, TEXT, 8),
+		name: Some(name.into()),
+		version: Some(version.into()),
+		base: opt(rng, TEXT, 6).map(Box::from),
+		desc: opt(rng, TEXT, 12).map(Box::from),
+		url: opt(rng, TEXT, 8).map(Box::from),
+		arch: opt(rng, TEXT, 5).map(Box::from),
+		packager: opt(rng, TEXT, 8).map(Box::from),
 		builddate: int(rng),
 		installdate: int(rng),
 		isize: int(rng),
 		size: int(rng),
 		reason: REASONS[rng.below(3)],
-		groups: some(rng, 3, |r| r.bytes(TEXT, 5)),
-		licenses: some(rng, 3, |r| r.bytes(TEXT, 5)),
+		groups: some(rng, 3, |r| r.bytes(TEXT, 5).into()).into(),
+		licenses: some(rng, 3, |r| r.bytes(TEXT, 5).into()).into(),
 		validation: rng.below(16) as c_int,
-		replaces: some(rng, 2, random_dep),
-		depends: some(rng, 3, random_dep),
-		optdepends: some(rng, 2, random_dep),
-		conflicts: some(rng, 2, random_dep),
-		provides: some(rng, 2, random_dep),
+		replaces: some(rng, 2, random_dep).into(),
+		depends: some(rng, 3, random_dep).into(),
+		optdepends: some(rng, 2, random_dep).into(),
+		conflicts: some(rng, 2, random_dep).into(),
+		provides: some(rng, 2, random_dep).into(),
 		// never written: checkdepends, makedepends
-		checkdepends: some(rng, 2, random_dep),
-		makedepends: some(rng, 2, random_dep),
+		checkdepends: some(rng, 2, random_dep).into(),
+		makedepends: some(rng, 2, random_dep).into(),
 		xdata: some(rng, 3, |r| PkgXData {
-			name: r.bytes(TEXT, 5),
-			value: r.bytes(TEXT, 5),
-		}),
+			name: r.bytes(TEXT, 5).into(),
+			value: r.bytes(TEXT, 5).into(),
+		})
+		.into(),
 		files: FileList {
 			files: some(rng, 5, |r| {
 				let name = r.bytes(TEXT, 8);
@@ -230,9 +231,10 @@ fn random_pkg(rng: &mut Rng) -> Package {
 			}),
 		},
 		backup: some(rng, 3, |r| Backup {
-			name: r.bytes(TEXT, 8),
-			hash: opt(r, b"0123456789abcdef", 8),
-		}),
+			name: r.bytes(TEXT, 8).into(),
+			hash: opt(r, b"0123456789abcdef", 8).map(Box::from),
+		})
+		.into(),
 		..Package::default()
 	}
 }
@@ -338,8 +340,8 @@ fn reason_fuzz() {
 fn pkg(name: &str, version: &str) -> Package {
 	Package {
 		name_hash: hash_sdbm(name.as_bytes()),
-		name: Some(name.into()),
-		version: Some(version.into()),
+		name: Some(name.as_bytes().into()),
+		version: Some(version.as_bytes().into()),
 		..Package::default()
 	}
 }
@@ -385,8 +387,8 @@ fn prepare_cases() {
 fn write_cases() {
 	let foo = pkg("foo", "1.0-1");
 	let full = Package {
-		base: Some(b"foo".to_vec()),
-		desc: Some(b"".to_vec()),
+		base: Some(b"foo"[..].into()),
+		desc: Some(b""[..].into()),
 		validation: 2,
 		reason: PkgReason::Unknown,
 		files: FileList {
@@ -394,14 +396,15 @@ fn write_cases() {
 		},
 		backup: vec![
 			Backup {
-				name: b"etc/a".to_vec(),
+				name: b"etc/a"[..].into(),
 				hash: None,
 			},
 			Backup {
-				name: b"etc/b".to_vec(),
-				hash: Some(b"0123".to_vec()),
+				name: b"etc/b"[..].into(),
+				hash: Some(b"0123"[..].into()),
 			},
-		],
+		]
+		.into(),
 		..foo.clone()
 	};
 	let backup_only = Package {
@@ -563,7 +566,7 @@ fn set_reason_cases() {
 		],
 	);
 	let detached = Package {
-		origin: Some(PkgFrom::File(b"foo.pkg.tar".to_vec())),
+		origin: Some(PkgFrom::File(b"foo.pkg.tar"[..].into())),
 		..pkg("foo", "1.0-1")
 	};
 	compare(

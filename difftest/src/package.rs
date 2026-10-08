@@ -220,7 +220,7 @@ fn c_deps(deps: &[Depend]) -> *mut CList {
 	})
 }
 
-fn c_strs(strs: &[Vec<u8>]) -> *mut CList {
+fn c_strs(strs: &[Box<[u8]>]) -> *mut CList {
 	c_list(strs, |s| dup_str(Some(s)).cast())
 }
 
@@ -338,6 +338,11 @@ pub(crate) fn field(p: *const c_char) -> Option<Vec<u8>> {
 	(!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_bytes().to_vec())
 }
 
+// field as a package string
+pub(crate) fn field_box(p: *const c_char) -> Option<Box<[u8]>> {
+	field(p).map(Box::from)
+}
+
 // a C string the C never passes as NULL, copied out
 pub(crate) fn text(p: *const c_char) -> Vec<u8> {
 	field(p).expect("C string is NULL")
@@ -378,6 +383,10 @@ pub(crate) fn read_strs(head: *const CList) -> Vec<Vec<u8>> {
 		.collect()
 }
 
+fn read_boxed_strs(head: *const CList) -> Box<[Box<[u8]>]> {
+	read_strs(head).into_iter().map(Box::from).collect()
+}
+
 fn depmod_from_c(m: c_int) -> DepMod {
 	match m {
 		1 => DepMod::Any,
@@ -395,9 +404,9 @@ pub(crate) fn read_dep(d: *const CDepend) -> Depend {
 	// SAFETY: d is a live alpm_depend_t owned by the C
 	let d = unsafe { &*d };
 	Depend {
-		name: field(d.name).expect("C depend without a name"),
-		version: field(d.version),
-		desc: field(d.desc),
+		name: field_box(d.name).expect("C depend without a name"),
+		version: field_box(d.version),
+		desc: field_box(d.desc),
 		name_hash: d.name_hash,
 		depmod: depmod_from_c(d.depmod),
 	}
@@ -407,18 +416,20 @@ pub(crate) fn read_deps(head: *const CList) -> Vec<Depend> {
 	read_list(head, |d: &CDepend| read_dep(d))
 }
 
-fn read_backup(head: *const CList) -> Vec<Backup> {
-	read_list(head, |b: &CBackup| Backup {
-		name: field(b.name).unwrap(),
-		hash: field(b.hash),
-	})
+fn read_backup(head: *const CList) -> Box<[Backup]> {
+	let b = read_list(head, |b: &CBackup| Backup {
+		name: field_box(b.name).unwrap(),
+		hash: field_box(b.hash),
+	});
+	b.into()
 }
 
-fn read_xdata(head: *const CList) -> Vec<PkgXData> {
-	read_list(head, |x: &CPkgXData| PkgXData {
-		name: field(x.name).unwrap(),
-		value: field(x.value).unwrap(),
-	})
+fn read_xdata(head: *const CList) -> Box<[PkgXData]> {
+	let x = read_list(head, |x: &CPkgXData| PkgXData {
+		name: field_box(x.name).unwrap(),
+		value: field_box(x.value).unwrap(),
+	});
+	x.into()
 }
 
 pub(crate) fn read_files(fl: *const CFileList) -> FileList {
@@ -447,7 +458,7 @@ fn reason_from_c(r: c_int) -> PkgReason {
 fn origin_from_c(origin: c_int, data: *mut c_void) -> Option<PkgFrom> {
 	match origin {
 		0 => None,
-		1 => Some(PkgFrom::File(field(data.cast()).unwrap())),
+		1 => Some(PkgFrom::File(field_box(data.cast()).unwrap())),
 		2 => Some(PkgFrom::LocalDb),
 		3 => Some(PkgFrom::SyncDb),
 		_ => panic!("unknown alpm_pkgfrom_t {origin}"),
@@ -460,31 +471,31 @@ pub(crate) fn read_pkg(p: *const CPkg) -> Package {
 	let c = unsafe { &*p };
 	Package {
 		name_hash: c.name_hash,
-		filename: field(c.filename),
-		base: field(c.base),
-		name: field(c.name),
-		version: field(c.version),
-		desc: field(c.desc),
-		url: field(c.url),
-		packager: field(c.packager),
-		sha256sum: field(c.sha256sum),
-		base64_sig: field(c.base64_sig),
-		arch: field(c.arch),
+		filename: field_box(c.filename),
+		base: field_box(c.base),
+		name: field_box(c.name),
+		version: field_box(c.version),
+		desc: field_box(c.desc),
+		url: field_box(c.url),
+		packager: field_box(c.packager),
+		sha256sum: field_box(c.sha256sum),
+		base64_sig: field_box(c.base64_sig),
+		arch: field_box(c.arch),
 		builddate: c.builddate,
 		installdate: c.installdate,
 		size: c.size,
 		isize: c.isize,
 		download_size: c.download_size,
-		licenses: read_strs(c.licenses),
-		replaces: read_deps(c.replaces),
-		groups: read_strs(c.groups),
+		licenses: read_boxed_strs(c.licenses),
+		replaces: read_deps(c.replaces).into(),
+		groups: read_boxed_strs(c.groups),
 		backup: read_backup(c.backup),
-		depends: read_deps(c.depends),
-		optdepends: read_deps(c.optdepends),
-		checkdepends: read_deps(c.checkdepends),
-		makedepends: read_deps(c.makedepends),
-		conflicts: read_deps(c.conflicts),
-		provides: read_deps(c.provides),
+		depends: read_deps(c.depends).into(),
+		optdepends: read_deps(c.optdepends).into(),
+		checkdepends: read_deps(c.checkdepends).into(),
+		makedepends: read_deps(c.makedepends).into(),
+		conflicts: read_deps(c.conflicts).into(),
+		provides: read_deps(c.provides).into(),
 		files: read_files(&c.files),
 		origin: origin_from_c(c.origin, c.origin_data),
 		reason: reason_from_c(c.reason),
@@ -510,33 +521,36 @@ pub fn c_pkg_getters(pkg: &Package) -> Package {
 	// return pointers into it, copied out before b drops
 	unsafe {
 		Package {
-			filename: field(alpm_pkg_get_filename(p)),
-			base: field(alpm_pkg_get_base(p)),
-			name: field(alpm_pkg_get_name(p)),
-			version: field(alpm_pkg_get_version(p)),
-			desc: field(alpm_pkg_get_desc(p)),
-			url: field(alpm_pkg_get_url(p)),
-			packager: field(alpm_pkg_get_packager(p)),
-			sha256sum: field(alpm_pkg_get_sha256sum(p)),
-			base64_sig: field(alpm_pkg_get_base64_sig(p)),
-			arch: field(alpm_pkg_get_arch(p)),
+			filename: field_box(alpm_pkg_get_filename(p)),
+			base: field_box(alpm_pkg_get_base(p)),
+			name: field_box(alpm_pkg_get_name(p)),
+			version: field_box(alpm_pkg_get_version(p)),
+			desc: field_box(alpm_pkg_get_desc(p)),
+			url: field_box(alpm_pkg_get_url(p)),
+			packager: field_box(alpm_pkg_get_packager(p)),
+			sha256sum: field_box(alpm_pkg_get_sha256sum(p)),
+			base64_sig: field_box(alpm_pkg_get_base64_sig(p)),
+			arch: field_box(alpm_pkg_get_arch(p)),
 			builddate: alpm_pkg_get_builddate(p),
 			installdate: alpm_pkg_get_installdate(p),
 			size: alpm_pkg_get_size(p),
 			isize: alpm_pkg_get_isize(p),
-			licenses: read_strs(alpm_pkg_get_licenses(p)),
-			replaces: read_deps(alpm_pkg_get_replaces(p)),
-			groups: read_strs(alpm_pkg_get_groups(p)),
+			licenses: read_boxed_strs(alpm_pkg_get_licenses(p)),
+			replaces: read_deps(alpm_pkg_get_replaces(p)).into(),
+			groups: read_boxed_strs(alpm_pkg_get_groups(p)),
 			backup: read_backup(alpm_pkg_get_backup(p)),
-			depends: read_deps(alpm_pkg_get_depends(p)),
-			optdepends: read_deps(alpm_pkg_get_optdepends(p)),
-			checkdepends: read_deps(alpm_pkg_get_checkdepends(p)),
-			makedepends: read_deps(alpm_pkg_get_makedepends(p)),
-			conflicts: read_deps(alpm_pkg_get_conflicts(p)),
-			provides: read_deps(alpm_pkg_get_provides(p)),
+			depends: read_deps(alpm_pkg_get_depends(p)).into(),
+			optdepends: read_deps(alpm_pkg_get_optdepends(p))
+				.into(),
+			checkdepends: read_deps(alpm_pkg_get_checkdepends(p))
+				.into(),
+			makedepends: read_deps(alpm_pkg_get_makedepends(p))
+				.into(),
+			conflicts: read_deps(alpm_pkg_get_conflicts(p)).into(),
+			provides: read_deps(alpm_pkg_get_provides(p)).into(),
 			files: read_files(alpm_pkg_get_files(p)),
 			origin: match alpm_pkg_get_origin(p) {
-				1 => Some(PkgFrom::File(Vec::new())),
+				1 => Some(PkgFrom::File(Box::default())),
 				o => origin_from_c(o, ptr::null_mut()),
 			},
 			reason: reason_from_c(alpm_pkg_get_reason(p)),

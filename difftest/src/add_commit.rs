@@ -325,7 +325,15 @@ fn metas(path: &Path, out: &mut HashMap<PathBuf, AcMeta>) {
 		AcMeta {
 			owner: (m.uid(), m.gid()),
 			mtime: archive_time(m.mtime(), m.mtime_nsec()),
-			atime: archive_time(m.atime(), m.atime_nsec()),
+			// a directory's atime is not stable: any open after the
+			// time fixup (either side, order varies) resets an atime
+			// older than a day under relatime. files are not read
+			// before this snapshot
+			atime: (!m.is_dir())
+				.then(|| {
+					archive_time(m.atime(), m.atime_nsec())
+				})
+				.flatten(),
 			xattrs: xattrs(path),
 		},
 	);

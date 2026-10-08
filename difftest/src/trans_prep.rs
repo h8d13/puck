@@ -517,6 +517,7 @@ fn pkg_name(p: *const CPkg) -> Vec<u8> {
 	crate::package::read_pkg(p)
 		.name
 		.expect("package without name")
+		.into_vec()
 }
 
 struct Rec {
@@ -1047,10 +1048,10 @@ impl CTx {
 							c.package1, c.package2,
 						);
 						(
-							p1.name.unwrap_or_default(),
-							p1.version.unwrap_or_default(),
-							p2.name.unwrap_or_default(),
-							p2.version.unwrap_or_default(),
+							p1.name.unwrap_or_default().into_vec(),
+							p1.version.unwrap_or_default().into_vec(),
+							p2.name.unwrap_or_default().into_vec(),
+							p2.version.unwrap_or_default().into_vec(),
 							c.reason,
 						)
 					})
@@ -1090,8 +1091,10 @@ impl CTx {
 				let p = crate::package::read_pkg(p.cast());
 				let reason = p.reason as c_int;
 				(
-					p.name.unwrap(),
-					p.version.unwrap_or_default(),
+					p.name.unwrap().into_vec(),
+					p.version
+						.unwrap_or_default()
+						.into_vec(),
 					reason,
 				)
 			})
@@ -1114,8 +1117,8 @@ impl CTx {
 			_ => self.id(p).0,
 		};
 		TpAdd {
-			name: pkg.name.unwrap(),
-			version: pkg.version.unwrap_or_default(),
+			name: pkg.name.unwrap().into_vec(),
+			version: pkg.version.unwrap_or_default().into_vec(),
 			reason: pkg.reason as c_int,
 			db,
 			removes: list_data(removes)
@@ -1127,6 +1130,7 @@ impl CTx {
 				crate::package::read_pkg(oldpkg)
 					.version
 					.unwrap()
+					.into_vec()
 			}),
 		}
 	}

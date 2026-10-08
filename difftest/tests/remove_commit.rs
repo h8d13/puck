@@ -413,8 +413,8 @@ fn gen_newpkg(rng: &mut Rng, w: &World) -> Package {
 		.iter()
 		.filter(|n| is_file(n) && rng.below(2) == 0)
 		.map(|n| Backup {
-			name: n.clone(),
-			hash: Some(OTHER_MD5.as_bytes().to_vec()),
+			name: n.clone().into(),
+			hash: Some(OTHER_MD5.as_bytes().into()),
 		})
 		.collect();
 	let files = names
@@ -423,12 +423,12 @@ fn gen_newpkg(rng: &mut Rng, w: &World) -> Package {
 		.collect();
 	Package {
 		name_hash: hash_sdbm(b"a"),
-		name: Some(b"a".to_vec()),
-		version: Some(b"9.0-1".to_vec()),
-		filename: Some(b"a-9.0-1.pkg.tar".to_vec()),
+		name: Some(b"a"[..].into()),
+		version: Some(b"9.0-1"[..].into()),
+		filename: Some(b"a-9.0-1.pkg.tar"[..].into()),
 		files: FileList { files },
 		backup,
-		origin: Some(PkgFrom::File(b"a-9.0-1.pkg.tar".to_vec())),
+		origin: Some(PkgFrom::File(b"a-9.0-1.pkg.tar"[..].into())),
 		..Package::default()
 	}
 }

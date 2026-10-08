@@ -679,7 +679,7 @@ fn fc_hooks() {
 		let pkg = |rng: &mut Rng| {
 			let name = pick(rng, &names).as_bytes().to_vec();
 			let mut p = Package {
-				name: Some(name),
+				name: Some(name.into()),
 				..Package::default()
 			};
 			for f in paths.iter().filter(|_| rng.below(2) == 0) {

@@ -349,7 +349,7 @@ impl From<Errno> for CommitError {
 }
 
 // a string field through printf %s: glibc prints NULL as "(null)"
-pub(crate) fn opt_str(s: &Option<Vec<u8>>) -> &[u8] {
+pub(crate) fn opt_str(s: &Option<Box<[u8]>>) -> &[u8] {
 	s.as_deref().map_or(b"(null)", until_nul)
 }
 

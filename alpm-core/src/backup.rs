@@ -9,9 +9,9 @@ use crate::util::until_nul;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Backup {
 	// file name, without .pacsave
-	pub name: Vec<u8>,
+	pub name: Box<[u8]>,
 	// None when the entry has no tab
-	pub hash: Option<Vec<u8>>,
+	pub hash: Option<Box<[u8]>>,
 }
 
 // _alpm_split_backup: name up to the first tab, the rest is the hash
@@ -20,11 +20,11 @@ pub fn split_backup(s: &[u8]) -> Backup {
 	let s = until_nul(s);
 	match s.iter().position(|&c| c == b'\t') {
 		Some(i) => Backup {
-			name: s[..i].to_vec(),
-			hash: Some(s[i + 1..].to_vec()),
+			name: s[..i].into(),
+			hash: Some(s[i + 1..].into()),
 		},
 		None => Backup {
-			name: s.to_vec(),
+			name: s.into(),
 			hash: None,
 		},
 	}

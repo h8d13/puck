@@ -18,8 +18,8 @@ fn pkg(name: &str, conflicts: &[&str], files: &[&str]) -> Package {
 	files.sort_by(|a, b| a.name().cmp(b.name()));
 	Package {
 		name_hash: hash_sdbm(name.as_bytes()),
-		name: Some(name.as_bytes().to_vec()),
-		version: Some(b"1.0-1".to_vec()),
+		name: Some(name.as_bytes().into()),
+		version: Some(b"1.0-1"[..].into()),
 		conflicts: conflicts
 			.iter()
 			.map(|c| dep_from_string(c.as_bytes()))

@@ -174,7 +174,9 @@ impl Recorder {
 				.position(|&d| d == db)
 				.expect("package of an unknown db")),
 		};
-		(db, read_pkg(p).name.expect("cached package without name"))
+		let name =
+			read_pkg(p).name.expect("cached package without name");
+		(db, name.into_vec())
 	}
 }
 
@@ -393,7 +395,9 @@ impl CGraph {
 		list_data(list)
 			.into_iter()
 			.map(|p| p.cast::<CPkg>())
-			.find(|&p| read_pkg(p).name.as_ref() == Some(&id.1))
+			.find(|&p| {
+				read_pkg(p).name.as_deref() == Some(&id.1[..])
+			})
 			.unwrap_or_else(|| panic!("no package {id:?}"))
 	}
 
@@ -541,7 +545,12 @@ impl CGraph {
 		let all = list_data(list.0);
 		let names = all
 			.iter()
-			.map(|&p| read_pkg(p.cast()).name.expect("no name"))
+			.map(|&p| {
+				read_pkg(p.cast())
+					.name
+					.expect("no name")
+					.into_vec()
+			})
 			.collect();
 		for &p in &all[targs.len()..] {
 			// SAFETY: dups made by _alpm_recursedeps, owned here
