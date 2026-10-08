@@ -1275,10 +1275,8 @@ pub fn filecache_setup(
 // archive extraction: _alpm_open_archive, _alpm_unpack and
 // _alpm_unpack_single
 //
-// libarchive is replaced by alpm-compress's decoders (filter picked by
-// magic bytes like libarchive's bidding, for the four filters it has)
-// read in libarchive's filter blocks (Filter), and libarchive's tar
-// reader (tar.rs). archive_read_extract(archive, entry, 0) is translated for what a tar
+// libarchive is replaced by its read filters (filter.rs: bidders,
+// stacking, filter blocks) and its tar reader (tar.rs). archive_read_extract(archive, entry, 0) is translated for what a tar
 // carries: without ARCHIVE_EXTRACT_* flags no owner, times, ACLs or
 // xattrs are restored, permissions obey the umask (_alpm_unpack sets
 // 0022) and lose SUID/SGID/sticky. an object in the way is unlinked (an

@@ -4,9 +4,8 @@
 //
 // the tar walk and the entry reader follow the C: _alpm_archive_fgets
 // over the entry's data blocks as libarchive cuts them, the READ_*
-// macros, keys matched as C strings. libarchive is replaced by
-// alpm-compress (gzip, bzip2, xz, zstd, none) picked by magic bytes, as
-// the db file name carries no compression suffix.
+// macros, keys matched as C strings. libarchive's filters are filter.rs,
+// picked by its bidders: the db file name carries no compression suffix.
 //
 // sync_db_validate without the status bits db.c keeps: the missing file
 // and the signature check (signing.rs). alpm_db_update with get_sync_dir:

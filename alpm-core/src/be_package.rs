@@ -4,9 +4,8 @@
 // signatures go through signing.rs, the keyring and callbacks are taken
 // as parameters until the handle carries them.
 //
-// the archive walk follows the C loop. libarchive is replaced by
-// alpm-compress (gzip, bzip2, xz, zstd, none, picked by magic bytes like
-// libarchive's filter bidding) and its tar reader; .MTREE goes through
+// the archive walk follows the C loop. libarchive is replaced by its read
+// filters (filter.rs) and its tar reader (tar.rs); .MTREE goes through
 // libarchive's mtree reader (crate::mtree). .PKGINFO is read byte for byte like
 // parse_descfile, through _alpm_archive_fgets over the entry's data
 // blocks.

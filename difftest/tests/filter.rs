@@ -7,7 +7,7 @@ use std::io::Write;
 
 use difftest::{
 	Rng, c_filter_write, filter_compare as compare,
-	filter_compare_file as compare_file, iters,
+	filter_compare_file as compare_file, filter_slowest, iters,
 };
 
 // payload: text and random bytes, compressible and not
@@ -118,6 +118,7 @@ fn cut_streams() {
 			));
 		}
 	}
+	eprintln!("slowest:\n{}", filter_slowest().join("\n"));
 	// open failures, read failures and clean shorter streams all seen
 	assert_eq!(kinds.len(), 3, "{kinds:?}");
 }
@@ -156,6 +157,7 @@ fn corrupt_streams() {
 			compared += 1;
 		}
 	}
+	eprintln!("slowest:\n{}", filter_slowest().join("\n"));
 	assert!(compared >= 800);
 }
 
@@ -234,12 +236,26 @@ fn odd_streams() {
 	let mut e = empty.clone();
 	e.extend_from_slice(&lz4);
 	cases.push(("lz4 empty frame then data".into(), e));
-	// many layers
+	// layers around MAX_NUMBER_FILTERS: its rounds end with 25 filters
+	// even when no bidder would take the 25th's output
 	let mut deep = data.clone();
-	for _ in 0..27 {
+	for n in 1..=27 {
 		deep = c_filter_write("gzip", "", &deep);
+		if n >= 24 {
+			cases.push((format!("{n} gzip layers"), deep.clone()));
+		}
 	}
-	cases.push(("27 gzip layers".into(), deep));
+	// trailers changed byte by byte: lzip's crc32 and sizes, gzip's
+	// unchecked crc32 and size, xz's index and footer
+	for name in ["gzip", "xz", "lzip", "lzma", "bzip2", "zstd", "lz4"] {
+		let s = c_filter_write(name, "", &data);
+		for back in 1..=24.min(s.len()) {
+			let mut m = s.clone();
+			let at = m.len() - back;
+			m[at] ^= 0x41;
+			cases.push((format!("{name} trailer byte -{back}"), m));
+		}
+	}
 	for (what, input) in &cases {
 		compare(what, input);
 	}

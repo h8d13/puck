@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 
 use alpm_core::filter::{Code, open_file, open_memory};
 use std::ptr;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::TempRoot;
 use crate::check::archive_error_string;
@@ -338,14 +340,39 @@ fn short(d: &[u8]) -> String {
 	format!("{} bytes {:02x?}", d.len(), &d[..n])
 }
 
+// the slowest compares so far: (the slower side, C, port, case, input
+// and output size)
+type Slow = (Duration, Duration, Duration, String, usize, usize);
+static SLOWEST: Mutex<Vec<Slow>> = Mutex::new(Vec::new());
+
+// the slowest compares of this process, one line each
+pub fn filter_slowest() -> Vec<String> {
+	SLOWEST.lock()
+		.unwrap()
+		.iter()
+		.map(|(_, c, r, what, n, out)| {
+			format!("C {c:?} port {r:?} {what}: {n} bytes -> {out}")
+		})
+		.collect()
+}
+
 // one input through libarchive's filters and the port's, in memory: the
 // C's outcome, asserted equal
 pub fn filter_compare(what: &str, input: &[u8]) -> FilterOutcome {
 	if std::env::var_os("FILTER_TRACE").is_some() {
 		eprintln!("{what}");
 	}
+	let t = Instant::now();
 	let c = from_c(c_filter_memory(input));
+	let tc = t.elapsed();
+	let t = Instant::now();
 	let r = from_port(open_memory(input.to_vec()));
+	let tr = t.elapsed();
+	let mut slow = SLOWEST.lock().unwrap();
+	slow.push((tc.max(tr), tc, tr, what.into(), input.len(), c.data.len()));
+	slow.sort_by_key(|s| std::cmp::Reverse(s.0));
+	slow.truncate(10);
+	drop(slow);
 	assert!(
 		c == r,
 		"{what}: {}\nC    {:?} {} data {}\nport {:?} {} data {}",

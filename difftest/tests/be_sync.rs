@@ -1173,7 +1173,7 @@ const EDGE: &[u8] = b"%DESC%\na\0b\nc\0\0d\n\n%GROUPS%\ng\0h\ni\n\0\nj\n\n\
 	%NAME%\nx\0\n\n%DEPENDS%\nq\0r\ns\n\n%URL%\nu\0v\n\n";
 
 // entries whose desc data starts 512 bytes before a block edge of
-// archive_read_data_block (util::Archive::block), with a filler line
+// archive_read_data_block (filter::Filter::block_size), with a filler line
 // moving EDGE so the edge falls on each of its bytes. a pad entry before
 // each desc (an unknown file, skipped) puts it there
 fn edge_db(block: usize) -> Vec<TarEntry> {
