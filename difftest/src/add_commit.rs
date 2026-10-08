@@ -3,8 +3,7 @@
 // handle with a minimal transaction: alpm_trans_init, alpm_pkg_load and
 // alpm_add_pkg of one package file, newpkg->oldpkg set to a dup of the
 // installed package like _alpm_sync_prepare does. the Rust side runs
-// alpm_core::add::upgrade_package on the same setup, its old package
-// removal through RemoveStandIn (remove.c's commit is a later port).
+// alpm_core::add::upgrade_package on the same setup.
 //
 // recorded on both sides in call order: log lines, the events add.c and
 // remove.c send, progress; the logfile text without stamps comes apart.
@@ -14,17 +13,14 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::ptr;
 use std::rc::Rc;
 
-use alpm_core::backup::needbackup;
 use alpm_core::be_local::INFRQ_ALL;
 use alpm_core::callbacks::{Callbacks, Event, LogLevel, Progress};
 use alpm_core::handle::Handle;
 use alpm_core::package::Package;
-use alpm_core::trans::TRANS_FLAG_NOSAVE;
-use alpm_core::util::{compute_md5sum, files_in_directory, llstat};
 use alpm_core::{add, be_package, trans, util};
 
 use crate::fixtures::{
@@ -616,330 +612,6 @@ impl Callbacks for AcRecorder {
 	}
 }
 
-fn rlog(h: &mut Handle, level: LogLevel, parts: &[&[u8]]) {
-	h.callbacks().log(level, &parts.concat());
-}
-
-// the dir_is_mountpoint of remove.c: dir (ending in '/') on another
-// device than dir/..
-fn is_mountpoint(dir: &[u8]) -> bool {
-	let os = |p: &[u8]| PathBuf::from(std::ffi::OsStr::from_bytes(p));
-	let (Ok(a), Ok(b)) = (
-		fs::metadata(os(dir)),
-		fs::metadata(os(&[dir, b".."].concat())),
-	) else {
-		return false;
-	};
-	a.dev() != b.dev()
-}
-
-// _alpm_remove_single_package(handle, oldpkg, newpkg, 0, 0) of remove.c
-// for what the cases hold: the old package is the only local one, no
-// .pacsave.N rotation, writable files (can_remove_file holds)
-pub struct RemoveStandIn {
-	pub flags: c_int,
-	pub skip_remove: Vec<Vec<u8>>,
-}
-
-// dir_is_mountpoint(handle, dir, NULL) with its debug lines
-fn mountpoint_logged(h: &mut Handle, dir: &[u8]) -> bool {
-	let os = |p: &[u8]| PathBuf::from(std::ffi::OsStr::from_bytes(p));
-	let a = match fs::metadata(os(dir)) {
-		Ok(a) => a,
-		Err(e) => {
-			let msg = [
-				&b"failed to stat directory "[..],
-				dir,
-				b": ",
-				&util::strerror(&e),
-				b"\n",
-			];
-			rlog(h, LogLevel::Debug, &msg);
-			return false;
-		}
-	};
-	let parent = [dir, b".."].concat();
-	match fs::metadata(os(&parent)) {
-		Ok(b) => a.dev() != b.dev(),
-		Err(e) => {
-			let msg = [
-				&b"failed to stat parent of "[..],
-				dir,
-				b": ",
-				&parent,
-				b": ",
-				&util::strerror(&e),
-				b"\n",
-			];
-			rlog(h, LogLevel::Debug, &msg);
-			false
-		}
-	}
-}
-
-// _alpm_access(handle, NULL, path, mode) with its debug line
-fn access_logged(h: &mut Handle, path: &[u8], write: bool) -> Option<i32> {
-	use rustix::fs::{Access, AtFlags, CWD, accessat};
-	let mode = match write {
-		true => Access::WRITE_OK,
-		false => Access::EXISTS,
-	};
-	let p = std::ffi::OsStr::from_bytes(path);
-	let e = accessat(CWD, p, mode, AtFlags::SYMLINK_NOFOLLOW).err()?;
-	let text = util::strerror(&std::io::Error::from(e));
-	let what: &[u8] = match write {
-		true => b"\" is not writable: ",
-		false => b"\" does not exist: ",
-	};
-	rlog(h, LogLevel::Debug, &[b"\"", path, what, &text, b"\n"]);
-	Some(e.raw_os_error())
-}
-
-impl RemoveStandIn {
-	// can_remove_file
-	fn can_remove(&self, h: &mut Handle, name: &[u8]) -> bool {
-		let path = [h.root(), name].concat();
-		if name.last() == Some(&b'/') && mountpoint_logged(h, &path) {
-			return true;
-		}
-		// EACCES 13, ETXTBSY 26
-		match access_logged(h, &path, true) {
-			Some(e) if e != 13 && e != 26 => {
-				if access_logged(h, &path, false).is_some() {
-					return true;
-				}
-				let text = util::strerror(
-					&std::io::Error::from_raw_os_error(e),
-				);
-				let msg = [
-					&b"cannot remove file '"[..],
-					&path,
-					b"': ",
-					&text,
-					b"\n",
-				];
-				rlog(h, LogLevel::Error, &msg);
-				false
-			}
-			_ => true,
-		}
-	}
-
-	fn skip(&self, h: &Handle, new: &Package, path: &[u8]) -> bool {
-		h.match_noupgrade(path) == Some(false)
-			|| self.skip_remove.iter().any(|s| s == path)
-			|| (needbackup(path, new).is_some()
-				&& new.files.contains(path).is_some())
-	}
-
-	fn unlink_file(
-		&self,
-		h: &mut Handle,
-		old: &Package,
-		new: &Package,
-		name: &[u8],
-	) {
-		let mut file = [h.root(), name].concat();
-		if file.last() == Some(&b'/') {
-			file.pop();
-		}
-		let os = |p: &[u8]| {
-			PathBuf::from(std::ffi::OsStr::from_bytes(p))
-		};
-		let Ok(st) = llstat(&file) else {
-			let msg = [b"file ", &file[..], b" does not exist\n"];
-			rlog(h, LogLevel::Debug, &msg);
-			return;
-		};
-		if st.is_dir() {
-			file.push(b'/');
-			let keep = |why: &[u8]| {
-				[&b"keeping directory "[..], &file, why]
-					.concat()
-			};
-			let msg = match files_in_directory(&file, false) {
-				Ok(n) if n > 0 => keep(b" (contains files)\n"),
-				Err(_) => keep(b" (could not count files)\n"),
-				_ if new.files.contains(name).is_some() => {
-					keep(b" (in new package)\n")
-				}
-				_ if is_mountpoint(&file) => {
-					keep(b" (mountpoint)\n")
-				}
-				_ => match fs::remove_dir(os(&file)) {
-					Ok(()) => [
-						&b"removed directory "[..],
-						&file,
-						b" (no remaining owners)\n",
-					]
-					.concat(),
-					Err(e) => [
-						&b"directory removal of "[..],
-						&file,
-						b" failed: ",
-						&util::strerror(&e),
-						b"\n",
-					]
-					.concat(),
-				},
-			};
-			rlog(h, LogLevel::Debug, &[&msg]);
-			return;
-		}
-		if let Some(b) = needbackup(name, old) {
-			if self.flags & TRANS_FLAG_NOSAVE != 0 {
-				let msg = [
-					&b"transaction is set to NOSAVE, not \
-					   backing up '"[..],
-					&file,
-					b"'\n",
-				];
-				rlog(h, LogLevel::Debug, &msg);
-			} else {
-				let hash = compute_md5sum(&file);
-				let differs = match (&hash, &b.hash) {
-					(Some(a), Some(b)) => a != b,
-					// the C's strcmp on a NULL backup hash
-					(Some(_), None) => true,
-					(None, _) => false,
-				};
-				if differs {
-					let newpath = [&file[..], b".pacsave"]
-						.concat();
-					fs::rename(os(&file), os(&newpath))
-						.unwrap();
-					let ev = Event::PacsaveCreated {
-						oldpkg: old,
-						file: &file,
-					};
-					h.callbacks().event(&ev);
-					let msg = [
-						&b"warning: "[..],
-						&file,
-						b" saved as ",
-						&newpath,
-						b"\n",
-					]
-					.concat();
-					let _ = h.logaction(
-						util::CALLER_PREFIX,
-						&msg,
-					);
-					return;
-				}
-			}
-		}
-		rlog(h, LogLevel::Debug, &[b"unlinking ", &file, b"\n"]);
-		if let Err(e) = fs::remove_file(os(&file)) {
-			let text = [
-				&b"cannot remove "[..],
-				&file,
-				b" (",
-				&util::strerror(&e),
-				b")\n",
-			]
-			.concat();
-			rlog(h, LogLevel::Error, &[&text]);
-			let act = [&b"error: "[..], &text].concat();
-			let _ = h.logaction(util::CALLER_PREFIX, &act);
-		}
-	}
-
-	pub fn run(
-		&self,
-		h: &mut Handle,
-		old: &Package,
-		new: &Package,
-	) -> bool {
-		let (name, ver) = (old.name_bytes(), old.version.as_deref());
-		let ver = ver.unwrap_or_default();
-		let msg = [
-			b"removing old package first (",
-			name,
-			b"-",
-			ver,
-			b")\n",
-		];
-		rlog(h, LogLevel::Debug, &msg);
-		if self.flags & trans::TRANS_FLAG_DBONLY == 0 {
-			self.remove_files(h, old, new);
-		}
-		self.remove_entry(h, old, name, ver)
-	}
-
-	// remove_package_files with newpkg set
-	fn remove_files(&self, h: &mut Handle, old: &Package, new: &Package) {
-		for f in &old.files.files {
-			if !self.skip(h, new, &f.name)
-				&& !self.can_remove(h, &f.name)
-			{
-				let msg = [
-					&b"not removing package '"[..],
-					old.name_bytes(),
-					b"', can't remove all files\n",
-				];
-				rlog(h, LogLevel::Debug, &msg);
-				return;
-			}
-		}
-		{
-			let n = old.files.files.len().to_string();
-			let msg = [b"removing ", n.as_bytes(), b" files\n"];
-			rlog(h, LogLevel::Debug, &msg);
-			for f in old.files.files.iter().rev() {
-				if self.skip(h, new, &f.name) {
-					let msg = [
-						&f.name[..],
-						b" is in skip_remove, skipping \
-						  removal\n",
-					];
-					rlog(h, LogLevel::Debug, &msg);
-					continue;
-				}
-				self.unlink_file(h, old, new, &f.name);
-			}
-		}
-	}
-
-	fn remove_entry(
-		&self,
-		h: &mut Handle,
-		old: &Package,
-		name: &[u8],
-		ver: &[u8],
-	) -> bool {
-		let msg = [b"removing database entry '", name, b"'\n"];
-		rlog(h, LogLevel::Debug, &msg);
-		let local = h.localdb().and_then(|d| d.local());
-		if local.is_none_or(|l| l.remove(old).is_err()) {
-			let msg = [
-				b"could not remove database entry ",
-				name,
-				b"-",
-				ver,
-				b"\n",
-			];
-			rlog(h, LogLevel::Error, &msg);
-		}
-		// db.c's line, Db does not log
-		let msg =
-			[b"removing entry '", name, b"' from 'local' cache\n"];
-		rlog(h, LogLevel::Debug, &msg);
-		let removed = h.localdb_mut().is_some_and(|db| {
-			db.remove_pkg_from_cache(old).is_ok()
-		});
-		if !removed {
-			let msg = [
-				b"could not remove entry '",
-				name,
-				b"' from cache\n",
-			];
-			rlog(h, LogLevel::Error, &msg);
-		}
-		true
-	}
-}
-
 // alpm_core's add::upgrade_package on the case, then ldconfig on
 // success like _alpm_upgrade_packages. the caller holds umask_lock
 pub fn rust_upgrade(fx: &TempRoot, c: &AcCase, logfile: &Path) -> AcResult {
@@ -952,32 +624,27 @@ pub fn rust_upgrade(fx: &TempRoot, c: &AcCase, logfile: &Path) -> AcResult {
 	let pkg = be_package::pkg_load(&pkgfile, true).unwrap();
 	cut_pkg(&pkgfile, c);
 	add::add_pkg(&mut h, pkg, None).unwrap();
-	let mut tr = h.set_trans(None).unwrap();
 	let dbext = h.dbext().to_vec();
 	let db = h.localdb_mut().unwrap();
 	let old = db.load_pkg(&dbext, c.name.as_bytes(), INFRQ_ALL);
-	let t = &mut tr.add[0];
+	let old = old.map(Package::dup);
+	// the driver's share: the targets out of trans.add, the
+	// transaction stays on the handle for its flags
+	let mut add = std::mem::take(&mut h.trans_mut().unwrap().add);
+	let t = &mut add[0];
 	match old {
-		Ok(old) => t.oldpkg = Some(old.dup()),
+		Ok(old) => t.oldpkg = Some(old),
 		Err(_) if c.stale_oldpkg => t.oldpkg = Some(t.pkg.dup()),
 		Err(_) => {}
 	}
 	let recs = Rc::new(RefCell::new(Vec::new()));
 	h.set_callbacks(Box::new(AcRecorder(recs.clone())));
-	let standin = RemoveStandIn {
-		flags: tr.flags,
-		skip_remove: tr.skip_remove.clone(),
-	};
-	let mut remove = |h: &mut Handle, old: &Package, new: &Package| {
-		standin.run(h, old, new)
-	};
-	let flags = tr.flags;
-	let r = add::upgrade_package(&mut h, flags, t, 1, 1, &mut remove);
+	let r = add::upgrade_package(&mut h, t, 1, 1);
 	if r.is_ok() {
 		util::ldconfig(&mut h);
 	}
 	h.set_callbacks(Box::new(()));
-	h.set_trans(Some(tr));
+	h.trans_mut().unwrap().add = add;
 	trans::trans_release(&mut h).unwrap();
 	drop(h);
 	let (rc, errno) = match r {

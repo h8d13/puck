@@ -31,6 +31,7 @@ use crate::handle::Handle;
 use crate::package::{
 	Package, PkgFrom, PkgReason, pkg_compare_versions, pkg_find,
 };
+use crate::remove::remove_single_package;
 use crate::trans::{
 	TRANS_FLAG_ALLDEPS, TRANS_FLAG_ALLEXPLICIT, TRANS_FLAG_DBONLY,
 	TRANS_FLAG_DOWNLOADONLY, TRANS_FLAG_NEEDED, TRANS_FLAG_NOSCRIPTLET,
@@ -155,6 +156,7 @@ pub fn add_pkg(
 // try_rename, perform_extraction, get_install_time, commit_single_pkg
 // and the per-package step of _alpm_upgrade_packages. the driver over
 // trans.add (interrupted state, ldconfig) comes with alpm_trans_commit.
+// an upgrade removes the old package through remove.rs first.
 //
 // perform_extraction's archive_write_disk is translated below (Writer)
 // for its flags OWNER|PERM|TIME|UNLINK|XATTR|SECURE_SYMLINKS and a fresh
@@ -1461,12 +1463,6 @@ fn scriptlet(
 	runscriptlet(h, path, script, &ver, oldver, is_archive);
 }
 
-// how the old package goes before an upgrade: _alpm_remove_single_package
-// (handle, oldpkg, newpkg, 0, 0) of remove.c, false for its -1. the
-// remove commit is its own port
-pub type RemoveOld<'r> =
-	dyn FnMut(&mut Handle, &Package, &Package) -> bool + 'r;
-
 // the archive position for the progress percentage: the data start of
 // the entry in an unfiltered tar (the bytes libarchive consumed), what
 // the decoder read of a compressed one (libarchive counts what its
@@ -1480,18 +1476,19 @@ fn position(entry: &TarballEntry, raw: &mut File, plain: bool) -> i64 {
 
 // commit_single_pkg: t.pkg, a file package (origin File), installed or
 // upgraded over t.oldpkg (an upgrade when the local cache still holds a
-// package of that name). flags are the transaction's, pkg_current and
-// pkg_count its progress counters. reason, install date and backup
+// package of that name). t is a target of the handle's transaction,
+// taken out of trans.add by the driver (the C mutates it in place);
+// flags and skip_remove are read from the transaction. pkg_current and
+// pkg_count are the progress counters. reason, install date and backup
 // hashes are updated in t.pkg. Err is the pm_errno the C leaves (Ok
-// where it sets none)
+// where it sets none, also without a transaction)
 pub fn commit_single_pkg(
 	h: &mut Handle,
-	flags: c_int,
 	t: &mut TransPkg,
 	pkg_current: usize,
 	pkg_count: usize,
-	remove_old: &mut RemoveOld,
 ) -> Result<(), Errno> {
+	let flags = h.trans().ok_or(Errno::Ok)?.flags;
 	let upgrade =
 		in_local_cache(h, t.pkg.name_bytes()) && t.oldpkg.is_some();
 	// the C's oldpkg stays NULL unless it is an upgrade
@@ -1555,10 +1552,10 @@ pub fn commit_single_pkg(
 		t.pkg.reason = PkgReason::Explicit;
 	}
 
-	if let Some(old) = oldpkg
-		&& !remove_old(h, old, &t.pkg)
-	{
-		return Err(Errno::TransAbort);
+	// the old package goes first. the C's _alpm_remove_single_package
+	// returns 0 whatever the files did, its -1 check here is dead
+	if let Some(old) = oldpkg {
+		let _ = remove_single_package(h, old, Some(&t.pkg), 0, 0);
 	}
 
 	// the db entry dir first, so install and mtree get their modes
@@ -1797,12 +1794,10 @@ fn add_in_local_cache(h: &mut Handle, pkg: &Package) -> bool {
 // transaction interrupted and skips ldconfig
 pub fn upgrade_package(
 	h: &mut Handle,
-	flags: c_int,
 	t: &mut TransPkg,
 	pkg_current: usize,
 	pkg_count: usize,
-	remove_old: &mut RemoveOld,
 ) -> Result<(), Errno> {
-	commit_single_pkg(h, flags, t, pkg_current, pkg_count, remove_old)
+	commit_single_pkg(h, t, pkg_current, pkg_count)
 		.map_err(|_| Errno::TransAbort)
 }

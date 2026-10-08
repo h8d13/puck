@@ -575,7 +575,6 @@ dependencies = [
  "alpm-types",
  "pacman-cli",
  "pacman-common",
- "rustix",
 ]
 
 [[package]]

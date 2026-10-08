@@ -15,4 +15,3 @@ alpm-compress.workspace = true
 alpm-db.workspace = true
 alpm-repo-db.workspace = true
 alpm-types.workspace = true
-rustix.workspace = true
