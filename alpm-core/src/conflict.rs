@@ -7,9 +7,10 @@
 // globs through FileCheck. the C getters lazy-load local packages, here
 // the caller loads them first (INFRQ_DESC for dependency conflicts,
 // INFRQ_FILES for file conflicts, INFRQ_ALL where a conflict copies them).
-// logging is not modelled, it never changes the result. allocation
-// failures are not modelled (the C returns NULL or drops entries).
-// progress goes through Callbacks, handle->progresscb in the C.
+// the dependency checks log through Callbacks like the C, the file check
+// does not log. allocation failures are not modelled (the C returns NULL
+// or drops entries). progress goes through Callbacks, handle->progresscb
+// in the C.
 
 use std::borrow::Borrow;
 use std::cmp::Ordering;
@@ -19,8 +20,8 @@ use std::os::unix::ffi::OsStrExt;
 
 use crate::backup::needbackup;
 use crate::be_local::INFRQ_ERROR;
-use crate::callbacks::{Callbacks, Progress};
-use crate::deps::{Depend, depcmp};
+use crate::callbacks::{Callbacks, LogLevel, Progress};
+use crate::deps::{Depend, dep_compute_string, depcmp};
 use crate::package::{Package, PkgFrom, has_name, pkg_cmp};
 use crate::pkghash::PkgHash;
 use crate::util::{PATH_MAX, fnmatch_patterns, llstat, until_nul};
@@ -64,12 +65,17 @@ fn dup_fails(pkg: &Package) -> bool {
 	pkg.origin == Some(PkgFrom::LocalDb) && pkg.infolevel & INFRQ_ERROR != 0
 }
 
+fn debug(log: &mut dyn Callbacks, parts: &[&[u8]]) {
+	log.log(LogLevel::Debug, &parts.concat());
+}
+
 // add_conflict: pairs already listed (by both names) are not added again
 fn add_conflict(
 	baddeps: &mut Vec<Conflict>,
 	pkg1: &Package,
 	pkg2: &Package,
 	reason: &Depend,
+	log: &mut dyn Callbacks,
 ) {
 	if dup_fails(pkg1) || dup_fails(pkg2) {
 		return;
@@ -77,13 +83,27 @@ fn add_conflict(
 	let isin = baddeps.iter().any(|c| {
 		same_name(&c.package1, pkg1) && same_name(&c.package2, pkg2)
 	});
-	if !isin {
-		baddeps.push(Conflict {
-			package1: pkg1.dup(),
-			package2: pkg2.dup(),
-			reason: reason.clone(),
-		});
+	if isin {
+		return;
 	}
+	baddeps.push(Conflict {
+		package1: pkg1.dup(),
+		package2: pkg2.dup(),
+		reason: reason.clone(),
+	});
+	let name = |p: &Package| {
+		p.name.as_deref().map_or(&b"(null)"[..], until_nul).to_vec()
+	};
+	let line: [&[u8]; 7] = [
+		b"package ",
+		&name(pkg1),
+		b" conflicts with ",
+		&name(pkg2),
+		b" (by ",
+		&dep_compute_string(reason),
+		b")\n",
+	];
+	debug(log, &line);
 }
 
 // check_conflict: the conflicts of each list1 package against every list2
@@ -94,6 +114,7 @@ fn check_conflict(
 	list2: &[&Package],
 	baddeps: &mut Vec<Conflict>,
 	reversed: bool,
+	log: &mut dyn Callbacks,
 ) {
 	for pkg1 in list1 {
 		for conflict in &pkg1.conflicts {
@@ -107,22 +128,29 @@ fn check_conflict(
 					false => (pkg1, pkg2),
 					true => (pkg2, pkg1),
 				};
-				add_conflict(baddeps, a, b, conflict);
+				add_conflict(baddeps, a, b, conflict, log);
 			}
 		}
 	}
 }
 
 // _alpm_innerconflicts: targets against targets
-pub fn innerconflicts(packages: &[&Package]) -> Vec<Conflict> {
+pub fn innerconflicts(
+	packages: &[&Package],
+	log: &mut dyn Callbacks,
+) -> Vec<Conflict> {
 	let mut baddeps = Vec::new();
-	check_conflict(packages, packages, &mut baddeps, false);
+	debug(log, &[b"check targets vs targets\n"]);
+	check_conflict(packages, packages, &mut baddeps, false, log);
 	baddeps
 }
 
 // alpm_checkconflicts: the handle is only checked for NULL
-pub fn checkconflicts(packages: &[&Package]) -> Vec<Conflict> {
-	innerconflicts(packages)
+pub fn checkconflicts(
+	packages: &[&Package],
+	log: &mut dyn Callbacks,
+) -> Vec<Conflict> {
+	innerconflicts(packages, log)
 }
 
 // alpm_list_diff with _alpm_pkg_cmp: both sides msorted by name (stable),
@@ -157,12 +185,15 @@ fn pkg_diff<'a>(lhs: &[&'a Package], rhs: &[&Package]) -> Vec<&'a Package> {
 pub fn outerconflicts<P: Borrow<Package>>(
 	local: &PkgHash<P>,
 	packages: &[&Package],
+	log: &mut dyn Callbacks,
 ) -> Vec<Conflict> {
 	let cache: Vec<&Package> = local.iter().map(Borrow::borrow).collect();
 	let dblist = pkg_diff(&cache, packages);
 	let mut baddeps = Vec::new();
-	check_conflict(packages, &dblist, &mut baddeps, false);
-	check_conflict(&dblist, packages, &mut baddeps, true);
+	debug(log, &[b"check targets vs db\n"]);
+	check_conflict(packages, &dblist, &mut baddeps, false, log);
+	debug(log, &[b"check db vs targets\n"]);
+	check_conflict(&dblist, packages, &mut baddeps, true, log);
 	baddeps
 }
 
