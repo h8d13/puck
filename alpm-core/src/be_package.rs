@@ -35,7 +35,7 @@ use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
 use crate::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
-	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, parse_xdata,
+	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, check_meta, parse_xdata,
 };
 use crate::signing::{
 	Keyring, SIG_PACKAGE, SIG_PACKAGE_MARGINAL_OK, SIG_PACKAGE_OPTIONAL,
@@ -43,12 +43,9 @@ use crate::signing::{
 	key_import, key_in_keychain, sigpath,
 };
 use crate::util::{
-	self, ArchiveFgets, DataBlocks, Entry, fnmatch, hash_sdbm, parsedate,
-	strtoofft, until_nul,
+	self, ArchiveFgets, DataBlocks, Entry, hash_sdbm, parsedate, strtoofft,
+	until_nul,
 };
-
-// limits.h on linux
-const NAME_MAX: usize = 255;
 
 // read_sigfile's limit, adopted from repo-add
 const MAX_SIGFILE_SIZE: u64 = 16384;
@@ -163,44 +160,6 @@ fn open_archive(
 
 fn log(cb: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
 	cb.log(level, &parts.concat());
-}
-
-// _alpm_pkg_check_meta on a package with a name and a version (the load
-// refuses others before, so its "name or version missing" bail is not
-// reached). every failed check logs, fnmatch arguments in the C's order:
-// the name is the pattern
-fn check_meta(cb: &mut dyn Callbacks, name: &[u8], version: &[u8]) -> bool {
-	let mut ok = true;
-	let mut fail = |why: &[u8]| {
-		let msg = [
-			b"invalid metadata for package ",
-			name,
-			b"-",
-			version,
-			b" (",
-			why,
-			b")\n",
-		];
-		log(cb, LogLevel::Error, &msg);
-		ok = false;
-	};
-	if matches!(name[0], b'-' | b'.') {
-		fail(b"package name cannot start with '.' or '-'");
-	}
-	if fnmatch(name, b"[![:alnum:]+_.@-]") {
-		fail(b"package name contains invalid characters");
-	}
-	let dashes = version.iter().filter(|&&c| c == b'-').count();
-	if dashes > 1 {
-		fail(b"package version contains invalid characters");
-	}
-	if version.contains(&b'/') {
-		fail(b"package version contains invalid characters");
-	}
-	if name.len() + version.len() + 1 > NAME_MAX {
-		fail(b"package name and version too long");
-	}
-	ok
 }
 
 fn text(v: &impl Display) -> Vec<u8> {
@@ -528,7 +487,7 @@ pub fn pkg_load_internal(
 		pkg.infolevel |= INFRQ_FILES;
 	}
 	let version = pkg.version.as_deref().unwrap_or_default();
-	if !check_meta(cb, pkg.name_bytes(), until_nul(version)) {
+	if !check_meta(pkg.name_bytes(), until_nul(version), cb) {
 		return Err(Error::Invalid(Reason::Meta));
 	}
 	Ok(pkg)
