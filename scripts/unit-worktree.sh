@@ -64,8 +64,9 @@ if [ "$#" = 0 ]; then
 	echo "usage: $0 <name>... | --remove <name>..." >&2
 	exit 2
 fi
-if [ -n "$(git status --porcelain)" ]; then
-	echo "working tree not clean: commit first" >&2
+# an explicit REF says which commit to take, local edits are not wanted
+if [ "$from" = HEAD ] && [ -n "$(git status --porcelain)" ]; then
+	echo "working tree not clean: commit first (or --from REF)" >&2
 	exit 1
 fi
 mkdir -p "$base"
