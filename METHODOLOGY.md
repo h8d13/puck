@@ -127,6 +127,11 @@ order.
   and no oomd, a runaway test never meets the OOM killer and freezes the
   machine; capped, it aborts and fails. Run tests through
   `scripts/cargo-test.sh`, which allows one suite at a time machine wide.
+- Waiting on a background run: never `until ! pgrep -f '<text>'`. The
+  waiter's own command line contains `<text>`, so pgrep always finds
+  it and the loop never ends (six such loops ran for hours). Wait on a
+  sentinel the run writes (`cmd; echo "rc=$?" >> log`, then
+  `until grep -q '^rc=' log`), or run it in the foreground.
 - Mutation checks that can loop (a removed loop exit, a dropped push)
   run under the same caps. `TEST_TIMEOUT=<s>` may be raised for long
   fuzz runs (2M iterations); `TEST_MEM_KB` is never raised.
