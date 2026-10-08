@@ -56,9 +56,21 @@ struct Run {
 	err: Vec<u8>,
 }
 
-fn run(bin: &Path, args: &[String], cwd: &Path) -> Run {
-	let o = Command::new(bin)
-		.arg0("pacman")
+// fake root: fakeroot runs bin as uid 0, for the root-only refreshes
+fn run(bin: &Path, args: &[String], cwd: &Path, root: bool) -> Run {
+	let mut cmd = match root {
+		true => {
+			let mut c = Command::new("fakeroot");
+			c.arg(bin);
+			c
+		}
+		false => {
+			let mut c = Command::new(bin);
+			c.arg0("pacman");
+			c
+		}
+	};
+	let o = cmd
 		.args(args)
 		.current_dir(cwd)
 		.env_clear()
@@ -88,11 +100,22 @@ fn setup(w: &SyncWorld, siglevel: Option<&str>) -> Vec<String> {
 		conf.push_str(&format!("SigLevel = {level}\n"));
 	}
 	for r in &w.repos {
-		conf.push_str(&format!(
-			"[{r}]\nServer = file:///nowhere/{r}\n"
-		));
+		let mirror = dir.join("mirror").display().to_string();
+		conf.push_str(&format!("[{r}]\nServer = file://{mirror}\n"));
 	}
 	fs::write(dir.join("pacman.conf"), conf).unwrap();
+	// the mirror -Sy/-Fy fetch from: the sync dbs as they are, the copy
+	// under db/sync kept apart to put back before every refresh run
+	for d in ["mirror", "sync.orig"] {
+		fs::create_dir_all(dir.join(d)).unwrap();
+	}
+	for e in fs::read_dir(dir.join("db/sync")).unwrap() {
+		let e = e.unwrap();
+		fs::copy(e.path(), dir.join("mirror").join(e.file_name()))
+			.unwrap();
+		fs::copy(e.path(), dir.join("sync.orig").join(e.file_name()))
+			.unwrap();
+	}
 	let p = |rel: &str| dir.join(rel).display().to_string();
 	vec![
 		format!("--config={}", p("pacman.conf")),
@@ -217,6 +240,12 @@ fn commands(w: &SyncWorld) -> Vec<Vec<String>> {
 		vec!["-X"],
 		vec!["-Q", "-S"],
 		vec!["-Sy"],
+		vec!["-Syy"],
+		vec!["-Syl"],
+		vec!["-Sys", "a"],
+		vec!["-Syi", sync],
+		vec!["-Fyy"],
+		vec!["-Fyl"],
 		vec!["-S", sync],
 		vec!["-Sc"],
 		vec!["-R", "owner"],
@@ -252,8 +281,30 @@ fn world(
 	for cmd in commands(w) {
 		let mut args = cmd.clone();
 		args.extend(paths.iter().cloned());
-		let cr = run(&c, &args, w.fx.dir());
-		let rr = run(&r, &args, w.fx.dir());
+		let root = refresh(&cmd);
+		let dir = w.fx.dir();
+		if root {
+			restore_sync(dir);
+		}
+		let cr = run(&c, &args, dir, root);
+		let synced_c = root.then(|| snapshot_sync(dir));
+		if root {
+			restore_sync(dir);
+		}
+		let rr = run(&r, &args, dir, root);
+		let synced_r = root.then(|| snapshot_sync(dir));
+		if root {
+			restore_sync(dir);
+		}
+		let rr = Run {
+			// the fetched dbs count as output
+			status: if synced_c == synced_r {
+				rr.status
+			} else {
+				-1
+			},
+			..rr
+		};
 		let label = cmd
 			.join(" ")
 			.replace(&w.fx.dir().display().to_string(), "@");
@@ -277,6 +328,48 @@ fn world(
 		out.push((label, diff.is_none(), diff));
 	}
 	out
+}
+
+// the refreshes, run as fake root with a file:// mirror
+fn refresh(cmd: &[String]) -> bool {
+	cmd.first()
+		.is_some_and(|c| c.starts_with("-Sy") || c.starts_with("-Fy"))
+}
+
+// db/sync back to what the fixture wrote, with an old mtime so a
+// refresh sees the mirror's copies as newer
+fn restore_sync(dir: &Path) {
+	let sync = dir.join("db/sync");
+	fs::remove_dir_all(&sync).unwrap();
+	fs::create_dir_all(&sync).unwrap();
+	let old =
+		std::time::UNIX_EPOCH + std::time::Duration::from_secs(1 << 20);
+	for e in fs::read_dir(dir.join("sync.orig")).unwrap() {
+		let e = e.unwrap();
+		let to = sync.join(e.file_name());
+		fs::copy(e.path(), &to).unwrap();
+		let f = fs::File::options().write(true).open(&to).unwrap();
+		f.set_modified(old).unwrap();
+	}
+}
+
+// names and contents under db/sync
+fn snapshot_sync(dir: &Path) -> Vec<(String, Vec<u8>)> {
+	let mut v: Vec<(String, Vec<u8>)> = fs::read_dir(dir.join("db/sync"))
+		.unwrap()
+		.map(|e| {
+			let e = e.unwrap();
+			let n = e.file_name().to_string_lossy().into_owned();
+			let data = if e.path().is_file() {
+				fs::read(e.path()).unwrap()
+			} else {
+				Vec::new()
+			};
+			(n, data)
+		})
+		.collect();
+	v.sort();
+	v
 }
 
 fn known(label: &str) -> bool {
