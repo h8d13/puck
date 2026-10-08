@@ -5,6 +5,7 @@
 // _alpm_realloc, _alpm_greedy_grow, _alpm_alloc_fail are not ported: Vec
 // grows and zero-fills itself.
 
+use std::cell::Cell;
 use std::ffi::{OsStr, OsString, c_char, c_ulong};
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
 use std::io::{self, ErrorKind, Read, Seek, Write};
@@ -17,6 +18,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::rc::Rc;
 
 use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
 use rustix::fs::{
@@ -1238,13 +1240,13 @@ pub fn filecache_setup(
 // prefix and modes set by chmod, so process cwd and umask stay untouched
 
 // file type bits of mode_t
-const S_IFMT: u32 = 0o170000;
-const S_IFREG: u32 = 0o100000;
-const S_IFDIR: u32 = 0o040000;
-const S_IFLNK: u32 = 0o120000;
-const S_IFCHR: u32 = 0o020000;
-const S_IFBLK: u32 = 0o060000;
-const S_IFIFO: u32 = 0o010000;
+pub(crate) const S_IFMT: u32 = 0o170000;
+pub(crate) const S_IFREG: u32 = 0o100000;
+pub(crate) const S_IFDIR: u32 = 0o040000;
+pub(crate) const S_IFLNK: u32 = 0o120000;
+pub(crate) const S_IFCHR: u32 = 0o020000;
+pub(crate) const S_IFBLK: u32 = 0o060000;
+pub(crate) const S_IFIFO: u32 = 0o010000;
 
 // the umask _alpm_unpack extracts under
 const UNPACK_UMASK: u32 = 0o022;
@@ -1267,6 +1269,9 @@ pub struct Filter {
 	// a short block: the stream's clean end
 	end: bool,
 	failed: Option<ErrorKind>,
+	// file bytes the decoder has read by the last block, shared with
+	// the Archive (archive_filter_bytes(a, -1), add.c's progress)
+	consumed: Rc<Cell<u64>>,
 }
 
 // bytes uudecode_bidder_bid's line scan goes on over (its ascii table)
@@ -1291,6 +1296,18 @@ impl Filter {
 			pos: 0,
 			end: false,
 			failed: None,
+			consumed: Rc::default(),
+		}
+	}
+
+	// the file under the decoder
+	fn file(&self) -> &File {
+		match &self.decoder {
+			CompressionDecoder::Bzip2(d) => d.get_ref().get_ref(),
+			CompressionDecoder::Gzip(d) => d.get_ref().get_ref(),
+			CompressionDecoder::Xz(d) => d.get_ref().get_ref(),
+			CompressionDecoder::Zstd(d) => d.get_ref().get_ref(),
+			CompressionDecoder::None(r) => r.get_ref(),
 		}
 	}
 
@@ -1328,7 +1345,10 @@ impl Filter {
 		self.pos = 0;
 		let start = self.data.len();
 		self.data.resize(start + self.size, 0);
-		match read_full(&mut self.decoder, &mut self.data[start..]) {
+		let r = read_full(&mut self.decoder, &mut self.data[start..]);
+		let pos = self.file().stream_position();
+		self.consumed.set(pos.unwrap_or_default());
+		match r {
 			Ok(n) => {
 				self.end = n < self.size;
 				self.data.truncate(start + n);
@@ -1385,6 +1405,8 @@ pub fn content(entry: &mut Entry) -> io::Result<Vec<u8>> {
 pub struct Archive {
 	pub reader: tar::Archive<Filter>,
 	pub meta: fs::Metadata,
+	// how far the decoder read the file, see Filter
+	pub consumed: Rc<Cell<u64>>,
 	// the filter picked, None: tar offsets are file offsets
 	pub settings: DecompressionSettings,
 }
@@ -1413,9 +1435,11 @@ pub fn open_archive(path: &[u8]) -> io::Result<Archive> {
 		.map_err(archive_io_err)?;
 	let mut filter = Filter::new(decoder, &settings);
 	filter.open()?;
+	let consumed = filter.consumed.clone();
 	Ok(Archive {
 		reader: tar::Archive::new(filter),
 		meta,
+		consumed,
 		settings,
 	})
 }
@@ -1471,7 +1495,7 @@ fn is_kind(r: &io::Result<impl Sized>, kinds: &[ErrorKind]) -> bool {
 // cleanup_pathname_fsobj without the SECURE flags: "./" and empty
 // components dropped, a trailing "." or '/' cut, ".." kept, a leading
 // '/' kept. "." or "/" when nothing is left, None for an empty name
-fn cleanup_pathname(name: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn cleanup_pathname(name: &[u8]) -> Option<Vec<u8>> {
 	if name.is_empty() {
 		return None;
 	}
@@ -1518,7 +1542,7 @@ fn wanted<L: AsRef<[u8]>>(list: &[L], name: &[u8]) -> bool {
 // last read, or the skip). the tar reader reads it with the next header,
 // so it is checked against the length of a plain archive; past a filter
 // a missing padding only shows at the next header
-fn check_padding(
+pub(crate) fn check_padding(
 	entry: &Entry,
 	size: u64,
 	plain_len: Option<u64>,
@@ -1531,7 +1555,7 @@ fn check_padding(
 }
 
 // archive_read_data_skip
-fn skip_data(
+pub(crate) fn skip_data(
 	entry: &mut Entry,
 	size: u64,
 	plain_len: Option<u64>,
@@ -1957,7 +1981,7 @@ pub fn unpack<L: AsRef<[u8]>>(
 
 // chdir(2): a directory the process may search, with the effective ids
 // like chdir
-fn enter(dir: &[u8]) -> io::Result<()> {
+pub(crate) fn enter(dir: &[u8]) -> io::Result<()> {
 	let path = c_path(dir);
 	if !fs::metadata(path)?.is_dir() {
 		return Err(rustix::io::Errno::NOTDIR.into());

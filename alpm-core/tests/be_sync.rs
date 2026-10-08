@@ -41,7 +41,7 @@ impl Db {
 	}
 
 	fn load(&self) -> Result<Vec<Package>, Error> {
-		let cache = populate(&self.path(), b".db")?;
+		let cache = populate(&self.path(), b".db", b"core", &mut ())?;
 		Ok(cache.iter().cloned().collect())
 	}
 }
@@ -157,7 +157,11 @@ fn validation() {
 fn estimate_follows_dbext() {
 	let db = Db::new("estimate");
 	db.write(&vec![0u8; 3015 * 40]);
-	let buckets = |ext: &[u8]| populate(&db.path(), ext).unwrap().buckets();
+	let buckets = |ext: &[u8]| {
+		populate(&db.path(), ext, b"core", &mut ())
+			.unwrap()
+			.buckets()
+	};
 	// 41 / 0.58 + 1 = 71 gives 73, 10 / 0.58 + 1 = 18 gives 19
 	assert_eq!(buckets(b".db"), 73);
 	assert_eq!(buckets(b".files"), 19);

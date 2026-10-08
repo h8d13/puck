@@ -3,6 +3,7 @@
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::{Mutex, MutexGuard};
 
+mod add_commit;
 mod backup;
 mod be_local;
 mod be_local_write;
@@ -14,6 +15,7 @@ mod cli_util;
 mod cli_util2;
 mod conf;
 mod conflict;
+mod database;
 mod db;
 mod db_search;
 mod db_update;
@@ -46,6 +48,7 @@ mod util;
 mod util_common;
 mod version;
 
+pub use add_commit::*;
 pub use backup::*;
 pub use be_local::*;
 pub use be_local_write::*;
@@ -57,6 +60,7 @@ pub use cli_util::*;
 pub use cli_util2::*;
 pub use conf::*;
 pub use conflict::*;
+pub use database::*;
 pub use db::*;
 pub use db_search::*;
 pub use db_update::*;

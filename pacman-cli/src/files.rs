@@ -7,6 +7,7 @@
 // output goes into an Output like sync.rs, messages are the untranslated
 // msgids. -Fy is sync.rs's sync_syncdbs.
 
+use alpm_core::callbacks::Callbacks;
 use alpm_core::db::Db;
 use alpm_core::handle::Handle;
 use alpm_core::package::Package;
@@ -39,11 +40,17 @@ struct Match<'p> {
 	files: Vec<Vec<u8>>,
 }
 
-// print_match. local is handle->db_local, dbext handle->dbext
+// handle->db_local with what alpm_db_get_pkg on it takes
+struct Local<'h> {
+	db: Option<&'h mut Db>,
+	dbext: &'h [u8],
+	cb: &'h mut dyn Callbacks,
+}
+
+// print_match
 fn print_match(
 	config: &Config,
-	local: Option<&mut Db>,
-	dbext: &[u8],
+	local: &mut Local,
 	repo: &[u8],
 	m: &Match,
 	exact_file: bool,
@@ -89,8 +96,11 @@ fn print_match(
 			c.nocolor,
 		]));
 		print_groups(out, pkg, c);
+		let (dbext, name) = (local.dbext, pkg.name_bytes());
 		let local = local
-			.and_then(|l| l.get_pkg(dbext, pkg.name_bytes()).ok());
+			.db
+			.as_deref_mut()
+			.and_then(|l| l.get_pkg(dbext, local.cb, name).ok());
 		print_installed(out, local, pkg, c);
 		out.push(b'\n');
 		for f in &m.files {
@@ -190,29 +200,32 @@ pub fn files_search<S: AsRef<[u8]>>(
 		return ret;
 	}
 
-	let dbext = handle.dbext().to_vec();
 	for ftarg in &ftargs {
 		let mut found = false;
-		let (mut local, syncdbs) = handle.dbs_mut();
-		for db in syncdbs {
+		let dbs = handle.dbs_mut();
+		let mut local = Local {
+			db: dbs.local,
+			dbext: dbs.dbext,
+			cb: dbs.cb,
+		};
+		for db in dbs.sync {
 			let repo = db.name().to_vec();
-			let hits: Vec<Match> = cache_list(db, &dbext)
-				.into_iter()
-				.filter_map(|p| {
-					let files = matches(ftarg, p);
-					(!files.is_empty()).then_some(Match {
-						pkg: p,
-						files,
+			let hits: Vec<Match> =
+				cache_list(db, local.dbext, local.cb)
+					.into_iter()
+					.filter_map(|p| {
+						let files = matches(ftarg, p);
+						(!files.is_empty()).then_some(
+							Match { pkg: p, files },
+						)
 					})
-				})
-				.collect();
+					.collect();
 			found |= !hits.is_empty();
 			for m in &hits {
 				let exact = ftarg.exact_file;
 				let o = &mut out.stdout;
-				let l = local.as_deref_mut();
 				print_match(
-					config, l, &dbext, &repo, m, exact, o,
+					config, &mut local, &repo, m, exact, o,
 				);
 			}
 		}
@@ -252,11 +265,11 @@ pub fn files_list<S: AsRef<[u8]>>(
 	targets: &[S],
 	out: &mut Output,
 ) -> i32 {
-	let dbext = handle.dbext().to_vec();
 	if targets.is_empty() {
-		for db in handle.syncdbs_mut() {
+		let dbs = handle.dbs_mut();
+		for db in dbs.sync {
 			let repo = db.name().to_vec();
-			for pkg in cache_list(db, &dbext) {
+			for pkg in cache_list(db, dbs.dbext, dbs.cb) {
 				dump_files(config, &repo, pkg, &mut out.stdout);
 			}
 		}
@@ -278,13 +291,14 @@ pub fn files_list<S: AsRef<[u8]>>(
 			None => (None, full),
 		};
 		let mut found = false;
-		for db in handle.syncdbs_mut() {
+		let dbs = handle.dbs_mut();
+		for db in dbs.sync {
 			if repo.is_some_and(|r| r != db.name()) {
 				continue;
 			}
 			let repo = db.name().to_vec();
 			// an empty name is WrongArgs, not found either
-			if let Ok(pkg) = db.get_pkg(&dbext, targ) {
+			if let Ok(pkg) = db.get_pkg(dbs.dbext, dbs.cb, targ) {
 				dump_files(config, &repo, pkg, &mut out.stdout);
 				found = true;
 				break;

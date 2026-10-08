@@ -88,6 +88,16 @@ pub(crate) struct SyncParts<'h> {
 	pub(crate) dbs: &'h mut [Db],
 }
 
+// the dbs borrowed with what their calls take from the handle: dbext
+// (read by cache loads) and the callbacks db.c logs through
+pub struct DbsMut<'h> {
+	pub dbext: &'h [u8],
+	pub cb: &'h mut dyn Callbacks,
+	pub local: Option<&'h mut Db>,
+	// registration order
+	pub sync: &'h mut [Db],
+}
+
 impl fmt::Debug for Handle {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("Handle")
@@ -672,9 +682,15 @@ impl Handle {
 		&mut self.dbs_sync
 	}
 
-	// the local db and the sync dbs borrowed together
-	pub fn dbs_mut(&mut self) -> (Option<&mut Db>, &mut [Db]) {
-		(self.db_local.as_mut(), &mut self.dbs_sync)
+	// the local db and the sync dbs borrowed together, with dbext and
+	// the callbacks
+	pub fn dbs_mut(&mut self) -> DbsMut<'_> {
+		DbsMut {
+			dbext: &self.dbext,
+			cb: &mut *self.cb,
+			local: self.db_local.as_mut(),
+			sync: &mut self.dbs_sync,
+		}
 	}
 
 	// alpm_register_syncdb: an empty name or one with '/' is WrongArgs,
@@ -709,13 +725,17 @@ impl Handle {
 
 	// alpm_unregister_all_syncdbs
 	pub fn unregister_all_syncdbs(&mut self) {
-		self.dbs_sync.clear();
+		for db in std::mem::take(&mut self.dbs_sync) {
+			db.unregister(&mut *self.cb);
+		}
 	}
 
 	// alpm_db_unregister on the local db. DbNotFound once gone (the C
 	// would need a freed pointer)
 	pub fn unregister_localdb(&mut self) -> Result<(), Errno> {
-		self.db_local.take().map(drop).ok_or(Errno::DbNotFound)
+		let db = self.db_local.take().ok_or(Errno::DbNotFound)?;
+		db.unregister(&mut *self.cb);
+		Ok(())
 	}
 
 	// alpm_db_unregister on a sync db, found by name like _alpm_db_cmp
@@ -726,7 +746,7 @@ impl Handle {
 		let treename = until_nul(treename);
 		let i = self.dbs_sync.iter().position(|d| d.name() == treename);
 		let i = i.ok_or(Errno::DbNotFound)?;
-		self.dbs_sync.remove(i);
+		self.dbs_sync.remove(i).unregister(&mut *self.cb);
 		Ok(())
 	}
 
@@ -878,16 +898,16 @@ impl DbCaches for Handle {
 		let Some(db) = &mut self.db_local else {
 			return Vec::new();
 		};
-		match db.load_all(&self.dbext, INFRQ_DESC) {
+		match db.load_all(&self.dbext, &mut *self.cb, INFRQ_DESC) {
 			Ok(cache) => cache.iter().collect(),
 			Err(_) => Vec::new(),
 		}
 	}
 
 	fn sync_caches(&mut self) -> Vec<Vec<&Package>> {
-		let dbext = &self.dbext;
+		let (dbext, cb) = (&self.dbext, &mut *self.cb);
 		let caches = self.dbs_sync.iter_mut().map(|db| {
-			db.pkgcache(dbext)
+			db.pkgcache(dbext, cb)
 				.map(|c| c.iter().collect())
 				.unwrap_or_default()
 		});
@@ -895,10 +915,13 @@ impl DbCaches for Handle {
 	}
 }
 
-// alpm_release: the lock goes with the handle. the logfile stream and
-// the syslog connection close with the Logger
+// alpm_release: the lock goes with the handle, then the local and the
+// sync dbs are unregistered. the logfile stream and the syslog
+// connection close with the Logger
 impl Drop for Handle {
 	fn drop(&mut self) {
 		self.handle_unlock();
+		let _ = self.unregister_localdb();
+		self.unregister_all_syncdbs();
 	}
 }

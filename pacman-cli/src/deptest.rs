@@ -13,13 +13,14 @@ pub fn pacman_deptest(
 	targets: &[Vec<u8>],
 	o: &mut Output,
 ) -> i32 {
-	let dbext = handle.dbext().to_vec();
 	let mut deps: Vec<&[u8]> = Vec::new();
 	for target in targets {
 		let target = until_nul(target);
-		let found = handle.localdb_mut().is_some_and(|db| {
-			db.get_pkg(&dbext, target).is_ok()
-				|| db.find_satisfier(&dbext, target).is_some()
+		let d = handle.dbs_mut();
+		let found = d.local.is_some_and(|db| {
+			db.get_pkg(d.dbext, d.cb, target).is_ok()
+				|| db.find_satisfier(d.dbext, d.cb, target)
+					.is_some()
 		});
 		if !found {
 			deps.push(target);

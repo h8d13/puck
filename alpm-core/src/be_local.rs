@@ -8,10 +8,11 @@
 //
 // lazy loading keeps the C infolevel bits: read() loads the requested
 // sections once, a failed read marks the package INFRQ_ERROR and later
-// reads give up. logging (name/version mismatch, unknown keys,
-// _alpm_pkg_check_meta warnings) is not modelled, it never changes the
-// result. mtree reading and the writing side are the last sections. not
-// ported: changelog.
+// reads give up. populate and read log through the caller's Callbacks
+// like the C through handle->logcb; not modelled: the name/version
+// mismatch and unknown key lines (alpm-db refuses such files whole) and
+// _alpm_pkg_check_meta's warnings. mtree reading and the writing side are
+// the last sections. not ported: changelog.
 
 use std::ffi::{OsStr, c_int};
 use std::fmt::Display;
@@ -30,6 +31,7 @@ use alpm_mtree::libarchive::{self, Entry};
 use alpm_types::{ExtraDataEntry, PackageInstallReason, PackageValidation};
 
 use crate::backup::Backup;
+use crate::callbacks::{Callbacks, LogLevel, logv};
 use crate::deps::{Depend, dep_compute_string, dep_from_string};
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
@@ -39,7 +41,7 @@ use crate::package::{
 };
 use crate::pkghash::PkgHash;
 use crate::util::{
-	Filter, hash_sdbm, makepath, mkdir_mode, splitname, until_nul,
+	Filter, hash_sdbm, makepath, mkdir_mode, splitname, strerror, until_nul,
 };
 
 // ALPM_LOCAL_DB_VERSION
@@ -207,11 +209,15 @@ impl LocalDb {
 
 	// local_db_populate: one package per "name-ver-rel" directory, in
 	// readdir order. entries splitname rejects and later duplicates of a
-	// name are skipped. the C appends then msorts the list by name; names
-	// are unique, so add_sorted gives the same list and bucket layout.
-	// only name, version, name_hash and origin are set, read() does the
-	// rest (the C's INFRQ_BASE read loads nothing)
-	pub fn populate(&self) -> Result<PkgHash<Package>, DbError> {
+	// name are skipped (logged). the C appends then msorts the list by
+	// name; names are unique, so add_sorted gives the same list and
+	// bucket layout. only name, version, name_hash and origin are set,
+	// read() does the rest (the C's INFRQ_BASE read loads nothing but
+	// its log line)
+	pub fn populate(
+		&self,
+		cb: &mut dyn Callbacks,
+	) -> Result<PkgHash<Package>, DbError> {
 		let dir =
 			fs::read_dir(os(&self.path)).map_err(DbError::Open)?;
 		let est = self.est_count()?;
@@ -223,22 +229,49 @@ impl LocalDb {
 				continue;
 			}
 			let fname = ent.file_name();
-			let Some((name, version)) = splitname(fname.as_bytes())
-			else {
+			let fname = fname.as_bytes();
+			let Some((name, version)) = splitname(fname) else {
+				let parts: [&[u8]; 3] = [
+					b"invalid name for database entry '",
+					fname,
+					b"'\n",
+				];
+				logv(cb, LogLevel::Error, &parts);
 				continue;
 			};
 			if cache.find(name).is_some() {
+				let parts: [&[u8]; 3] = [
+					b"duplicated database entry '",
+					name,
+					b"'\n",
+				];
+				logv(cb, LogLevel::Error, &parts);
 				continue;
 			}
-			let pkg = Package {
+			let mut pkg = Package {
 				name_hash: hash_sdbm(name),
 				name: Some(name.to_vec()),
 				version: Some(version.to_vec()),
 				origin: Some(PkgFrom::LocalDb),
 				..Package::default()
 			};
+			// local_db_read(pkg, INFRQ_BASE) never fails
+			let _ = self.read(&mut pkg, INFRQ_BASE, cb);
+			let parts: [&[u8]; 3] = [
+				b"adding '",
+				name,
+				b"' to package cache for db 'local'\n",
+			];
+			logv(cb, LogLevel::Function, &parts);
 			cache.add_sorted(pkg).map_err(|_| DbError::Memory)?;
 		}
+		let count = cache.len().to_string();
+		let parts: [&[u8]; 3] = [
+			b"added ",
+			count.as_bytes(),
+			b" packages to package cache for db 'local'\n",
+		];
+		logv(cb, LogLevel::Debug, &parts);
 		Ok(cache)
 	}
 
@@ -249,6 +282,7 @@ impl LocalDb {
 		&self,
 		pkg: &mut Package,
 		inforeq: c_int,
+		cb: &mut dyn Callbacks,
 	) -> Result<(), ReadError> {
 		if pkg.infolevel & inforeq == inforeq {
 			return Ok(());
@@ -256,11 +290,49 @@ impl LocalDb {
 		if pkg.infolevel & INFRQ_ERROR != 0 {
 			return Err(ReadError::Earlier);
 		}
-		let r = self.read_sections(pkg, inforeq);
+		let level = format!("{inforeq:x}");
+		let parts: [&[u8]; 5] = [
+			b"loading package data for ",
+			pkg.name_bytes(),
+			b" : level=0x",
+			level.as_bytes(),
+			b"\n",
+		];
+		logv(cb, LogLevel::Function, &parts);
+		let r = self.read_sections(pkg, inforeq, cb);
 		if r.is_err() {
 			pkg.infolevel |= INFRQ_ERROR;
 		}
 		r
+	}
+
+	// fopen(path, "r") for a section, the failure logged
+	fn open_section(
+		&self,
+		pkg: &Package,
+		file: &[u8],
+		cb: &mut dyn Callbacks,
+	) -> Result<File, ReadError> {
+		let path = self.pkgpath(pkg, file);
+		File::open(os(&path)).map_err(|e| {
+			let err = strerror(&e);
+			let parts: [&[u8]; 5] = [
+				b"could not open file ",
+				&path,
+				b": ",
+				&err,
+				b"\n",
+			];
+			logv(cb, LogLevel::Error, &parts);
+			ReadError::Io(e)
+		})
+	}
+
+	// the open section read whole: alpm-db parses str
+	fn read_text(mut f: File) -> Result<String, ReadError> {
+		let mut s = String::new();
+		f.read_to_string(&mut s).map_err(ReadError::Io)?;
+		Ok(s)
 	}
 
 	fn wants(pkg: &Package, inforeq: c_int, bit: c_int) -> bool {
@@ -271,20 +343,19 @@ impl LocalDb {
 		&self,
 		pkg: &mut Package,
 		inforeq: c_int,
+		cb: &mut dyn Callbacks,
 	) -> Result<(), ReadError> {
 		if Self::wants(pkg, inforeq, INFRQ_DESC) {
-			let path = self.pkgpath(pkg, b"desc");
-			let s = fs::read_to_string(os(&path))
-				.map_err(ReadError::Io)?;
+			let f = self.open_section(pkg, b"desc", cb)?;
+			let s = Self::read_text(f)?;
 			let desc =
 				parse_libalpm(&s).map_err(ReadError::Desc)?;
 			apply_desc(pkg, desc);
 			pkg.infolevel |= INFRQ_DESC;
 		}
 		if Self::wants(pkg, inforeq, INFRQ_FILES) {
-			let path = self.pkgpath(pkg, b"files");
-			let s = fs::read_to_string(os(&path))
-				.map_err(ReadError::Io)?;
+			let f = self.open_section(pkg, b"files", cb)?;
+			let s = Self::read_text(f)?;
 			let files = DbFiles::from_str_libalpm(&s)
 				.map_err(ReadError::Files)?;
 			apply_files(pkg, &files);
@@ -788,11 +859,21 @@ impl LocalDb {
 		&self,
 		pkg: &mut Package,
 		reason: PkgReason,
+		cb: &mut dyn Callbacks,
 	) -> Result<(), Errno> {
 		if pkg.origin != Some(PkgFrom::LocalDb) {
 			return Err(Errno::WrongArgs);
 		}
-		let _ = self.read(pkg, INFRQ_DESC);
+		let n = (reason as u32).to_string();
+		let parts: [&[u8]; 5] = [
+			b"setting install reason ",
+			n.as_bytes(),
+			b" for ",
+			pkg.name_bytes(),
+			b"\n",
+		];
+		logv(cb, LogLevel::Debug, &parts);
+		let _ = self.read(pkg, INFRQ_DESC, cb);
 		if pkg.reason == reason {
 			return Ok(());
 		}

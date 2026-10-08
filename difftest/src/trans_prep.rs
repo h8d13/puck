@@ -500,9 +500,10 @@ const Q_CONFLICT_PKG: c_int = 1 << 2;
 const Q_REMOVE_PKGS: c_int = 1 << 4;
 const Q_SELECT_PROVIDER: c_int = 1 << 5;
 const LOG_DEBUG: c_int = 1 << 2;
-// debug lines the port does not log: RET_ERR/GOTO_ERR and the db.c cache
-// loads (a missing sync db retries on every lookup)
-const UNPORTED_DEBUG: [&[u8]; 5] = [
+// debug lines left out on both sides: RET_ERR/GOTO_ERR (not logged by
+// the port) and the db.c cache loads (the C retries a missing sync db on
+// every lookup, the port's View reads caches loaded once)
+pub const UNPORTED_DEBUG: [&[u8]; 5] = [
 	b"returning error ",
 	b"got error ",
 	b"loading package cache for repository ",
@@ -638,7 +639,10 @@ pub struct TpSetup {
 }
 
 unsafe extern "C" {
-	fn alpm_add_pkg(handle: *mut c_void, pkg: *mut CPkg) -> c_int;
+	pub(crate) fn alpm_add_pkg(
+		handle: *mut c_void,
+		pkg: *mut CPkg,
+	) -> c_int;
 	pub(crate) fn alpm_remove_pkg(
 		handle: *mut c_void,
 		pkg: *mut CPkg,

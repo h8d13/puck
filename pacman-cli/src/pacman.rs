@@ -36,6 +36,7 @@ use crate::conf::{
 	ConfError, Config, Host, LOG_DEBUG, LOG_ERROR, LOG_FUNCTION,
 	LOG_WARNING, Msg, PM_COLOR_OFF, PM_COLOR_ON, PM_OP_MAIN, format_msg,
 };
+use crate::database::pacman_database;
 use crate::deptest::pacman_deptest;
 use crate::files::pacman_files;
 use crate::getopt::{Getopt, HasArg, LongOpt};
@@ -1505,6 +1506,8 @@ impl Host for OutHost<'_> {
 		let now = (self.now_secs)();
 		if let Some(s) = stamped(config, msg, true, now) {
 			self.out.stderr.extend_from_slice(&s);
+			// stderr is unbuffered: before the callbacks' next line
+			self.out.flush();
 		}
 	}
 }
@@ -1610,7 +1613,7 @@ fn dispatch<R: BufRead>(
 	let (config, cols) = (ui.config, ui.cols);
 	match config.op {
 		PM_OP_DATABASE => {
-			unported(&mut ui.out.stderr, config, "--database")
+			pacman_database(config, handle, targets, ui.out)
 		}
 		PM_OP_REMOVE => {
 			let p = pacman_remove(ui, handle, targets);
@@ -1694,7 +1697,10 @@ pub fn run<R: BufRead + 'static>(
 				explicit_adds: Vec::new(),
 				explicit_removes: Vec::new(),
 			};
-			dispatch(&mut ui, &mut handle, &targets) & 0xff
+			let ret = dispatch(&mut ui, &mut handle, &targets);
+			// the op's output before alpm_release logs (cleanup)
+			ui.out.flush();
+			ret & 0xff
 		}
 	};
 	console_cursor_show(&mut out.stdout, term.stdout_tty);

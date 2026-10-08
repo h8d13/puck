@@ -111,7 +111,10 @@ unsafe extern "C" {
 
 	fn _alpm_pkg_new() -> *mut CPkg;
 	pub(crate) fn _alpm_pkg_free(pkg: *mut CPkg);
-	fn _alpm_pkg_dup(pkg: *mut CPkg, new_ptr: *mut *mut CPkg) -> c_int;
+	pub(crate) fn _alpm_pkg_dup(
+		pkg: *mut CPkg,
+		new_ptr: *mut *mut CPkg,
+	) -> c_int;
 	fn _alpm_pkg_cmp(p1: *const c_void, p2: *const c_void) -> c_int;
 	fn _alpm_pkg_compare_versions(
 		spkg: *mut CPkg,

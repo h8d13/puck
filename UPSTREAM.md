@@ -426,6 +426,28 @@ declarations. No existing MR found for it.
   (handle.c:572); `alpm_option_add_architecture` has no CHECK_HANDLE and
   pushes an unchecked strdup (handle.c:819). **api / env**
 
+## `src/pacman/database.c` minor
+
+- `pacman_database` overwrites the `-Dk` result with the reason change's
+  (database.c:300-302); checkargs_database refuses `-k` with
+  `--asdeps`/`--asexplicit` (pacman.c:590-595). **none**
+- `file->name[strlen(file->name) - 1]` reads before an empty name
+  (database.c:197); the local `%FILES%` reader stops at an empty line
+  (be_local.c:865-866). **none**
+- `all_files` from an unchecked `malloc` (database.c:189). **env**
+- paths built with `snprintf(path, PATH_MAX, ...)` are cut silently, a
+  dbpath near PATH_MAX reports present desc/files as missing
+  (database.c:122, 135, 140). **env**
+- the owners of a file listed twice print in the order glibc's `qsort`
+  leaves equal names (database.c:221): stable through its merge sort,
+  not when it falls back to quicksort for big lists. **none**
+- `-D` prints "install reason has been set" also when the reason was
+  already that one (database.c:72-83, be_local.c:1189-1192). **none**
+- `local_db_read` never sets INFRQ_BASE (be_local.c:740-919): populate's
+  INFRQ_BASE read logs a "loading package data" line per package
+  (be_local.c:627), and a sync populate failure logs "freeing package
+  cache" for a cache never marked loaded (be_sync.c:477, 484). **none**
+
 ## `src/pacman/package.c` / `signing.c` minor
 
 - uninitialized `siglist` freed when the package file is gone between load
@@ -676,6 +698,22 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
   returns success. **none**: pacman loads every package in full first
   (`-U`, sync), and that walk fails on any cut with LIBARCHIVE; only a
   file changing between load and commit gets here (**env**)
+
+## add.c commit minor
+
+- an intervening symlink is unlinked silently: with UNLINK |
+  SECURE_SYMLINKS (add.c:118-123) extracting `usr/lib/y` over a `usr/lib`
+  symlink to a directory replaces the link with a real directory;
+  conflict.c (~521) only flags it when the package lists the `usr/lib/`
+  entry, which makepkg always does. **packager**, or real with
+  `--overwrite`
+- the commit hangs on a fifo: `alpm_compute_md5sum` opens a backup path,
+  its `.pacnew` or a symlink to a fifo and `open(2)` blocks forever
+  (add.c:335, 357-358). **packager** (port: same)
+- pm_errno PKG_CANT_REMOVE from the remove step survives a successful
+  upgrade (add.c:508, remove.c:718). **api**
+- the -1 check after `_alpm_remove_single_package` is dead, it always
+  returns 0 (add.c:508-511). **none**
 
 ## transaction prepare minor
 

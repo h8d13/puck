@@ -44,7 +44,7 @@ fn load_c(fx: &TempRoot, tree: &str, ext: &str) -> Outcome {
 fn load_rust(fx: &TempRoot, tree: &str, ext: &str) -> Outcome {
 	let path =
 		be_sync::db_path(&fx.dbpath(), tree.as_bytes(), ext.as_bytes());
-	let cache = populate(&path, ext.as_bytes())
+	let cache = populate(&path, ext.as_bytes(), b"core", &mut ())
 		.map_err(|e| e.errno() as i32)?;
 	let counts = (cache.len(), cache.buckets(), cache.limit());
 	let pkgs = cache.iter().map(|p| (p.clone(), get_validation(p)));
@@ -494,7 +494,7 @@ fn run_case(
 	let fx = TempRoot::new("be-sync");
 	write_db(&fx.sync_file("repo", ext), comp, &ustar(entries));
 	let path = be_sync::db_path(&fx.dbpath(), b"repo", ext.as_bytes());
-	let why = match populate(&path, ext.as_bytes()) {
+	let why = match populate(&path, ext.as_bytes(), b"core", &mut ()) {
 		Err(e) => format!("{e:?}"),
 		Ok(_) => String::new(),
 	};
@@ -629,7 +629,7 @@ fn real_sync_dbs() {
 			tree.as_bytes(),
 			ext.as_bytes(),
 		);
-		let r = populate(&path, ext.as_bytes());
+		let r = populate(&path, ext.as_bytes(), b"core", &mut ());
 		let (cp, _) = c.as_ref().expect("C refused a real db");
 		let r = match r {
 			Ok(r) => r,
@@ -1108,7 +1108,7 @@ fn validity(fx: &TempRoot, tree: &str) -> (c_int, (c_int, c_int)) {
 		.iter_mut()
 		.find(|d| d.name() == tree.as_bytes())
 		.unwrap();
-	let e = db.pkgcache(&ext).err().map_or(0, |e| e as c_int);
+	let e = db.pkgcache(&ext, &mut ()).err().map_or(0, |e| e as c_int);
 	let valid = match db.valid() {
 		Ok(()) => (0, 0),
 		Err(e) => (-1, e as c_int),
