@@ -859,6 +859,8 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
   1409, 1447), so each `-U <cached url>` leaves an empty dir in the
   cachedir; and a failing fetchcb returns through RET_ERR before the
   removal (dload.c:1284 vs 1294). **real**
+  Seen on a real system: 58 leftover `download-*` dirs in
+  `/var/cache/pacman/pkg` (Arch default DownloadUser, C pacman 7.1).
 - sandboxed downloads count server errors in the forked child's copy of
   the handle (dload.c:920-1060): a mirror failing during `-Sy` is not
   remembered for the package downloads of the same `-Syu`, unlike
