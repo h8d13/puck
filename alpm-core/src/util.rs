@@ -1246,23 +1246,7 @@ pub fn filecache_setup(
 			skipping(cb, b"not a directory", dir);
 			continue;
 		}
-		// _alpm_access(dir, W_OK) with its debug line
-		let writable = rustix::fs::accessat(
-			rustix::fs::CWD,
-			c_path(dir),
-			rustix::fs::Access::WRITE_OK,
-			rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-		);
-		if let Err(e) = writable {
-			let e = strerror(&e.into());
-			let m = [
-				b"\"",
-				&dir[..],
-				b"\" is not writable: ",
-				&e,
-				b"\n",
-			];
-			cb.log(LogLevel::Debug, &m.concat());
+		if alpm_access(cb, None, dir, Access::WRITE_OK).is_err() {
 			skipping(cb, b"not writable", dir);
 			continue;
 		}
