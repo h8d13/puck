@@ -628,6 +628,30 @@ Found through the conf difftest aborting only with longer TMPDIR paths.
 - port: no buffer
 - difftest: odd-root fixture names padded so the size avoids 16k+8
 
+## `handle.c` / `log.c` / frontend `util.c` minor
+
+- `alpm_option_get/set_disable_sandbox` declared in alpm.h:2314/2321 but
+  not exported (no SYMEXPORT, handle.c:971, 984). **api**
+- `alpm_logaction` ignores `fflush`'s result, a full disk on a line under
+  the stdio buffer returns 0 (log.c:94); fd leaked when fdopen fails
+  (log.c:65). **env**
+- add/remove assumeinstalled compare different name_hash sources
+  (handle.c:758, 785); `set_sandboxuser` drops the old user before
+  validating (606-617); parallel_downloads returned as int (363-366).
+  **api**
+- `multiselect_question` keeps the grown buffer and its last bytes after
+  an invalid answer: a long invalid selection can swallow the next line
+  (util.c:1567-1609). **real (rare)**
+- `multiselect_parse` ties "deselect all first" to strtok's first token,
+  a whitespace-only first token keeps everything selected (util.c:1486).
+  **real (rare)**
+- `print_packages` passes `localtime()` unchecked to strftime
+  (util.c:1224-1230, same as the -Si build date crash) **packager**;
+  `pkg_get_location` with a NULL filename prints "(null)" or crashes in
+  strdup (util.c:1118-1137) **packager**
+- `select_display` NULL handling (1427-1440), `target_cmp` returns 0/1
+  (1043), `parseindex("")` is 0 (1447-1448). **none**
+
 ## `src/pacman/conf.c` minor
 
 - CacheServer `file://` URLs do not get the sysroot, Server ones do
