@@ -549,14 +549,14 @@ declarations. No existing MR found for it.
 - `_cache_mtree_next` turns ARCHIVE_WARN into -1, so `-Qkk` stops silently
   at the first warning and prints totals as if complete (be_local.c:296-
   309). **packager**
-- libarchive's mtree `readline` returns 0 (end of data) whenever
-  `__archive_read_ahead` gives NULL, a failed filter included; its
-  `bytes_read < 0` check after that is dead
-  (archive_read_support_format_mtree.c, libarchive 3.8.9). A gzip'd
-  local mtree cut past the open's read-ahead (128 KiB of text) reads as
-  a shorter complete one: `-Qkk` checks part of the files and reports
-  success. **env** (pacman writes the file; disk full or a crash cuts
-  it), libarchive bug
+- a gzip'd local mtree cut past the open's read-ahead reads as a shorter
+  complete one (libarchive's `readline`, below): `-Qkk` checks part of
+  the files and reports success. **env** (pacman writes the file; disk
+  full or a crash cuts it)
+- build_filelist_from_mtree logs a failed `.MTREE` at debug level only
+  and keeps the archive's list; a cut `.MTREE` past its first filter
+  block gives a partial list with no message at all (be_package.c:
+  483-500). **packager**
 - NoExtract for `.INSTALL`/`.CHANGELOG` is matched at `filepath + rootlen`
   of a dbpath-based path: wrong string, and uninitialized bytes when that
   path is shorter than root (check.c:34, 351). **local**
@@ -979,18 +979,60 @@ Found through the conf difftest aborting only with longer TMPDIR paths.
 To be written up and reported through pacman's usual channels by the
 maintainer of this repo, not from here.
 
+# libarchive findings
+
+`archive_read_support_format_mtree.c` at libarchive 3.8.9, met while
+translating it (`alpm-core::mtree`). Same practice labels, judged by
+what pacman reads (bsdtar's `.MTREE`, copied as the local `mtree`).
+
+- `readline` returns 0 (end of data) whenever `__archive_read_ahead`
+  gives NULL, a failed filter included; its `bytes_read < 0` check after
+  that is dead. A stream cut past the open's read-ahead reads as a
+  shorter complete file. **env**
+- a nul byte stops `readline`'s scan for good (`for (u = ...; *u; ++u)`
+  restarts at it): the rest of the data is appended to that one line,
+  dropped at the end of data when under 64 KiB, "Line too long"
+  otherwise. **packager / local**
+- `readline` resumes its scan after a backslash that ended a read-ahead
+  block, so a `\` and the `\n` after it split across two blocks end the
+  line instead of joining it (also `\` `\r` | `\n`). `detect_form`'s `next_line` returns 0
+  or the tail's length for a last line without newline depending on
+  whether its earlier read-ahead already covered the data, which decides
+  the bid on data without signature. Neither is modelled (the port sees
+  one buffer). **none** (bsdtar writes no continuation lines, pacman's
+  files have the signature)
+- `read_mtree` runs `detect_form` even after the `#mtree` signature: if
+  the first entry lines put the path last (NetBSD's `mtree -D`), the
+  whole file is read that way. **packager**
+- the non-printable check uses `isprint` in the caller's locale (pacman
+  calls `setlocale(LC_ALL, "")`): in a single-byte locale such as
+  ISO-8859-1, bytes from 0xa0 pass and the line is read. The port keeps
+  the C/UTF-8 result. **env**
+- "Non-printable character 0x%02X" is overwritten by "Can't parse line
+  %ju" before it can be read. **none**
+- a path listed again takes the `/set` keywords current at that line
+  too, so `./a uid=3` followed by `./a type=dir` under `/set uid=0`
+  ends with uid 0: later lines override with defaults, not only with
+  what they spell out. **packager**
+- the freebsd device format accepts a negative minor whose int32 value
+  matches (`device=freebsd,1,-65281`), the `(int32_t)` read-back sign
+  extends. **none**
+
 # ALPM findings
 
-Applied in `vendor/patches/` today: mtree 0401-0411 (until the mtree
-reader is owned), gzip members 0551, content sniffing 0552. Kept as
-reports in `vendor/upstream-reports/`, no longer applied: version
-ordering 0101/0102, `Unknown Packager` 0105, relation backtracking 0106,
-empty xdata value 0107. The alpm-db/alpm-repo-db/alpm-pkginfo findings
+Applied in `vendor/patches/` today: gzip members 0551, content sniffing
+0552, decoder over any reader 0553. Kept as reports in
+`vendor/upstream-reports/`, no longer applied: version ordering
+0101/0102, `Unknown Packager` 0105, relation backtracking 0106, empty
+xdata value 0107, alpm-mtree `PathType` `PartialEq` 0401, gzip members
+in its helper 0403, `Error::Parse` display 0411 (alpm-mtree is no longer
+used: `alpm-core::mtree`; 0402, 0404-0410 bent it into libarchive's
+reader and are gone). The alpm-db/alpm-repo-db/alpm-pkginfo findings
 below came from patches dropped with the owned readers (PORTING.md
 "Owned readers"); they stay valid as reports. Further notes from the patch work:
 
 - alpm-mtree `Error::Parse` display broken (`error-parse` wants `$source`,
-  code passes `error`), fixed in 0411. **api**
+  code passes `error`). **api**, to report
 
 - strict desc parsers allow one blank line between sections only,
   against the spec. **packager**
@@ -1047,7 +1089,7 @@ pacman's formats. Same practice labels, judged against real databases.
 - alpm-mtree `mode` parser takes 3-4 digits (docs: 3-5); bsdtar writes
   `mode=%o`, so permissions 0000 or below 0100 (`mode=0`, `mode=44`)
   reject the whole mtree. **real (rare)**
-- alpm-mtree `PathType` has no `PartialEq`. **api**
+- alpm-mtree `PathType` has no `PartialEq`. **api**, to report
 - alpm-mtree drops `size` for dirs/links, refuses char/block/fifo types
   and file lines without `size`, which libarchive reads. **packager**
 - alpm-pkginfo needs `pkgtype` as first xdata, refuses unknown keys
@@ -1057,7 +1099,12 @@ pacman's formats. Same practice labels, judged against real databases.
 - alpm-package `PackageReader` needs a valid file name, parses
   `.BUILDINFO`, needs UTF-8 `.INSTALL`. **api**
 - alpm-mtree's gzip helper is private, reading `.MTREE` from bytes needs
-  the `alpm_common::MetadataFile` trait. **api**
+  the `alpm_common::MetadataFile` trait; it reads one gzip member
+  (`GzDecoder`). **api**, to report
+- alpm-compress `CompressionDecoder` only decodes a `File`: compressed
+  data in memory (a package's `.MTREE`) cannot use it. 0553 makes it
+  generic over a `BufRead` (`from_reader`, `get_ref`), `new` unchanged.
+  **api**
 - tar (via alpm-compress) refuses the `S` type without a GNU header.
   **packager**
 - alpm-compress gzip uses `GzDecoder`, reads only the first member
