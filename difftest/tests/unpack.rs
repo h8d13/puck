@@ -777,23 +777,21 @@ fn link_cases() {
 	}
 }
 
-// pinned divergence: libarchive reads a directory entry (type '5', or a
-// regular one named like a directory) as one without data, so its data
-// is read as the next header and the loop ends there. the tar reader
-// skips the data by its size and goes on
+// libarchive reads a directory entry (type '5', or a regular one named
+// like a directory) as one without data, so its data is read as the next
+// header and the loop ends there (UPSTREAM.md)
 #[test]
-fn dir_with_data_divergence() {
+fn dir_with_data() {
 	for kind in *b"50" {
 		let nodes =
 			[node("a/", kind, 0o644, "", b"data"), file("b", "x")];
 		let case = Case::new("dir with data", tar(&nodes));
 		let [(c, cs), (r, rs)] = run_both(&case, &none);
 		assert_eq!(c, r);
+		assert_eq!(lines(&cs), lines(&rs));
 		let dirs = ["/ dir 755", "/p/ dir 755", "/p/a/ dir 755"];
-		assert_eq!(lines(&cs)[..3], dirs);
-		assert!(lines(&cs)[3].starts_with("/pkg "), "{:?}", lines(&cs));
 		assert_eq!(lines(&rs)[..3], dirs);
-		assert_eq!(lines(&rs)[3], "/p/b file 644 links 1 \"x\"");
+		assert!(lines(&rs)[3].starts_with("/pkg "), "{:?}", lines(&rs));
 	}
 }
 

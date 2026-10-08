@@ -9,13 +9,15 @@
 // remove.c send, progress; the logfile text without stamps comes apart.
 // cases are built twice from one AcCase, once per side.
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use alpm_core::be_local::INFRQ_ALL;
 use alpm_core::callbacks::{Callbacks, Event, LogLevel, Progress};
@@ -25,7 +27,7 @@ use alpm_core::{add, be_package, trans, util};
 
 use crate::cstr;
 use crate::fixtures::{
-	Comp, LocalEntry, Node, TarNode, TempRoot, snapshot, ustar_owned,
+	Comp, LocalEntry, Node, TarNode, TempRoot, snapshot, ustar_entries,
 	write_db,
 };
 use crate::handle::log_message;
@@ -45,8 +47,12 @@ use crate::util::c_umask;
 pub const AC_NOLOCK: c_int = 1 << 17;
 // set when SOURCE_DATE_EPOCH is valid: %INSTALLDATE% compared as is
 pub const AC_SDE_EXACT: &str = "DIFFTEST_SDE_EXACT";
+// set: the C runs in the C locale instead of C.UTF-8
+pub const AC_C_LOCALE: &str = "DIFFTEST_C_LOCALE";
 // every tar entry's mtime (fixtures::header)
 pub const AC_MTIME: i64 = 1_700_000_000;
+// times from here on are the run's own (now), the archives' lie below
+const AC_RUN_TIME: i64 = AC_MTIME + 1_000_000;
 
 unsafe extern "C" {
 	fn _alpm_upgrade_packages(handle: *mut c_void) -> c_int;
@@ -79,6 +85,8 @@ pub struct AcCase {
 	pub version: String,
 	// the package's entries after .PKGINFO, in archive order
 	pub nodes: Vec<TarNode>,
+	// members written by hand after the nodes (pax headers)
+	pub tail: Vec<u8>,
 	pub backup: Vec<String>,
 	pub comp: Comp,
 	// entry owner, None: the running user
@@ -92,12 +100,17 @@ pub struct AcCase {
 	pub stale_oldpkg: bool,
 	// the package file cut to this many bytes after loading it
 	pub cut: Option<usize>,
+	// a ready package file used instead of .PKGINFO, nodes and tail
+	pub file: Option<PathBuf>,
 }
 
 // uid and gid of the running process, as files get them
 pub fn ac_owner() -> (u32, u32) {
+	// one probe per call: test threads ask at the same time
+	static N: AtomicUsize = AtomicUsize::new(0);
+	let n = N.fetch_add(1, Ordering::Relaxed);
 	let probe = std::env::temp_dir()
-		.join(format!("difftest-owner-{}", std::process::id()));
+		.join(format!("difftest-owner-{}-{n}", std::process::id()));
 	fs::write(&probe, b"").unwrap();
 	let p = fs::metadata(&probe).unwrap();
 	fs::remove_file(&probe).unwrap();
@@ -191,6 +204,13 @@ pub fn ac_build(fx: &TempRoot, c: &AcCase) -> Vec<u8> {
 			install: o.install,
 		}]);
 	}
+	let pkgs = fx.dir().join("pkgs");
+	fs::create_dir_all(&pkgs).unwrap();
+	if let Some(file) = &c.file {
+		let path = pkgs.join(file.file_name().unwrap());
+		fs::copy(file, &path).unwrap();
+		return path.as_os_str().as_bytes().to_vec();
+	}
 	let info = TarNode {
 		name: b".PKGINFO".to_vec(),
 		kind: b'0',
@@ -201,9 +221,9 @@ pub fn ac_build(fx: &TempRoot, c: &AcCase) -> Vec<u8> {
 	let mut nodes = vec![info];
 	nodes.extend(c.nodes.iter().cloned());
 	let owner = c.owner.unwrap_or_else(ac_owner);
-	let tar = ustar_owned(&nodes, owner);
-	let pkgs = fx.dir().join("pkgs");
-	fs::create_dir_all(&pkgs).unwrap();
+	let mut tar = ustar_entries(&nodes, owner);
+	tar.extend_from_slice(&c.tail);
+	tar.resize(tar.len() + 1024, 0);
 	let path = pkgs.join(format!("{}-{}.pkg.tar", c.name, c.version));
 	if path.exists() {
 		fs::remove_file(&path).unwrap();
@@ -248,19 +268,74 @@ pub struct AcResult {
 	pub local: AcNode,
 }
 
-// fixtures::Node plus, for files and links, whether the mtime is the
-// archive's; desc files with %INSTALLDATE% masked (the C's time(NULL))
+// fixtures::Node plus the metadata (AcMeta); desc files with
+// %INSTALLDATE% masked (the C's time(NULL))
 #[derive(Debug, PartialEq, Eq)]
 pub enum AcNode {
-	File(u32, u64, Vec<u8>, bool),
-	Dir(u32, Option<Vec<(Vec<u8>, AcNode)>>),
-	Link(Vec<u8>, bool),
-	Special(u32),
+	File(u32, u64, Vec<u8>, AcMeta),
+	Dir(u32, Option<Vec<(Vec<u8>, AcNode)>>, AcMeta),
+	Link(Vec<u8>, AcMeta),
+	Special(u32, AcMeta),
 	Unreadable(u32),
 }
 
-fn archive_mtime(p: &Path) -> bool {
-	fs::symlink_metadata(p).is_ok_and(|m| m.mtime() == AC_MTIME)
+// owner, the times an archive gave to the nanosecond (None: one of the
+// run), the xattrs by name
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AcMeta {
+	pub owner: (u32, u32),
+	pub mtime: Option<(i64, i64)>,
+	pub atime: Option<(i64, i64)>,
+	pub xattrs: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+fn archive_time(sec: i64, nsec: i64) -> Option<(i64, i64)> {
+	(sec < AC_RUN_TIME).then_some((sec, nsec))
+}
+
+// the xattrs of path itself (llistxattr, through libc like the port so
+// that fakeroot answers for both)
+fn xattrs(path: &Path) -> Vec<(Vec<u8>, Vec<u8>)> {
+	let mut names = vec![0u8; 65536];
+	let Ok(n) = rustix::fs::llistxattr(path, &mut names[..]) else {
+		return Vec::new();
+	};
+	let mut out: Vec<(Vec<u8>, Vec<u8>)> = names[..n]
+		.split(|&c| c == 0)
+		.filter(|n| !n.is_empty())
+		.map(|name| {
+			let mut v = vec![0u8; 65536];
+			let len = rustix::fs::lgetxattr(path, name, &mut v[..])
+				.unwrap_or(0);
+			(name.to_vec(), v[..len].to_vec())
+		})
+		.collect();
+	out.sort();
+	out
+}
+
+// AcMeta of every path under root, taken before anything is read: a
+// read moves the atime (relatime)
+fn metas(path: &Path, out: &mut HashMap<PathBuf, AcMeta>) {
+	let Ok(m) = fs::symlink_metadata(path) else {
+		return;
+	};
+	out.insert(
+		path.to_path_buf(),
+		AcMeta {
+			owner: (m.uid(), m.gid()),
+			mtime: archive_time(m.mtime(), m.mtime_nsec()),
+			atime: archive_time(m.atime(), m.atime_nsec()),
+			xattrs: xattrs(path),
+		},
+	);
+	if !m.is_dir() {
+		return;
+	}
+	let Ok(rd) = fs::read_dir(path) else { return };
+	for e in rd.flatten() {
+		metas(&e.path(), out);
+	}
 }
 
 fn mask_installdate(data: &[u8]) -> Vec<u8> {
@@ -290,7 +365,13 @@ pub(crate) fn mask_tmpdir(msg: &[u8]) -> Vec<u8> {
 	out
 }
 
-fn ac_node(path: &Path, node: Node, mask: bool) -> AcNode {
+fn ac_node(
+	path: &Path,
+	node: Node,
+	mask: bool,
+	metas: &mut HashMap<PathBuf, AcMeta>,
+) -> AcNode {
+	let meta = metas.remove(path).unwrap_or_default();
 	match node {
 		Node::File(m, n, data) => {
 			let data = match mask && path
@@ -300,11 +381,10 @@ fn ac_node(path: &Path, node: Node, mask: bool) -> AcNode {
 				true => mask_installdate(&data),
 				false => data,
 			};
-			AcNode::File(m, n, data, archive_mtime(path))
+			AcNode::File(m, n, data, meta)
 		}
-		Node::Dir(m, entries) => AcNode::Dir(
-			m,
-			entries.map(|es| {
+		Node::Dir(m, entries) => {
+			let entries = entries.map(|es| {
 				es.into_iter()
 					.map(|(name, n)| {
 						let p = path.join(
@@ -312,20 +392,25 @@ fn ac_node(path: &Path, node: Node, mask: bool) -> AcNode {
 								&name,
 							),
 						);
-						let n = ac_node(&p, n, mask);
+						let n = ac_node(
+							&p, n, mask, metas,
+						);
 						(name, n)
 					})
 					.collect()
-			}),
-		),
-		Node::Link(t) => AcNode::Link(t, archive_mtime(path)),
-		Node::Special(m) => AcNode::Special(m),
+			});
+			AcNode::Dir(m, entries, meta)
+		}
+		Node::Link(t) => AcNode::Link(t, meta),
+		Node::Special(m) => AcNode::Special(m, meta),
 		Node::Unreadable(m) => AcNode::Unreadable(m),
 	}
 }
 
 pub(crate) fn tree(path: &Path, mask: bool) -> AcNode {
-	ac_node(path, snapshot(path), mask)
+	let mut m = HashMap::new();
+	metas(path, &mut m);
+	ac_node(path, snapshot(path), mask, &mut m)
 }
 
 fn finish(
@@ -486,6 +571,12 @@ unsafe extern "C" fn progress_cb(
 // _alpm_upgrade_packages on the case, built under fx; logfile is
 // written by alpm_logaction. the caller holds umask_lock
 pub fn c_upgrade(fx: &TempRoot, c: &AcCase, logfile: &Path) -> AcResult {
+	// pacman's setlocale(LC_ALL, ""): libarchive converts pax strings to
+	// the locale's charset, the port models UTF-8. AC_C_LOCALE keeps
+	// the process in the C locale (a child run of its own)
+	if std::env::var_os(AC_C_LOCALE).is_none() {
+		crate::cli_util::init();
+	}
 	let pkgpath = ac_build(fx, c);
 	let pkgfile = cstr(&pkgpath);
 	let (root, dbpath) = (cstr(&fx.root()), cstr(&fx.dbpath()));
