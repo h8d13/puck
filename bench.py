@@ -4,21 +4,23 @@
 # and peak RSS (wait4). stdout and stderr are compared per op, so a fast
 # wrong answer shows as DIFF.
 #
-# usage: ./bench.py [-n RUNS] [-c C_PACMAN] [PUCK] [-- OP ...]
+# usage: ./bench.py [-n RUNS] [-c C_PACMAN] [-p PUCK] [-- OP ...]
 #   PUCK defaults to target/release/puck (cargo build --release -p
 #   pacman-cli), C_PACMAN to /usr/bin/pacman (the distro's optimized
 #   build; pacman/build is a debug build). OPs after -- replace the
 #   default set, each one shell-split: ./bench.py -- "-Si linux" -Qi
 #
 # both run with argv[0] "pacman" so usage and messages compare; run on a
-# quiet machine, other load moves the medians
+# quiet machine, other load moves the medians. peak RSS comes from a tiny
+# C launcher (built with cc into the temp dir): wait4's maxrss includes
+# the forking parent's memory from before exec, ~11 MB for this python
 
 import argparse
 import os
 import shlex
 import statistics
+import subprocess
 import tempfile
-import time
 
 DEFAULT_OPS = [
 	"-Q",
@@ -37,26 +39,63 @@ DEFAULT_OPS = [
 ]
 
 
+# launcher: fork, exec argv[2..] with argv[0] "pacman" and stdout/stderr
+# to argv[1].out/.err, then print "<status> <maxrss KiB> <wall ns>"
+LAUNCHER = r'''
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+int main(int argc, char **argv)
+{
+	char out[4096], err[4096];
+	struct timespec a, b;
+	struct rusage ru;
+	int st;
+	snprintf(out, sizeof out, "%s.out", argv[1]);
+	snprintf(err, sizeof err, "%s.err", argv[1]);
+	clock_gettime(CLOCK_MONOTONIC, &a);
+	pid_t pid = fork();
+	if(pid == 0) {
+		dup2(open(out, O_WRONLY | O_CREAT | O_TRUNC, 0600), 1);
+		dup2(open(err, O_WRONLY | O_CREAT | O_TRUNC, 0600), 2);
+		char *bin = argv[2];
+		argv[2] = "pacman";
+		execv(bin, argv + 2);
+		_exit(127);
+	}
+	wait4(pid, &st, 0, &ru);
+	clock_gettime(CLOCK_MONOTONIC, &b);
+	printf("%d %ld %lld\n", st, ru.ru_maxrss,
+		(b.tv_sec - a.tv_sec) * 1000000000LL + (b.tv_nsec - a.tv_nsec));
+	return 0;
+}
+'''
+
+
+def build_launcher(tmp):
+	src, exe = os.path.join(tmp, "launch.c"), os.path.join(tmp, "launch")
+	with open(src, "w") as f:
+		f.write(LAUNCHER)
+	subprocess.run(["cc", "-O2", "-o", exe, src], check=True)
+	return exe
+
+
 # one run: wall seconds, peak RSS KiB, exit status, stdout, stderr
-def run(binary, args, tmp):
-	paths = [os.path.join(tmp, "out"), os.path.join(tmp, "err")]
-	fds = [os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-		for p in paths]
-	t = time.perf_counter()
-	pid = os.fork()
-	if pid == 0:
-		os.dup2(fds[0], 1)
-		os.dup2(fds[1], 2)
-		env = dict(os.environ, COLUMNS="80")
-		os.execve(binary, ["pacman", *args], env)
-	_, status, ru = os.wait4(pid, 0)
-	wall = time.perf_counter() - t
+def run(launcher, binary, args, tmp):
+	base = os.path.join(tmp, "run")
+	env = dict(os.environ, COLUMNS="80")
+	r = subprocess.run([launcher, base, binary, *args], env=env,
+		capture_output=True, check=True)
+	st, rss, ns = (int(x) for x in r.stdout.split())
 	data = []
-	for fd, p in zip(fds, paths):
-		os.close(fd)
-		with open(p, "rb") as f:
+	for ext in ("out", "err"):
+		with open(f"{base}.{ext}", "rb") as f:
 			data.append(f.read())
-	return wall, ru.ru_maxrss, os.waitstatus_to_exitcode(status), data
+	return ns / 1e9, rss, st, data
 
 
 def fmt_time(s):
@@ -64,8 +103,9 @@ def fmt_time(s):
 
 
 def main():
-	ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-	ap.add_argument("puck", nargs="?", default="target/release/puck")
+	ap = argparse.ArgumentParser(
+		description="C pacman vs puck: time, peak RSS, same output")
+	ap.add_argument("-p", "--puck", default="target/release/puck")
 	ap.add_argument("-c", "--c-pacman", default="/usr/bin/pacman")
 	ap.add_argument("-n", "--runs", type=int, default=7)
 	ap.add_argument("ops", nargs="*")
@@ -78,17 +118,18 @@ def main():
 	print(f"{'op':28} {'C time':>11} {'C RSS':>9} {'puck time':>11} "
 		f"{'puck RSS':>9} {'time':>6} {'RSS':>6} out")
 	with tempfile.TemporaryDirectory() as tmp:
+		launcher = build_launcher(tmp)
 		for op in ops:
 			args = shlex.split(op)
-			run(a.c_pacman, args, tmp)
-			run(a.puck, args, tmp)
+			run(launcher, a.c_pacman, args, tmp)
+			run(launcher, a.puck, args, tmp)
 			ct, cm, rt, rm = [], [], [], []
 			same = True
 			for _ in range(a.runs):
-				w, m, cs, co = run(a.c_pacman, args, tmp)
+				w, m, cs, co = run(launcher, a.c_pacman, args, tmp)
 				ct.append(w)
 				cm.append(m)
-				w, m, rs, ro = run(a.puck, args, tmp)
+				w, m, rs, ro = run(launcher, a.puck, args, tmp)
 				rt.append(w)
 				rm.append(m)
 				same &= cs == rs and co == ro
