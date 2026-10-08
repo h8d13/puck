@@ -8,9 +8,9 @@
 // the C prints to stdout and through pm_printf to stderr, both go into an
 // Output. config is the C global, handle config->handle; cols is what
 // getcols() gives -Si (COLUMNS or the terminal width, 0 when neither).
-// packages shown are copies of the cache entries: the displays read the
-// local db and every sync db cache, which Handle only lends out one at a
-// time. messages are the untranslated msgids.
+// -Si shows a sync package in place while the display loads the local
+// and the other sync caches (Handle::dbs_mut, the dbs split around the
+// shown one). messages are the untranslated msgids.
 //
 // what -Sy prints during alpm_db_update comes from the handle's
 // callbacks (callback.rs); out is flushed (Output::flush) before, so the
@@ -84,34 +84,49 @@ pub(crate) fn cache_list<'a>(
 		.unwrap_or_default()
 }
 
-// what dump_pkg_full asks of libalpm for a sync package of db_name
+// what dump_pkg_full asks of libalpm for a package of sync db this:
+// the dbs registered before and after it load on demand, this one is
+// loaded and lends the package
 struct SyncEnv<'a> {
-	handle: &'a mut Handle,
-	db_name: Vec<u8>,
+	dbext: &'a [u8],
+	cb: &'a mut dyn Callbacks,
+	local: Option<&'a mut Db>,
+	before: &'a mut [Db],
+	this: &'a Db,
+	after: &'a mut [Db],
+	root: &'a [u8],
 	config: &'a Config,
 	stderr: Vec<u8>,
 }
 
 impl DbCaches for SyncEnv<'_> {
 	fn local_cache(&mut self) -> Vec<&Package> {
-		let dbs = self.handle.dbs_mut();
-		match dbs.local {
-			Some(db) => cache_list(db, dbs.dbext, dbs.cb),
+		match self.local.as_deref_mut() {
+			Some(db) => cache_list(db, self.dbext, self.cb),
 			None => Vec::new(),
 		}
 	}
 
 	fn sync_caches(&mut self) -> Vec<Vec<&Package>> {
-		let dbs = self.handle.dbs_mut();
-		dbs.sync.iter_mut()
-			.map(|db| cache_list(db, dbs.dbext, dbs.cb))
-			.collect()
+		let (dbext, cb) = (self.dbext, &mut *self.cb);
+		let this = self.this.loaded_pkgcache();
+		let mut caches: Vec<Vec<&Package>> = Vec::new();
+		for db in self.before.iter_mut() {
+			caches.push(cache_list(db, dbext, cb));
+		}
+		caches.push(this
+			.map(|c| c.iter().collect())
+			.unwrap_or_default());
+		for db in self.after.iter_mut() {
+			caches.push(cache_list(db, dbext, cb));
+		}
+		caches
 	}
 }
 
 impl PkgEnv for SyncEnv<'_> {
 	fn db_name(&mut self, _: &Package) -> Option<Vec<u8>> {
-		Some(self.db_name.clone())
+		Some(self.this.name().to_vec())
 	}
 
 	// alpm_decode_signature, then alpm_extract_keyid on the packets:
@@ -120,7 +135,7 @@ impl PkgEnv for SyncEnv<'_> {
 	fn sig_keys(&mut self, pkg: &Package, b64: &[u8]) -> Vec<Vec<u8>> {
 		let sig = decode_signature(b64).unwrap_or_default();
 		let mut keys = Vec::new();
-		let cb = self.handle.callbacks();
+		let cb = &mut *self.cb;
 		let _ = extract_keyid(cb, pkg.name_bytes(), &sig, &mut keys);
 		keys
 	}
@@ -134,7 +149,7 @@ impl PkgEnv for SyncEnv<'_> {
 	}
 
 	fn root(&mut self) -> Vec<u8> {
-		self.handle.root().to_vec()
+		self.root.to_vec()
 	}
 
 	// local -ii backup states only, never reached for sync packages
@@ -150,29 +165,55 @@ impl PkgEnv for SyncEnv<'_> {
 	fn error(&mut self, msg: &[u8]) {
 		pm_printf(&mut self.stderr, self.config, LOG_ERROR, msg);
 	}
+
+	fn validation(&mut self, pkg: &Package) -> i32 {
+		get_validation(pkg)
+	}
 }
 
-// dump_pkg_full of a copy of a cache entry of sync db db
+// dump_pkg_full in place of every entry of sync db i's cache list, or
+// of the first one called name (a cache that cannot load is empty).
+// true when one was shown
 fn show_full(
 	config: &Config,
 	handle: &mut Handle,
-	db: usize,
-	mut pkg: Package,
+	i: usize,
+	name: Option<&[u8]>,
 	cols: u16,
 	out: &mut Output,
-) {
-	// what alpm_pkg_get_validation computes on first use
-	pkg.validation = get_validation(&pkg);
+) -> bool {
+	let root = handle.root().to_vec();
+	let dbs = handle.dbs_mut();
+	let (before, rest) = dbs.sync.split_at_mut(i);
+	let (this, after) = rest.split_first_mut().expect("db i exists");
+	let _ = this.pkgcache(dbs.dbext, dbs.cb);
+	let this = &*this;
+	let all = this.loaded_pkgcache().into_iter().flat_map(|c| c.iter());
+	let pkgs: Vec<&Package> = match name {
+		None => all.collect(),
+		Some(n) => {
+			all.filter(|p| p.name_bytes() == n).take(1).collect()
+		}
+	};
 	let mut env = SyncEnv {
-		db_name: handle.syncdbs()[db].name().to_vec(),
-		handle,
+		dbext: dbs.dbext,
+		cb: dbs.cb,
+		local: dbs.local,
+		before,
+		this,
+		after,
+		root: &root,
 		config,
 		stderr: Vec::new(),
 	};
 	let extra = config.op_s_info > 1;
 	let colstr = &config.colstr;
-	dump_pkg_full(&mut out.stdout, &mut env, &pkg, extra, cols, colstr);
-	out.stderr.extend(env.stderr);
+	for pkg in &pkgs {
+		let stdout = &mut out.stdout;
+		dump_pkg_full(stdout, &mut env, pkg, extra, cols, colstr);
+		out.stderr.append(&mut env.stderr);
+	}
+	!pkgs.is_empty()
 }
 
 fn os(path: &[u8]) -> &OsStr {
@@ -603,16 +644,7 @@ pub fn sync_info<S: AsRef<[u8]>>(
 	let ndbs = handle.syncdbs().len();
 	if targets.is_empty() {
 		for i in 0..ndbs {
-			let dbs = handle.dbs_mut();
-			let db = &mut dbs.sync[i];
-			let pkgs: Vec<Package> =
-				cache_list(db, dbs.dbext, dbs.cb)
-					.into_iter()
-					.cloned()
-					.collect();
-			for pkg in pkgs {
-				show_full(config, handle, i, pkg, cols, out);
-			}
+			show_full(config, handle, i, None, cols, out);
 		}
 		return 0;
 	}
@@ -630,20 +662,14 @@ pub fn sync_info<S: AsRef<[u8]>>(
 		};
 		let (mut foundpkg, mut founddb) = (false, false);
 		for i in 0..ndbs {
-			let dbs = handle.dbs_mut();
-			let db = &mut dbs.sync[i];
-			if repo.is_some_and(|r| r != db.name()) {
+			if repo.is_some_and(|r| r != handle.syncdbs()[i].name())
+			{
 				continue;
 			}
 			founddb = true;
-			let pkg = cache_list(db, dbs.dbext, dbs.cb)
-				.into_iter()
-				.find(|p| p.name_bytes() == pkgstr)
-				.cloned();
-			if let Some(pkg) = pkg {
-				show_full(config, handle, i, pkg, cols, out);
-				foundpkg = true;
-			}
+			let name = Some(pkgstr);
+			foundpkg |=
+				show_full(config, handle, i, name, cols, out);
 		}
 		if !founddb {
 			// printf("%s", NULL) is "(null)" in glibc

@@ -25,9 +25,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use alpm_core::PACKAGE_VERSION;
 use alpm_core::handle::Handle;
 use alpm_core::util::strerror;
+use alpm_core::{LIB_VERSION, PACKAGE_VERSION};
 use pacman_common::util_common::{PATH_MAX, mbasename};
 
 use crate::callback::Frontend;
@@ -48,11 +48,8 @@ use crate::upgrade::pacman_upgrade;
 use crate::util::{
 	Output, Term, Ui, arg_to_string, console_cursor_hide,
 	console_cursor_show, debug_stamp, flush_term_input, getcols,
-	list_display, now_secs, pm_printf,
+	list_display, needs_root, now_secs, pm_printf,
 };
-
-// alpm_version() of the reference build (meson LIB_VERSION)
-pub const LIB_VERSION: &str = "16.0.1";
 
 // conf.h operations, PM_OP_MAIN in conf
 pub const PM_OP_REMOVE: u16 = 2;
@@ -67,7 +64,7 @@ pub const PKG_LOCALITY_NATIVE: u16 = 1;
 pub const PKG_LOCALITY_FOREIGN: u16 = 1 << 1;
 
 // alpm.h alpm_transflag_t, as stored in config->flags
-pub use alpm_core::trans::{
+use alpm_core::trans::{
 	TRANS_FLAG_ALLDEPS, TRANS_FLAG_ALLEXPLICIT, TRANS_FLAG_CASCADE,
 	TRANS_FLAG_DBONLY, TRANS_FLAG_DOWNLOADONLY, TRANS_FLAG_NEEDED,
 	TRANS_FLAG_NOCONFLICTS, TRANS_FLAG_NODEPS, TRANS_FLAG_NODEPVERSION,
@@ -1335,26 +1332,6 @@ pub fn parseargs(
 		_ => {}
 	}
 	Ok(targets)
-}
-
-// util.c needs_root: operations that modify the system
-pub fn needs_root(config: &Config) -> bool {
-	let c = config;
-	match c.op {
-		PM_OP_DATABASE => c.op_q_check == 0,
-		PM_OP_UPGRADE | PM_OP_REMOVE => c.print == 0,
-		PM_OP_SYNC => {
-			c.op_s_clean != 0
-				|| c.op_s_sync != 0 || (c.group == 0
-				&& c.op_s_info == 0 && c
-				.op_q_list
-				== 0 && c.op_s_search == 0 && c
-				.print
-				== 0)
-		}
-		PM_OP_FILES => c.op_s_sync != 0,
-		_ => false,
-	}
 }
 
 // main: a "-" target is replaced by the lines of stdin (None when stdin

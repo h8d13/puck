@@ -37,6 +37,7 @@ use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::header;
 use reqwest::redirect::Policy;
 use rustix::fs::{AtFlags, CWD, Timespec, Timestamps};
+use time::OffsetDateTime;
 
 use crate::callbacks::{Callbacks, DownloadEvent, Event, Fetch, LogLevel};
 use crate::error::Errno;
@@ -415,108 +416,304 @@ fn utimes_long(p: &[u8], seconds: i64) {
 	let _ = rustix::fs::utimensat(CWD, path(p), &times, AtFlags::empty());
 }
 
-// days since 1970-01-01 of a proleptic gregorian date
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-	let y = if m <= 2 { y - 1 } else { y };
-	let era = y.div_euclid(400);
-	let yoe = y - era * 400;
-	let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
-	let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-	era * 146097 + doe - 719468
-}
-
-pub(crate) fn civil_from_days(z: i64) -> (i64, i64, i64) {
-	let z = z + 719468;
-	let era = z.div_euclid(146097);
-	let doe = z - era * 146097;
-	let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-	let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-	let mp = (5 * doy + 2) / 153;
-	let d = doy - (153 * mp + 2) / 5 + 1;
-	let m = if mp < 10 { mp + 3 } else { mp - 9 };
-	(yoe + era * 400 + i64::from(m <= 2), m, d)
-}
-
+// curl's Curl_wkday and Curl_month: parsedate's names, the
+// If-Modified-Since date's too
+const WKDAYS: [&[u8]; 7] =
+	[b"Mon", b"Tue", b"Wed", b"Thu", b"Fri", b"Sat", b"Sun"];
+const WEEKDAYS: [&[u8]; 7] = [
+	b"Monday",
+	b"Tuesday",
+	b"Wednesday",
+	b"Thursday",
+	b"Friday",
+	b"Saturday",
+	b"Sunday",
+];
 pub(crate) const MONTHS: [&[u8]; 12] = [
 	b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep",
 	b"Oct", b"Nov", b"Dec",
 ];
-const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
 
-// the If-Modified-Since date curl sends: "Sun, 06 Nov 1994 08:49:37 GMT"
-pub fn http_date(t: i64) -> String {
-	let (days, secs) = (t.div_euclid(86400), t.rem_euclid(86400));
-	let (y, m, d) = civil_from_days(days);
-	format!(
+// parsedate.c's tz table: name, minutes west of GMT (tDAYZONE -60 on
+// the summer zones), then the military letters (A is UTC+1, as used,
+// not RFC 822's sign). names match case-sensitively
+const TZ: [(&[u8], i64); 69] = [
+	(b"GMT", 0),
+	(b"UT", 0),
+	(b"UTC", 0),
+	(b"WET", 0),
+	(b"BST", -60),
+	(b"WAT", 60),
+	(b"AST", 240),
+	(b"ADT", 180),
+	(b"EST", 300),
+	(b"EDT", 240),
+	(b"CST", 360),
+	(b"CDT", 300),
+	(b"MST", 420),
+	(b"MDT", 360),
+	(b"PST", 480),
+	(b"PDT", 420),
+	(b"YST", 540),
+	(b"YDT", 480),
+	(b"HST", 600),
+	(b"HDT", 540),
+	(b"CAT", 600),
+	(b"AHST", 600),
+	(b"NT", 660),
+	(b"IDLW", 720),
+	(b"CET", -60),
+	(b"MET", -60),
+	(b"MEWT", -60),
+	(b"MEST", -120),
+	(b"CEST", -120),
+	(b"MESZ", -120),
+	(b"FWT", -60),
+	(b"FST", -120),
+	(b"EET", -120),
+	(b"WAST", -420),
+	(b"WADT", -480),
+	(b"CCT", -480),
+	(b"JST", -540),
+	(b"EAST", -600),
+	(b"EADT", -660),
+	(b"GST", -600),
+	(b"NZT", -720),
+	(b"NZST", -720),
+	(b"NZDT", -780),
+	(b"IDLE", -720),
+	(b"A", -60),
+	(b"B", -120),
+	(b"C", -180),
+	(b"D", -240),
+	(b"E", -300),
+	(b"F", -360),
+	(b"G", -420),
+	(b"H", -480),
+	(b"I", -540),
+	(b"K", -600),
+	(b"L", -660),
+	(b"M", -720),
+	(b"N", 60),
+	(b"O", 120),
+	(b"P", 180),
+	(b"Q", 240),
+	(b"R", 300),
+	(b"S", 360),
+	(b"T", 420),
+	(b"U", 480),
+	(b"V", 540),
+	(b"W", 600),
+	(b"X", 660),
+	(b"Y", 720),
+	(b"Z", 0),
+];
+
+// the If-Modified-Since date curl sends: "Sun, 06 Nov 1994 08:49:37 GMT".
+// None past the years time covers (-9999..9999), mtimes never get there
+pub fn http_date(t: i64) -> Option<String> {
+	let d = OffsetDateTime::from_unix_timestamp(t).ok()?;
+	let wday = WKDAYS[d.weekday().number_days_from_monday() as usize];
+	let mon = MONTHS[d.month() as usize - 1];
+	Some(format!(
 		"{}, {:02} {} {:4} {:02}:{:02}:{:02} GMT",
-		WEEKDAYS[days.rem_euclid(7) as usize],
-		d,
-		String::from_utf8_lossy(MONTHS[(m - 1) as usize]),
-		y,
-		secs / 3600,
-		secs / 60 % 60,
-		secs % 60
+		String::from_utf8_lossy(wday),
+		d.day(),
+		String::from_utf8_lossy(mon),
+		d.year(),
+		d.hour(),
+		d.minute(),
+		d.second()
+	))
+}
+
+// position of the name in names, ASCII case ignored
+fn name_in(names: &[&[u8]], name: &[u8]) -> Option<usize> {
+	names.iter().position(|n| n.eq_ignore_ascii_case(name))
+}
+
+// oneortwodigit: the value of one or two digits at s[0], and their end
+fn one_or_two(s: &[u8]) -> (i64, usize) {
+	let n = i64::from(s[0] - b'0');
+	match s.get(1) {
+		Some(c) if c.is_ascii_digit() => {
+			(n * 10 + i64::from(c - b'0'), 2)
+		}
+		_ => (n, 1),
+	}
+}
+
+// match_time: "H[H]:M[M][:S[S]]" in range (seconds up to 60), the
+// hour, minute, second and the length read
+fn match_time(s: &[u8]) -> Option<(i64, i64, i64, usize)> {
+	let digit_at = |i: usize| s.get(i).is_some_and(u8::is_ascii_digit);
+	let (hh, mut p) = one_or_two(s);
+	if hh >= 24 || s.get(p) != Some(&b':') || !digit_at(p + 1) {
+		return None;
+	}
+	let (mm, n) = one_or_two(&s[p + 1..]);
+	p += 1 + n;
+	if mm >= 60 {
+		return None;
+	}
+	if s.get(p) != Some(&b':') || !digit_at(p + 1) {
+		return Some((hh, mm, 0, p));
+	}
+	let (ss, n) = one_or_two(&s[p + 1..]);
+	(ss <= 60).then_some((hh, mm, ss, p + 1 + n))
+}
+
+// time2epoch: curl's own day count, the day of month unchecked against
+// the month (Feb 30 is Mar 2) and any year
+fn time2epoch(
+	sec: i64,
+	min: i64,
+	hour: i64,
+	mday: i64,
+	mon: usize,
+	year: i64,
+) -> i64 {
+	const CUMULATIVE: [i64; 12] =
+		[0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+	let y = year - i64::from(mon <= 1);
+	// C int division, truncating like the C's
+	let leap =
+		y / 4 - y / 100 + y / 400 - 1969 / 4 + 1969 / 100 - 1969 / 400;
+	let days = (year - 1970) * 365 + leap + CUMULATIVE[mon] + mday - 1;
+	((days * 24 + hour) * 60 + min) * 60 + sec
+}
+
+// curl's parsedate (lib/parsedate.c, curl 8.22): at most 6 parts, each a
+// weekday, month or zone name, a time, a "+hhmm"/"-hhmm" zone, YYYYMMDD,
+// a day or a year; anything else fails. None is PARSEDATE_FAIL. curl
+// keeps its own day count (time2epoch), which time cannot express
+fn parsedate(date: &[u8]) -> Option<i64> {
+	let (mut wday, mut mon, mut mday) = (None, None, None);
+	let (mut time, mut year, mut tzoff) = (None, None, None);
+	// dignext: a number is a day first, then a year
+	let mut want_day = true;
+	let mut at = 0;
+	for _ in 0..6 {
+		while at < date.len() && !date[at].is_ascii_alphanumeric() {
+			at += 1;
+		}
+		let rest = &date[at..];
+		let Some(&c) = rest.first() else {
+			break;
+		};
+		if c.is_ascii_alphabetic() {
+			// NAME_LEN 12: a longer name is never one
+			let len = rest
+				.iter()
+				.take(12)
+				.take_while(|c| c.is_ascii_alphabetic())
+				.count();
+			let name = &rest[..len];
+			let mut found = false;
+			if len != 12 {
+				if wday.is_none() {
+					wday = match len {
+						3 => name_in(&WKDAYS, name),
+						4.. => name_in(&WEEKDAYS, name),
+						_ => None,
+					};
+					found = wday.is_some();
+				}
+				if !found && mon.is_none() && len == 3 {
+					mon = name_in(&MONTHS, name);
+					found = mon.is_some();
+				}
+				if !found && tzoff.is_none() && len <= 4 {
+					let z = TZ.iter().find(|z| z.0 == name);
+					tzoff = z.map(|z| z.1 * 60);
+					found = tzoff.is_some();
+				}
+			}
+			if !found {
+				return None;
+			}
+			at += len;
+			continue;
+		}
+		if time.is_none()
+			&& let Some((h, m, s, len)) = match_time(rest)
+		{
+			time = Some((h, m, s));
+			at += len;
+			continue;
+		}
+		// curlx_str_number with max 99999999
+		let digits =
+			rest.iter().take_while(|c| c.is_ascii_digit()).count();
+		let text = std::str::from_utf8(&rest[..digits]).ok()?;
+		let val: i64 =
+			text.parse().ok().filter(|&v| v <= 99_999_999)?;
+		let mut found = false;
+		let sign = at.checked_sub(1).map(|i| date[i]);
+		if tzoff.is_none()
+			&& digits == 4 && val <= 1400
+			&& matches!(sign, Some(b'+' | b'-'))
+		{
+			// "+hhmm" is east of GMT: subtracted
+			let off = (val / 100 * 60 + val % 100) * 60;
+			tzoff = Some(if sign == Some(b'+') {
+				-off
+			} else {
+				off
+			});
+			found = true;
+		} else if digits == 8
+			&& year.is_none() && mon.is_none()
+			&& mday.is_none()
+		{
+			year = Some(val / 10000);
+			// month 00 stays unset like the C's -1
+			mon = usize::try_from(val % 10000 / 100 - 1).ok();
+			mday = Some(val % 100);
+			found = true;
+		}
+		if !found && want_day && mday.is_none() {
+			if (1..32).contains(&val) {
+				mday = Some(val);
+				found = true;
+			}
+			want_day = false;
+		}
+		if !found && !want_day && year.is_none() {
+			year = Some(match val {
+				71..100 => val + 1900,
+				..100 => val + 2000,
+				_ => val,
+			});
+			found = true;
+			if mday.is_none() {
+				want_day = true;
+			}
+		}
+		if !found {
+			return None;
+		}
+		at += digits;
+	}
+	let (sec, min, hour) = time.map_or((0, 0, 0), |(h, m, s)| (s, m, h));
+	let (mday, mon, year) = (mday?, mon?, year?);
+	if year < 1583 || mday > 31 || mon > 11 {
+		return None;
+	}
+	Some(
+		time2epoch(sec, min, hour, mday, mon, year)
+			+ tzoff.unwrap_or(0),
 	)
 }
 
-// Last-Modified as curl's getdate reads the usual forms (RFC 1123, RFC
-// 850, asctime): a month name, hh:mm:ss, a day, a year, GMT/UTC or a
-// numeric zone; weekday names are skipped. None when a part is missing
-pub fn parse_http_date(s: &[u8]) -> Option<i64> {
-	let (mut mon, mut day, mut year, mut time) = (None, None, None, None);
-	let mut zone = 0i64;
-	let tokens = s.split(|c| matches!(c, b' ' | b',' | b'-' | b'\t'));
-	for tok in tokens.filter(|t| !t.is_empty()) {
-		if tok.iter().all(u8::is_ascii_alphabetic) {
-			let short =
-				tok.get(..3).map(<[u8]>::to_ascii_lowercase);
-			let i = MONTHS.iter().position(|m| {
-				short.as_deref()
-					== Some(&m.to_ascii_lowercase()[..])
-			});
-			if let Some(i) = i {
-				mon = Some(i as i64 + 1);
-			}
-		} else if tok.contains(&b':') {
-			let v: Vec<i64> = tok
-				.split(|&c| c == b':')
-				.map(|n| {
-					std::str::from_utf8(n)
-						.ok()?
-						.parse()
-						.ok()
-				})
-				.collect::<Option<_>>()?;
-			match v[..] {
-				[h, m, s] => time = Some(h * 3600 + m * 60 + s),
-				[h, m] => time = Some(h * 3600 + m * 60),
-				_ => return None,
-			}
-		} else if let [b'+' | b'-', rest @ ..] = tok {
-			let n: i64 =
-				std::str::from_utf8(rest).ok()?.parse().ok()?;
-			let off = (n / 100) * 3600 + (n % 100) * 60;
-			zone = if tok[0] == b'+' { off } else { -off };
-		} else if tok.iter().all(u8::is_ascii_digit) {
-			let n: i64 =
-				std::str::from_utf8(tok).ok()?.parse().ok()?;
-			if tok.len() <= 2
-				&& day.is_none() && (1..=31).contains(&n)
-			{
-				day = Some(n);
-			} else if year.is_none() {
-				year = Some(match n {
-					0..=69 if tok.len() <= 2 => n + 2000,
-					70..=99 if tok.len() <= 2 => n + 1900,
-					_ => n,
-				});
-			} else {
-				return None;
-			}
-		}
+// Curl_getdate_capped, CURLINFO_FILETIME of a Last-Modified: -1 when it
+// does not parse, a parsed -1 moved to 0
+pub fn getdate_capped(date: &[u8]) -> i64 {
+	match parsedate(date) {
+		None => -1,
+		Some(-1) => 0,
+		Some(t) => t,
 	}
-	let days = days_from_civil(year?, mon?, day?);
-	Some(days * 86400 + time? - zone)
 }
 
 // the CURLcodes the transfers end with (curl.h)
@@ -889,10 +1086,10 @@ impl Worker {
 			req = req.header(header::RANGE, range);
 		}
 		if let Some(t) = job.time_cond {
-			req = req.header(
-				header::IF_MODIFIED_SINCE,
-				http_date(t),
-			);
+			// mtimes past year 9999 go without a condition
+			if let Some(d) = http_date(t) {
+				req = req.header(header::IF_MODIFIED_SINCE, d);
+			}
 		}
 		if let Some(ua) = &job.user_agent
 			&& let Ok(v) = header::HeaderValue::from_bytes(ua)
@@ -955,7 +1152,7 @@ impl Worker {
 			&& let Some(v) =
 				header_bytes(&resp, header::LAST_MODIFIED)
 		{
-			timeofdoc = parse_http_date(v).unwrap_or(-1);
+			timeofdoc = getdate_capped(v);
 			xfer.filetime = timeofdoc;
 		}
 		if status == 304 {

@@ -20,7 +20,7 @@ use std::ffi::c_int;
 
 use crate::be_local::{INFRQ_DSIZE, INFRQ_FILES};
 use crate::be_package::{self, pkg_validate};
-use crate::callbacks::{Callbacks, Event, LogLevel, Progress, Question};
+use crate::callbacks::{Callbacks, Event, LogLevel, Progress, Question, logv};
 use crate::conflict::{
 	Conflict, FileCheck, FileConflict, innerconflicts, outerconflicts,
 };
@@ -47,8 +47,7 @@ use crate::trans::{
 	CommitData, CommitError, PrepareData, PrepareError, TRANS_FLAG_DBONLY,
 	TRANS_FLAG_DOWNLOADONLY, TRANS_FLAG_NEEDED, TRANS_FLAG_NOCONFLICTS,
 	TRANS_FLAG_NODEPS, TRANS_FLAG_NODEPVERSION, Trans, TransPkg,
-	TransState, View, load_caches, log, opt_str, readable, trans_in,
-	with_view,
+	TransState, View, load_caches, opt_str, readable, trans_in, with_view,
 };
 use crate::util::{
 	ReadFileError, filecache_find, filecache_setup, get_fullpath,
@@ -96,7 +95,7 @@ pub fn sync_get_new_version(
 			name(pkg),
 			b"' not found in sync db => no upgrade\n",
 		];
-		log(cb, Debug, &msg);
+		logv(cb, Debug, &msg);
 		return None;
 	};
 	if pkg_compare_versions(&spkg, pkg) != Ordering::Greater {
@@ -111,7 +110,7 @@ pub fn sync_get_new_version(
 		ver(&spkg),
 		b")\n",
 	];
-	log(cb, Debug, &msg);
+	logv(cb, Debug, &msg);
 	Some((i, spkg))
 }
 
@@ -143,13 +142,13 @@ fn check_literal(
 				ver(spkg),
 				b")\n",
 			];
-			log(cb, Debug, &msg);
+			logv(cb, Debug, &msg);
 			if ignored(h, spkg, lpkg) {
 				let head: [&[u8]; 2] = [
 					&change,
 					b"ignoring package upgrade (",
 				];
-				log(
+				logv(
 					cb,
 					Warning,
 					&[&head[..], &versions].concat(),
@@ -163,7 +162,7 @@ fn check_literal(
 				ver(spkg),
 				b" to the transaction targets\n",
 			];
-			log(cb, Debug, &msg);
+			logv(cb, Debug, &msg);
 			true
 		}
 		Ordering::Less if enable_downgrade => {
@@ -172,7 +171,7 @@ fn check_literal(
 					&change,
 					b"ignoring package downgrade (",
 				];
-				log(
+				logv(
 					cb,
 					Warning,
 					&[&head[..], &versions].concat(),
@@ -187,7 +186,7 @@ fn check_literal(
 				ver(spkg),
 				b"\n",
 			];
-			log(cb, Warning, &msg);
+			logv(cb, Warning, &msg);
 			true
 		}
 		Ordering::Less => {
@@ -201,7 +200,7 @@ fn check_literal(
 				ver(spkg),
 				b")\n",
 			];
-			log(cb, Warning, &msg);
+			logv(cb, Warning, &msg);
 			false
 		}
 		Ordering::Equal => false,
@@ -227,7 +226,7 @@ fn check_replacers(
 		db.name(),
 		b"\n",
 	];
-	log(cb, Debug, &msg);
+	logv(cb, Debug, &msg);
 	let mut replacers = Vec::new();
 	for spkg in view.sync[sdb].cache.iter() {
 		if !spkg.replaces.iter().any(|r| depcmp_literal(lpkg, r)) {
@@ -245,7 +244,7 @@ fn check_replacers(
 				ver(spkg),
 				b")\n",
 			];
-			log(cb, Warning, &msg);
+			logv(cb, Warning, &msg);
 			continue;
 		}
 		let mut q = Question::ReplacePkg {
@@ -270,7 +269,7 @@ fn check_replacers(
 					name(spkg),
 					b"\n",
 				];
-				log(cb, Warning, &msg);
+				logv(cb, Warning, &msg);
 				continue;
 			}
 			let msg = [
@@ -280,7 +279,7 @@ fn check_replacers(
 				name(&tpkg.pkg),
 				b"\n",
 			];
-			log(cb, Debug, &msg);
+			logv(cb, Debug, &msg);
 			tpkg.removes.push(lpkg.clone());
 			if lpkg.reason == PkgReason::Explicit {
 				tpkg.pkg.reason = PkgReason::Explicit;
@@ -296,7 +295,7 @@ fn check_replacers(
 				ver(spkg),
 				b" to the transaction targets\n",
 			];
-			log(cb, Debug, &msg);
+			logv(cb, Debug, &msg);
 			replacers.push(t);
 		}
 	}
@@ -327,7 +326,7 @@ fn sysupgrade(
 	trans: &mut Trans,
 	enable_downgrade: bool,
 ) {
-	log(cb, Debug, &[b"checking for package upgrades\n"]);
+	logv(cb, Debug, &[b"checking for package upgrades\n"]);
 	for lpkg in view.local.iter() {
 		let n = lpkg.name_bytes();
 		if pkg_find(&trans.remove, n).is_some() {
@@ -335,7 +334,7 @@ fn sysupgrade(
 				name(lpkg),
 				b" is marked for removal -- skipping\n",
 			];
-			log(cb, Debug, &msg);
+			logv(cb, Debug, &msg);
 			continue;
 		}
 		if find_target(&trans.add, n).is_some() {
@@ -343,7 +342,7 @@ fn sysupgrade(
 				name(lpkg),
 				b" is already in the target list -- skipping\n",
 			];
-			log(cb, Debug, &msg);
+			logv(cb, Debug, &msg);
 			continue;
 		}
 		for (j, sdb) in view.sync.iter().enumerate() {
@@ -426,7 +425,7 @@ pub fn find_group_pkgs(
 					ver(local),
 					b" is up to date -- skipping\n",
 				];
-				log(cb, Warning, &msg);
+				logv(cb, Warning, &msg);
 				ignorelist.push(pkg);
 				continue;
 			}
@@ -476,7 +475,7 @@ pub fn compute_download_size(
 				match fs::metadata(OsStr::from_bytes(&path)) {
 					Ok(md) => {
 						let msg = b"using (package - .part) size\n";
-						log(cb, Debug, &[msg]);
+						logv(cb, Debug, &[msg]);
 						let left = newpkg
 							.size
 							.wrapping_sub(
@@ -491,7 +490,7 @@ pub fn compute_download_size(
 		}
 	};
 	let msg = format!("setting download size {size} for pkg ");
-	log(cb, Debug, &[msg.as_bytes(), name(newpkg), b"\n"]);
+	logv(cb, Debug, &[msg.as_bytes(), name(newpkg), b"\n"]);
 	newpkg.infolevel |= INFRQ_DSIZE;
 	newpkg.download_size = size;
 	Ok(partial)
@@ -583,7 +582,7 @@ pub(crate) fn sync_prepare(
 	}
 	if trans.flags & TRANS_FLAG_NOCONFLICTS == 0 {
 		event(cb, Event::InterconflictsStart);
-		log(cb, Debug, &[b"looking for conflicts\n"]);
+		logv(cb, Debug, &[b"looking for conflicts\n"]);
 		inner_conflicts(cb, trans)?;
 		outer_conflicts(view, cb, trans)?;
 		event(cb, Event::InterconflictsDone);
@@ -600,13 +599,13 @@ pub(crate) fn sync_prepare(
 				name(rpkg),
 				b"' to remove list\n",
 			];
-			log(cb, Debug, &msg);
+			logv(cb, Debug, &msg);
 			trans.remove.push(rpkg.dup());
 		}
 	}
 
 	if trans.flags & TRANS_FLAG_NODEPS == 0 {
-		log(cb, Debug, &[b"checking dependencies\n"]);
+		logv(cb, Debug, &[b"checking dependencies\n"]);
 		let nodepversion = trans.flags & TRANS_FLAG_NODEPVERSION != 0;
 		let env = view.env(nodepversion);
 		let rem: Vec<&Package> = trans.remove.iter().collect();
@@ -640,7 +639,7 @@ fn resolve(
 	trans: &mut Trans,
 ) -> Result<(), PrepareError> {
 	event(cb, Event::ResolvedepsStart);
-	log(cb, Debug, &[b"resolving target's dependencies\n"]);
+	logv(cb, Debug, &[b"resolving target's dependencies\n"]);
 	let nodepversion = trans.flags & TRANS_FLAG_NODEPVERSION != 0;
 	let env = view.env(nodepversion);
 	let add = std::mem::take(&mut trans.add);
@@ -704,7 +703,7 @@ fn resolve(
 				opt_str(f1),
 				b"\n",
 			];
-			log(cb, Error, &msg);
+			logv(cb, Error, &msg);
 		}
 	}
 	if dup {
@@ -740,7 +739,7 @@ fn inner_conflicts(
 	cb: &mut dyn Callbacks,
 	trans: &mut Trans,
 ) -> Result<(), PrepareError> {
-	log(cb, Debug, &[b"check targets vs targets\n"]);
+	logv(cb, Debug, &[b"check targets vs targets\n"]);
 	let deps = {
 		let add: Vec<&Package> =
 			trans.add.iter().map(|t| &t.pkg).collect();
@@ -761,7 +760,7 @@ fn inner_conflicts(
 			name(&conflict.package2),
 			b"'\n",
 		];
-		log(cb, Debug, &msg);
+		logv(cb, Debug, &msg);
 		let (dep1, dep2) = (dep_from_string(n1), dep_from_string(n2));
 		let (s1, s2) = (&trans.add[i1].pkg, &trans.add[i2].pkg);
 		let (rsync, sync) = if depcmp(s1, &dep2) {
@@ -770,7 +769,7 @@ fn inner_conflicts(
 			(i1, i2)
 		} else {
 			let msg = b"unresolvable package conflicts detected\n";
-			log(cb, Error, &[msg]);
+			logv(cb, Error, &[msg]);
 			return Err(conflict_err(conflict));
 		};
 		let (r, s) = (&trans.add[rsync].pkg, &trans.add[sync].pkg);
@@ -785,7 +784,7 @@ fn inner_conflicts(
 			ver(s),
 			b"'\n",
 		];
-		log(cb, Warning, &msg);
+		logv(cb, Warning, &msg);
 		let gone = trans.add.remove(rsync);
 		trans.unresolvable.push(gone);
 	}
@@ -799,7 +798,7 @@ fn outer_conflicts(
 	cb: &mut dyn Callbacks,
 	trans: &mut Trans,
 ) -> Result<(), PrepareError> {
-	log(cb, Debug, &[b"check targets vs db and db vs targets\n"]);
+	logv(cb, Debug, &[b"check targets vs db and db vs targets\n"]);
 	let deps = {
 		let add: Vec<&Package> =
 			trans.add.iter().map(|t| &t.pkg).collect();
@@ -826,7 +825,7 @@ fn outer_conflicts(
 			ver(p2),
 			b"'\n",
 		];
-		log(cb, Debug, &msg);
+		logv(cb, Debug, &msg);
 		let mut q = Question::ConflictPkg {
 			remove: 0,
 			conflict,
@@ -834,7 +833,7 @@ fn outer_conflicts(
 		cb.question(&mut q);
 		if q.answer() == 0 {
 			let msg = b"unresolvable package conflicts detected\n";
-			log(cb, Error, &[msg]);
+			logv(cb, Error, &[msg]);
 			return Err(conflict_err(conflict));
 		}
 		let i = position(&trans.add, p1.name_bytes())
@@ -843,7 +842,7 @@ fn outer_conflicts(
 			.local
 			.find(n2)
 			.expect("package2 of an outer conflict is installed");
-		log(cb, Debug, &[b"electing '", name(p2), b"' for removal\n"]);
+		logv(cb, Debug, &[b"electing '", name(p2), b"' for removal\n"]);
 		trans.add[i].removes.push(local.clone());
 	}
 	Ok(())
@@ -898,7 +897,7 @@ fn find_dl_candidates(
 		};
 		if db.servers().is_empty() {
 			let e = Errno::ServerNone.strerror().as_bytes();
-			log(cb, Error, &[e, b": ", db.name(), b"\n"]);
+			logv(cb, Error, &[e, b": ", db.name(), b"\n"]);
 			return Err(Errno::ServerNone);
 		}
 		let fname = t.pkg.filename.as_deref().map(until_nul);
@@ -970,7 +969,7 @@ fn download_candidates(h: &mut Handle) -> Result<(), Errno> {
 		files.iter().map(|&i| add[i].pkg.download_size).collect();
 	if h.checkspace() != 0 {
 		let msg = b"checking available disk space for download\n";
-		log(h.callbacks(), Debug, &[msg]);
+		logv(h.callbacks(), Debug, &[msg]);
 		h.with_callbacks(|_, cb| {
 			check_downloadspace(&tmp, &sizes, &mut System, cb)
 		})
@@ -991,7 +990,7 @@ fn download_candidates(h: &mut Handle) -> Result<(), Errno> {
 	if let Err(e) = r {
 		let cb = h.callbacks();
 		cb.event(&Event::PkgRetrieveFailed { num, total_size });
-		log(cb, Warning, &[b"failed to retrieve some files\n"]);
+		logv(cb, Warning, &[b"failed to retrieve some files\n"]);
 		return Err(e);
 	}
 	h.callbacks()
@@ -1023,7 +1022,7 @@ fn pkg_get_sig(
 	})?;
 	let size = data.len().to_string();
 	let msg = [b"found detached signature ", &sig[..], b" with size "];
-	log(cb, Debug, &[&msg.concat(), size.as_bytes(), b"\n"]);
+	logv(cb, Debug, &[&msg.concat(), size.as_bytes(), b"\n"]);
 	Ok(data)
 }
 
@@ -1077,7 +1076,7 @@ fn missing_keys(
 			continue;
 		}
 		for key in keys {
-			log(
+			logv(
 				cb,
 				Debug,
 				&[b"found signature key: ", &key, b"\n"],
@@ -1120,7 +1119,7 @@ fn check_keyring(h: &mut Handle) -> Result<(), Errno> {
 		cb.event(&Event::KeyDownloadDone);
 		if fail {
 			let msg = b"required key missing from keyring\n";
-			log(cb, Error, &[msg]);
+			logv(cb, Error, &[msg]);
 			return Err(errno);
 		}
 		Ok(())
@@ -1195,7 +1194,7 @@ fn validate_all(
 		let Some(path) = filecache_find(h.cachedirs(), fname, cb)
 		else {
 			let msg = b": could not find package in cache\n";
-			log(cb, Error, &[name(&t.pkg), msg]);
+			logv(cb, Error, &[name(&t.pkg), msg]);
 			return Err(Errno::PkgNotFound);
 		};
 		let syncpkg = t.pkg.clone();
@@ -1234,7 +1233,7 @@ fn report_invalid(h: &mut Handle, cb: &mut dyn Callbacks, v: &Invalid) {
 	match &v.error {
 		be_package::Error::MissingSig => {
 			let msg = b": missing required signature\n";
-			log(cb, Error, &[&v.name, msg]);
+			logv(cb, Error, &[&v.name, msg]);
 		}
 		be_package::Error::InvalidSig(siglist) => {
 			let level = v.siglevel;
@@ -1262,7 +1261,7 @@ fn report_invalid(h: &mut Handle, cb: &mut dyn Callbacks, v: &Invalid) {
 				errno.strerror().as_bytes(),
 				b"\n",
 			];
-			log(cb, Error, &msg);
+			logv(cb, Error, &msg);
 		}
 		_ => {}
 	}
@@ -1399,11 +1398,11 @@ fn load_all(
 		let Some(path) = filecache_find(h.cachedirs(), &fname, cb)
 		else {
 			let msg = b": could not find package in cache\n";
-			log(cb, Error, &[name(&t.pkg), msg]);
+			logv(cb, Error, &[name(&t.pkg), msg]);
 			return Err(Errno::PkgNotFound);
 		};
 		let msg = b"replacing pkgcache entry with package file for target ";
-		log(cb, Debug, &[msg, name(&t.pkg), b"\n"]);
+		logv(cb, Debug, &[msg, name(&t.pkg), b"\n"]);
 		let file = match be_package::pkg_load_internal(cb, &path, true)
 		{
 			Ok(file) => Some(file)
@@ -1411,7 +1410,7 @@ fn load_all(
 			Err(e) => {
 				errno = e.errno();
 				let msg = b"failed to load pkgfile internal\n";
-				log(cb, Debug, &[msg]);
+				logv(cb, Debug, &[msg]);
 				None
 			}
 		};
@@ -1471,7 +1470,7 @@ pub(crate) fn sync_check(h: &mut Handle) -> Result<(), CommitError> {
 		return Ok(());
 	}
 	h.callbacks().event(&Event::FileconflictsStart);
-	log(h.callbacks(), Debug, &[b"looking for file conflicts\n"]);
+	logv(h.callbacks(), Debug, &[b"looking for file conflicts\n"]);
 	let conflicts = find_fileconflicts(h);
 	if !conflicts.is_empty() {
 		return Err(CommitError {
@@ -1485,7 +1484,7 @@ pub(crate) fn sync_check(h: &mut Handle) -> Result<(), CommitError> {
 		return Ok(());
 	}
 	h.callbacks().event(&Event::DiskspaceStart);
-	log(h.callbacks(), Debug, &[b"checking available disk space\n"]);
+	logv(h.callbacks(), Debug, &[b"checking available disk space\n"]);
 	let trans = h.set_trans(None).expect("committing");
 	// check_diskspace takes package lists, the targets are TransPkgs
 	let add: Vec<Package> =
@@ -1496,7 +1495,7 @@ pub(crate) fn sync_check(h: &mut Handle) -> Result<(), CommitError> {
 	h.set_trans(Some(trans));
 	if let Err(e) = r {
 		let msg = b"not enough free disk space\n";
-		log(h.callbacks(), Error, &[msg]);
+		logv(h.callbacks(), Error, &[msg]);
 		return Err(e.errno().unwrap_or(Errno::Ok).into());
 	}
 	h.callbacks().event(&Event::DiskspaceDone);
@@ -1536,12 +1535,12 @@ fn find_fileconflicts(h: &mut Handle) -> Vec<FileConflict> {
 pub(crate) fn sync_commit(h: &mut Handle) -> Result<(), Errno> {
 	if !h.trans().expect("committing").remove.is_empty() {
 		let msg = b"removing conflicting and to-be-replaced packages\n";
-		log(h.callbacks(), Debug, &[msg]);
+		logv(h.callbacks(), Debug, &[msg]);
 		remove::remove_packages(h, false);
 	}
-	log(h.callbacks(), Debug, &[b"installing packages\n"]);
+	logv(h.callbacks(), Debug, &[b"installing packages\n"]);
 	add::upgrade_packages(h).inspect_err(|_| {
 		let msg = b"could not commit transaction\n";
-		log(h.callbacks(), Error, &[msg]);
+		logv(h.callbacks(), Error, &[msg]);
 	})
 }

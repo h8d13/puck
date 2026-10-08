@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use time::{OffsetDateTime, UtcOffset};
 
-use crate::dload::{MONTHS, civil_from_days};
+use crate::dload::MONTHS;
 use crate::error::Errno;
 use crate::util::until_nul;
 
@@ -64,12 +64,20 @@ pub fn local_now() -> LogTime {
 	LogTime { secs, utcoff }
 }
 
-// the broken-down local time: year, month, day, hour, minute, second
-fn local(t: LogTime) -> (i64, i64, i64, i64, i64, i64) {
+// the broken-down local time: year, month, day, hour, minute, second.
+// a clock past time's years (-9999..9999) stamps the epoch
+fn local(t: LogTime) -> (i32, u8, u8, u8, u8, u8) {
 	let s = t.secs + i64::from(t.utcoff);
-	let (days, rem) = (s.div_euclid(86400), s.rem_euclid(86400));
-	let (y, m, d) = civil_from_days(days);
-	(y, m, d, rem / 3600, rem / 60 % 60, rem % 60)
+	let d = OffsetDateTime::from_unix_timestamp(s)
+		.unwrap_or(OffsetDateTime::UNIX_EPOCH);
+	(
+		d.year(),
+		d.month() as u8,
+		d.day(),
+		d.hour(),
+		d.minute(),
+		d.second(),
+	)
 }
 
 // _alpm_log_leader: "[%FT%T%z] [prefix] ". glibc's %F is "%Y-%m-%d",

@@ -11,7 +11,7 @@
 // calloc'd struct dload_payload mirrors, released through
 // _alpm_dload_payload_reset.
 use std::collections::HashMap;
-use std::ffi::{CStr, c_char, c_int, c_long, c_void};
+use std::ffi::{c_char, c_int, c_long, c_void};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::ptr;
@@ -22,10 +22,12 @@ use std::time::Duration;
 
 use alpm_core::callbacks::{Callbacks, DownloadEvent, Event, Fetch, LogLevel};
 use alpm_core::dload::Payload;
+use time::OffsetDateTime;
 
 use crate::handle::*;
+use crate::package::text_or_empty;
 use crate::{CFile, CList, TempRoot, alpm_list_add, alpm_list_free, c_free};
-use crate::{cstr, strdup, take, vsnprintf};
+use crate::{cstr, strdup, take};
 
 // CURL_ERROR_SIZE
 const CURL_ERROR_SIZE: usize = 256;
@@ -83,6 +85,18 @@ unsafe extern "C" {
 		filename: *const c_char,
 	) -> *mut c_char;
 	fn _alpm_filecache_setup(handle: *mut c_void) -> *const c_char;
+	// time_t is long on glibc's 64-bit targets
+	fn curl_getdate(p: *const c_char, unused: *const c_long) -> c_long;
+}
+
+// curl's date parser, the one CURLINFO_FILETIME reads Last-Modified
+// with (Curl_getdate_capped differs past time_t only). -1 is a failure,
+// curl moves a parsed -1 to 0
+pub fn c_getdate(s: &[u8]) -> c_long {
+	let c = cstr(s);
+	// SAFETY: c is a nul-terminated copy, the second argument is
+	// unused by curl and may be NULL
+	unsafe { curl_getdate(c.as_ptr(), ptr::null()) }
 }
 
 // the log lines both sides record: RET_ERR/GOTO_ERR's carry the C's
@@ -201,14 +215,6 @@ struct Ctx {
 	fetch: Option<Fetcher>,
 }
 
-fn bytes(p: *const c_char) -> Vec<u8> {
-	if p.is_null() {
-		return Vec::new();
-	}
-	// SAFETY: libalpm passes nul-terminated strings
-	unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
-}
-
 #[repr(C)]
 struct CCompleted {
 	total: i64,
@@ -256,7 +262,7 @@ unsafe extern "C" fn dl_cb(
 		};
 		(ctx, ev)
 	};
-	ctx.rec.downloads.push((bytes(filename), ev));
+	ctx.rec.downloads.push((text_or_empty(filename), ev));
 }
 
 unsafe extern "C" fn log_cb(
@@ -271,14 +277,10 @@ unsafe extern "C" fn log_cb(
 		4 => LogLevel::Debug,
 		_ => return,
 	};
-	let mut buf = vec![0 as c_char; 8192];
-	// SAFETY: fmt and args are the printf pair _alpm_log got, used once;
-	// buf is writable for its length. ctx is the boxed Ctx
-	let ctx = unsafe {
-		vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
-		&mut *ctx.cast::<Ctx>()
-	};
-	let msg = bytes(buf.as_ptr());
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
+	// SAFETY: ctx is the boxed Ctx
+	let ctx = unsafe { &mut *ctx.cast::<Ctx>() };
 	if kept(level, &msg) {
 		ctx.rec.logs.push((level, msg));
 	}
@@ -310,7 +312,7 @@ unsafe extern "C" fn fetch_cb(
 	// SAFETY: ctx is the boxed Ctx, fetch is set while this cb is
 	let ctx = unsafe { &mut *ctx.cast::<Ctx>() };
 	let f = ctx.fetch.as_mut().expect("fetchcb without a script");
-	f.fetch(&bytes(url), &bytes(localpath), force != 0)
+	f.fetch(&text_or_empty(url), &text_or_empty(localpath), force != 0)
 }
 
 pub struct CDload {
@@ -486,7 +488,7 @@ impl CDload {
 		while !i.is_null() {
 			// SAFETY: a live list node holding a C string
 			unsafe {
-				out.push(bytes((*i).data.cast()));
+				out.push(text_or_empty((*i).data.cast()));
 				i = (*i).next;
 			}
 		}
@@ -502,13 +504,6 @@ impl CDload {
 		// SAFETY: h is live, ctx boxed
 		unsafe { alpm_option_set_fetchcb(self.h, cb, c.cast()) };
 		old
-	}
-
-	pub fn fetch_calls(&self) -> Vec<(Vec<u8>, Vec<u8>, bool)> {
-		self.ctx.fetch
-			.as_ref()
-			.map(|f| f.calls.clone())
-			.unwrap_or_default()
 	}
 
 	fn take_record(&mut self) -> Record {
@@ -617,7 +612,7 @@ impl CDload {
 	// _alpm_filecache_setup and the logs it made
 	pub fn filecache_setup(&mut self) -> (Vec<u8>, Record) {
 		// SAFETY: h is live, the string stays owned by the handle
-		let r = bytes(unsafe { _alpm_filecache_setup(self.h) });
+		let r = text_or_empty(unsafe { _alpm_filecache_setup(self.h) });
 		(r, self.take_record())
 	}
 }
@@ -675,32 +670,18 @@ pub fn payload_layout_ok() -> bool {
 
 // HTTP dates for Last-Modified, independent of the port's
 pub fn http_date(t: i64) -> String {
-	const WD: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-	const MON: [&str; 12] = [
-		"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep",
-		"Oct", "Nov", "Dec",
-	];
-	let days = t.div_euclid(86400);
-	let secs = t.rem_euclid(86400);
-	// civil_from_days, H. Hinnant
-	let z = days + 719468;
-	let era = z.div_euclid(146097);
-	let doe = z - era * 146097;
-	let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-	let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-	let mp = (5 * doy + 2) / 153;
-	let d = doy - (153 * mp + 2) / 5 + 1;
-	let m = if mp < 10 { mp + 3 } else { mp - 9 };
-	let y = yoe + era * 400 + i64::from(m <= 2);
+	const WD: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+	let d = OffsetDateTime::from_unix_timestamp(t).expect("server mtime");
+	let mon = format!("{}", d.month());
 	format!(
 		"{}, {:02} {} {} {:02}:{:02}:{:02} GMT",
-		WD[days.rem_euclid(7) as usize],
-		d,
-		MON[(m - 1) as usize],
-		y,
-		secs / 3600,
-		secs / 60 % 60,
-		secs % 60
+		WD[d.weekday().number_days_from_monday() as usize],
+		d.day(),
+		&mon[..3],
+		d.year(),
+		d.hour(),
+		d.minute(),
+		d.second()
 	)
 }
 

@@ -8,7 +8,7 @@
 // Callbacks, recording the same way, and a logfile of its own, so the
 // tests compare HookRec lists and logfile text directly.
 use std::cell::RefCell;
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CString, c_char, c_int, c_void};
 use std::fs;
 use std::path::PathBuf;
 use std::ptr;
@@ -18,7 +18,9 @@ use std::sync::MutexGuard;
 use alpm_core::callbacks::{Callbacks, Event, HookRun, HookWhen, LogLevel};
 use alpm_core::handle::Handle;
 use alpm_core::package::{DbCaches, Package};
+use alpm_core::trans::TRANS_FLAG_NOLOCK;
 
+use crate::handle::log_message;
 use crate::handle::{
 	ALPM, CHandleHead, alpm_db_get_pkgcache, alpm_get_localdb,
 	alpm_initialize, alpm_option_set_eventcb, alpm_option_set_hookdirs,
@@ -26,11 +28,10 @@ use crate::handle::{
 	alpm_option_set_noextracts, alpm_release, alpm_trans_init,
 	alpm_trans_release,
 };
-use crate::package::{CPkgBox, alpm_pkg_get_provides, list_data, with_strs};
-use crate::{alpm_list_add, alpm_list_free, cstr, vsnprintf};
-
-// ALPM_TRANS_FLAG_NOLOCK: no lock file under the fixture dbpath
-const TRANS_FLAG_NOLOCK: c_int = 1 << 17;
+use crate::package::{
+	CPkgBox, alpm_pkg_get_provides, field, list_data, with_strs,
+};
+use crate::{alpm_list_add, alpm_list_free, cstr};
 
 type IoCb = unsafe extern "C" fn(*mut c_void, isize, *mut c_void) -> isize;
 
@@ -202,26 +203,17 @@ const EVENT_HOOK_DONE: c_int = 35;
 const EVENT_HOOK_RUN_START: c_int = 36;
 const EVENT_HOOK_RUN_DONE: c_int = 37;
 
-fn bytes(p: *const c_char) -> Option<Vec<u8>> {
-	// SAFETY: NULL or a nul-terminated string alive for the callback
-	(!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_bytes().to_vec())
-}
-
 unsafe extern "C" fn log_cb(
 	ctx: *mut c_void,
 	level: c_int,
 	fmt: *const c_char,
 	args: *mut c_void,
 ) {
-	let mut buf = vec![0 as c_char; 16384];
-	// SAFETY: fmt and args are _alpm_log's printf pair, used once; buf
-	// is writable for its length. ctx is the boxed Vec of CHookHandle
-	let (n, recs) = unsafe {
-		let n = vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
-		(n, &mut *ctx.cast::<Vec<HookRec>>())
-	};
-	assert!(n >= 0 && (n as usize) < buf.len(), "log message cut");
-	recs.push(HookRec::Log(level, bytes(buf.as_ptr()).unwrap()));
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
+	// SAFETY: ctx is the boxed Vec of HookRec
+	let recs = unsafe { &mut *ctx.cast::<Vec<HookRec>>() };
+	recs.push(HookRec::Log(level, msg));
 }
 
 unsafe extern "C" fn event_cb(ctx: *mut c_void, event: *mut c_void) {
@@ -245,7 +237,7 @@ pub(crate) unsafe fn c_hook_rec(event: *mut c_void) -> Option<HookRec> {
 		match kind {
 			EVENT_SCRIPTLET_INFO => {
 				let e = &*event.cast::<CScriptletInfo>();
-				HookRec::Scriptlet(bytes(e.line).unwrap())
+				HookRec::Scriptlet(field(e.line).unwrap())
 			}
 			EVENT_HOOK_START | EVENT_HOOK_DONE => {
 				let e = &*event.cast::<CEventHook>();
@@ -258,8 +250,8 @@ pub(crate) unsafe fn c_hook_rec(event: *mut c_void) -> Option<HookRec> {
 			}
 			EVENT_HOOK_RUN_START | EVENT_HOOK_RUN_DONE => {
 				let e = &*event.cast::<CEventHookRun>();
-				let name = bytes(e.name).unwrap();
-				let desc = bytes(e.desc);
+				let name = field(e.name).unwrap();
+				let desc = field(e.desc);
 				match kind {
 					EVENT_HOOK_RUN_START => {
 						HookRec::RunStart(
@@ -296,6 +288,7 @@ pub type CTarget<'a> = (&'a Package, Option<&'a Package>);
 pub struct CHookHandle {
 	h: *mut c_void,
 	logfile: PathBuf,
+	// the callbacks' ctx: boxed so the Vec stays put when the handle moves
 	#[allow(clippy::box_collection)]
 	recs: Box<Vec<HookRec>>,
 	_guard: MutexGuard<'static, ()>,

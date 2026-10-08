@@ -43,7 +43,9 @@ use unicode_width::UnicodeWidthChar;
 
 pub use crate::conf::ColStr;
 use crate::conf::{Config, LOG_DEBUG, LOG_ERROR, LOG_FUNCTION, LOG_WARNING};
-use crate::pacman::{PM_OP_SYNC, PM_OP_UPGRADE};
+use crate::pacman::{
+	PM_OP_DATABASE, PM_OP_FILES, PM_OP_REMOVE, PM_OP_SYNC, PM_OP_UPGRADE,
+};
 
 // what the C writes to stdout and stderr. sink is where flush sends it
 // (the binary's std streams), None keeps it buffered (tests, callers
@@ -1886,4 +1888,24 @@ pub struct Ui<'a, R> {
 	// config->explicit_adds/explicit_removes
 	pub explicit_adds: Vec<Package>,
 	pub explicit_removes: Vec<Package>,
+}
+
+// util.c needs_root: operations that modify the system
+pub fn needs_root(config: &Config) -> bool {
+	let c = config;
+	match c.op {
+		PM_OP_DATABASE => c.op_q_check == 0,
+		PM_OP_UPGRADE | PM_OP_REMOVE => c.print == 0,
+		PM_OP_SYNC => {
+			c.op_s_clean != 0
+				|| c.op_s_sync != 0 || (c.group == 0
+				&& c.op_s_info == 0 && c
+				.op_q_list
+				== 0 && c.op_s_search == 0 && c
+				.print
+				== 0)
+		}
+		PM_OP_FILES => c.op_s_sync != 0,
+		_ => false,
+	}
 }

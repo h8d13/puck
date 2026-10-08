@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use alpm_core::callbacks::{Callbacks, DownloadEvent, Event, Fetch, LogLevel};
 use alpm_core::dload::{
 	DownloadState, Downloader, Payload, Sandbox, Settings,
-	download_internal, gethost, http_date, parse_http_date,
+	download_internal, getdate_capped, gethost, http_date,
 	remove_temporary_download_dir,
 };
 use alpm_core::error::Errno;
@@ -67,8 +67,14 @@ struct Rec {
 }
 
 impl Callbacks for Rec {
+	// errors and warnings: the debug lines are the difftest's
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {
-		self.logs.push((level, String::from_utf8_lossy(msg).into()));
+		if level != LogLevel::Debug {
+			self.logs.push((
+				level,
+				String::from_utf8_lossy(msg).into(),
+			));
+		}
 	}
 
 	fn download(&mut self, filename: &[u8], event: DownloadEvent) {
@@ -147,20 +153,26 @@ fn hosts() {
 
 #[test]
 fn dates() {
-	assert_eq!(http_date(784111777), "Sun, 06 Nov 1994 08:49:37 GMT");
-	assert_eq!(http_date(0), "Thu, 01 Jan 1970 00:00:00 GMT");
+	let date = |t| http_date(t).unwrap();
+	assert_eq!(date(784111777), "Sun, 06 Nov 1994 08:49:37 GMT");
+	assert_eq!(date(0), "Thu, 01 Jan 1970 00:00:00 GMT");
+	assert_eq!(http_date(1 << 40), None);
 	for s in [
 		&b"Sun, 06 Nov 1994 08:49:37 GMT"[..],
 		b"Sunday, 06-Nov-94 08:49:37 GMT",
 		b"Sun Nov  6 08:49:37 1994",
 		b"Sun, 06 Nov 1994 09:49:37 +0100",
+		b"Sun, 06 Nov 1994 03:49:37 EST",
 	] {
-		assert_eq!(parse_http_date(s), Some(784111777), "{s:?}");
+		assert_eq!(getdate_capped(s), 784111777, "{s:?}");
 	}
-	assert_eq!(parse_http_date(b"garbage"), None);
-	assert_eq!(parse_http_date(b"06 Nov 1994"), None);
+	assert_eq!(getdate_capped(b"garbage"), -1);
+	// no time is midnight, a parsed -1 is 0
+	assert_eq!(getdate_capped(b"06 Nov 1994"), 784080000);
+	assert_eq!(getdate_capped(b"31 Dec 1969 23:59:59 GMT"), 0);
+	assert_eq!(getdate_capped(b"Tue, 15 Mar 1582 22:12:44 GMT"), -1);
 	for t in (0..4_000_000_000i64).step_by(86_399_999) {
-		assert_eq!(parse_http_date(http_date(t).as_bytes()), Some(t));
+		assert_eq!(getdate_capped(date(t).as_bytes()), t);
 	}
 }
 

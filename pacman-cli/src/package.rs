@@ -75,6 +75,11 @@ pub trait PkgEnv: DbCaches {
 	fn format_date(&mut self, t: i64) -> Option<Vec<u8>> {
 		format_date(t)
 	}
+	// alpm_pkg_get_validation: the stored value, a sync db computes it
+	// on first use
+	fn validation(&mut self, pkg: &Package) -> i32 {
+		pkg.validation
+	}
 	// alpm_pkg_has_scriptlet: a local package lazy-loads it here
 	fn has_scriptlet(&mut self, pkg: &Package) -> bool {
 		pkg.scriptlet != 0
@@ -309,7 +314,7 @@ pub fn dump_pkg_full(
 		}
 		PkgReason::Unknown => b"Unknown",
 	};
-	let validation = validation_list(pkg.validation);
+	let validation = validation_list(env.validation(pkg));
 	// computed before any output, like the C
 	let (requiredby, optionalfor) = if extra || local {
 		(compute_requiredby(pkg, env), compute_optionalfor(pkg, env))

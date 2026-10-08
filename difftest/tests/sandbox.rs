@@ -32,7 +32,7 @@ use alpm_core::sandbox_syscalls::{DENIED_SYSCALLS, syscalls_filter};
 use difftest::{
 	CDload, CSandbox, CbRec, Recorder, Reply, Rng, SbRecorder, Server,
 	TempRoot, fs_probe_setup, fs_probes, inject_errors, iters,
-	no_new_privs, probe_lines, syscall_probes,
+	no_new_privs, probe_lines, syscall_probes, unsandbox,
 };
 
 const ENOSYS: c_int = 38;
@@ -624,6 +624,8 @@ fn helper_download_vs_c() {
 				})
 				.collect::<Vec<_>>()
 		};
+		// the C downloads in place, the helper's setup lines are its own
+		unsandbox(&mut rec.0.logs);
 		assert_eq!(
 			norm(&rec.0.logs, &d),
 			norm(&crec.logs, &dir_bytes(&cd)),

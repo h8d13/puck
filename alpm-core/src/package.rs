@@ -238,15 +238,9 @@ pub fn compute_optionalfor(
 	compute(pkg, caches, true)
 }
 
-// alpm_pkg_should_ignore: the name or one of the groups matches an
-// ignorepkg/ignoregroup entry as an fnmatch pattern (alpm_list_find with
-// _alpm_fnmatch, so no '!' negation). groups as given, the C getter
-// lazy-loads them for local packages
+// alpm_pkg_should_ignore (DepsOpts::should_ignore)
 pub fn pkg_should_ignore(handle: &Handle, pkg: &Package) -> bool {
-	let matches =
-		|pats: &[Vec<u8>], s: &[u8]| pats.iter().any(|p| fnmatch(p, s));
-	matches(handle.ignorepkgs(), pkg.name_bytes())
-		|| pkg.groups.iter().any(|g| matches(handle.ignoregroups(), g))
+	handle.deps_opts().should_ignore(pkg)
 }
 
 // _alpm_pkg_check_meta on a package with this name and version, every

@@ -43,6 +43,9 @@ pub struct PkgHash<P = Package> {
 	holes: Vec<usize>,
 	// slab indices in pkghash->list order
 	list: Vec<usize>,
+	// list in pkg_cmp order (no add broke it): merge_pos bisects, so a
+	// db load's add_sorted calls do not each scan the list
+	ordered: bool,
 	limit: usize,
 }
 
@@ -86,6 +89,7 @@ impl<P: Borrow<Package>> PkgHash<P> {
 			slab: Vec::new(),
 			holes: Vec::new(),
 			list: Vec::new(),
+			ordered: true,
 			limit,
 		})
 	}
@@ -141,6 +145,9 @@ impl<P: Borrow<Package>> PkgHash<P> {
 		let after = |&i: &usize| {
 			pkg_cmp(self.entry(i).borrow(), pkg).is_gt()
 		};
+		if self.ordered {
+			return self.list.partition_point(|i| !after(i));
+		}
 		self.list.iter().position(after).unwrap_or(self.list.len())
 	}
 
@@ -171,6 +178,10 @@ impl<P: Borrow<Package>> PkgHash<P> {
 			false => self.list.len(),
 			true => self.merge_pos(pkg.borrow()),
 		};
+		if let Some(&last) = self.list.last().filter(|_| !sorted) {
+			let p = self.entry(last).borrow();
+			self.ordered &= pkg_cmp(p, pkg.borrow()).is_le();
+		}
 		let i = match self.holes.pop() {
 			Some(i) => {
 				self.slab[i] = Some(pkg);

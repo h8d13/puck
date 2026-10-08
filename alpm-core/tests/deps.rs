@@ -241,7 +241,7 @@ mod resolve {
 		sync: &'a [DbPkgs<'a>],
 	) -> DepsEnv<'a> {
 		DepsEnv {
-			handle: h,
+			opts: h.deps_opts(),
 			nodepversion: false,
 			local: DbPkgs {
 				usage: DB_USAGE_ALL,

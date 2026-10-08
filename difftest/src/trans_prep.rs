@@ -16,7 +16,7 @@
 // RET_ERR/GOTO_ERR and of db.c's cache loads. packages are named by name (and db index where the
 // C pointer says which db).
 use std::collections::VecDeque;
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CString, c_char, c_int, c_void};
 use std::fs;
 use std::path::Path;
 use std::ptr;
@@ -27,11 +27,13 @@ use pacman_cli::conf::Config;
 use crate::cli_util::config;
 use crate::cli_util2::{CIo, run};
 use crate::conflict::take_conflicts;
+use crate::deps_graph;
 use crate::deps_graph::{LOG_FUNCTION, take_misses};
 use crate::fixtures::{
 	Comp, LocalEntry, TarEntry, TempRoot, section, tar_dir, tar_file,
 	ustar, write_db,
 };
+use crate::handle::log_message;
 use crate::handle::{
 	_alpm_db_get_pkgcache_hash, ALPM, CDb, CHandleHead, CTrans,
 	alpm_db_get_groupcache, alpm_db_get_name, alpm_db_set_usage,
@@ -44,19 +46,18 @@ use crate::handle::{
 	alpm_pkg_free, alpm_pkg_get_db, alpm_pkg_load, alpm_register_syncdb,
 	alpm_release, alpm_trans_init, alpm_trans_release,
 };
-use crate::package::{CPkg, field, list_data, with_strs};
+use crate::package::{CPkg, field, list_data, read_dep, with_strs};
 use crate::sync_ro::pacman_sync;
 use crate::{CList, Rng, alpm_list_add, alpm_list_free, c_free, cstr};
-use crate::{deps_graph, vsnprintf};
 
 // ---- fixture worlds ----
 
 pub const TP_SYNC: [&str; 3] = ["core", "extra", "multi"];
 const NAMES: [&str; 8] = ["a", "b", "c", "d", "e", "f", "g", "h"];
 // provided only
-const VIRTUAL: [&str; 3] = ["v1", "v2", "libx"];
+pub const TP_VIRTUAL: [&str; 3] = ["v1", "v2", "libx"];
 const PKG_VERSIONS: [&str; 4] = ["1.0-1", "2.0-1", "1:0.5-1", "1.5-2"];
-const DEP_VERSIONS: [&str; 5] = ["1.0", "2.0", "1:0.5", "1.5", "1.0-1"];
+pub const TP_DEP_VERSIONS: [&str; 5] = ["1.0", "2.0", "1:0.5", "1.5", "1.0-1"];
 const OPS: [&str; 5] = ["=", ">=", "<=", ">", "<"];
 pub const TP_GROUPS: [&str; 2] = ["g1", "g2"];
 // the handle architectures, when set, are "x86_64"
@@ -70,20 +71,20 @@ fn some<T>(rng: &mut Rng, n: usize, f: impl Fn(&mut Rng) -> T) -> Vec<T> {
 	(0..rng.below(n)).map(|_| f(rng)).collect()
 }
 
-fn any_name(rng: &mut Rng) -> &'static str {
+pub fn tp_any_name(rng: &mut Rng) -> &'static str {
 	match rng.below(4) {
-		0 => pick(rng, &VIRTUAL),
+		0 => pick(rng, &TP_VIRTUAL),
 		_ => pick(rng, &NAMES),
 	}
 }
 
-fn relation(rng: &mut Rng) -> String {
-	let name = any_name(rng);
+pub fn tp_relation(rng: &mut Rng) -> String {
+	let name = tp_any_name(rng);
 	match rng.below(3) {
 		0 => format!(
 			"{name}{}{}",
 			pick(rng, &OPS),
-			pick(rng, &DEP_VERSIONS)
+			pick(rng, &TP_DEP_VERSIONS)
 		),
 		_ => name.to_string(),
 	}
@@ -91,12 +92,12 @@ fn relation(rng: &mut Rng) -> String {
 
 fn provision(rng: &mut Rng) -> String {
 	let name = match rng.below(3) {
-		0 | 1 => pick(rng, &VIRTUAL),
+		0 | 1 => pick(rng, &TP_VIRTUAL),
 		_ => pick(rng, &NAMES),
 	};
 	match rng.below(4) {
 		0 | 1 => name.to_string(),
-		_ => format!("{name}={}", pick(rng, &DEP_VERSIONS)),
+		_ => format!("{name}={}", pick(rng, &TP_DEP_VERSIONS)),
 	}
 }
 
@@ -139,15 +140,15 @@ fn gen_pkg(rng: &mut Rng, name: &'static str, sync: bool) -> TpPkg {
 	let mut p = TpPkg {
 		name,
 		version,
-		depends: some(rng, 4, relation),
-		optdepends: some(rng, 3, |r| any_name(r).to_string()),
+		depends: some(rng, 4, tp_relation),
+		optdepends: some(rng, 3, |r| tp_any_name(r).to_string()),
 		provides: some(rng, 3, provision),
 		conflicts: match rng.below(3) {
-			0 => some(rng, 3, relation),
+			0 => some(rng, 3, tp_relation),
 			_ => Vec::new(),
 		},
 		replaces: match (sync, rng.below(4)) {
-			(true, 0) => some(rng, 3, relation),
+			(true, 0) => some(rng, 3, tp_relation),
 			_ => Vec::new(),
 		},
 		groups: subset(rng, &TP_GROUPS, 3),
@@ -512,10 +513,6 @@ pub const UNPORTED_DEBUG: [&[u8]; 5] = [
 	b"loading group cache for repository ",
 ];
 
-fn read_dep(d: *mut c_void) -> Depend {
-	deps_graph::read_dep(d.cast())
-}
-
 fn pkg_name(p: *const CPkg) -> Vec<u8> {
 	crate::package::read_pkg(p)
 		.name
@@ -539,13 +536,8 @@ unsafe extern "C" fn log_cb(
 	// SAFETY: ctx is the Rec registered with the callback, no other
 	// reference to it is live while the C runs
 	let rec = unsafe { &mut *ctx.cast::<Rec>() };
-	let mut buf = [0 as c_char; 4096];
-	// SAFETY: fmt and args are the format and va_list of this call,
-	// used once; buf is writable for its length
-	let n = unsafe { vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args) };
-	assert!(n >= 0 && (n as usize) < buf.len(), "log message too long");
-	// SAFETY: vsnprintf nul-terminated buf
-	let msg = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_bytes().to_vec();
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
 	let errline = level == LOG_DEBUG
 		&& UNPORTED_DEBUG.iter().any(|p| msg.starts_with(p));
 	if rec.mute || level == LOG_FUNCTION || errline {
@@ -565,7 +557,7 @@ unsafe extern "C" fn event_cb(ctx: *mut c_void, e: *mut c_void) {
 			let o = unsafe { &*e.cast::<CEvOptdep>() };
 			TpEvent::OptdepRemoval(
 				pkg_name(o.pkg),
-				read_dep(o.optdep),
+				read_dep(o.optdep.cast()),
 			)
 		}
 		k => TpEvent::Kind(k),
@@ -606,7 +598,7 @@ unsafe extern "C" fn question_cb(ctx: *mut c_void, q: *mut c_void) {
 			let c = unsafe { &*q.list.cast::<CConflict>() };
 			let (a, b) =
 				(pkg_name(c.package1), pkg_name(c.package2));
-			TpAsk::Conflict(a, b, read_dep(c.reason))
+			TpAsk::Conflict(a, b, read_dep(c.reason.cast()))
 		}
 		Q_REMOVE_PKGS => {
 			// SAFETY: as above
@@ -623,7 +615,7 @@ unsafe extern "C" fn question_cb(ctx: *mut c_void, q: *mut c_void) {
 					let db = unsafe { alpm_pkg_get_db(p) };
 					// SAFETY: db is live, its name nul terminated
 					unsafe {
-						CStr::from_ptr(
+						std::ffi::CStr::from_ptr(
 							alpm_db_get_name(db),
 						)
 					}
@@ -632,7 +624,11 @@ unsafe extern "C" fn question_cb(ctx: *mut c_void, q: *mut c_void) {
 				})
 				.collect();
 			let names = names(q.list);
-			TpAsk::SelectProvider(names, dbs, read_dep(q.depend))
+			TpAsk::SelectProvider(
+				names,
+				dbs,
+				read_dep(q.depend.cast()),
+			)
 		}
 		k => panic!("unexpected question {k}"),
 	};

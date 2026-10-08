@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::be_local::INFRQ_DESC;
 use crate::callbacks::{Callbacks, Fetch, LogLevel};
 use crate::db::{Db, SIG_USE_DEFAULT};
-use crate::deps::{DepMod, Depend};
+use crate::deps::{DepMod, Depend, DepsOpts};
 use crate::dload::{DownloadState, Downloader, Sandbox, Settings};
 use crate::error::Errno;
 use crate::log::Logger;
@@ -153,10 +153,12 @@ pub(crate) struct SyncParts<'h> {
 }
 
 // the dbs borrowed with what their calls take from the handle: dbext
-// (read by cache loads) and the callbacks db.c logs through
+// (read by cache loads), the callbacks db.c logs through and the
+// options deps.c reads next to the caches
 pub struct DbsMut<'h> {
 	pub dbext: &'h [u8],
 	pub cb: &'h mut dyn Callbacks,
+	pub opts: DepsOpts<'h>,
 	pub local: Option<&'h mut Db>,
 	// registration order
 	pub sync: &'h mut [Db],
@@ -624,10 +626,6 @@ impl Handle {
 		}
 	}
 
-	pub fn download_state(&self) -> &DownloadState {
-		&self.download
-	}
-
 	// handle->user
 	pub fn user(&self) -> u32 {
 		self.user
@@ -688,6 +686,15 @@ impl Handle {
 	// alpm_option_get_assumeinstalled
 	pub fn assumeinstalled(&self) -> &[Depend] {
 		&self.assumeinstalled
+	}
+
+	// ignorepkg, ignoregroup and assumeinstalled, as deps.c reads them
+	pub fn deps_opts(&self) -> DepsOpts<'_> {
+		DepsOpts {
+			ignorepkg: &self.ignorepkg,
+			ignoregroup: &self.ignoregroup,
+			assumeinstalled: &self.assumeinstalled,
+		}
 	}
 
 	// alpm_option_add_assumeinstalled: only "name" and "name=version",
@@ -778,6 +785,11 @@ impl Handle {
 		DbsMut {
 			dbext: &self.dbext,
 			cb: &mut *self.cb,
+			opts: DepsOpts {
+				ignorepkg: &self.ignorepkg,
+				ignoregroup: &self.ignoregroup,
+				assumeinstalled: &self.assumeinstalled,
+			},
 			local: self.db_local.as_mut(),
 			sync: &mut self.dbs_sync,
 		}

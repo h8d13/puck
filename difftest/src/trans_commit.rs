@@ -19,7 +19,7 @@
 // data list, the logfile, the root, local db and cache trees.
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
@@ -49,6 +49,7 @@ use crate::fixtures::{
 	Comp, LocalEntry, TarEntry, TarNode, TempRoot, section, tar_dir,
 	tar_file, ustar, ustar_owned, write_db,
 };
+use crate::handle::log_message;
 use crate::handle::{
 	_alpm_db_get_pkgcache_hash, ALPM, CDb, CHandleHead, alpm_db_add_server,
 	alpm_db_get_pkg, alpm_errno, alpm_get_localdb, alpm_initialize,
@@ -63,7 +64,7 @@ use crate::handle::{
 	alpm_trans_release,
 };
 use crate::hook::{HookRec, c_hook_rec, hook_rec, strip_stamps};
-use crate::package::{CPkg, list_data, read_pkg, with_strs};
+use crate::package::{CPkg, list_data, read_pkg, text, with_strs};
 use crate::signing::{
 	_alpm_key_in_keychain, GPGME_PROTOCOL_OPENPGP, GpgFixture, c_only,
 	encode_base64, gpgme_check_version, gpgme_set_engine_info,
@@ -72,7 +73,7 @@ use crate::trans_prep::{
 	alpm_add_pkg, alpm_remove_pkg, alpm_sync_sysupgrade, alpm_trans_prepare,
 };
 use crate::util::c_umask;
-use crate::{CList, alpm_list_free, c_free, cstr, vsnprintf};
+use crate::{CList, alpm_list_free, c_free, cstr};
 
 unsafe extern "C" {
 	fn alpm_trans_commit(
@@ -186,8 +187,6 @@ fn tc_hookdirs(fx: &TempRoot, c: &TcCase) -> Vec<Vec<u8>> {
 		false => (0..2).map(|i| hookdir(fx, i)).collect(),
 	}
 }
-
-pub const TC_NOLOCK: c_int = 1 << 17;
 
 fn arch_name(p: &TcPkg) -> String {
 	format!("{}-{}-x86_64.pkg.tar.gz", p.name, p.version)
@@ -566,11 +565,6 @@ struct CRec {
 	answers: VecDeque<c_int>,
 }
 
-fn c_bytes(p: *const c_char) -> Vec<u8> {
-	// SAFETY: a nul-terminated string alive for the callback
-	unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
-}
-
 fn c_name_ver(p: *mut CPkg) -> Option<Vec<u8>> {
 	(!p.is_null()).then(|| name_ver(&read_pkg(p)))
 }
@@ -581,15 +575,11 @@ unsafe extern "C" fn log_cb(
 	fmt: *const c_char,
 	args: *mut c_void,
 ) {
-	let mut buf = vec![0 as c_char; 16384];
-	// SAFETY: fmt and args are _alpm_log's printf pair, used once; buf
-	// is writable for its length. ctx is the boxed CRec
-	let (n, rec) = unsafe {
-		let n = vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
-		(n, &mut *ctx.cast::<CRec>())
-	};
-	assert!(n >= 0 && (n as usize) < buf.len(), "log message cut");
-	rec.recs.push(TcRec::Log(level, c_bytes(buf.as_ptr())));
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
+	// SAFETY: ctx is the boxed CRec
+	let rec = unsafe { &mut *ctx.cast::<CRec>() };
+	rec.recs.push(TcRec::Log(level, msg));
 }
 
 // alpm_event_package_operation_t, alpm_event_pkg_retrieve_t
@@ -664,14 +654,14 @@ unsafe extern "C" fn question_cb(ctx: *mut c_void, q: *mut c_void) {
 	let detail = (kind == Q_CORRUPTED).then(|| {
 		// SAFETY: a CORRUPTED_PKG question
 		let c = unsafe { &*q.cast::<CQCorrupted>() };
-		(c_bytes(c.filepath), c.reason)
+		(text(c.filepath), c.reason)
 	});
 	rec.recs.push(TcRec::Ask(kind, detail));
 	if kind == Q_IMPORT_KEY {
 		// SAFETY: an IMPORT_KEY question, uid may be NULL
 		let k = unsafe { &*q.cast::<CQImportKey>() };
-		let uid = (!k.uid.is_null()).then(|| c_bytes(k.uid));
-		rec.recs.push(TcRec::AskKey(uid, c_bytes(k.fingerprint)));
+		let uid = (!k.uid.is_null()).then(|| text(k.uid));
+		rec.recs.push(TcRec::AskKey(uid, text(k.fingerprint)));
 	}
 	let answer = rec.answers.pop_front().unwrap_or(0);
 	// SAFETY: the answer int follows the type in every question
@@ -688,7 +678,7 @@ unsafe extern "C" fn progress_cb(
 ) {
 	// SAFETY: ctx is the CRec
 	let rec = unsafe { &mut *ctx.cast::<CRec>() };
-	let r = TcRec::Progress(kind, c_bytes(pkg), percent, howmany, current);
+	let r = TcRec::Progress(kind, text(pkg), percent, howmany, current);
 	rec.recs.push(r);
 }
 
@@ -715,7 +705,7 @@ unsafe extern "C" fn dl_cb(
 		};
 		(&mut *ctx.cast::<CRec>(), r)
 	};
-	rec.recs.push(TcRec::Download(c_bytes(filename), r));
+	rec.recs.push(TcRec::Download(text(filename), r));
 }
 
 // the commit data list read out and freed: filenames or fileconflicts
@@ -731,10 +721,10 @@ fn c_data(errno: c_int, data: *mut CList) -> TcData {
 				// SAFETY: a live alpm_fileconflict_t of the list
 				let r = unsafe {
 					(
-						c_bytes((*c).target),
+						text((*c).target),
 						(*c).conflict_type,
-						c_bytes((*c).file),
-						c_bytes((*c).ctarget),
+						text((*c).file),
+						text((*c).ctarget),
 					)
 				};
 				// SAFETY: freed once, not used after
@@ -747,7 +737,7 @@ fn c_data(errno: c_int, data: *mut CList) -> TcData {
 		let list = items
 			.iter()
 			.map(|&p| {
-				let s = c_bytes(p.cast());
+				let s = text(p.cast());
 				c_free(p);
 				s
 			})

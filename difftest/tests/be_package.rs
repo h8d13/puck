@@ -23,7 +23,10 @@ use alpm_core::be_package::{
 use alpm_core::callbacks::{Callbacks, LogLevel};
 use alpm_core::package::Package;
 use alpm_core::signing::Keyring;
-use difftest::{CPkgHandle, Rng, cut_archive_text, iters, pax_record};
+use difftest::{
+	COMPS, CPkgHandle, Comp, Rng, TarNode, cut_archive_text, iters,
+	pax_record, ustar_nodes,
+};
 
 // alpm_loglevel_t and message of each log line
 type CLogs = Vec<(c_int, Vec<u8>)>;
@@ -392,98 +395,30 @@ fn entry(name: &[u8], mode: u32, kind: Kind) -> Entry {
 	}
 }
 
-// octal field of width w, nul terminated
-fn octal(field: &mut [u8], v: u64) {
-	let w = field.len() - 1;
-	let s = format!("{v:0w$o}");
-	field[..w].copy_from_slice(s.as_bytes());
-}
-
-fn header(
-	name: &[u8],
-	link: &[u8],
-	mode: u32,
-	size: usize,
-	kind: u8,
-) -> [u8; 512] {
-	let mut h = [0u8; 512];
-	h[..name.len()].copy_from_slice(name);
-	octal(&mut h[100..108], u64::from(mode));
-	octal(&mut h[108..116], 0);
-	octal(&mut h[116..124], 0);
-	octal(&mut h[124..136], size as u64);
-	octal(&mut h[136..148], 1_700_000_000);
-	h[156] = kind;
-	h[157..157 + link.len()].copy_from_slice(link);
-	h[257..263].copy_from_slice(b"ustar\0");
-	h[263..265].copy_from_slice(b"00");
-	h[148..156].fill(b' ');
-	let sum: u64 = h.iter().map(|&b| u64::from(b)).sum();
-	octal(&mut h[148..155], sum);
-	h
-}
-
-fn push_data(out: &mut Vec<u8>, data: &[u8]) {
-	out.extend_from_slice(data);
-	out.resize(out.len().next_multiple_of(512), 0);
-}
-
-// GNU longname/longlink entry for a field past 100 bytes, the cut field
-fn long<'a>(out: &mut Vec<u8>, s: &'a [u8], flag: u8) -> &'a [u8] {
-	if s.len() <= 100 {
-		return s;
+// fixtures' tar entry of e
+fn node(e: &Entry) -> TarNode {
+	let (kind, link, data): (u8, &[u8], &[u8]) = match &e.kind {
+		Kind::File(d) => (b'0', b"", d),
+		Kind::Dir => (b'5', b"", b""),
+		Kind::Symlink(t) => (b'2', t, b""),
+		Kind::Hardlink(t) => (b'1', t, b""),
+		Kind::Char => (b'3', b"", b""),
+		Kind::Block => (b'4', b"", b""),
+		Kind::Fifo => (b'6', b"", b""),
+		Kind::Raw(f, d) => (*f, b"", d),
+	};
+	TarNode {
+		name: e.name.clone(),
+		kind,
+		mode: e.mode,
+		link: link.to_vec(),
+		data: data.to_vec(),
 	}
-	let data = [s, b"\0"].concat();
-	out.extend_from_slice(&header(
-		b"././@LongLink",
-		b"",
-		0o644,
-		data.len(),
-		flag,
-	));
-	push_data(out, &data);
-	&s[..100]
 }
 
 fn ustar(entries: &[Entry]) -> Vec<u8> {
-	let mut out = Vec::new();
-	for e in entries {
-		let (flag, link, data): (u8, &[u8], &[u8]) = match &e.kind {
-			Kind::File(d) => (b'0', b"", d),
-			Kind::Dir => (b'5', b"", b""),
-			Kind::Symlink(t) => (b'2', t, b""),
-			Kind::Hardlink(t) => (b'1', t, b""),
-			Kind::Char => (b'3', b"", b""),
-			Kind::Block => (b'4', b"", b""),
-			Kind::Fifo => (b'6', b"", b""),
-			Kind::Raw(f, d) => (*f, b"", d),
-		};
-		let link = long(&mut out, link, b'K');
-		let name = long(&mut out, &e.name, b'L');
-		out.extend_from_slice(&header(
-			name,
-			link,
-			e.mode,
-			data.len(),
-			flag,
-		));
-		push_data(&mut out, data);
-	}
-	out.resize(out.len() + 1024, 0);
-	out
+	ustar_nodes(&entries.iter().map(node).collect::<Vec<_>>())
 }
-
-#[derive(Clone, Copy, Debug)]
-enum Comp {
-	None,
-	Gzip,
-	Bzip2,
-	Xz,
-	Zstd,
-}
-
-const COMPS: [Comp; 5] =
-	[Comp::None, Comp::Gzip, Comp::Bzip2, Comp::Xz, Comp::Zstd];
 
 // fast levels, the fuzz writes thousands of archives
 fn compress(path: &Path, comp: Comp, data: &[u8]) {

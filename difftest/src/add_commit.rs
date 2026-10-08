@@ -10,7 +10,7 @@
 // cases are built twice from one AcCase, once per side.
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -25,10 +25,12 @@ use alpm_core::handle::Handle;
 use alpm_core::package::Package;
 use alpm_core::{add, be_package, trans, util};
 
+use crate::cstr;
 use crate::fixtures::{
 	Comp, LocalEntry, Node, TarNode, TempRoot, snapshot, ustar_entries,
 	write_db,
 };
+use crate::handle::log_message;
 use crate::handle::{
 	ALPM, CDb, alpm_db_get_pkg, alpm_errno, alpm_get_localdb,
 	alpm_initialize, alpm_option_set_eventcb, alpm_option_set_logcb,
@@ -37,10 +39,9 @@ use crate::handle::{
 	alpm_release, alpm_trans_init, alpm_trans_release,
 };
 use crate::hook::strip_stamps;
-use crate::package::{_alpm_pkg_dup, CPkg, read_pkg, with_strs};
+use crate::package::{_alpm_pkg_dup, CPkg, read_pkg, text, with_strs};
 use crate::trans_prep::alpm_add_pkg;
 use crate::util::c_umask;
-use crate::{cstr, vsnprintf};
 
 // ALPM_TRANS_FLAG_NOLOCK: no lock file under the fixture dbpath
 pub const AC_NOLOCK: c_int = 1 << 17;
@@ -488,11 +489,6 @@ const EV_SCRIPTLET: c_int = 17;
 const EV_PACNEW: c_int = 32;
 const EV_PACSAVE: c_int = 33;
 
-fn c_bytes(p: *const c_char) -> Vec<u8> {
-	// SAFETY: a nul-terminated string alive for the callback
-	unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
-}
-
 fn c_name(p: *mut CPkg) -> Option<Vec<u8>> {
 	(!p.is_null()).then(|| read_pkg(p).name_bytes().to_vec())
 }
@@ -507,15 +503,11 @@ unsafe extern "C" fn log_cb(
 	fmt: *const c_char,
 	args: *mut c_void,
 ) {
-	let mut buf = vec![0 as c_char; 16384];
-	// SAFETY: fmt and args are _alpm_log's printf pair, used once; buf
-	// is writable for its length. ctx is the boxed record list
-	let (n, recs) = unsafe {
-		let n = vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
-		(n, &mut *ctx.cast::<Vec<AcRec>>())
-	};
-	assert!(n >= 0 && (n as usize) < buf.len(), "log message cut");
-	recs.push(AcRec::Log(level, c_bytes(buf.as_ptr())));
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
+	// SAFETY: ctx is the boxed record list
+	let recs = unsafe { &mut *ctx.cast::<Vec<AcRec>>() };
+	recs.push(AcRec::Log(level, msg));
 }
 
 unsafe extern "C" fn event_cb(ctx: *mut c_void, event: *mut c_void) {
@@ -542,19 +534,19 @@ unsafe extern "C" fn event_cb(ctx: *mut c_void, event: *mut c_void) {
 					e.from_noupgrade != 0,
 					c_name(e.oldpkg),
 					c_name(e.newpkg).unwrap(),
-					c_bytes(e.file),
+					text(e.file),
 				)
 			}
 			EV_PACSAVE => {
 				let e = &*event.cast::<CEvPacsave>();
 				AcRec::Pacsave(
 					c_name(e.oldpkg).unwrap(),
-					c_bytes(e.file),
+					text(e.file),
 				)
 			}
 			EV_SCRIPTLET => {
 				let e = &*event.cast::<CEvLine>();
-				AcRec::Scriptlet(c_bytes(e.line))
+				AcRec::Scriptlet(text(e.line))
 			}
 			k => AcRec::Event(k),
 		}
@@ -572,8 +564,7 @@ unsafe extern "C" fn progress_cb(
 ) {
 	// SAFETY: ctx is the boxed record list
 	let recs = unsafe { &mut *ctx.cast::<Vec<AcRec>>() };
-	let rec =
-		AcRec::Progress(kind, c_bytes(pkg), percent, howmany, current);
+	let rec = AcRec::Progress(kind, text(pkg), percent, howmany, current);
 	recs.push(rec);
 }
 

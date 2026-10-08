@@ -250,7 +250,7 @@ makes them; METHODOLOGY.md has the rules.
 | rustix 1.1 (`fs`, `process`, `termios`, `net`; `use-libc`) | util, diskspace, lock, sandbox, frontend util | statvfs, access, umask, getuid/geteuid, fchdir, tty width, tcflush, SCM_RIGHTS to the exec helper; fsetxattr/lsetxattr, utimensat with ns (`fs`) | handle unit, process unit, xattr unit |
 | landlock 0.4, libseccomp 0.4 | sandbox | `alpm_sandbox_setup_child` | sandbox unit |
 | signal-hook 0.4 (+ signal-hook-registry) | pacman-cli sighandler | SIGINT/SIGHUP soft interrupt (no safe handler API in std/rustix, none in ALPM; tokio's signals use the same registry) | signals unit |
-| md-5, sha2, base64, time, unicode-width | through alpm-types / directly | precedent crates of ALPM | start |
+| md-5, sha2, base64, time, unicode-width | through alpm-types / directly (time: dload, log, frontend dates, difftest) | precedent crates of ALPM | start |
 
 Removed, with their patches: alpm-db (0201-0207), alpm-repo-db
 (0301-0305), alpm-pkginfo (0501-0506), alpm-package, alpm-buildinfo,
@@ -289,7 +289,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `pacman-cli::package::format_date_utc` | `time` crate | done: time does the calendar; `%c` field layout is a format! (no `formatting` feature) |
 | glibc wcwidth table in `pacman-cli::util` | `unicode-width` | done: unicode-width, glibc -1 mapping |
 | generated glibc class/towupper tables in `alpm-core::regex` | std `char` Unicode methods | done: std classes, `to_uppercase` when single-char; divergence counted (`class_divergence`, `towupper_divergence`) |
-| `dload` http_date/parse_http_date + civil date | `time` crate | open: switch formatting, keep RFC 850/asctime parsing time lacks |
+| `dload` http_date/parse_http_date + civil date | `time` crate | done: If-Modified-Since and log stamps format through time; Last-Modified is curl's parsedate translated (6 parts, names, zones, YYYYMMDD, curl's own time2epoch: years past 9999, Feb 30), which time cannot express; difftest `http_dates` vs `curl_getdate` |
 | `pacman-cli::getopt` | clap (ALPM CLIs) | kept: ops are combinable short flags anywhere (`-yS`, `pkg -S`), letters change meaning per op (two-pass parse), glibc error texts and ambiguity list, permuted argv/optind, POSIXLY_CORRECT; clap offers none of these |
 | `backup::split_backup`, `package::parse_xdata` | `alpm-db`, alpm-types `ExtraData` | translated again for the owned db readers (bytes, NULL hash, the C's '=' split) |
 | md5/sha256 | `md-5`, `sha2` | uses the crates |
@@ -505,8 +505,8 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   section, so the "loading package data" lines match.
 - `database`: trans_init(0, 0)/trans_release are the db lock
   (`Handle::lock`/`handle_unlock`), the getters' lazy loads happen up
-  front. checkdeps logs through the handle's callbacks, swapped out for
-  the call because `DepsEnv` borrows the `Handle`.
+  front. checkdeps logs through the handle's callbacks, lent by
+  `Handle::dbs_mut` next to the caches and `DepsOpts`.
 - lazy loads (`load_pkg`, the group cache) write into the cache entry like
   the C. `Package` has no ops pointer, so every local cache entry
   lazy-loads through be_local (the C keeps default ops for a package added
@@ -569,12 +569,11 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   `Output{stdout,stderr}`.
 - `getopt` keeps glibc 2.44 semantics (optopt starts at 0, nextchar as an
   argv position). `parseargs` returns `Err(exit status)` where the C exits.
-  `LIB_VERSION` hard-coded from meson, should sit next to
-  `PACKAGE_VERSION`; `TRANS_FLAG_*` move to alpm-core with trans.c,
-  `needs_root` to util.rs.
+  `LIB_VERSION` (meson's) sits next to `PACKAGE_VERSION` in alpm-core;
+  `TRANS_FLAG_*` live in `alpm_core::trans` (alpm.h), not re-exported.
 - `conflict`, `diskspace`, `deps` take handle state as parameters
-  (local `PkgHash`, root, overwrite, `DepsEnv`) and report through
-  per-unit traits until the callbacks unit lands; callers load packages
+  (local `PkgHash`, root, overwrite, `DepsEnv`) and report through the
+  `Callbacks` they are handed; callers load packages
   first where the C lazy-loads. Mount table and statvfs go through
   `Mounts`.
 - `query`: a shown local package reloads its cache entry where the C's
@@ -586,8 +585,8 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   the callbacks print at once like the C's unbuffered stderr, so the
   op's lines and libalpm's keep the C's order (separate pipes: the
   stdout/stderr interleave is not compared). `QueryEnv` carries
-  `getcols()` and `PATH`. `sync`/`files` display copies of cache entries (one db
-  borrowed at a time).
+  `getcols()` and `PATH`. `sync`/`files` show cache entries in place
+  (`Handle::dbs_mut`, -Si splits the sync dbs around the shown one).
 - `signing`: gpg(1) driven as gpgme's engine-gpg does (same binary,
   `--homedir`, status lines, colon listings); the signature goes over
   stdin, the file by path after a first read. gpgme's verify state
@@ -611,7 +610,8 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   them (others reqwest's), no netrc, Basic auth from URL userinfo only,
   HTTP/1.1, no ftp://, rustls with the platform verifier, reqwest's proxy
   env handling, the url crate's normalised URL after a redirect,
-  Last-Modified in RFC 1123/850/asctime forms only. Redirects are
+  If-Modified-Since left out for an mtime past year 9999 (time's range).
+  Last-Modified goes through curl's parsedate (`getdate_capped`). Redirects are
   followed by hand like curl's FOLLOWLOCATION (any 3xx with a Location,
   10 follows, http(s) only, curl's texts for disabled/unknown schemes,
   connect/resolve errors naming the hop, url credentials kept on the
@@ -761,8 +761,8 @@ Follow-ups raised by port units:
 | checksums (`alpm_compute_md5sum`/`sha256sum`, `_alpm_test_checksum`) via alpm-types `Checksum` | util rest | done |
 | fixture writer copied into `difftest/tests/deps_resolve.rs`, move to `fixtures.rs` | pkg follow-ups | done |
 | db search (`_alpm_db_search`) on the ported regex | db | done |
-| `LIB_VERSION` next to `PACKAGE_VERSION`, `needs_root` into util.rs, `TRANS_FLAG_*` with trans.c | args | todo |
-| one `check_meta` (be_sync, be_package, package), test ustar builders onto `fixtures::ustar` | be_package | in progress: `package::check_meta` with its log lines, used by be_sync and be_local populate; be_package keeps its copy (sniff done via 0552) |
+| `LIB_VERSION` next to `PACKAGE_VERSION`, `needs_root` into util.rs, `TRANS_FLAG_*` with trans.c | args | done: frontend and difftest import the flags from `alpm_core::trans` (alpm.h exposes them; no pacman.rs re-export, no difftest copies) |
+| one `check_meta` (be_sync, be_package, package), test ustar builders onto `fixtures::ustar` | be_package | done: `package::check_meta` (its log lines) for be_sync, be_local and be_package; difftest's be_package tars through `fixtures::ustar_nodes`, port tests through `tar::Builder` |
 | precedent cleanup: base64, time, unicode-width, drop split_backup/parse_xdata, ALPM vs C difftest for vercmp/relations | audit | done |
 | regex class/towupper tables -> std `char` methods, divergence counted like wcwidth | audit | done |
 | handle callbacks + log.c: one `Callbacks` model wired into `Handle` (deps, conflict, diskspace, dload, signing, hooks, scriptlets, sandbox) | deps, conflict, diskspace | done |
@@ -771,16 +771,17 @@ Follow-ups raised by port units:
 | rustix `process`/`termios` features: handle->user, getcols tty width, flush_term_input | handle, cliutil2 | done (`use-libc` backend for fakeroot, METHODOLOGY.md); pty difftest |
 | local time offset for log stamps (UTC today) | handle | done: `log::local_offset` (time `local-offset`, METHODOLOGY.md) for pacman.log, syslog, PACMAN_DEBUG and `-Qi`/`-Si`/`%b` dates; %F's year unpadded like glibc; parse-time errors get their PACMAN_DEBUG stamp; difftests compare stamps (`stamped`) instead of stripping them, commits keep the zone (`strip_stamps`) |
 | shared helpers into util: `llstat`, `strerror`, `PATH_MAX` once; frontend `pm_printf`/`Output`/`check_syncdbs`/`getcols` | conflict, diskspace, query, sync | done |
-| `Handle` split borrow of local + sync caches (resolver and displays clone caches today) | deps, sync | in progress (integration) |
+| `Handle` split borrow of local + sync caches (resolver and displays clone caches today) | deps, sync | done: -Si/-Sii and -Dk/-Dkk borrow in place (peak RSS on the real local + core/extra/vrch dbs: -Si 133 -> 88 MiB, -Sii 137 -> 89, -Dk 57 -> 36, -Dkk 124 -> 76; wall equal within noise); the resolver's `TransPkg`s stay owned copies by design (Notes) |
 | XferCommand via a sandbox helper exec mode (`alpm_sandbox_setup_child` from conf.c) | sandbox | done: `conf::XferCommand`, `sandbox::SandboxExec` |
 | conf difftest abort under long TMPDIR | sandbox, dbwrite reports | done: C one-byte heap overflow in `escape_chars` (UPSTREAM.md), fixture avoids it |
 | `alpm_extract_keyid` wired into -Sii/-Qii `sig_keys` | sync | done: `SyncEnv::sig_keys` (-Qii shows no keys in the C either); generated sync dbs carry `%PGPSIG%` (`random_sig`), sync_ro and cli_binary -Sii compare keys and the format error lines |
 | `Handle` owns `signing::Keyring` (gpgdir, known_keys) and implements `SigCallbacks`; `Db::register_sync` calls `be_sync::sync_db_validate` | signing | done |
 | query.rs's new_version copy onto `alpm_core::sync::sync_get_new_version` | query | done |
-| `pacman_sync` dispatches to `sync_trans` (needs a `Ui`), re-export `TRANS_FLAG_*` in pacman.rs | transprep | done |
+| `pacman_sync` dispatches to `sync_trans` (needs a `Ui`) | transprep | done |
 | "found cached pkg" debug line into `util::filecache_find` (local wrapper in sync.rs) | transprep | done (dload's lookups log it too); `filecache_setup`'s /tmp fallback logs its "option 'cachedir'" line |
-| conflict.rs `pkg_diff` onto `deps::list_diff`; deps_graph test reuses the trans_prep world generator | transprep | todo |
-| `Handle` owns dload `DownloadState`/`Settings`/cachedirs; `filecache_*` into util | dload | with the callbacks unit |
+| conflict.rs `pkg_diff` onto `deps::list_diff`; deps_graph test reuses the trans_prep world generator | transprep | done: deps_graph runs on `gen_world`/`write_world` plus its odd depends and `>=` provisions |
+| trans_prep worlds with deps_graph's odd relations (`a>=`, `d: for d`, `c<=>1`, ...) in every relation list: `prepare_fuzz` aborts in the C (`free(): invalid pointer` at `alpm_trans_release` after a prepare with file targets), `frontend_fuzz` drops below its "nothing to do" floor. root-cause (C bug or difftest free path), then widen `tp_relation` | cruft | todo |
+| `Handle` owns dload `DownloadState`/`Settings`/cachedirs; `filecache_*` into util | dload | done (`Handle::dload_settings`, `util::filecache_*`) |
 | `alpm_db_update` (be_sync download + validate) | dload | done |
 | drop `SyncCallbacks` and the `replace_callbacks` swap in sync.rs for `callback.rs` (progress bars, "is up to date", "failed to download") | dbupdate | done |
 | `Question::SelectProvider` carries provider db names (today through `Lookup`); `Handle::replace_callbacks` has no frontend caller left | frontend | done: `DbPkgs::name`, `SelectProvider::dbs`; `Lookup::db_name` and `replace_callbacks` removed, deps_graph/trans_prep compare the dbs |
@@ -790,7 +791,7 @@ Follow-ups raised by port units:
 | `be_package::changelog` without callbacks: -Qpc missed "opening archive" | qk | done (cli_binary `-Qpc --debug`) |
 | optdepends' ` [installed]`/` [pending]` after install/upgrade: the binary's `Lookup for ()` had no lists | twin-root | done: `PackageOp::local`/`pending` (local cache, trans->add at DONE; the driver keeps satisfier copies of the targets in trans.add while it lends them out), `Lookup` removed |
 | `-Sp` of an installed sync package whose local entry has no files list: the C fails ("could not open file .../files", invalid package), the port prints | output (cli_binary local_time) | todo (query/lazy-load owner) |
-| one `logv(cb, ...)` helper (copies in hook.rs, deps.rs, trans.rs, util's `log_parts`) | integrate2 | in progress: `callbacks::logv`, used by db, be_local, be_sync |
+| one `logv(cb, ...)` helper (copies in hook.rs, deps.rs, trans.rs, util's `log_parts`) | integrate2 | done: `callbacks::logv` everywhere (hook, deps, trans, sync, add, remove, util, be_package, conflict, sandbox_fs copies gone) |
 | `-D` dispatch arm: `pacman_database(config, handle, targets, &mut o)` | m1close | done |
 | setup_libalpm's server adds through `Handle::dbs_mut()` (`Db::add_server` takes the callbacks) | m1close | done |
 | `multibar_move_completed_up` from the frontend (a Callbacks hook or a shared flag) | commit | done (`Term::move_completed_up`) |
@@ -803,9 +804,9 @@ Follow-ups raised by port units:
 | query's `check_signature` stub onto `signing::pkg_check_pgp_signature` (handle keyring and callbacks): -Qpi with a `.sig`, and checksig's debug lines once signing logs them | qk | done: results mapped onto util's `SigResult`, difftest query runs -Qpi with debug |
 | `be_package::changelog` takes the callbacks (-Qpc's "opening archive" debug line); difftest query runs -Qpc without debug | qk | todo |
 | signing debug lines (`_alpm_access` "is not readable", "sig path ... could not be opened", "missing required signature") | m1close | done: every signing.c line ported, trans_commit's `SIGNING_DEBUG`/`sig_unreadable` and db_update's positive debug list dropped, cli_binary's `known()` narrowed to the GOTO_ERR lines |
-| difftest C log callbacks (deps_graph, dload, diskspace, db_update) onto `handle::record_log` | m1close | todo |
-| `DepsEnv` without `&Handle` (assumeinstalled, ignore lists), so checkdeps logs without swapping the callbacks | m1close | todo |
-| difftest: `read_deps` pub(crate) (drops conflict's `CDepend`), `SyncWorld` into fixtures.rs | conflict, sync | todo |
+| difftest C log callbacks (deps_graph, dload, diskspace, db_update) onto `handle::record_log` | m1close | done: every alpm_cb_log (also add_commit, conflict, handle_opts, hook, remove_commit, sandbox, signing, trans_commit, trans_prep, util) formats through `handle::log_message`; util's copy is `record_log` |
+| `DepsEnv` without `&Handle` (assumeinstalled, ignore lists), so checkdeps logs without swapping the callbacks | m1close | done: `DepsOpts` (`Handle::deps_opts`, `DbsMut::opts`); `with_callbacks` stays for the `View` planning steps, the sync loads and the frontend's package loads |
+| difftest: `read_deps` pub(crate) (drops conflict's `CDepend`), `SyncWorld` into fixtures.rs | conflict, sync | done: one `CDepend`/`read_dep` in package.rs (conflict, deps, deps_graph, trans_prep copies gone); `SyncWorld` and its generators in fixtures.rs, `c_handle` stays in sync_ro |
 | be_sync: a non-archive db must fail at open (DB_OPEN, db invalid) like libarchive, not LIBARCHIVE | query | done |
 | `%DATA%` in repo dbs, gzip multi-member, `Packager` default, backup `(null)` | db readers | ALPM side, see `UPSTREAM.md` |
 | xattrs and pax mtime/uid/gid on extraction | addcommit | done (xattr unit): `alpm-core::tar`, add.rs set_xattrs/times; difftest add_commit pax cases, fuzz_pax, fakeroot run (`security.capability`, ids; `DIFFTEST_CAP_PKGS` real packages) |
