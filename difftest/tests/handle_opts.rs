@@ -619,8 +619,9 @@ fn logaction_errors() {
 fn stamp_format() {
 	let mut rng = Rng::new(0x57a);
 	for _ in 0..iters() {
-		// years -6700 to 10700: %F's unpadded and negative years
-		let secs = (rng.next_u64() % (1 << 39)) as i64 - (1 << 38);
+		// years -2400 to 6300: %F's unpadded and negative years,
+		// inside time's years (local() stamps the epoch past them)
+		let secs = (rng.next_u64() % (1 << 38)) as i64 - (1 << 37);
 		let utcoff = rng.below(28 * 3600 + 1) as i32 - 14 * 3600;
 		let t = LogTime { secs, utcoff };
 		let stamp = c_strftime_at(secs, utcoff, c"[%FT%T%z] [");
