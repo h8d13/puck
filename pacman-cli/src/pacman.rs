@@ -1,27 +1,49 @@
-// port of src/pacman/pacman.c: command line parsing, usage and version
+// port of src/pacman/pacman.c: command line parsing, usage, version and
+// main
 //
 // the C fills the global `config` and the static pm_targets list and
 // exits through cleanup() on --help, --version and conflicting options.
 // here parseargs fills a `Config`, returns the targets, and Err carries
 // the exit status instead (0 after --help/--version). stdout and stderr
-// are buffered in `Io`, pm_printf goes through it with the config as it
-// is at that moment (colstr, logmask). messages are the untranslated
-// msgids. `main_args` is main() from parseargs up to parseconfig, the
-// part before setup_libalpm; operations are not dispatched.
+// of parsing are buffered in `Io`, pm_printf goes through it with the
+// config as it is at that moment (colstr, logmask). messages are the
+// untranslated msgids. `main_args` is main() from parseargs up to
+// parseconfig, `run` the whole of main on a util::Term: setup_libalpm,
+// the operation, cleanup, the exit status.
+//
+// operations write into an Output that goes to the Term when they
+// return, the callbacks write to the Term directly: a libalpm log line
+// comes before the operation's own stderr even where the C interleaves
+// them. not ported operations (-R, -U, -D, -Sc, -Sy, -Fy, sync
+// transactions) report an error and fail. signals: std has no handler
+// API; SIGINT/SIGHUP kill the process (the C's soft handler exits
+// 128 + signal without a transaction, the same status), no SIGSEGV
+// cursor restore, no SIGWINCH (getcols is not cached anyway).
 use std::ffi::OsStr;
 use std::fs;
-use std::io;
+use std::io::{self, IsTerminal, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::time::Instant;
 
 use alpm_core::PACKAGE_VERSION;
+use alpm_core::handle::Handle;
 use alpm_core::util::strerror;
-use pacman_common::util_common::mbasename;
+use pacman_common::util_common::{mbasename, safe_fgets};
 
+use crate::callback::Frontend;
 use crate::conf::{
-	ConfError, Config, Host, LOG_DEBUG, LOG_ERROR, LOG_FUNCTION, Msg,
-	PM_COLOR_OFF, PM_COLOR_ON, PM_OP_MAIN, format_msg,
+	ConfError, Config, Host, LOG_DEBUG, LOG_ERROR, LOG_FUNCTION,
+	LOG_WARNING, Msg, PM_COLOR_OFF, PM_COLOR_ON, PM_OP_MAIN, format_msg,
 };
+use crate::deptest::pacman_deptest;
+use crate::files::pacman_files;
 use crate::getopt::{Getopt, HasArg, LongOpt};
+use crate::query::{QueryEnv, pacman_query};
+use crate::sync::{Unported, pacman_sync};
+use crate::util::{
+	Output, Term, arg_to_string, console_cursor_hide, console_cursor_show,
+	debug_stamp, getcols, list_display, now_secs, pm_printf_term,
+};
 
 // alpm_version() of the reference build (meson LIB_VERSION)
 pub const LIB_VERSION: &str = "16.0.1";
@@ -57,6 +79,7 @@ pub const TRANS_FLAG_NEEDED: i32 = 1 << 13;
 pub const TRANS_FLAG_ALLEXPLICIT: i32 = 1 << 14;
 pub const TRANS_FLAG_UNNEEDED: i32 = 1 << 15;
 pub const TRANS_FLAG_RECURSEALL: i32 = 1 << 16;
+pub const TRANS_FLAG_NOLOCK: i32 = 1 << 17;
 
 // conf.h long option codes, getopt returns them for the long names
 pub const OP_LONG_FLAG_MIN: i32 = 1000;
@@ -206,18 +229,37 @@ pub const LONGOPTS: &[LongOpt] = &[
 ];
 
 // the process side of parsing: buffered stdout/stderr and the probes
-// the C makes (isatty(stdout), getenv("POSIXLY_CORRECT") in getopt)
+// the C makes (isatty(stdout), getenv("POSIXLY_CORRECT") in getopt).
+// debug_stamps puts the PACMAN_DEBUG stamp before messages while debug
+// logging is on
 #[derive(Clone, Debug, Default)]
 pub struct Io {
 	pub out: Vec<u8>,
 	pub err: Vec<u8>,
 	pub stdout_tty: bool,
 	pub posixly_correct: bool,
+	pub debug_stamps: bool,
+}
+
+// a pm_printf message with the PACMAN_DEBUG stamp when asked for
+fn stamped(
+	config: &Config,
+	msg: &Msg,
+	stamps: bool,
+	now: i64,
+) -> Option<Vec<u8>> {
+	let s = format_msg(config, msg)?;
+	let debug = config.logmask & LOG_DEBUG != 0;
+	if !stamps || !debug || *msg == Msg::DbUpgradeHint {
+		return Some(s);
+	}
+	Some([debug_stamp(now), s].concat())
 }
 
 impl Host for Io {
 	fn log(&mut self, config: &Config, msg: &Msg) {
-		if let Some(s) = format_msg(config, msg) {
+		let stamps = self.debug_stamps;
+		if let Some(s) = stamped(config, msg, stamps, now_secs()) {
 			self.err.extend_from_slice(&s);
 		}
 	}
@@ -1420,4 +1462,231 @@ pub fn main_args<F: FnOnce() -> Result<(), i32>>(
 	config.parseconfig(&file, io)
 		.map_err(|e: ConfError| e.ret & 0xff)?;
 	Ok((config, targets))
+}
+
+// the binary's process: std streams (stdout line buffered like a C
+// terminal stdout, flushed where the C flushes), stdin lines, getcols
+// and a monotonic millisecond clock
+pub struct StdTerm {
+	start: Instant,
+}
+
+impl Default for StdTerm {
+	fn default() -> Self {
+		StdTerm {
+			start: Instant::now(),
+		}
+	}
+}
+
+// write errors are dropped like the unchecked C stdio calls
+impl Term for StdTerm {
+	fn out(&mut self, s: &[u8]) {
+		let _ = io::stdout().write_all(s);
+	}
+
+	fn err(&mut self, s: &[u8]) {
+		let _ = io::stderr().write_all(s);
+	}
+
+	fn flush(&mut self) {
+		let _ = io::stdout().flush();
+		let _ = io::stderr().flush();
+	}
+
+	fn read_line(&mut self, size: usize) -> Option<Vec<u8>> {
+		safe_fgets(&mut io::stdin().lock(), size).ok().flatten()
+	}
+
+	fn stdin_is_tty(&mut self) -> bool {
+		io::stdin().is_terminal()
+	}
+
+	fn stdout_is_tty(&mut self) -> bool {
+		io::stdout().is_terminal()
+	}
+
+	fn cols(&mut self) -> u16 {
+		getcols()
+	}
+
+	// CLOCK_MONOTONIC_COARSE counts from boot, a fresh bar's zero sync
+	// time is long past: the offset keeps that
+	fn now_ms(&mut self) -> i64 {
+		let ms = self.start.elapsed().as_millis();
+		i64::try_from(ms)
+			.unwrap_or(i64::MAX)
+			.saturating_add(1 << 30)
+	}
+}
+
+// pm_printf of conf.c messages through a Term
+struct TermHost<'a> {
+	term: &'a mut dyn Term,
+}
+
+impl Host for TermHost<'_> {
+	fn log(&mut self, config: &Config, msg: &Msg) {
+		let now = self.term.now_secs();
+		if let Some(s) = stamped(config, msg, true, now) {
+			self.term.err(&s);
+		}
+	}
+}
+
+// main(): Err from main_args is cleanup(ret), the parse output goes out
+// before anything else is printed
+fn setup<T: Term + 'static>(
+	argv: &mut [Vec<u8>],
+	process: Process<'_, impl FnOnce() -> Result<(), i32>>,
+	io: &mut Io,
+	term: &mut T,
+	new_term: &impl Fn() -> T,
+) -> Result<(Config, Vec<Vec<u8>>, Handle), i32> {
+	let parsed = main_args(argv, process, io);
+	term.out(&std::mem::take(&mut io.out));
+	term.err(&std::mem::take(&mut io.err));
+	let (mut config, targets) = parsed?;
+	let cb = Box::new(Frontend::new(config.clone(), new_term()));
+	let mut host = TermHost { term };
+	let mut handle = config
+		.setup_libalpm(&mut host, cb)
+		.map_err(|e| e.ret & 0xff)?;
+	// noask is meant to be non-interactive
+	if config.noask != 0 {
+		config.noconfirm = 1;
+	}
+	if config.print != 0 && config.op_s_clean == 0 {
+		config.noconfirm = 1;
+		config.flags |= TRANS_FLAG_NOCONFLICTS | TRANS_FLAG_NOLOCK;
+		// errors only
+		config.logmask &= !LOG_WARNING;
+	}
+	// the callbacks read the config as it is from here on
+	let cb = Frontend::new(config.clone(), new_term());
+	handle.set_callbacks(Box::new(cb));
+	Ok((config, targets, handle))
+}
+
+// the -v lines before the operation
+fn verbose(
+	term: &mut dyn Term,
+	config: &Config,
+	handle: &Handle,
+	targets: &[Vec<u8>],
+) {
+	let join = |dirs: &[Vec<u8>]| -> Vec<u8> {
+		dirs.iter().flat_map(|d| [&d[..], b"  "].concat()).collect()
+	};
+	let null = |s: Option<&[u8]>| s.unwrap_or(b"(null)").to_vec();
+	let conf = config.configfile.as_deref();
+	let lines: [(&[u8], Vec<u8>); 8] = [
+		(b"Root      : ", handle.root().to_vec()),
+		(b"Conf File : ", null(conf)),
+		(b"DB Path   : ", handle.dbpath().to_vec()),
+		(b"Cache Dirs: ", join(handle.cachedirs())),
+		(b"Hook Dirs : ", join(handle.hookdirs())),
+		(b"Lock File : ", handle.lockfile().to_vec()),
+		(b"Log File  : ", null(handle.logfile())),
+		(b"GPG Dir   : ", null(handle.gpgdir())),
+	];
+	let mut out = Vec::new();
+	for (title, value) in lines {
+		out.extend_from_slice(&[title, &value[..], b"\n"].concat());
+	}
+	let title = b"Targets   :";
+	list_display(&mut out, Some(title), targets, 0, &config.colstr);
+	term.out(&out);
+}
+
+// a branch this port does not have yet: reported, status 1
+fn unported(term: &mut dyn Term, config: &Config, what: &str) -> i32 {
+	let msg = format!("{what} is not supported by this port yet\n");
+	pm_printf_term(term, config, LOG_ERROR, msg.as_bytes());
+	1
+}
+
+fn unported_sync(term: &mut dyn Term, config: &Config, u: Unported) -> i32 {
+	let what = match u {
+		Unported::Clean => "--clean",
+		Unported::Refresh => "--refresh",
+		Unported::Transaction => "installing or upgrading packages",
+	};
+	unported(term, config, what)
+}
+
+// the operation of config.op on handle: the exit status
+fn dispatch(
+	term: &mut dyn Term,
+	config: &Config,
+	handle: &mut Handle,
+	targets: &[Vec<u8>],
+) -> i32 {
+	let mut o = Output::default();
+	let cols = term.cols();
+	let ret = match config.op {
+		PM_OP_DATABASE => unported(term, config, "--database"),
+		PM_OP_REMOVE => unported(term, config, "--remove"),
+		PM_OP_UPGRADE => unported(term, config, "--upgrade"),
+		PM_OP_QUERY => {
+			let path =
+				std::env::var_os("PATH").map(|p| p.into_vec());
+			let env = QueryEnv { cols, path };
+			pacman_query(config, handle, &env, targets, &mut o)
+		}
+		PM_OP_SYNC => {
+			match pacman_sync(config, handle, targets, cols, &mut o)
+			{
+				Ok(ret) => ret,
+				Err(u) => unported_sync(term, config, u),
+			}
+		}
+		PM_OP_DEPTEST => pacman_deptest(handle, targets, &mut o),
+		PM_OP_FILES => {
+			match pacman_files(config, handle, targets, &mut o) {
+				Ok(ret) => ret,
+				Err(u) => unported_sync(term, config, u),
+			}
+		}
+		_ => {
+			let msg = b"no operation specified (use -h for help)\n";
+			pm_printf_term(term, config, LOG_ERROR, msg);
+			1
+		}
+	};
+	term.out(&o.stdout);
+	term.err(&o.stderr);
+	ret
+}
+
+// main(): the exit status (cleanup(ret) exits with ret & 0xff). new_term
+// gives the callbacks their own Term onto the same process
+pub fn run<T: Term + 'static>(
+	argv: &mut [Vec<u8>],
+	process: Process<'_, impl FnOnce() -> Result<(), i32>>,
+	io: &mut Io,
+	new_term: impl Fn() -> T,
+) -> i32 {
+	let mut term = new_term();
+	console_cursor_hide(&mut term);
+	let ret = match setup(argv, process, io, &mut term, &new_term) {
+		Err(ret) => ret,
+		Ok((config, targets, mut handle)) => {
+			if config.verbose > 0 {
+				verbose(&mut term, &config, &handle, &targets);
+			}
+			if needs_root(&config) {
+				let cl =
+					arg_to_string(argv).unwrap_or_default();
+				let msg = [&b"Running '"[..], &cl, b"'\n"]
+					.concat();
+				let _ = handle.logaction(b"PACMAN", &msg);
+			}
+			dispatch(&mut term, &config, &mut handle, &targets)
+				& 0xff
+		}
+	};
+	console_cursor_show(&mut term);
+	term.flush();
+	ret
 }
