@@ -88,6 +88,10 @@ pattern), and record the choice here before use.
   - alphabets built from the characters the C special-cases
   - assert messages show the input
   - if inputs are filtered (C preconditions), assert a minimum compared count
+- Tests running C that sets the umask (dload, makepath,
+  `local_db_prepare`/`write`, unpack), or comparing file modes next to
+  it, take `difftest::umask_lock()` before any C handle (`ALPM` lock),
+  never while holding one.
 - Mutation check before reporting done: break 2+ branches of the port one
   at a time, confirm a difftest fails, restore.
 
