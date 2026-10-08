@@ -76,6 +76,7 @@ dependencies = [
  "pacman-common",
  "reqwest",
  "rustix",
+ "tar",
 ]
 
 [[package]]

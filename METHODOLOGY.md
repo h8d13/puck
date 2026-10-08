@@ -134,6 +134,11 @@ order.
   meant to be reused are named in the report)
 - `scripts/cargo-test.sh` (cargo test --release) green for the whole
   workspace
+- vendored crates a unit patched: `cargo test` inside `vendor/alpm` with
+  the runner config (`--config "target.'cfg(all())'.runner = [...]"`,
+  `-j 2`), `-- --skip crazy_threads`: alpm-compress's zstd cases ask
+  for 99999 threads, which cannot fit under the 4 GiB cap. Remove
+  `vendor/alpm/target` and `Cargo.lock` after
 - `scripts/check-separation.sh` passes (no test modules, C access or
   difftest in port crates)
 - `scripts/check-externs.py` passes (one declaration per C symbol in

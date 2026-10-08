@@ -1546,12 +1546,6 @@ fn fixed_archive() {
 	}
 }
 
-fn cut(path: &Path, keep: usize) {
-	let mut data = fs::read(path).unwrap();
-	data.truncate(keep);
-	fs::write(path, data).unwrap();
-}
-
 // errors around the file itself and compressions alpm-compress does not
 // read the way libarchive does
 #[test]
@@ -1577,20 +1571,6 @@ fn fixed_files() {
 	fs::write(&path, [0u8; 2048]).unwrap();
 	pin(&h, &path, "zero blocks", ["same"; 2]);
 
-	// cut inside the second file's data. both refuse it; for gzip and xz
-	// the errno differs: libarchive's format bidding reads ahead through
-	// a small stream while opening (PKG_OPEN), the port meets the end in
-	// .PKGINFO (PKG_INVALID)
-	for comp in COMPS {
-		write_pkg(&path, comp, &entries);
-		let n = fs::metadata(&path).unwrap().len() as usize;
-		cut(&path, n * 2 / 3);
-		let (c, r) = (load_c(&h, &path, true), load_rust(&path, true));
-		assert!(
-			c.is_err() && r.is_err(),
-			"truncated {comp:?}: {c:?} {r:?}"
-		);
-	}
 	// truncated plain tar: libarchive seeks over the data of the file
 	// the walk stopped on
 	compress(&path, Comp::None, &tar[..tar.len() - 1024 - 512 - 512]);
@@ -1612,6 +1592,72 @@ fn fixed_files() {
 	compress(&a, Comp::Gzip, &tar);
 	compress(&path, Comp::Gzip, &fs::read(&a).unwrap());
 	pin(&h, &path, "gzip in gzip", ["rust open"; 2]);
+}
+
+// a package over several of libarchive's 64/128 KiB filter blocks, with
+// headers at and across block boundaries and random data between them
+// (see unpack's big_package)
+fn big_package() -> Vec<Entry> {
+	const BLOCK: usize = 64 * 1024;
+	let mut rng = Rng::new(0xb16_9ac);
+	let mut entries =
+		vec![file(b".PKGINFO", PKGINFO.as_bytes()), dir(b"usr/")];
+	let mut off: usize = 512 + PKGINFO.len().next_multiple_of(512) + 512;
+	for i in 0.. {
+		if off > 1300 * 1024 {
+			break;
+		}
+		let next = (off + 512 + 20000).next_multiple_of(BLOCK);
+		let len = match i % 4 {
+			0 => next - off - 512,
+			1 => next - off - 512 - 256,
+			_ => rng.below(9000),
+		};
+		let data: Vec<u8> =
+			(0..len).map(|_| rng.next_u64() as u8).collect();
+		off += 512 + len.next_multiple_of(512);
+		entries.push(file(format!("usr/f{i}").as_bytes(), &data));
+	}
+	entries.push(file(b".INSTALL", b"post_install() {\n\ttrue\n}\n"));
+	entries
+}
+
+// a compressed package cut short, at the start, evenly spread, at random
+// and in the stream's tail: libarchive fails the filter block the stream
+// ends in. inside the first one the open fails (PKG_OPEN), later the
+// full walk meets it in a header or data skip (LIBARCHIVE), with full off
+// the walk stops before it
+#[test]
+fn compressed_cuts() {
+	let fx = Fixture::new();
+	let h = fx.handle();
+	let path = fx.pkg("cut.pkg.tar");
+	let tar = ustar(&big_package());
+	let mut rng = Rng::new(0x0c07_5eed);
+	let mut errnos = std::collections::BTreeSet::new();
+	for comp in [Comp::Gzip, Comp::Bzip2, Comp::Xz, Comp::Zstd] {
+		compress(&path, comp, &tar);
+		let data = fs::read(&path).unwrap();
+		let len = data.len();
+		let mut cuts: Vec<usize> = vec![1, 2, 10, 100];
+		cuts.extend((1..48).map(|i| len * i / 48));
+		cuts.extend((0..16).map(|_| rng.below(len)));
+		cuts.extend([1, 4, 8, 9, 12, 20, 64].map(|d| len - d));
+		for n in cuts {
+			fs::write(&path, &data[..n]).unwrap();
+			assert_same(
+				&h,
+				&path,
+				&format!("{comp:?} cut at {n}/{len}"),
+			);
+			for full in [false, true] {
+				let c = load_c(&h, &path, full);
+				errnos.insert((full, c.err()));
+			}
+		}
+	}
+	// loads, open and libarchive errors all seen
+	assert!(errnos.len() >= 3, "{errnos:?}");
 }
 
 // lz4 and lzma (.tar.lz4 is a makepkg PKGEXT): libarchive reads them,

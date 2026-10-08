@@ -23,7 +23,6 @@ use std::io::{self, ErrorKind, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use alpm_compress::tarball::{TarballEntry, TarballReader};
 use alpm_mtree::libarchive::{self, EntryType};
 use alpm_pkginfo::pacman::PacmanPackageInfo;
 use alpm_types::Sha256Checksum;
@@ -44,9 +43,7 @@ use crate::signing::{
 	SIG_PACKAGE_UNKNOWN_OK, SigResult, check_pgp_helper, extract_keyid,
 	key_import, key_in_keychain, sigpath,
 };
-use crate::util::{
-	self, archive_io_err as io_err, fnmatch, hash_sdbm, until_nul,
-};
+use crate::util::{self, Entry, fnmatch, hash_sdbm, until_nul};
 
 // limits.h on linux
 const NAME_MAX: usize = 255;
@@ -148,7 +145,7 @@ fn open_err(e: io::Error) -> Error {
 fn open_archive(
 	cb: &mut dyn Callbacks,
 	path: &[u8],
-) -> Result<(TarballReader<'static>, i64), Error> {
+) -> Result<(tar::Archive<util::Filter>, i64), Error> {
 	log(cb, LogLevel::Debug, &[b"opening archive ", path, b"\n"]);
 	let archive = util::open_archive(path).map_err(|e| {
 		if e.raw_os_error().is_some() {
@@ -234,11 +231,8 @@ fn set<T: Display>(field: &mut Option<Vec<u8>>, v: &Option<T>) {
 // parse_descfile, through alpm-pkginfo's pacman reader, plus the
 // name/version checks _alpm_pkg_load_internal runs after it. list keys
 // append, so a second .PKGINFO adds to the first like in the C
-fn parse_descfile(
-	pkg: &mut Package,
-	entry: &mut TarballEntry,
-) -> Result<(), Reason> {
-	let data = entry.content().map_err(|e| Reason::Read(io_err(e)))?;
+fn parse_descfile(pkg: &mut Package, entry: &mut Entry) -> Result<(), Reason> {
+	let data = util::content(entry).map_err(Reason::Read)?;
 	let v = PacmanPackageInfo::parse(&data).map_err(Reason::Pkginfo)?;
 	if let Some(name) = &v.pkgname {
 		let name = text(name);
@@ -310,12 +304,12 @@ fn push_file(files: &mut FileList, path: &[u8], mode: u32, size: i64) {
 // archive_entry_mode and archive_entry_size of a tar entry the way
 // libarchive's tar reader sets them: the type from the type flag over the
 // header's permission bits. a hard link has no type bits and size 0
-pub(crate) fn tar_mode_size(entry: &TarballEntry) -> io::Result<(u32, i64)> {
-	let header = entry.raw().header();
+pub(crate) fn tar_mode_size(entry: &Entry) -> io::Result<(u32, i64)> {
+	let header = entry.header();
 	let perm = header.mode()? & !AE_IFMT;
-	let size = entry.raw().size() as i64;
-	let name = entry.path().as_os_str().as_bytes();
-	// tar type flags, the tar crate is not a direct dependency
+	let size = entry.size() as i64;
+	let name = entry.path_bytes();
+	// the header's type flag byte, as libarchive's tar reader sees it
 	let (kind, size) = match header.entry_type().as_byte() {
 		b'5' => (AE_IFDIR, size),
 		b'1' => (0, 0),
@@ -351,9 +345,9 @@ fn mtree_file(e: &libarchive::Entry) -> (Vec<u8>, u32, i64) {
 // about. a "./.INSTALL" line marks the scriptlet
 fn filelist_from_mtree(
 	pkg: &mut Package,
-	entry: &mut TarballEntry,
+	entry: &mut Entry,
 ) -> Option<FileList> {
-	let data = entry.content().ok()?;
+	let data = util::content(entry).ok()?;
 	let entries = libarchive::from_reader(&data[..]).ok()?;
 	if entries.iter().any(|e| !e.warnings.is_empty()) {
 		return None;
@@ -390,16 +384,16 @@ pub fn pkg_load_internal(
 	};
 	let (mut config, mut hit_mtree) = (false, false);
 
-	let entries = archive.entries().map_err(|e| Error::Open(io_err(e)))?;
+	let entries = archive.entries().map_err(Error::Open)?;
 	for (i, entry) in entries.enumerate() {
 		let mut entry = match entry {
 			Ok(e) => e,
 			// libarchive picks the format while opening: a first
 			// header no reader takes is an open failure
-			Err(e) if i == 0 => return Err(Error::Open(io_err(e))),
-			Err(e) => return Err(Error::Archive(io_err(e))),
+			Err(e) if i == 0 => return Err(Error::Open(e)),
+			Err(e) => return Err(Error::Archive(e)),
 		};
-		let name = entry.path().as_os_str().as_bytes().to_vec();
+		let name = entry.path_bytes().to_vec();
 		// the .PKGINFO and .MTREE branches continue before the break
 		// check below, so the walk always goes one entry further
 		if name == b".PKGINFO" {
@@ -660,13 +654,12 @@ pub fn changelog(pkg: &Package) -> Result<Vec<u8>, Error> {
 		return Err(Error::WrongArgs);
 	};
 	let (mut archive, _) = open_archive(&mut (), until_nul(path))?;
-	let entries = archive.entries().map_err(|e| Error::Open(io_err(e)))?;
+	let entries = archive.entries().map_err(Error::Open)?;
 	// a header error ends the search like the C's while loop
 	for mut entry in entries.map_while(Result::ok) {
-		if entry.path().as_os_str().as_bytes() == b".CHANGELOG" {
-			return entry
-				.content()
-				.map_err(|e| Error::Archive(io_err(e)));
+		if *entry.path_bytes() == *b".CHANGELOG" {
+			return util::content(&mut entry)
+				.map_err(Error::Archive);
 		}
 	}
 	Err(Error::NotFound)

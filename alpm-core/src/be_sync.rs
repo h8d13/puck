@@ -23,7 +23,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use alpm_compress::decompression::DecompressionSettings;
-use alpm_compress::tarball::{TarballEntry, TarballReader};
 use alpm_repo_db::desc::{Section, parse_libalpm};
 use alpm_repo_db::files::RepoFiles;
 use rustix::fs::{Access, AtFlags, CWD, accessat};
@@ -47,8 +46,8 @@ use crate::signing::{
 	SIG_DATABASE_UNKNOWN_OK, check_pgp_helper, process_siglist,
 };
 use crate::util::{
-	self, PATH_MAX, archive_io_err as io_err, fnmatch, get_fullpath,
-	hash_sdbm, makepath, splitname, strerror, until_nul,
+	self, Entry, Filter, PATH_MAX, fnmatch, get_fullpath, hash_sdbm,
+	makepath, splitname, strerror, until_nul,
 };
 
 // limits.h on linux
@@ -375,7 +374,7 @@ fn bytes_per_package(settings: &DecompressionSettings) -> u64 {
 fn open_archive(
 	path: &[u8],
 	dbext: &[u8],
-) -> Result<(TarballReader<'static>, u64), Error> {
+) -> Result<(tar::Archive<Filter>, u64), Error> {
 	let archive = util::open_archive(path).map_err(|e| match e.kind() {
 		ErrorKind::NotFound => Error::NotFound,
 		_ => Error::Open(e),
@@ -472,11 +471,8 @@ impl Walk<'_> {
 	}
 
 	// sync_db_read up to the parsing of the entry data
-	fn read_entry(
-		&mut self,
-		entry: &mut TarballEntry,
-	) -> Result<(), Error> {
-		let entryname = entry.path().as_os_str().as_bytes().to_vec();
+	fn read_entry(&mut self, entry: &mut Entry) -> Result<(), Error> {
+		let entryname = entry.path_bytes().to_vec();
 		let parts: [&[u8]; 3] = [
 			b"loading package data from archive entry ",
 			&entryname,
@@ -497,9 +493,8 @@ impl Walk<'_> {
 			// unknown database file, skipped
 			_ => return Ok(()),
 		};
-		let data = entry.content().map_err(|e| {
-			invalid(&entryname, Reason::Read(io_err(e)))
-		})?;
+		let data = util::content(entry)
+			.map_err(|e| invalid(&entryname, Reason::Read(e)))?;
 		let text = text.get_or_insert_with(Vec::new);
 		// the C reads each entry on its own: a blank line ends whatever
 		// section the previous entry left open
@@ -657,22 +652,21 @@ pub fn populate(
 		cb,
 	};
 	let mut broken = None;
-	let entries =
-		archive.entries().map_err(|e| Error::Archive(io_err(e)))?;
+	let entries = archive.entries().map_err(Error::Archive)?;
 	for (i, entry) in entries.enumerate() {
 		let mut entry = match entry {
 			Ok(e) => e,
 			// libarchive picks the format while opening: a first header
 			// no reader takes is an open failure, like be_package
-			Err(e) if i == 0 => return Err(Error::Open(io_err(e))),
+			Err(e) if i == 0 => return Err(Error::Open(e)),
 			Err(e) => {
-				broken = Some(io_err(e));
+				broken = Some(e);
 				break;
 			}
 		};
 		// libarchive types a regular entry ending in '/' a directory
-		let name = entry.path().as_os_str().as_bytes();
-		if entry.is_dir() || name.last() == Some(&b'/') {
+		let is_dir = entry.header().entry_type().is_dir();
+		if is_dir || entry.path_bytes().last() == Some(&b'/') {
 			continue;
 		}
 		walk.read_entry(&mut entry)?;

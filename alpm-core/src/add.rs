@@ -1,10 +1,11 @@
 // port of lib/libalpm/add.c: alpm_add_pkg (the target side of -S/-U)
 // and, below, the per-package commit.
 
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::ffi::{OsStr, c_int};
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
-use std::io::{self, ErrorKind, Read, Seek, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{
 	DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, fchown,
@@ -14,7 +15,6 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alpm_compress::decompression::DecompressionSettings;
-use alpm_compress::tarball::TarballEntry;
 use rustix::fs::{
 	AtFlags, CWD, FileType, Mode, OFlags, Timespec, Timestamps, chmodat,
 	fchmod, futimens, makedev, mknodat, openat, utimensat,
@@ -39,10 +39,9 @@ use crate::trans::{
 	trans_in,
 };
 use crate::util::{
-	CALLER_PREFIX, PATH_MAX, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK,
-	S_IFMT, archive_io_err, check_padding, cleanup_pathname,
-	compute_md5sum, enter, ldconfig, llstat, mkdir_mode, open_archive,
-	strerror, until_nul,
+	CALLER_PREFIX, Entry, PATH_MAX, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO,
+	S_IFLNK, S_IFMT, check_padding, cleanup_pathname, compute_md5sum,
+	enter, ldconfig, llstat, mkdir_mode, open_archive, strerror, until_nul,
 };
 
 use LogLevel::{Debug, Error, Warning};
@@ -165,8 +164,8 @@ pub fn add_pkg(
 // chdir()s into root for hard link targets, here they are joined to
 // root and the process cwd stays. the process umask is taken as 0022
 // (pacman's main sets it); modes come out exact either way. not
-// restored: xattrs (pax records, out of reach of TarballEntry), pax
-// times and ids (the ustar fields are used). libarchive's texts are
+// restored: xattrs (pax records, not translated yet), pax times and
+// ids (the ustar fields are used). libarchive's texts are
 // copied, a failed data read shows the port's error text.
 
 // archive_write_disk todo bits
@@ -613,10 +612,7 @@ impl Writer<'_> {
 
 	// copy_data + _archive_write_disk_data_block: a failed read is
 	// fatal, a failed write a warning that ends the copy
-	fn copy_data(
-		&mut self,
-		entry: &mut TarballEntry,
-	) -> Result<(), ExtractError> {
+	fn copy_data(&mut self, entry: &mut Entry) -> Result<(), ExtractError> {
 		// libarchive's tar reader names a short entry, other read
 		// errors show the port's text
 		let fatal = |e: io::Error| ExtractError {
@@ -887,13 +883,13 @@ impl Disk<'_> {
 	// libarchive's (tar_mode_size)
 	fn extract(
 		&self,
-		entry: &mut TarballEntry,
+		entry: &mut Entry,
 		name: &[u8],
 		mode: u32,
 		size: u64,
 	) -> Result<(), ExtractError> {
-		let header = entry.raw().header();
-		let target = entry.raw().link_name_bytes().unwrap_or_default();
+		let header = entry.header();
+		let target = entry.link_name_bytes().unwrap_or_default();
 		let dev = |n: io::Result<Option<u32>>| {
 			n.ok().flatten().unwrap_or(0)
 		};
@@ -980,7 +976,7 @@ fn logaction(h: &mut Handle, parts: &[&[u8]]) {
 fn perform_extraction(
 	h: &mut Handle,
 	disk: &Disk,
-	entry: &mut TarballEntry,
+	entry: &mut Entry,
 	mode: u32,
 	size: u64,
 	filename: &[u8],
@@ -1025,7 +1021,7 @@ fn try_rename(h: &mut Handle, src: &[u8], dest: &[u8]) -> bool {
 fn extract_db_file(
 	h: &mut Handle,
 	disk: &Disk,
-	entry: &mut TarballEntry,
+	entry: &mut Entry,
 	(mode, size): (u32, u64),
 	newpkg: &Package,
 	entryname: &[u8],
@@ -1076,11 +1072,11 @@ fn pacnew(filename: &[u8]) -> Vec<u8> {
 fn extract_single_file(
 	h: &mut Handle,
 	disk: &Disk,
-	entry: &mut TarballEntry,
+	entry: &mut Entry,
 	newpkg: &mut Package,
 	oldpkg: Option<&Package>,
 ) -> usize {
-	let entryname = until_nul(entry.path().as_os_str().as_bytes()).to_vec();
+	let entryname = until_nul(&entry.path_bytes()).to_vec();
 	let Ok((entrymode, size)) = tar_mode_size(entry) else {
 		return 0;
 	};
@@ -1465,12 +1461,13 @@ fn scriptlet(
 
 // the archive position for the progress percentage: the data start of
 // the entry in an unfiltered tar (the bytes libarchive consumed), what
-// the decoder read of a compressed one (libarchive counts what its
-// filter consumed, equal once the whole stream is read)
-fn position(entry: &TarballEntry, raw: &mut File, plain: bool) -> i64 {
+// the decoder read of a compressed one by the filter's last block
+// (libarchive counts what its client read, equal once the whole stream
+// is read)
+fn position(entry: &Entry, consumed: &Cell<u64>, plain: bool) -> i64 {
 	match plain {
-		true => entry.raw().raw_file_position() as i64,
-		false => raw.stream_position().map_or(0, |p| p as i64),
+		true => entry.raw_file_position() as i64,
+		false => consumed.get() as i64,
 	}
 }
 
@@ -1597,14 +1594,14 @@ pub fn commit_single_pkg(
 		skip: meta.is_file().then(|| (meta.dev(), meta.ino())),
 		plain_len: plain.then_some(meta.len()),
 	};
-	let mut raw = archive.raw;
+	let consumed = archive.consumed;
 	let mut entries = match archive.reader.entries() {
 		Ok(e) => e,
-		Err(e) => return Err(open_failed(h, archive_io_err(e))),
+		Err(e) => return Err(open_failed(h, e)),
 	};
 	// libarchive reads the first header while opening
 	let first = match entries.next() {
-		Some(Err(e)) => return Err(open_failed(h, archive_io_err(e))),
+		Some(Err(e)) => return Err(open_failed(h, e)),
 		first => first,
 	};
 	// the C chdir()s into root for hard links; checked the same way
@@ -1626,12 +1623,10 @@ pub fn commit_single_pkg(
 	if flags & TRANS_FLAG_DBONLY != 0 {
 		log(h.callbacks(), Debug, &[b"extracting db files\n"]);
 		for mut entry in entries {
-			let entryname =
-				until_nul(entry.path().as_os_str().as_bytes());
+			let entryname = until_nul(&entry.path_bytes()).to_vec();
 			if entryname.first() != Some(&b'.') {
 				continue;
 			}
-			let entryname = entryname.to_vec();
 			let Ok((mode, size)) = tar_mode_size(&entry) else {
 				continue;
 			};
@@ -1656,7 +1651,7 @@ pub fn commit_single_pkg(
 				0 => 0,
 				size => {
 					let pos = position(
-						&entry, &mut raw, plain,
+						&entry, &consumed, plain,
 					);
 					((pos * 100) / size).min(100) as c_int
 				}
