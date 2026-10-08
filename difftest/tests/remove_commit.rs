@@ -589,23 +589,33 @@ fn both(tmp: &TempRoot, w: &World, case: &RmCase) -> RmOutcome {
 	c
 }
 
+// a TempRoot whose root/ may hold read-only dirs: made removable first,
+// also when a case panics
+struct Fix(TempRoot);
+
+impl Drop for Fix {
+	fn drop(&mut self) {
+		force_remove(&self.0.dir().join("root"));
+	}
+}
+
 fn in_child() -> bool {
 	std::env::var_os(CHILD).is_some()
 }
 
 #[test]
 fn fuzz() {
-	let tmp = TempRoot::new("rmcommit");
+	let fix = Fix(TempRoot::new("rmcommit"));
+	let tmp = &fix.0;
 	let mut rng = Rng::new(0x5e7a);
 	let mut seen = BTreeMap::new();
 	let n = (iters() / 100).max(500);
 	for _ in 0..n {
 		let w = gen_world(&mut rng, false);
 		let case = gen_case(&mut rng, &w, false);
-		let out = both(&tmp, &w, &case);
+		let out = both(tmp, &w, &case);
 		count_marks(&out, &mut seen);
 	}
-	force_remove(&tmp.dir().join("root"));
 	for m in MARKS {
 		assert!(seen.contains_key(m), "never hit {m:?}: {seen:?}");
 	}
@@ -616,7 +626,8 @@ fn fuzz() {
 // mountpoint, NOSAVE, DBONLY
 #[test]
 fn fixed() {
-	let tmp = TempRoot::new("rmcommit-fixed");
+	let fix = Fix(TempRoot::new("rmcommit-fixed"));
+	let tmp = &fix.0;
 	let files = |v: &[&str]| -> Vec<Vec<u8>> {
 		let mut v: Vec<Vec<u8>> =
 			v.iter().map(|s| s.as_bytes().to_vec()).collect();
@@ -671,13 +682,12 @@ fn fixed() {
 			pkg_count: 1,
 			..RmCase::default()
 		};
-		let out = both(&tmp, &w, &case);
+		let out = both(tmp, &w, &case);
 		let saved =
 			out.recs.iter()
 				.any(|r| matches!(r, RmRec::Pacsave(..)));
 		assert_eq!(saved, flags == 0, "{}", show(&out));
 	}
-	force_remove(&tmp.dir().join("root"));
 }
 
 // re-runs the fc_ tests of this binary under fakechroot
@@ -706,18 +716,18 @@ fn fc_scriptlets() {
 	if !in_child() {
 		return;
 	}
-	let tmp = TempRoot::new("rmcommit-fc");
+	let fix = Fix(TempRoot::new("rmcommit-fc"));
+	let tmp = &fix.0;
 	let mut rng = Rng::new(0x5c47);
 	let mut ran = 0;
 	for _ in 0..(iters() / 2000).max(60) {
 		let w = gen_world(&mut rng, true);
 		let case = gen_case(&mut rng, &w, true);
-		let out = both(&tmp, &w, &case);
+		let out = both(tmp, &w, &case);
 		ran +=
 			out.recs.iter()
 				.filter(|r| matches!(r, RmRec::Scriptlet(_)))
 				.count();
 	}
-	force_remove(&tmp.dir().join("root"));
 	assert!(ran > 0, "no scriptlet ran");
 }
