@@ -28,7 +28,7 @@ use alpm_repo_db::desc::{RepoDescFile, RepoDescFileV2};
 use alpm_repo_db::files::RepoFiles;
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
-use crate::callbacks::Callbacks;
+use crate::callbacks::{Callbacks, LogLevel};
 use crate::deps::{Depend, dep_from_string};
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
@@ -41,7 +41,7 @@ use crate::signing::{
 	Keyring, SIG_DATABASE, SIG_DATABASE_MARGINAL_OK, SIG_DATABASE_OPTIONAL,
 	SIG_DATABASE_UNKNOWN_OK, check_pgp_helper, process_siglist,
 };
-use crate::util::{fnmatch, hash_sdbm, splitname, until_nul};
+use crate::util::{fnmatch, hash_sdbm, splitname, strerror, until_nul};
 
 // limits.h on linux
 const NAME_MAX: usize = 255;
@@ -121,9 +121,15 @@ pub fn sync_db_validate(
 	let path = until_nul(path);
 	// _alpm_access(R_OK) failing with ENOENT, a dangling link exists
 	let nofollow = AtFlags::SYMLINK_NOFOLLOW;
-	let access = accessat(CWD, path, Access::READ_OK, nofollow);
-	if access == Err(rustix::io::Errno::NOENT) {
-		return Ok(false);
+	if let Err(e) = accessat(CWD, path, Access::READ_OK, nofollow) {
+		let why = strerror(&io::Error::from_raw_os_error(
+			e.raw_os_error(),
+		));
+		let msg = [b"\"", path, b"\" is not readable: ", &why, b"\n"];
+		cb.log(LogLevel::Debug, &msg.concat());
+		if e == rustix::io::Errno::NOENT {
+			return Ok(false);
+		}
 	}
 	if siglevel & SIG_DATABASE == 0 {
 		return Ok(true);

@@ -234,6 +234,12 @@ impl Db {
 		let msg = [b"registering sync database '", treename, b"'\n"];
 		cb.log(LogLevel::Debug, &msg.concat());
 		let path = be_sync::db_path(dbpath, treename, dbext);
+		// _alpm_db_path computing it, the first time validate asks
+		let msg = [b"database path for tree ", treename, b" set to "];
+		cb.log(
+			LogLevel::Debug,
+			&[&msg.concat()[..], &path, b"\n"].concat(),
+		);
 		let mut db = Db::new(treename, path, Backend::Sync);
 		db.siglevel = siglevel;
 		db.validate(default_siglevel, kr, cb);

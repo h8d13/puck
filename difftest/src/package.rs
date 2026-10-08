@@ -25,12 +25,12 @@ struct CPkgXData {
 
 // alpm_depend_t
 #[repr(C)]
-struct CDepend {
-	name: *mut c_char,
-	version: *mut c_char,
-	desc: *mut c_char,
-	name_hash: c_ulong,
-	depmod: c_int,
+pub(crate) struct CDepend {
+	pub(crate) name: *mut c_char,
+	pub(crate) version: *mut c_char,
+	pub(crate) desc: *mut c_char,
+	pub(crate) name_hash: c_ulong,
+	pub(crate) depmod: c_int,
 }
 
 // alpm_backup_t
@@ -377,7 +377,7 @@ fn depmod_from_c(m: c_int) -> DepMod {
 	}
 }
 
-fn read_deps(head: *const CList) -> Vec<Depend> {
+pub(crate) fn read_deps(head: *const CList) -> Vec<Depend> {
 	read_list(head, |d: &CDepend| Depend {
 		name: field(d.name).unwrap(),
 		version: field(d.version),
