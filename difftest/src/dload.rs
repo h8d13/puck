@@ -474,13 +474,6 @@ impl CDload {
 		old
 	}
 
-	pub fn fetch_calls(&self) -> Vec<(Vec<u8>, Vec<u8>, bool)> {
-		self.ctx.fetch
-			.as_ref()
-			.map(|f| f.calls.clone())
-			.unwrap_or_default()
-	}
-
 	fn take_record(&mut self) -> Record {
 		std::mem::take(&mut self.ctx.rec)
 	}

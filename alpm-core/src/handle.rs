@@ -640,10 +640,6 @@ impl Handle {
 		}
 	}
 
-	pub fn download_state(&self) -> &DownloadState {
-		&self.download
-	}
-
 	// handle->user
 	pub fn user(&self) -> u32 {
 		self.user

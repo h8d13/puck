@@ -188,8 +188,6 @@ fn tc_hookdirs(fx: &TempRoot, c: &TcCase) -> Vec<Vec<u8>> {
 	}
 }
 
-pub const TC_NOLOCK: c_int = 1 << 17;
-
 fn arch_name(p: &TcPkg) -> String {
 	format!("{}-{}-x86_64.pkg.tar.gz", p.name, p.version)
 }
