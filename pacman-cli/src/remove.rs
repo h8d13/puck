@@ -27,11 +27,12 @@ fn removal_failed<R>(ui: &mut Ui<R>, target: &[u8], e: &[u8]) {
 // remove_target: the installed package of that name, else every member
 // of the local group of that name. false is the C's -1
 fn remove_target<R>(ui: &mut Ui<R>, h: &mut Handle, target: &[u8]) -> bool {
-	let dbext = h.dbext().to_vec();
-	let Some(db) = h.localdb_mut() else {
+	let dbs = h.dbs_mut();
+	let (dbext, cb) = (dbs.dbext, dbs.cb);
+	let Some(db) = dbs.local else {
 		return false;
 	};
-	if let Ok(pkg) = db.get_pkg(&dbext, target) {
+	if let Ok(pkg) = db.get_pkg(dbext, cb, target) {
 		let pkg = pkg.clone();
 		if let Err(e) = remove_pkg(h, &pkg) {
 			removal_failed(ui, target, e.strerror().as_bytes());
@@ -40,7 +41,13 @@ fn remove_target<R>(ui: &mut Ui<R>, h: &mut Handle, target: &[u8]) -> bool {
 		ui.explicit_removes.push(pkg);
 		return true;
 	}
-	let members: Vec<Package> = match db.get_group(&dbext, target) {
+	let dbs = h.dbs_mut();
+	let Some(db) = dbs.local else {
+		return false;
+	};
+	let members: Vec<Package> = match db
+		.get_group(dbs.dbext, dbs.cb, target)
+	{
 		Ok(Some(grp)) => grp.packages.into_iter().cloned().collect(),
 		_ => {
 			let msg: [&[u8]; 3] =

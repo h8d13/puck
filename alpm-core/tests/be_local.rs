@@ -68,7 +68,7 @@ const FILES: &str = "%FILES%\nusr/\nusr/lib/a\nusr/lib-x\nusr/lib/\n\n\
 	%BACKUP%\nusr/lib/a\td41d8cd98f00b204e9800998ecf8427e\n\n";
 
 fn names(db: &LocalDb) -> Vec<String> {
-	db.populate()
+	db.populate(&mut ())
 		.unwrap()
 		.iter()
 		.map(|p| {
@@ -90,7 +90,7 @@ fn register_creates_missing_db() {
 	assert_eq!(db.path(), [&t.dbpath()[..], b"local/"].concat());
 	let ver = fs::read(t.local().join("ALPM_DB_VERSION")).unwrap();
 	assert_eq!(ver, b"9\n");
-	assert!(db.populate().unwrap().is_empty());
+	assert!(db.populate(&mut ()).unwrap().is_empty());
 }
 
 #[test]
@@ -139,7 +139,7 @@ fn populate_entries() {
 	.unwrap();
 	let db = LocalDb::register(&t.dbpath()).unwrap();
 	assert_eq!(names(&db), ["a-x-2-1", "b-1-1", "c-1:1-1", "link-1-1"]);
-	let cache = db.populate().unwrap();
+	let cache = db.populate(&mut ()).unwrap();
 	let p = cache.find(b"a-x").unwrap();
 	assert_eq!(p.origin, Some(PkgFrom::LocalDb));
 	assert_eq!(p.infolevel, 0);
@@ -156,8 +156,9 @@ fn read_sections() {
 	t.pkg("foo-1:2.0-3", DESC, FILES);
 	fs::write(t.local().join("foo-1:2.0-3/install"), "").unwrap();
 	let db = LocalDb::register(&t.dbpath()).unwrap();
-	let mut p = db.populate().unwrap().iter().next().unwrap().clone();
-	db.read(&mut p, INFRQ_DESC).unwrap();
+	let mut p =
+		db.populate(&mut ()).unwrap().iter().next().unwrap().clone();
+	db.read(&mut p, INFRQ_DESC, &mut ()).unwrap();
 	assert_eq!(p.infolevel, INFRQ_DESC);
 	assert!(p.files.files.is_empty());
 	assert_eq!(p.base.as_deref(), Some(&b"foo-base"[..]));
@@ -177,7 +178,8 @@ fn read_sections() {
 	let optdesc = p.optdepends[0].desc.as_deref();
 	assert_eq!(optdesc, Some(&b"does things"[..]));
 	assert_eq!(p.xdata.len(), 1);
-	db.read(&mut p, INFRQ_FILES | INFRQ_SCRIPTLET).unwrap();
+	db.read(&mut p, INFRQ_FILES | INFRQ_SCRIPTLET, &mut ())
+		.unwrap();
 	let files: Vec<&[u8]> =
 		p.files.files.iter().map(|f| &f.name[..]).collect();
 	// strcmp order: '-' sorts before '/'
@@ -194,22 +196,23 @@ fn read_error_is_sticky() {
 	t.init();
 	t.pkg("foo-1.0-1", "%BUILDDATE%\nx\n", FILES);
 	let db = LocalDb::register(&t.dbpath()).unwrap();
-	let fresh = db.populate().unwrap().iter().next().unwrap().clone();
+	let fresh =
+		db.populate(&mut ()).unwrap().iter().next().unwrap().clone();
 	let mut p = fresh.clone();
 	// files first: loaded, then the desc failure blocks later sections
-	db.read(&mut p, INFRQ_FILES).unwrap();
-	let r = db.read(&mut p, INFRQ_DESC);
+	db.read(&mut p, INFRQ_FILES, &mut ()).unwrap();
+	let r = db.read(&mut p, INFRQ_DESC, &mut ());
 	assert!(matches!(r, Err(ReadError::Desc(_))));
 	assert_eq!(p.infolevel, INFRQ_FILES | INFRQ_ERROR);
 	assert!(p.desc.is_none());
-	let r = db.read(&mut p, INFRQ_SCRIPTLET);
+	let r = db.read(&mut p, INFRQ_SCRIPTLET, &mut ());
 	assert!(matches!(r, Err(ReadError::Earlier)));
 	// loaded sections still answer
-	db.read(&mut p, INFRQ_FILES).unwrap();
+	db.read(&mut p, INFRQ_FILES, &mut ()).unwrap();
 	assert_eq!(p.files.files.len(), 4);
 	// a missing file is an io error
 	let mut q = fresh;
 	fs::remove_file(t.local().join("foo-1.0-1/files")).unwrap();
-	let r = db.read(&mut q, INFRQ_FILES);
+	let r = db.read(&mut q, INFRQ_FILES, &mut ());
 	assert!(matches!(r, Err(ReadError::Io(_))));
 }

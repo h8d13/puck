@@ -366,17 +366,17 @@ pub(crate) struct View<'a> {
 // caches of the dbs used for install or upgrade (a failure marks a sync
 // db invalid like the C's lazy load)
 pub(crate) fn load_caches(h: &mut Handle, sync: bool) {
-	let dbext = h.dbext().to_vec();
-	let (local, dbs) = h.dbs_mut();
-	if let Some(db) = local {
-		let _ = db.load_all(&dbext, INFRQ_DESC);
+	let d = h.dbs_mut();
+	let (dbext, cb) = (d.dbext, d.cb);
+	if let Some(db) = d.local {
+		let _ = db.load_all(dbext, cb, INFRQ_DESC);
 	}
 	if !sync {
 		return;
 	}
-	for db in dbs {
+	for db in d.sync {
 		if db.usage() & (DB_USAGE_INSTALL | DB_USAGE_UPGRADE) != 0 {
-			let _ = db.pkgcache(&dbext);
+			let _ = db.pkgcache(dbext, cb);
 		}
 	}
 }
@@ -555,10 +555,12 @@ fn sort_targets(view: &View, cb: &mut dyn Callbacks, trans: &mut Trans) {
 
 // _alpm_pkg_dup force-loads every section of a local package: the
 // removals and oldpkgs a prepare collected are dup'ed again from their
-// fully loaded cache entries, for the commit
+// fully loaded cache entries, for the commit. not logged: the C reads
+// them when it dups, not here
 fn load_full(h: &mut Handle, trans: &mut Trans) {
-	let dbext = h.dbext().to_vec();
-	let Some(db) = h.localdb_mut() else {
+	let d = h.dbs_mut();
+	let (dbext, cb) = (d.dbext, &mut ());
+	let Some(db) = d.local else {
 		return;
 	};
 	let olds = trans.add.iter_mut().filter_map(|t| t.oldpkg.as_mut());
@@ -566,8 +568,7 @@ fn load_full(h: &mut Handle, trans: &mut Trans) {
 		if p.infolevel & INFRQ_ALL == INFRQ_ALL {
 			continue;
 		}
-		if let Ok(full) = db.load_pkg(&dbext, p.name_bytes(), INFRQ_ALL)
-		{
+		if let Ok(full) = db.force_load_pkg(dbext, cb, p.name_bytes()) {
 			*p = full.dup();
 		}
 	}

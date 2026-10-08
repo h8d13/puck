@@ -376,10 +376,10 @@ pub fn rust_remove_single(
 	h.set_callbacks(Box::new(RustRec(recs.clone())));
 	h.set_logfile(logfile.as_os_str().as_encoded_bytes());
 	h.set_noupgrades(&case.noupgrade);
-	let dbext = h.dbext().to_vec();
-	let db = h.localdb_mut().unwrap();
-	db.load_all(&dbext, INFRQ_ALL).unwrap();
-	let pkg = db.get_pkg(&dbext, &case.target).unwrap().clone();
+	let dbs = h.dbs_mut();
+	let db = dbs.local.unwrap();
+	db.load_all(dbs.dbext, dbs.cb, INFRQ_ALL).unwrap();
+	let pkg = db.get_pkg(dbs.dbext, dbs.cb, &case.target).unwrap().clone();
 	trans_init(&mut h, case.flags | TRANS_FLAG_NOLOCK).unwrap();
 	remove_pkg(&mut h, &pkg).unwrap();
 	let trans = h.trans_mut().unwrap();

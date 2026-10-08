@@ -29,7 +29,7 @@ fn rust_handle(w: &SyncWorld, dbext: &[u8]) -> Handle {
 fn warm(h: &mut Handle) {
 	let dbext = h.dbext().to_vec();
 	for db in h.syncdbs_mut() {
-		let _ = db.pkgcache(&dbext);
+		let _ = db.pkgcache(&dbext, &mut ());
 	}
 }
 

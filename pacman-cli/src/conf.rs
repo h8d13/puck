@@ -888,14 +888,13 @@ fn register_repo<H: Host>(
 	host: &mut H,
 	repo: &ConfigRepo,
 ) -> bool {
-	let db = match handle.register_syncdb(&repo.name, repo.siglevel) {
-		Ok(db) => db,
-		Err(err) => {
-			let name = repo.name.clone();
-			host.log(config, &Msg::RegisterFailed { name, err });
-			return false;
-		}
-	};
+	if let Err(err) = handle.register_syncdb(&repo.name, repo.siglevel) {
+		let name = repo.name.clone();
+		host.log(config, &Msg::RegisterFailed { name, err });
+		return false;
+	}
+	let dbs = handle.dbs_mut();
+	let db = dbs.sync.last_mut().expect("just registered");
 	let usage = format!("setting usage of {} for ", repo.usage);
 	let line = cat(&[usage.as_bytes(), &repo.name, b" repository\n"]);
 	host.log(config, &Msg::Debug(line));
@@ -904,8 +903,8 @@ fn register_repo<H: Host>(
 	for (cache, urls) in lists {
 		for url in urls {
 			let added = match cache {
-				true => db.add_cache_server(url),
-				false => db.add_server(url),
+				true => db.add_cache_server(dbs.cb, url),
+				false => db.add_server(dbs.cb, url),
 			};
 			if let Err(err) = added {
 				let msg = Msg::ServerFailed {

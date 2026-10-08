@@ -2,6 +2,7 @@
 pub mod callback;
 pub mod check;
 pub mod conf;
+pub mod database;
 pub mod deptest;
 pub mod files;
 pub mod getopt;
