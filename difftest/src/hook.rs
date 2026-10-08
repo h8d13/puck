@@ -98,32 +98,36 @@ impl Callbacks for HookRecorder {
 	}
 
 	fn event(&mut self, event: &Event<'_>) {
-		let run = |r: &HookRun| {
-			let desc = r.desc.map(<[u8]>::to_vec);
-			(r.name.to_vec(), desc, r.position, r.total)
-		};
-		let rec = match event {
-			Event::ScriptletInfo { line } => {
-				HookRec::Scriptlet(line.to_vec())
-			}
-			Event::HookStart { when } => {
-				HookRec::HookStart(*when as c_int)
-			}
-			Event::HookDone { when } => {
-				HookRec::HookDone(*when as c_int)
-			}
-			Event::HookRunStart(r) => {
-				let (n, d, p, t) = run(r);
-				HookRec::RunStart(n, d, p, t)
-			}
-			Event::HookRunDone(r) => {
-				let (n, d, p, t) = run(r);
-				HookRec::RunDone(n, d, p, t)
-			}
-			e => panic!("unexpected event {}", e.kind()),
-		};
+		let rec = hook_rec(event).unwrap_or_else(|| {
+			panic!("unexpected event {}", event.kind())
+		});
 		self.0.borrow_mut().push(rec);
 	}
+}
+
+// a scriptlet line or hook event as HookRec, None for other events
+pub fn hook_rec(event: &Event<'_>) -> Option<HookRec> {
+	let run = |r: &HookRun| {
+		let desc = r.desc.map(<[u8]>::to_vec);
+		(r.name.to_vec(), desc, r.position, r.total)
+	};
+	let rec = match event {
+		Event::ScriptletInfo { line } => {
+			HookRec::Scriptlet(line.to_vec())
+		}
+		Event::HookStart { when } => HookRec::HookStart(*when as c_int),
+		Event::HookDone { when } => HookRec::HookDone(*when as c_int),
+		Event::HookRunStart(r) => {
+			let (n, d, p, t) = run(r);
+			HookRec::RunStart(n, d, p, t)
+		}
+		Event::HookRunDone(r) => {
+			let (n, d, p, t) = run(r);
+			HookRec::RunDone(n, d, p, t)
+		}
+		_ => return None,
+	};
+	Some(rec)
 }
 
 // a Rust Handle on root/dbpath with a HookRecorder and a logfile, the
@@ -226,7 +230,17 @@ unsafe extern "C" fn event_cb(ctx: *mut c_void, event: *mut c_void) {
 	let (recs, kind) = unsafe {
 		(&mut *ctx.cast::<Vec<HookRec>>(), *event.cast::<c_int>())
 	};
-	// SAFETY: the casts follow kind, see above
+	// SAFETY: a live event of the C
+	let rec = unsafe { c_hook_rec(event) };
+	recs.push(rec.unwrap_or_else(|| panic!("unexpected event {kind}")));
+}
+
+// a C scriptlet line or hook event as HookRec, None for other events.
+// SAFETY: event is a live alpm_event_t
+pub(crate) unsafe fn c_hook_rec(event: *mut c_void) -> Option<HookRec> {
+	// SAFETY: every event starts with its type, which says the struct
+	let kind = unsafe { *event.cast::<c_int>() };
+	// SAFETY: the casts follow kind
 	let rec = unsafe {
 		match kind {
 			EVENT_SCRIPTLET_INFO => {
@@ -258,10 +272,10 @@ unsafe extern "C" fn event_cb(ctx: *mut c_void, event: *mut c_void) {
 					),
 				}
 			}
-			k => panic!("unexpected event {k}"),
+			_ => return None,
 		}
 	};
-	recs.push(rec);
+	Some(rec)
 }
 
 // "[%FT%T%z] " leaders of alpm_logaction dropped, wherever they sit (a

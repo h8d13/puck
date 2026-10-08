@@ -7,10 +7,10 @@
 // globs through FileCheck. the C getters lazy-load local packages, here
 // the caller loads them first (INFRQ_DESC for dependency conflicts,
 // INFRQ_FILES for file conflicts, INFRQ_ALL where a conflict copies them).
-// the dependency checks log through Callbacks like the C, the file check
-// does not log. allocation failures are not modelled (the C returns NULL
-// or drops entries). progress goes through Callbacks, handle->progresscb
-// in the C.
+// both checks log through Callbacks like the C (the file check's debug
+// lines as conflict.c has them). allocation failures are not modelled
+// (the C returns NULL or drops entries). progress goes through
+// Callbacks, handle->progresscb in the C.
 
 use std::borrow::Borrow;
 use std::cmp::Ordering;
@@ -236,7 +236,19 @@ fn fileconflict(
 	file: Vec<u8>,
 	pkg1: &Package,
 	pkg2: Option<&Package>,
+	cb: &mut dyn Callbacks,
 ) -> FileConflict {
+	let owner = pkg2.map_or(&b"(filesystem)"[..], Package::name_bytes);
+	let line: [&[u8]; 7] = [
+		b"found file conflict ",
+		&file,
+		b", packages ",
+		pkg1.name_bytes(),
+		b" and ",
+		owner,
+		b"\n",
+	];
+	debug(cb, &line);
 	let (conflict_type, ctarget) = match pkg2 {
 		None => (FileConflictType::Filesystem, &[][..]),
 		Some(p) if p.origin == Some(PkgFrom::LocalDb) => {
@@ -255,9 +267,15 @@ fn fileconflict(
 // dir_belongsto_pkgs: every entry under root + dirpath, recursively, is
 // in the file list of one of pkgs. lstat decides what is a directory, so
 // a symlink to one is checked as a file. readdir order does not matter,
-// any unowned entry or lstat failure answers no. a readdir error ends
-// the walk like the end of the directory
-fn dir_belongsto_pkgs(root: &[u8], dirpath: &[u8], pkgs: &[&Package]) -> bool {
+// any unowned entry or lstat failure answers no; readdir order only
+// picks which one is logged. a readdir error ends the walk like the end
+// of the directory. an unowned subdirectory is logged at each level
+fn dir_belongsto_pkgs(
+	root: &[u8],
+	dirpath: &[u8],
+	pkgs: &[&Package],
+	cb: &mut dyn Callbacks,
+) -> bool {
 	let Ok(dir) = fs::read_dir(os(&cat(&[root, dirpath]))) else {
 		return false;
 	};
@@ -269,20 +287,32 @@ fn dir_belongsto_pkgs(root: &[u8], dirpath: &[u8], pkgs: &[&Package]) -> bool {
 		let name = name.as_bytes();
 		let full = cat(&[root, dirpath, name]);
 		let Ok(meta) = fs::symlink_metadata(os(&full)) else {
+			debug(cb, &[b"could not stat ", &full, b"\n"]);
 			return false;
 		};
 		let is_dir = meta.is_dir();
 		let slash: &[u8] = if is_dir { b"/" } else { b"" };
 		let path = cat(&[dirpath, name, slash]);
-		if !pkgs.iter().any(|p| has_file(p, &path)) {
-			return false;
-		}
-		if is_dir && !dir_belongsto_pkgs(root, &path, pkgs) {
+		let owned = pkgs.iter().any(|p| has_file(p, &path))
+			&& (!is_dir
+				|| dir_belongsto_pkgs(root, &path, pkgs, cb));
+		if !owned {
+			let msg = b" found in directory\n";
+			debug(cb, &[b"unowned file ", &path, msg]);
 			return false;
 		}
 	}
 	true
 }
+
+// check_filesystem's debug lines of a resolved conflict
+const REPLACING_FILE: &[u8] =
+	b"replacing package file with a directory, not a conflict\n";
+const LOCAL_REMOVED: &[u8] = b"local file will be removed, not a conflict\n";
+const CHANGED_HANDS: &[u8] =
+	b"file changed packages, adding to remove skiplist\n";
+const UNOWNED_BACKUP: &[u8] = b"file was unowned but in new backup list\n";
+const FORCED: &[u8] = b"conflict with file on filesystem being forced\n";
 
 // the entries after newfiles[j] inside directory filestr: the C moves j
 // to the last of them, the walk goes on after it
@@ -325,19 +355,34 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 		p1: &Package,
 		rest: &[&Package],
 		out: &mut FileConflicts,
+		cb: &mut dyn Callbacks,
 	) {
+		let name = p1.name_bytes();
+		debug(cb, &[b"searching for file conflicts: ", name, b"\n"]);
 		for p2 in rest {
 			for filename in p1.files.intersection(&p2.files) {
 				let path = cat(&[self.root, filename]);
 				if self.can_overwrite(filename, &path)
 					&& has_file(p2, filename)
 				{
+					let line: [&[u8]; 6] = [
+						filename,
+						b" exists in both '",
+						name,
+						b"' and '",
+						p2.name_bytes(),
+						b"'\n",
+					];
+					debug(cb, &line);
+					let msg = b"file-file conflict being forced\n";
+					debug(cb, &[msg]);
 					continue;
 				}
 				out.conflicts.push(fileconflict(
 					path,
 					p1,
 					Some(p2),
+					cb,
 				));
 			}
 		}
@@ -350,6 +395,7 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 		relative_path: &[u8],
 		dbpkg: Option<&Package>,
 		rem: &[&Package],
+		cb: &mut dyn Callbacks,
 	) -> bool {
 		let dir = [relative_path, b"/"].concat();
 		let owners: Vec<&Package> =
@@ -362,7 +408,9 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 		if !pkg_diff(&owners, &pkgs).is_empty() {
 			return false;
 		}
-		dir_belongsto_pkgs(self.root, &dir, &owners)
+		let msg = b" belong to removed packages\n";
+		debug(cb, &[b"checking if all files in ", &dir, msg]);
+		dir_belongsto_pkgs(self.root, &dir, &owners, cb)
 	}
 
 	// CHECK 2: files of p1 new to the installed version (all of them
@@ -374,8 +422,12 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 		upgrade: &[&Package],
 		rem: &[&Package],
 		out: &mut FileConflicts,
+		cb: &mut dyn Callbacks,
 	) {
 		let rootlen = self.root.len();
+		let name = p1.name_bytes();
+		let msg = b"searching for filesystem conflicts: ";
+		debug(cb, &[msg, name, b"\n"]);
 		let dbpkg = self.local_pkg(p1.name_bytes());
 		let newfiles: Vec<&[u8]> = match dbpkg {
 			Some(db) => p1.files.difference(&db.files),
@@ -394,6 +446,8 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 				j += 1;
 				continue;
 			};
+			let msg = b"checking possible conflict: ";
+			debug(cb, &[msg, &path, b"\n"]);
 			let is_dir = lsbuf.is_dir();
 			let mut resolved = false;
 			// the C reads path[pathlen - 1] with the untruncated length,
@@ -401,6 +455,8 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 			let pfile_isdir = path.last() == Some(&b'/');
 			if pfile_isdir {
 				if is_dir {
+					let msg = b"file is a directory, not a conflict\n";
+					debug(cb, &[msg]);
 					j += 1;
 					continue;
 				}
@@ -412,6 +468,7 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 				if dbpkg.is_some_and(|db| {
 					has_file(db, relative_path)
 				}) {
+					debug(cb, &[REPLACING_FILE]);
 					resolved = true;
 					skip_inside(&newfiles, &mut j, filestr);
 				}
@@ -425,6 +482,7 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 					break;
 				}
 				if has_file(rempkg, relative_path) {
+					debug(cb, &[LOCAL_REMOVED]);
 					resolved = true;
 					if pfile_isdir {
 						skip_inside(
@@ -452,6 +510,7 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 				if has_file(localp2, relative_path) {
 					out.skip_remove
 						.push(relative_path.to_vec());
+					debug(cb, &[CHANGED_HANDS]);
 					resolved = true;
 					if filestr.last() == Some(&b'/') {
 						skip_inside(
@@ -467,6 +526,7 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 					relative_path,
 					dbpkg,
 					rem,
+					cb,
 				);
 			}
 
@@ -475,10 +535,12 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 				&& needbackup(relative_path, p1).is_some()
 				&& self.file_owner(relative_path).is_none()
 			{
+				debug(cb, &[UNOWNED_BACKUP]);
 				resolved = true;
 			}
 
 			if !is_dir && self.can_overwrite(filestr, &path) {
+				debug(cb, &[FORCED]);
 				resolved = true;
 			}
 
@@ -488,6 +550,7 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 					path.clone(),
 					p1,
 					owner,
+					cb,
 				));
 			}
 			j += 1;
@@ -501,7 +564,7 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 		&self,
 		upgrade: &[&Package],
 		rem: &[&Package],
-		progress: &mut dyn Callbacks,
+		cb: &mut dyn Callbacks,
 	) -> FileConflicts {
 		let mut out = FileConflicts::default();
 		let numtargs = upgrade.len();
@@ -511,21 +574,18 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 		for (current, p1) in upgrade.iter().enumerate() {
 			// size_t arithmetic, the quotient fits an int
 			let percent = (current * 100 / numtargs) as c_int;
-			progress.progress(
+			cb.progress(
 				Progress::ConflictsStart,
 				b"",
 				percent,
 				numtargs,
 				current,
 			);
-			self.check_targets(
-				p1,
-				&upgrade[current + 1..],
-				&mut out,
-			);
-			self.check_filesystem(p1, upgrade, rem, &mut out);
+			let rest = &upgrade[current + 1..];
+			self.check_targets(p1, rest, &mut out, cb);
+			self.check_filesystem(p1, upgrade, rem, &mut out, cb);
 		}
-		progress.progress(
+		cb.progress(
 			Progress::ConflictsStart,
 			b"",
 			100,

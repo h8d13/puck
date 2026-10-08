@@ -21,7 +21,8 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use alpm_core::PACKAGE_VERSION;
@@ -1483,6 +1484,7 @@ pub fn std_term() -> Term<StdIn> {
 		flush_input: flush_term_input,
 		now_ms: monotonic_ms,
 		now_secs,
+		move_completed_up: Arc::default(),
 	}
 }
 
@@ -1636,6 +1638,12 @@ pub fn run<R: BufRead + 'static>(
 	new_term: impl Fn() -> Term<R>,
 	sink: Option<fn(&mut Output)>,
 ) -> i32 {
+	// one multibar_move_completed_up flag for the callbacks and the ops
+	let flag = Arc::<AtomicBool>::default();
+	let new_term = || Term {
+		move_completed_up: flag.clone(),
+		..new_term()
+	};
 	let mut term = new_term();
 	let mut out = Output {
 		sink,

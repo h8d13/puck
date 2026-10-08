@@ -208,3 +208,33 @@ fn log_lines() {
 	f.event(&Event::DbRetrieveDone);
 	assert_eq!(s(&f.out.stderr), "warning: w\n");
 }
+
+// multibar_move_completed_up set from outside through the flag the Term
+// shares (sync's commit holds another Term with it): the completed bar
+// moves to the top, where finished bars leave the UI
+#[test]
+fn move_completed_up_shared_flag() {
+	let run = |up: bool| {
+		let t = Term {
+			cols: || 80,
+			now_ms,
+			..Term::new(Cursor::new(Vec::new()), false, true)
+		};
+		let flag = t.move_completed_up.clone();
+		let mut f = Frontend::new(Config::new(), t);
+		flag.store(up, std::sync::atomic::Ordering::Relaxed);
+		let names: [&[u8]; 3] = [b"a.pkg", b"b.pkg", b"c.pkg"];
+		for n in names {
+			f.download(n, DownloadEvent::Init { optional: false });
+		}
+		let done = DownloadEvent::Completed {
+			total: 2,
+			result: 0,
+		};
+		f.download(names[2], done);
+		let bars = f.multibar().active.iter();
+		bars.map(|b| s(&b.filename).to_owned()).collect::<Vec<_>>()
+	};
+	assert_eq!(run(false), ["a.pkg", "b.pkg", "c.pkg"]);
+	assert_eq!(run(true), ["b.pkg", "a.pkg"]);
+}

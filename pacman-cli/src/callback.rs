@@ -18,6 +18,7 @@
 // where the C asserts a download bar exists, an unknown file is ignored.
 use std::ffi::c_int;
 use std::io::BufRead;
+use std::sync::atomic::Ordering;
 
 use alpm_core::callbacks::{
 	Callbacks, DownloadEvent, Event, HookWhen, LogLevel, PackageOperation,
@@ -80,7 +81,6 @@ pub struct Bar {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Multibar {
 	pub active: Vec<Bar>,
-	pub move_completed_up: bool,
 	pub cursor_lineno: c_int,
 }
 
@@ -214,9 +214,9 @@ impl<R: BufRead, L: Lookup> Frontend<R, L> {
 		&self.multibar
 	}
 
-	// multibar_move_completed_up
+	// multibar_move_completed_up: the flag is the Term's, shared
 	pub fn multibar_move_completed_up(&mut self, value: bool) {
-		self.multibar.move_completed_up = value;
+		self.term.move_completed_up.store(value, Ordering::Relaxed);
 	}
 
 	fn print(&mut self, s: &[u8]) {
@@ -603,8 +603,8 @@ impl<R: BufRead, L: Lookup> Frontend<R, L> {
 			0 => {
 				let now = (self.term.now_ms)();
 				Self::update_bar_finalstats(now, bar);
-				if self.multibar.move_completed_up && index != 0
-				{
+				let up = &self.term.move_completed_up;
+				if up.load(Ordering::Relaxed) && index != 0 {
 					// the completed bar moves to the top
 					self.multibar.active.swap(0, index);
 					let former_top = self.multibar.active
