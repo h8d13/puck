@@ -66,7 +66,7 @@ follows the wider ALPM workspace, then parity:
 | `statvfs` (`diskspace.c`), `umask` | `rustix` safe API | in ALPM's lockfile |
 | getuid/geteuid, fchdir, tty width and tcflush, fd passing (`SCM_RIGHTS`) | `rustix` `process`, `termios`, `net` | same crate; `use-libc` backend so ids go through libc like the C's (fakeroot's LD_PRELOAD fakes libc, not raw syscalls) |
 | chroot exec (scriptlets, hooks, ldconfig) | spawn `chroot(8)` via `std::process::Command` | no `pre_exec` (unsafe); works under fakechroot like the C's `chroot()` |
-| run downloads as DownloadUser | spawned helper process, `CommandExt::uid`/`gid` | safe std, instead of the C's fork + setuid |
+| run downloads and XferCommand as DownloadUser | spawned helper process (the binary re-executed), `CommandExt::uid`/`gid` | safe std, instead of the C's fork + setuid |
 | landlock (`sandbox_fs.c`) | `landlock` crate | the Landlock maintainers' binding |
 | seccomp (`sandbox_syscalls.c`) | `libseccomp` crate | binding to the same C library pacman links |
 | lock file | `OpenOptions::create_new` | safe std (O_CREAT\|O_EXCL) |

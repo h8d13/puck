@@ -770,6 +770,15 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
 - with the sandbox, the mkdtemp'd `download-XXXXXX` dir is left behind on
   early error paths, e.g. `-Sy` while the db is locked (be_sync.c:156,
   163, 271; sync.c:783, 885; dload.c:1283-1295; util.c:996-1002). **real**
+  Also without an error: `alpm_fetch_pkgurl` with every url already
+  cached never reaches `_alpm_download`, the only remover (dload.c:1339,
+  1409, 1447), so each `-U <cached url>` leaves an empty dir in the
+  cachedir; and a failing fetchcb returns through RET_ERR before the
+  removal (dload.c:1284 vs 1294). **real**
+- sandboxed downloads count server errors in the forked child's copy of
+  the handle (dload.c:920-1060): a mirror failing during `-Sy` is not
+  remembered for the package downloads of the same `-Syu`, unlike
+  without the sandbox. **real**, cosmetic
 - `_alpm_filecache_setup` tests `stat(tmpdir) && S_ISDIR` inverted, a valid
   TMPDIR is never used (util.c:944) **env**; a CacheDir that is a regular
   file is accepted (util.c:911-916) **local**
@@ -817,6 +826,19 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
 - `alpm_sandbox_setup_child` fails its root and getpwnam checks silently
   (sandbox.c:56-57); callback type read without EINTR retry (dload.c:1000).
   **api**
+- `alpm_sandbox_setup_child` restricts writes (landlock) before it sets
+  no_new_privs (sandbox.c:58-66): `landlock_restrict_self` needs one of
+  no_new_privs or CAP_SYS_ADMIN, so it only works as real root. Under
+  fakeroot every sandboxed download fails ("restricting filesystem
+  access failed ... Operation not permitted"); with
+  DisableSandboxFilesystem it works. **env**
+- XferCommand switches to DownloadUser whenever it is set (conf.c:247,
+  `config->sandboxuser`), not where `_alpm_use_sandbox` holds: with
+  DisableSandbox the download dir is the root-owned sync dir or cachedir
+  (util.c:964, 1005), the command runs as DownloadUser and cannot write
+  there. **local** (DownloadUser is in Arch's default pacman.conf).
+  download_with_xfercommand returns 0 (success) after a failed argv
+  calloc (conf.c:322-329, ret starts at 0). **env**
 - SIGTERM sent after every normal EOF, unknown callback types skipped
   (dload.c:1000-1022); 0-byte pipe writes refused (sandbox.c:84, 108);
   chroot/pivot_root listed twice (sandbox_syscalls.c:43/95, 52/100);

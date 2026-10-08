@@ -72,7 +72,7 @@ already downloaded sync dbs.
 | package model, pkghash, group | done |
 | local db reader (`be_local.c` via `alpm-db`) | done (reading side) |
 | sync db reader (`be_sync.c` via `alpm-repo-db`, `alpm-compress`) | done (reading side) |
-| pacman.conf (`conf.c`) | done (parsing, `setup_libalpm`, `register_repo`; XferCommand pending) |
+| pacman.conf (`conf.c`) | done (parsing, `setup_libalpm`, `register_repo`, XferCommand) |
 | db layer and cache (`db.c`), minimal handle (`handle.c`) | done (no search, update, signatures) |
 | POSIX ERE for `-Ss`/`-Qs` (glibc regcomp/regexec, C.UTF-8) | done |
 | `-Qk`/`-Qkk` (`check.c`) + local mtree reading (`alpm-mtree`) | done |
@@ -94,9 +94,9 @@ default-SigLevel world (signing debug lines, GOTO_ERR's C file:line).
 
 | Part | State |
 |---|---|
-| downloads (`dload.c`): parallel, resume, mirrors, sandbox user | done (`reqwest`); sandbox child and Handle wiring pending |
+| downloads (`dload.c`): parallel, resume, mirrors, sandbox user | done (`reqwest`, sandbox helper wired into the Handle) |
 | signature verification (`signing.c`) | done (`gpg` over `--status-fd`, argv checked against gpgme's); Handle/db wiring pending |
-| db update/validation (`be_sync.c` writing side) | done (`alpm_db_update`, `-Sy`/`-Syy`/`-Fy` with progress bars); sandbox child pending |
+| db update/validation (`be_sync.c` writing side) | done (`alpm_db_update`, `-Sy`/`-Syy`/`-Fy` with progress bars, sandboxed) |
 
 Gate: pactest sync/download tests against the Rust binary. `-Sy`/`-Syy`/
 `-Fy` parity runs (fakeroot, `file://` mirror, fetched dbs compared) are
@@ -249,10 +249,10 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `lib/libalpm/be_sync.c` | 762 | `alpm-core::be_sync` (partial) | populate (tar walk, load_pkg_for_entry, check_meta subset, validate_filename, error ranking), get_validation, db_path, sync_db_validate (missing file, signature, import retry) via `alpm-repo-db` + `alpm-compress`: difftest on generated .db/.files in gz/bz2/xz/zst/none (fields, cache order, table counts), real sync db copies; alpm_db_update + get_sync_dir: difftest vs C on loopback mirrors with gpg-signed fixture dbs (sequences, edges, signatures, fuzz) |
 | `lib/libalpm/db.c` | 773 | `alpm-core::db` (partial) | register/unregister, servers (sanitize_url), usage, siglevel, get_valid, pkgcache/get_pkg, groupcache/get_group (load_grpcache order), add/remove pkg in cache, load_pkg (lazy loads in place), dbext read at load, db_path, db_cmp: difftest op-sequence fuzz (results, errno, db state each step); search (difftest fuzz), load_all/walk/find_satisfier; log lines (db.c, be_local populate/read, be_sync populate): the op fuzz compares every line of each op and of the release; update pending |
 | `lib/libalpm/log.c` | 112 | `alpm-core::log` | logaction (logfile, errno), leader format, syslog packet: difftest (stamps stripped), clock injectable, UTC default |
-| `lib/libalpm/handle.c` | 1017 | `alpm-core::handle` (all but handle->user, trans) | options, lock, logfile, callbacks, keyring, dload state: difftest option fuzz, lock, logaction; earlier: | alpm_initialize path checks/normalisation, dbext, architectures, siglevels, ignore/noupgrade/noextract lists + match: difftest; callbacks, lock, cachedirs, hookdirs, gpgdir, logfile, sandbox, downloads pending |
+| `lib/libalpm/handle.c` | 1017 | `alpm-core::handle` (all but trans) | options, lock, logfile, callbacks, keyring, dload state: difftest option fuzz, lock, logaction; earlier: | alpm_initialize path checks/normalisation, dbext, architectures, siglevels, ignore/noupgrade/noextract lists + match: difftest; callbacks, lock, cachedirs, hookdirs, gpgdir, logfile, sandbox, downloads pending |
 | `lib/libalpm/alpm.c` | 132 | - | |
 | `lib/libalpm/signing.c` | 1201 | `alpm-core::signing` | decode_signature, checksig (.sig and base64), check_pgp_helper, process_siglist, key_in_keychain, key_import (keyring/question part; WKD/keyserver failure only), pkg/db_check_pgp_signature, extract_keyid: difftest vs gpgme-backed C on throwaway keyrings (all status/validity pairs, bad/garbage/truncated/armored sigs), results, rc, pm_errno, questions, logs; gpg argv vs gpgme's; extract_keyid fuzz |
-| `lib/libalpm/dload.c` | 1474 | `alpm-core::dload` (partial) | _alpm_download (reqwest, fetchcb path), resume/mirrors/cache servers/server error counting/.sig/max size/time condition, alpm_fetch_pkgurl, download dir + filecache helpers: difftest vs C on scripted 127.0.0.1 HTTP servers and file://; sandbox child behind `Sandbox`: unit tests |
+| `lib/libalpm/dload.c` | 1474 | `alpm-core::dload` (partial) | _alpm_download (reqwest, fetchcb path), resume/mirrors/cache servers/server error counting/.sig/max size/time condition, alpm_fetch_pkgurl, download dir + filecache helpers: difftest vs C on scripted 127.0.0.1 HTTP servers and file://; sandbox child behind `Sandbox`: fetch_pkgurl cases and db_update sequences sandboxed vs the C, the binaries under fakeroot with DownloadUser (`cli_binary` xfercommand) |
 | `lib/libalpm/deps.c` | 926 | `alpm-core::deps` (partial) | dep_from_string, dep_compute_string, depcmp_provides (+ static dep_vercmp through it), depcmp_literal, depcmp, find_satisfier, checkdeps, sortbydeps, resolvedep/resolvedeps, find_dbs_satisfier, recursedeps: difftest on fixture handles (local + 3 sync dbs, ignore, assumeinstalled, NODEPVERSION, usage), questions/logs compared |
 | `lib/libalpm/graph.c` | 38 | `alpm-core::graph` | via sortbydeps |
 | `lib/libalpm/conflict.c` | 686 | `alpm-core::conflict` | innerconflicts, outerconflicts, checkconflicts, db_find_fileconflicts (both checks, skip_remove, progress): difftest on fixture roots (files, dirs, symlinks) and local dbs, 2M fuzz |
@@ -262,7 +262,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `lib/libalpm/add.c` | 718 | `alpm-core::add` | `_alpm_upgrade_packages` (`upgrade_packages`): difftest `trans_commit`; alpm_add_pkg: difftest `trans_prep`; commit_single_pkg with extract_single_file, extract_db_file, perform_extraction (archive_write_disk with OWNER/PERM/TIME/UNLINK/SECURE_SYMLINKS), try_rename, get_install_time, and the per-package step of `_alpm_upgrade_packages`: difftest `add_commit` vs C `_alpm_upgrade_packages` on one-package transactions (backup md5 states, .pacnew, NoUpgrade/NoExtract, dir/file/symlink changes, modes, SUID/SGID, root-owned entries, hard links, db files, DBONLY, reasons, truncated packages, SOURCE_DATE_EPOCH children; trees with archive mtimes, local db, logs, events, progress, logfile, rc, pm_errno), scriptlets under fakechroot, 2M fuzz |
 | `lib/libalpm/remove.c` | 798 | `alpm-core::remove` | `_alpm_remove_packages` (`remove_packages`): difftest `trans_commit`; alpm_remove_pkg, `_alpm_remove_prepare` (cascade, recurse, unneeded, optdepend events): difftest `trans_prep`; `_alpm_remove_single_package` with can_remove_file, shift_pacsave, unlink_file, should_skip_file, remove_package_files, dir_is_mountpoint: difftest `remove_commit` on fixture roots and local dbs (files, dirs, symlinks, /proc mountpoint, read-only dirs, .pacsave rotations, other owners, NoUpgrade, skip_remove, NOSAVE/DBONLY/NOSCRIPTLET, upgrade path; trees, local db, cache, logs, events, progress, logfile, pm_errno), scriptlets under fakechroot, 2M fuzz |
 | `lib/libalpm/hook.c` | 679 | `alpm-core::hook` | parse/validate, dir scan and masking, triggers, Depends, AbortOnFail, NeedsTargets, run: difftest fuzz on root "/" and runs under fakechroot |
-| `lib/libalpm/sandbox*.c` | 608 | `alpm-core::{sandbox,sandbox_fs,sandbox_syscalls}` | restrict_writes_to (8 variants incl. injected landlock failures), syscalls_filter (list parsed from the C, raw syscall probes): errno per probe in spawned children vs C; callback pipe writer + parent loop: byte-stream fuzz; helper download vs C _alpm_download; uid switch: unit tests (root) |
+| `lib/libalpm/sandbox*.c` | 608 | `alpm-core::{sandbox,sandbox_fs,sandbox_syscalls}` | restrict_writes_to (8 variants incl. injected landlock failures), syscalls_filter (list parsed from the C, raw syscall probes): errno per probe in spawned children vs C; callback pipe writer + parent loop: byte-stream fuzz; helper download vs C _alpm_download; uid switch: unit tests (root); exec mode (XferCommand): `cli_binary` vs the C binary under fakeroot |
 | regcomp/regexec (glibc, used by db.c, remove.c, files.c) | - | `alpm-core::regex` | difftest fuzz vs glibc (C.UTF-8, 4 flag sets) on agreeing characters; classes/towupper via std, divergence per class counted |
 | `src/common/*.c` | 445 | `pacman-common::{util_common,ini}` | all of util-common.c and ini.c: difftest fuzz (safe_fgets on fmemopen + real file, llstat on /tmp tree, ini via recorded callback) |
 | `src/pacman/*.c` | 10124 | - | excl. symlinks into `src/common` |
@@ -276,8 +276,8 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `src/pacman/database.c` (in the above) | 305 | `pacman-cli::database` | -D --asdeps/--asexplicit, -Dk, -Dkk: difftest vs C pacman_database on two copies of each fixture (ret, stdout, stderr, local db tree after), -Dkk on sync worlds; unit tests |
 | `src/pacman/files.c` (in the above) | 341 | `pacman-cli::files` | -F, -Fx, -Fq, --machinereadable, -Fl: difftest vs C pacman_files on .files dbs; -Fy: same, with the frontend callbacks |
 | `src/pacman/package.c` (in the above) | 587 | `pacman-cli::package` | dump_pkg_full (all origins, -i/-ii), dump_pkg_backups, dump_pkg_files, print_installed, print_groups, dump_pkg_search: difftest on a real C handle with refilled db caches and real files under the root, strftime %c vs `format_date_utc` fuzz + localtime limits; changelog and gpgme results: unit tests |
-| `src/pacman/conf.c` (in the above) | 1468 | `pacman-cli::conf` (partial) | config model, parseconfigfile, setdefaults (include, siglevel, cleanmethod, usage, repeating options, $repo/$arch, sysroot), glob(3) subset: difftest on random config trees (return, stderr, whole config_t), glob vs libc; setup_libalpm, register_repo: difftest reading the handle back through every getter; XferCommand download pending |
-| `src/pacman/util.c` (in the above) | 1981 | `pacman-cli::util` (partial: all but trans_init/release, sync_syncdbs, tcflush) | display_targets + table engine, print_packages (--print-format), optdepends lists, select/multiselect/yesno prompts (stdin via fmemopen), rmrf: difftest; earlier helpers: | indentprint, strreplace, string_display, list_display(_linebreak), signature_display, humanize_size, arg_to_string, console cursor helpers: difftest fuzz; glibc mbstowcs: difftest; wcwidth via unicode-width, divergence per class counted, display difftests on agreeing characters |
+| `src/pacman/conf.c` (in the above) | 1468 | `pacman-cli::conf` (partial) | config model, parseconfigfile, setdefaults (include, siglevel, cleanmethod, usage, repeating options, $repo/$arch, sysroot), glob(3) subset: difftest on random config trees (return, stderr, whole config_t), glob vs libc; setup_libalpm, register_repo: difftest reading the handle back through every getter; XferCommand (download_with_xfercommand, systemvp): `cli_binary` xfercommand, C vs Rust binaries on loopback and file:// mirrors with fixture commands |
+| `src/pacman/util.c` (in the above) | 1981 | `pacman-cli::util` (partial: all but trans_init/release, sync_syncdbs) | display_targets + table engine, print_packages (--print-format), optdepends lists, select/multiselect/yesno prompts (stdin via fmemopen), rmrf: difftest; earlier helpers: | indentprint, strreplace, string_display, list_display(_linebreak), signature_display, humanize_size, arg_to_string, console cursor helpers: difftest fuzz; getcols (TIOCGWINSZ) and flush_term_input: tty-probe on a pty vs C; glibc mbstowcs: difftest; wcwidth via unicode-width, divergence per class counted, display difftests on agreeing characters |
 | `src/util/testpkg.c` | 103 | - | |
 | `src/pacman/pacman-conf.c` | 481 | - | the scripts read config values through it (pacman-key, makepkg) |
 
@@ -374,9 +374,12 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   the reported entries only, no stale depmissing leftovers.
 - frontend: one `util::Term` (stdin, ttys, cols, clocks as fn pointers)
   and `Output` with an optional sink, flushed before stdin reads, before
-  `db_update` and after every callback; tests read the buffer. The
-  binary's uid is 0 (or FAKEROOTUID) under fakeroot (FAKEROOTKEY): /proc
-  shows the real uid where fakeroot fakes getuid. Transaction prompts and
+  `db_update` and after every callback; tests read the buffer. getuid
+  and geteuid go through libc (rustix `use-libc`): fakeroot's LD_PRELOAD
+  fakes libc's ids, not raw syscalls or /proc, so the binary and
+  handle->user see uid 0 under fakeroot like the C (the FAKEROOTKEY
+  emulation is gone). `Term::flush_input` is flush_term_input (tcflush
+  of a terminal stdin) before each prompt read. Transaction prompts and
   callback prompts read stdin through separate buffers. No Callbacks hook
   for `multibar_move_completed_up` (sync_prepare_execute sets it before
   the commit's downloads; the callbacks sit boxed in the handle). After
@@ -501,8 +504,9 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   child's chroot()+exec, so argv[0] is cmd (`/sbin/ldconfig` for
   ldconfig) and a slash-less cmd gets `./`; root "/" spawns directly;
   chroot(8)'s own failure line is reworded to the C child's text (English
-  messages only). umask(0022) in the child is not set (no safe way in the
-  child); only SIGPIPE and the signal mask are reset. Output lines split
+  messages only). The child's umask(0022) is set in the parent around
+  the spawn (process wide for that moment); only SIGPIPE and the signal
+  mask are reset. Output lines split
   like the C (2046-byte cut, NUL cuts, unterminated last line delivered
   twice as in the C).
 - `sandbox`: the download child is a re-exec of the binary
@@ -512,6 +516,28 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   Request over stdin, callbacks over stdout in the C pipe format.
   no_new_privs comes before landlock (needed unprivileged); getpwnam via
   `getent passwd`; parent sends SIGKILL after the loop (C: SIGTERM).
+  `Handle` holds handle->user (getuid at initialize) and a `SandboxFor`
+  (`sandbox::handle_sandbox`; tests swap in a pretend-root one):
+  `with_downloader` (fetch_pkgurl, the sync commit's downloads) and
+  `be_sync::downloader` get a `HelperSandbox` where `_alpm_use_sandbox`
+  holds. finalize_download_file chowns to root only as root, like the C.
+  A sandbox download dir nothing went through (fetch_pkgurl with every
+  url cached, a failed fetchcb in db_update) is removed; the C keeps it
+  (UPSTREAM.md). The helper's server error counts die with it like the
+  forked child's, so a sandboxed handle never blocks a mirror across
+  calls.
+- XferCommand: `conf::XferCommand` is download_with_xfercommand (the
+  fetchcb setup_libalpm registers; re-installed with the final config):
+  the process cwd is changed and put back through fchdir like the C,
+  the debug line shows the raw wait status. With DownloadUser it runs
+  through the helper's exec mode (`--alpm-sandbox-exec`,
+  `sandbox::SandboxExec`): the parent checks root and the user, spawns
+  the helper as that user; the helper sets no_new_privs and execs argv.
+  The helper's stdin is a socket bringing argv and the parent's stdin
+  (SCM_RIGHTS, rustix `net`); an exec failure's errno comes back on it
+  like the C's err_fd, so "fork failed!" shows as in the C. SIGINT and
+  SIGQUIT are not ignored while the command runs (no safe std API): ^C
+  ends pacman with the command, where the C carries on after it.
 - `remove` commit side: `remove_single_package(h, oldpkg, newpkg,
   targ_count, pkg_count)` reads flags and skip_remove from `h.trans()`,
   oldpkg is the `trans.remove` dup (every section loaded), newpkg's files
@@ -533,7 +559,7 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   entry (a directory's mode and times fixed up right after it), names
   absolute, hard link targets joined to root instead of chdir(root),
   umask taken as 0022 (modes come out exact either way), euid from
-  /proc/self/status. Not restored: xattrs and pax time/id records (not
+  `util::geteuid`. Not restored: xattrs and pax time/id records (not
   translated yet), lchmod is a no-op like glibc's on symlinks.
   libarchive's texts are copied; a short entry is "Truncated tar archive
   detected while reading data", other read errors show the port's text.
@@ -579,13 +605,13 @@ Follow-ups raised by port units:
 | precedent cleanup: base64, time, unicode-width, drop split_backup/parse_xdata, ALPM vs C difftest for vercmp/relations | audit | done |
 | regex class/towupper tables -> std `char` methods, divergence counted like wcwidth | audit | done |
 | handle callbacks + log.c: one `Callbacks` model wired into `Handle` (deps, conflict, diskspace, dload, signing, hooks, scriptlets, sandbox) | deps, conflict, diskspace | done |
-| wire `HelperSandbox::for_handle` into `Handle::fetch_pkgurl` once `handle->user` (getuid) is ported | integrate | todo |
+| wire `HelperSandbox::for_handle` into `Handle::fetch_pkgurl` once `handle->user` (getuid) is ported | integrate | done: `Handle::user`, `SandboxFor` in `with_downloader` (fetch_pkgurl, sync commit downloads) |
 | dload difftest umask race (C umask(0) process-wide vs parallel tests) | integrate | done: `difftest::umask_lock()` |
-| rustix `process`/`termios` features: handle->user, getcols tty width, flush_term_input | handle, cliutil2 | todo |
+| rustix `process`/`termios` features: handle->user, getcols tty width, flush_term_input | handle, cliutil2 | done (`use-libc` backend for fakeroot, METHODOLOGY.md); pty difftest |
 | local time offset for log stamps (UTC today) | handle | todo |
 | shared helpers into util: `llstat`, `strerror`, `PATH_MAX` once; frontend `pm_printf`/`Output`/`check_syncdbs`/`getcols` | conflict, diskspace, query, sync | done |
 | `Handle` split borrow of local + sync caches (resolver and displays clone caches today) | deps, sync | in progress (integration) |
-| XferCommand via a sandbox helper exec mode (`alpm_sandbox_setup_child` from conf.c) | sandbox | todo |
+| XferCommand via a sandbox helper exec mode (`alpm_sandbox_setup_child` from conf.c) | sandbox | done: `conf::XferCommand`, `sandbox::SandboxExec` |
 | conf difftest abort under long TMPDIR | sandbox, dbwrite reports | done: C one-byte heap overflow in `escape_chars` (UPSTREAM.md), fixture avoids it |
 | `alpm_extract_keyid` wired into -Sii/-Qii `sig_keys` | sync | todo (ported in signing) |
 | `Handle` owns `signing::Keyring` (gpgdir, known_keys) and implements `SigCallbacks`; `Db::register_sync` calls `be_sync::sync_db_validate` | signing | with the callbacks unit |
@@ -597,8 +623,8 @@ Follow-ups raised by port units:
 | `alpm_db_update` (be_sync download + validate) | dload | done |
 | drop `SyncCallbacks` and the `replace_callbacks` swap in sync.rs for `callback.rs` (progress bars, "is up to date", "failed to download") | dbupdate | done |
 | `Question::SelectProvider` carries provider db names (today through `Lookup`); `Handle::replace_callbacks` has no frontend caller left | frontend | todo |
-| sandbox in `be_sync::downloader` (like `fetch_pkgurl`) | dbupdate | todo |
-| `umask(0022)` around `alpm_db_update` (rustix process) | dbupdate | todo |
+| sandbox in `be_sync::downloader` (like `fetch_pkgurl`) | dbupdate | done (`SyncParts::sandbox`) |
+| `umask(0022)` around `alpm_db_update` (rustix process) | dbupdate | done, and run_chroot's child umask |
 | one `logv(cb, ...)` helper (copies in hook.rs, deps.rs, trans.rs, util's `log_parts`) | integrate2 | in progress: `callbacks::logv`, used by db, be_local, be_sync |
 | `-D` dispatch arm: `pacman_database(config, handle, targets, &mut o)` | m1close | done |
 | setup_libalpm's server adds through `Handle::dbs_mut()` (`Db::add_server` takes the callbacks) | m1close | done |
@@ -614,7 +640,8 @@ Follow-ups raised by port units:
 | be_sync: a non-archive db must fail at open (DB_OPEN, db invalid) like libarchive, not LIBARCHIVE | query | done |
 | `%DATA%` in repo dbs, gzip multi-member, `Packager` default, backup `(null)` | db readers | ALPM side, see `UPSTREAM.md` |
 | xattrs and pax mtime/uid/gid on extraction: alpm-compress `TarballEntry` needs a `raw_mut` (pax_extensions takes `&mut`) | addcommit | todo |
-| one geteuid/getuid helper (add.rs `euid`, sandbox `System::uid` read /proc/self/status) or rustix `process` | addcommit | todo |
+| one geteuid/getuid helper (add.rs `euid`, sandbox `System::uid` read /proc/self/status) or rustix `process` | addcommit | done: `util::getuid`/`geteuid` (dload's Umask reader stays: no getumask without setting it) |
+| dload's internal debug lines (url, maxsize, time condition, tempfile, curl result, response code), so `-Sy --debug` with the built-in downloader matches | process | todo |
 | `_alpm_upgrade_packages` loop over trans.add, interrupted state, ldconfig | addcommit | with alpm_trans_commit |
 
 Divergences below are corrected in vendored ALPM where listed in "ALPM
