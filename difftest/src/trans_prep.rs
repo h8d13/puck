@@ -639,7 +639,10 @@ pub struct TpSetup {
 
 unsafe extern "C" {
 	fn alpm_add_pkg(handle: *mut c_void, pkg: *mut CPkg) -> c_int;
-	fn alpm_remove_pkg(handle: *mut c_void, pkg: *mut CPkg) -> c_int;
+	pub(crate) fn alpm_remove_pkg(
+		handle: *mut c_void,
+		pkg: *mut CPkg,
+	) -> c_int;
 	fn alpm_sync_sysupgrade(
 		handle: *mut c_void,
 		enable_downgrade: c_int,
