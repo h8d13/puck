@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::cmp::Ordering;
 use std::ffi::{OsStr, c_int};
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
-use std::io::{self, ErrorKind, Read, Write};
+use std::io::{self, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{
 	DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, fchown,
@@ -16,13 +16,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use alpm_compress::decompression::DecompressionSettings;
 use rustix::fs::{
-	AtFlags, CWD, FileType, Mode, OFlags, Timespec, Timestamps, chmodat,
-	fchmod, futimens, makedev, mknodat, openat, utimensat,
+	AtFlags, CWD, Mode, OFlags, Timespec, Timestamps, XattrFlags, chmodat,
+	fchmod, fsetxattr, futimens, lsetxattr, mknodat, openat, utimensat,
 };
 
 use crate::backup;
 use crate::be_local::{INFRQ_DESC, INFRQ_FILES, PrepareError, WriteError};
-use crate::be_package::tar_mode_size;
 use crate::callbacks::{
 	Event, LogLevel, PackageOp, PackageOperation, Progress,
 };
@@ -39,10 +38,10 @@ use crate::trans::{
 	runscriptlet, trans_in,
 };
 use crate::util::{
-	CALLER_PREFIX, Entry, PATH_MAX, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO,
-	S_IFLNK, S_IFMT, check_padding, cleanup_pathname, compute_md5sum,
-	enter, geteuid, ldconfig, llstat, mkdir_mode, open_archive, strerror,
-	until_nul,
+	CALLER_PREFIX, Entry, Object, PATH_MAX, S_IFDIR, S_IFMT,
+	cleanup_pathname, compute_md5sum, enter, geteuid, ldconfig, llstat,
+	mkdir_mode, object, open_archive, open_link_data, strerror, until_nul,
+	write_block,
 };
 
 use LogLevel::{Debug, Error, Warning};
@@ -165,10 +164,11 @@ pub fn add_pkg(
 // chdir()s into root for hard link targets, here they are joined to
 // root and the process cwd stays. the process umask is taken as 0022
 // (the C inherits pacman's, src/pacman never sets one); modes come out
-// exact either way. not
-// restored: xattrs (pax records, not translated yet), pax times and
-// ids (the ustar fields are used). libarchive's texts are
-// copied, a failed data read shows the port's error text.
+// exact either way. what the entry carries comes from libarchive's tar
+// reader (tar.rs): pax times to the nanosecond, pax ids, xattrs. no
+// user/group lookup is set, so uname/gname are never used; ACLs and file
+// flags are read but not restored (no ARCHIVE_EXTRACT_ACL/FFLAGS).
+// libarchive's texts are copied.
 
 // archive_write_disk todo bits
 const TODO_MODE_BASE: u32 = 1;
@@ -180,6 +180,7 @@ const TODO_SUID: u32 = 1 << 4;
 const TODO_SUID_CHECK: u32 = 1 << 5;
 const TODO_OWNER: u32 = 1 << 6;
 const TODO_TIMES: u32 = 1 << 7;
+const TODO_XATTR: u32 = 1 << 10;
 
 const S_ISUID: u32 = 0o4000;
 const S_ISGID: u32 = 0o2000;
@@ -196,6 +197,9 @@ const ENOENT: i32 = 2;
 const ENOTDIR: i32 = 20;
 const EISDIR: i32 = 21;
 const EEXIST: i32 = 17;
+const EOVERFLOW: i32 = 75;
+const ENOSYS: i32 = 38;
+const ENOTSUP: i32 = 95;
 
 fn os(path: &[u8]) -> &Path {
 	Path::new(OsStr::from_bytes(path))
@@ -229,16 +233,6 @@ fn warn(errno: i32, msg: Vec<u8>) -> ExtractError {
 	}
 }
 
-// what create_filesystem_object makes of the entry
-#[derive(Clone, Debug)]
-enum Object {
-	File,
-	Dir,
-	Symlink(Vec<u8>),
-	HardLink(Vec<u8>),
-	Node(FileType, u64),
-}
-
 // what stays the same over the entries of one package
 struct Disk<'a> {
 	// the C's cwd during the commit
@@ -247,8 +241,6 @@ struct Disk<'a> {
 	// st_dev/st_ino of the package file (archive_read_extract2's skip
 	// file)
 	skip: Option<(u64, u64)>,
-	// archive length when unfiltered, see util::check_padding
-	plain_len: Option<u64>,
 }
 
 // a name as the C resolves it: relative ones from the cwd (root)
@@ -292,10 +284,22 @@ fn check_symlinks(
 				));
 			}
 			Ok(st) if st.is_dir() => {
-				// la_opendirat(O_RDONLY | O_DIRECTORY)
-				if !last && let Err(e) = File::open(os(&head)) {
+				// la_opendirat: O_PATH, no read permission needed
+				let flags = OFlags::PATH
+					| OFlags::DIRECTORY
+					| OFlags::CLOEXEC;
+				let fd = openat(
+					CWD,
+					os(&head),
+					flags,
+					Mode::empty(),
+				);
+				if !last && let Err(e) = fd {
 					let what = b"Could not chdir ";
-					return Err(fail(errno(&e), what));
+					return Err(fail(
+						e.raw_os_error(),
+						what,
+					));
 				}
 			}
 			Ok(st) if st.is_symlink() => {
@@ -340,12 +344,18 @@ struct Writer<'d> {
 	obj: Object,
 	uid: i64,
 	gid: i64,
-	mtime: i64,
-	filesize: u64,
+	// seconds and nanoseconds, None: unset (the writer's start time)
+	mtime: Option<(i64, i64)>,
+	atime: Option<(i64, i64)>,
+	// in the order set_xattrs takes them
+	xattrs: Vec<(Vec<u8>, Vec<u8>)>,
+	// archive_entry_size
+	filesize: i64,
 	todo: u32,
 	deferred: u32,
 	fd: Option<File>,
-	written: u64,
+	// where the last write ended
+	fd_offset: i64,
 	// the last archive_set_error
 	err: Option<(i32, Vec<u8>)>,
 }
@@ -436,9 +446,14 @@ impl Writer<'_> {
 				let src = resolve(self.disk.root, &target);
 				io(fs::hard_link(os(&src), os(&name)))?;
 				// a hard link without data has no metadata of
-				// its own
-				self.todo = 0;
-				self.deferred = 0;
+				// its own; one with data (pax) takes it
+				if self.filesize <= 0 {
+					self.todo = 0;
+					self.deferred = 0;
+					return Ok(());
+				}
+				self.fd = open_link_data(os(&name))
+					.map_err(|e| errno(&e))?;
 				return Ok(());
 			}
 			Object::Symlink(target) => {
@@ -497,7 +512,8 @@ impl Writer<'_> {
 	// restore_entry
 	fn restore(&mut self) -> Result<(), ExtractError> {
 		let name = resolve(self.disk.root, &self.name);
-		let is_dir = matches!(self.obj, Object::Dir);
+		// the entry's type bits, a hard link may carry a directory's
+		let is_dir = self.mode & S_IFMT == S_IFDIR;
 		if !is_dir {
 			// ARCHIVE_EXTRACT_UNLINK
 			match fs::remove_file(os(&name)) {
@@ -596,57 +612,53 @@ impl Writer<'_> {
 		Ok(())
 	}
 
-	// copy_data + _archive_write_disk_data_block: a failed read is
-	// fatal, a failed write a warning that ends the copy
+	// copy_data + _archive_write_disk_data_block: the data blocks at
+	// their offsets until the entry's end. a failed read (libarchive's
+	// text) is fatal, a failed write a warning that ends the copy
 	fn copy_data(&mut self, entry: &mut Entry) -> Result<(), ExtractError> {
-		// libarchive's tar reader names a short entry, other read
-		// errors show the port's text
-		let fatal = |e: io::Error| ExtractError {
-			fatal: true,
-			errno: errno(&e),
-			msg: match e.kind() {
-				ErrorKind::UnexpectedEof => {
-					b"Truncated tar archive \
-					detected while reading data"
-						.to_vec()
-				}
-				_ => strerror(&e),
-			},
-		};
 		let Some(mut f) = self.fd.take() else {
 			return Ok(());
 		};
-		let mut buf = vec![0; 64 * 1024];
-		let mut r = Ok(());
-		while self.written < self.filesize {
-			let n = match entry.read(&mut buf) {
-				Ok(0) => {
-					let e = ErrorKind::UnexpectedEof.into();
-					r = Err(fatal(e));
-					break;
-				}
-				Ok(n) => n,
-				Err(e) if e.kind()
-					== ErrorKind::Interrupted =>
-				{
-					continue;
-				}
-				Err(e) => {
-					r = Err(fatal(e));
-					break;
-				}
-			};
-			if let Err(e) = f.write_all(&buf[..n]) {
-				let msg = b"Write failed".to_vec();
-				r = Err(warn(errno(&e), msg));
-				break;
-			}
-			self.written += n as u64;
-		}
+		let r = self.pour(entry, &mut f);
 		self.fd = Some(f);
-		r?;
-		check_padding(entry, self.filesize, self.disk.plain_len)
-			.map_err(fatal)
+		r
+	}
+
+	fn pour(
+		&mut self,
+		entry: &mut Entry,
+		f: &mut File,
+	) -> Result<(), ExtractError> {
+		loop {
+			let block = entry.data_block().map_err(|e| {
+				ExtractError {
+					fatal: true,
+					errno: ERRNO_MISC,
+					msg: e.to_string().into_bytes(),
+				}
+			})?;
+			let Some((offset, data)) = block else {
+				return Ok(());
+			};
+			let block = (offset, &data[..]);
+			let size = self.filesize;
+			let n = write_block(
+				f,
+				&mut self.fd_offset,
+				block,
+				size,
+			)
+			.map_err(|(e, what)| {
+				warn(errno(&e), what.as_bytes().to_vec())
+			})?;
+			if n < data.len() {
+				let msg = format!(
+					"Too much data: Truncating file at {} bytes",
+					self.filesize
+				);
+				return Err(warn(EOVERFLOW, msg.into_bytes()));
+			}
+		}
 	}
 
 	// lazy_stat: the open file, else lstat of the name
@@ -750,17 +762,16 @@ impl Writer<'_> {
 		ok
 	}
 
-	// atime is the writer's start time, mtime the entry's
+	// the entry's times to the nanosecond, the writer's start time for
+	// one that is unset
 	fn times(&self) -> Timestamps {
+		let ts = |t: Option<(i64, i64)>| {
+			let (tv_sec, tv_nsec) = t.unwrap_or((now(), 0));
+			Timespec { tv_sec, tv_nsec }
+		};
 		Timestamps {
-			last_access: Timespec {
-				tv_sec: now(),
-				tv_nsec: 0,
-			},
-			last_modification: Timespec {
-				tv_sec: self.mtime,
-				tv_nsec: 0,
-			},
+			last_access: ts(self.atime),
+			last_modification: ts(self.mtime),
 		}
 	}
 
@@ -783,12 +794,72 @@ impl Writer<'_> {
 		true
 	}
 
-	// _archive_write_disk_finish_entry: size, owner, mode, times
+	// set_xattrs (Linux): fsetxattr on the open file, else lsetxattr on
+	// the entry's name. POSIX.1e ACL attributes are skipped quietly, the
+	// obsolete xfsroot namespace is refused without a call (and without
+	// a warning unless a call failed too)
+	fn set_xattrs(&mut self) -> bool {
+		let (mut failed, mut fail, mut warned) =
+			(Vec::new(), false, false);
+		let path = resolve(self.disk.root, &self.path);
+		for (name, value) in &self.xattrs {
+			let acl = [
+				&b"system.posix_acl_access"[..],
+				b"system.posix_acl_default",
+				b"trusted.SGI_ACL_DEFAULT",
+				b"trusted.SGI_ACL_FILE",
+			];
+			if acl.contains(&&name[..]) {
+				continue;
+			}
+			if name.starts_with(b"xfsroot.") {
+				fail = true;
+				failed.push(name.clone());
+				continue;
+			}
+			let flags = XattrFlags::empty();
+			let r = match &self.fd {
+				Some(f) => {
+					fsetxattr(f, &name[..], value, flags)
+				}
+				None => lsetxattr(
+					os(&path),
+					&name[..],
+					value,
+					flags,
+				),
+			};
+			let Err(e) = r else { continue };
+			let e = e.raw_os_error();
+			fail |= e != ENOTSUP && e != ENOSYS;
+			failed.push(name.clone());
+			warned = true;
+		}
+		if !warned {
+			return true;
+		}
+		let msg = match fail {
+			true => [
+				&b"Cannot restore extended attributes: "[..],
+				&failed.join(&b' '),
+			]
+			.concat(),
+			false => b"Cannot restore extended attributes on this \
+				  file system"
+				.to_vec(),
+		};
+		self.set_err(ERRNO_MISC, msg);
+		false
+	}
+
+	// _archive_write_disk_finish_entry: size, owner, mode, times. xattrs
+	// go before the mode when not root (a file left unwritable), last
+	// when root (file capabilities are cleared by the other changes)
 	fn finish(&mut self) -> Result<(), ExtractError> {
 		self.err = None;
 		if let Some(f) = &self.fd
-			&& self.written != self.filesize
-			&& let Err(e) = f.set_len(self.filesize)
+			&& self.fd_offset != self.filesize
+			&& let Err(e) = f.set_len(self.filesize as u64)
 			&& self.filesize == 0
 		{
 			let msg = b"File size could not be restored".to_vec();
@@ -796,11 +867,18 @@ impl Writer<'_> {
 			return Err(warn(errno(&e), msg));
 		}
 		let mut ok = true;
+		let root = self.disk.euid == 0;
 		if self.todo & TODO_OWNER != 0 {
 			ok &= self.set_ownership();
 		}
+		if !root && self.todo & TODO_XATTR != 0 {
+			ok &= self.set_xattrs();
+		}
 		if self.todo & TODO_MODE != 0 {
 			ok &= self.set_mode();
+		}
+		if root && self.todo & TODO_XATTR != 0 {
+			ok &= self.set_xattrs();
 		}
 		if self.todo & TODO_TIMES != 0 {
 			ok &= self.set_times();
@@ -865,39 +943,16 @@ impl Writer<'_> {
 
 impl Disk<'_> {
 	// archive_read_extract2 of the entry named name (absolute) through a
-	// fresh archive_write_disk with pacman's flags. mode and size are
-	// libarchive's (tar_mode_size)
+	// fresh archive_write_disk with pacman's flags. mode is the entry's,
+	// or extract_db_file's 0644 over it
 	fn extract(
 		&self,
 		entry: &mut Entry,
 		name: &[u8],
 		mode: u32,
-		size: u64,
 	) -> Result<(), ExtractError> {
-		let header = entry.header();
-		let target = entry.link_name_bytes().unwrap_or_default();
-		let dev = |n: io::Result<Option<u32>>| {
-			n.ok().flatten().unwrap_or(0)
-		};
-		let obj = match mode & S_IFMT {
-			S_IFDIR => Object::Dir,
-			S_IFLNK => Object::Symlink(target.to_vec()),
-			// hard links carry no type bits
-			0 => Object::HardLink(target.to_vec()),
-			S_IFCHR | S_IFBLK => {
-				let kind = match mode & S_IFMT {
-					S_IFCHR => FileType::CharacterDevice,
-					_ => FileType::BlockDevice,
-				};
-				let rdev = makedev(
-					dev(header.device_major()),
-					dev(header.device_minor()),
-				);
-				Object::Node(kind, rdev)
-			}
-			S_IFIFO => Object::Node(FileType::Fifo, 0),
-			_ => Object::File,
-		};
+		let obj = object(entry);
+		let size = entry.size();
 		let clean = cleanup_pathname(name).ok_or_else(|| {
 			warn(ERRNO_MISC, b"Invalid empty pathname".to_vec())
 		})?;
@@ -911,28 +966,29 @@ impl Disk<'_> {
 			.concat();
 			return Err(warn(ERRNO_MISC, msg));
 		}
-		let mut todo = TODO_MODE | TODO_OWNER | TODO_TIMES;
+		let mut todo = TODO_MODE | TODO_OWNER | TODO_TIMES | TODO_XATTR;
 		if mode & S_ISGID != 0 {
 			todo |= TODO_SGID | TODO_SGID_CHECK;
 		}
 		if mode & S_ISUID != 0 {
 			todo |= TODO_SUID | TODO_SUID_CHECK;
 		}
-		let id = |n: io::Result<u64>| n.map_or(0, |n| n as i64);
 		let mut w = Writer {
 			disk: self,
 			name: clean,
 			path: name.to_vec(),
 			mode,
 			obj,
-			uid: id(header.uid()),
-			gid: id(header.gid()),
-			mtime: id(header.mtime()),
+			uid: entry.uid(),
+			gid: entry.gid(),
+			mtime: entry.mtime(),
+			atime: entry.atime(),
+			xattrs: entry.xattrs().to_vec(),
 			filesize: size,
 			todo,
 			deferred: 0,
 			fd: None,
-			written: 0,
+			fd_offset: 0,
 			err: None,
 		};
 		check_symlinks(self.root, &w.name, false)?;
@@ -964,10 +1020,9 @@ fn perform_extraction(
 	disk: &Disk,
 	entry: &mut Entry,
 	mode: u32,
-	size: u64,
 	filename: &[u8],
 ) -> bool {
-	let Err(e) = disk.extract(entry, filename, mode, size) else {
+	let Err(e) = disk.extract(entry, filename, mode) else {
 		return false;
 	};
 	let text = [filename, b" (", &e.msg, b")\n"].concat();
@@ -1008,7 +1063,6 @@ fn extract_db_file(
 	h: &mut Handle,
 	disk: &Disk,
 	entry: &mut Entry,
-	(mode, size): (u32, u64),
 	newpkg: &Package,
 	entryname: &[u8],
 ) -> bool {
@@ -1029,7 +1083,7 @@ fn extract_db_file(
 		}
 	};
 	// archive_entry_set_perm keeps the type bits
-	let mode = (mode & S_IFMT) | 0o644;
+	let mode = (entry.mode() & S_IFMT) | 0o644;
 	let dbpath = h.localdb().and_then(|db| db.local()).map(|l| l.path());
 	let filename = [
 		dbpath.unwrap_or_default(),
@@ -1042,7 +1096,7 @@ fn extract_db_file(
 	.concat();
 	// snprintf into char[PATH_MAX]
 	let filename = &filename[..filename.len().min(PATH_MAX - 1)];
-	perform_extraction(h, disk, entry, mode, size, filename)
+	perform_extraction(h, disk, entry, mode, filename)
 }
 
 // the ".pacnew" sibling
@@ -1062,15 +1116,11 @@ fn extract_single_file(
 	newpkg: &mut Package,
 	oldpkg: Option<&Package>,
 ) -> usize {
-	let entryname = until_nul(&entry.path_bytes()).to_vec();
-	let Ok((entrymode, size)) = tar_mode_size(entry) else {
-		return 0;
-	};
-	let size = size as u64;
+	let entryname = entry.path_bytes().to_vec();
+	let entrymode = entry.mode();
 	if entryname.first() == Some(&b'.') {
-		let ms = (entrymode, size);
 		return usize::from(extract_db_file(
-			h, disk, entry, ms, newpkg, &entryname,
+			h, disk, entry, newpkg, &entryname,
 		));
 	}
 	if newpkg.files.contains(&entryname).is_none() {
@@ -1210,7 +1260,7 @@ fn extract_single_file(
 
 	let msg = [b"extracting ", &filename[..], b"\n"];
 	log(h.callbacks(), Debug, &msg);
-	if perform_extraction(h, disk, entry, entrymode, size, &filename) {
+	if perform_extraction(h, disk, entry, entrymode, &filename) {
 		return 1;
 	}
 	if let Some(i) = backup {
@@ -1567,7 +1617,7 @@ pub fn commit_single_pkg(
 		log(h.callbacks(), Error, &msg);
 		Errno::PkgOpen
 	};
-	let mut archive = match open_archive(&pkgfile) {
+	let archive = match open_archive(&pkgfile) {
 		Ok(a) => a,
 		Err(e) => return Err(open_failed(h, e)),
 	};
@@ -1578,18 +1628,8 @@ pub fn commit_single_pkg(
 		root: &disk_root,
 		euid: geteuid(),
 		skip: meta.is_file().then(|| (meta.dev(), meta.ino())),
-		plain_len: plain.then_some(meta.len()),
 	};
-	let consumed = archive.consumed;
-	let mut entries = match archive.reader.entries() {
-		Ok(e) => e,
-		Err(e) => return Err(open_failed(h, e)),
-	};
-	// libarchive reads the first header while opening
-	let first = match entries.next() {
-		Some(Err(e)) => return Err(open_failed(h, e)),
-		first => first,
-	};
+	let consumed = &archive.consumed;
 	// the C chdir()s into root for hard links; checked the same way
 	if let Err(e) = enter(&disk_root) {
 		let msg = [
@@ -1605,20 +1645,16 @@ pub fn commit_single_pkg(
 
 	let mut errors = 0;
 	// archive_read_next_header other than ARCHIVE_OK ends the loop
-	let entries = first.into_iter().chain(entries).map_while(Result::ok);
+	let entries = archive.reader.entries().map_while(Result::ok);
 	if flags & TRANS_FLAG_DBONLY != 0 {
 		log(h.callbacks(), Debug, &[b"extracting db files\n"]);
 		for mut entry in entries {
-			let entryname = until_nul(&entry.path_bytes()).to_vec();
+			let entryname = entry.path_bytes().to_vec();
 			if entryname.first() != Some(&b'.') {
 				continue;
 			}
-			let Ok((mode, size)) = tar_mode_size(&entry) else {
-				continue;
-			};
-			let ms = (mode, size as u64);
 			errors += usize::from(extract_db_file(
-				h, &disk, &mut entry, ms, &t.pkg, &entryname,
+				h, &disk, &mut entry, &t.pkg, &entryname,
 			));
 		}
 	} else {
@@ -1637,7 +1673,7 @@ pub fn commit_single_pkg(
 				0 => 0,
 				size => {
 					let pos = position(
-						&entry, &consumed, plain,
+						&entry, consumed, plain,
 					);
 					((pos * 100) / size).min(100) as c_int
 				}

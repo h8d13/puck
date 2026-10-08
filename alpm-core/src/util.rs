@@ -25,10 +25,10 @@ use rustix::fs::{
 	Access, AtFlags, CWD, FileType, Mode, accessat, makedev, mknodat,
 };
 
-use crate::be_package::tar_mode_size;
 use crate::callbacks::{Callbacks, Event, LogLevel};
 use crate::error::Errno;
 use crate::handle::Handle;
+use crate::tar;
 
 pub use pacman_common::util_common::{PATH_MAX, llstat};
 
@@ -1287,8 +1287,8 @@ pub fn filecache_setup(
 //
 // libarchive is replaced by alpm-compress's decoders (filter picked by
 // magic bytes like libarchive's bidding, for the four filters it has)
-// read in libarchive's filter blocks (Filter), and the tar crate.
-// archive_read_extract(archive, entry, 0) is translated for what a tar
+// read in libarchive's filter blocks (Filter), and libarchive's tar
+// reader (tar.rs). archive_read_extract(archive, entry, 0) is translated for what a tar
 // carries: without ARCHIVE_EXTRACT_* flags no owner, times, ACLs or
 // xattrs are restored, permissions obey the umask (_alpm_unpack sets
 // 0022) and lose SUID/SGID/sticky. an object in the way is unlinked (an
@@ -1462,8 +1462,8 @@ impl<R: Source> Read for Filter<R> {
 	}
 }
 
-// a tar entry read through the filter
-pub type Entry<'a> = tar::Entry<'a, Filter>;
+// a tar entry read through the filter (libarchive's tar reader)
+pub type Entry<'a> = tar::Entry<'a>;
 
 // the rest of an entry's data
 pub fn content(entry: &mut Entry) -> io::Result<Vec<u8>> {
@@ -1476,48 +1476,21 @@ pub fn content(entry: &mut Entry) -> io::Result<Vec<u8>> {
 // its callers set it ("512K for a line length seems reasonable")
 pub(crate) const MAX_LINE_SIZE: usize = 512 * 1024;
 
-// archive_read_data_block on an entry: its data in the blocks libarchive
-// hands out, which end at multiples of the block size in the archive
-// stream. a short read is the truncated archive: what arrived is one
-// more block, the next read fails like libarchive's
+// archive_read_data_block on an entry, offsets dropped: its data in the
+// blocks libarchive hands out, which end where its read-ahead buffers
+// end (tar::Reader)
 pub(crate) struct DataBlocks<'e, 'a> {
 	entry: &'e mut Entry<'a>,
-	block: u64,
-	// stream offset of the next byte, entry bytes not read yet
-	pos: u64,
-	left: u64,
-	truncated: bool,
 }
 
 impl<'e, 'a> DataBlocks<'e, 'a> {
-	pub(crate) fn new(entry: &'e mut Entry<'a>, block: u64) -> Self {
-		DataBlocks {
-			pos: entry.raw_file_position(),
-			left: entry.size(),
-			entry,
-			block,
-			truncated: false,
-		}
+	pub(crate) fn new(entry: &'e mut Entry<'a>) -> Self {
+		DataBlocks { entry }
 	}
 
 	// None at the entry's end (ARCHIVE_EOF)
 	pub(crate) fn next(&mut self) -> io::Result<Option<Vec<u8>>> {
-		if self.truncated {
-			return Err(ErrorKind::UnexpectedEof.into());
-		}
-		if self.left == 0 {
-			return Ok(None);
-		}
-		let want = (self.block - self.pos % self.block).min(self.left);
-		let mut data = Vec::new();
-		(&mut *self.entry).take(want).read_to_end(&mut data)?;
-		if data.is_empty() {
-			return Err(ErrorKind::UnexpectedEof.into());
-		}
-		self.truncated = (data.len() as u64) < want;
-		self.pos += data.len() as u64;
-		self.left -= data.len() as u64;
-		Ok(Some(data))
+		Ok(self.entry.data_block()?.map(|(_, data)| data))
 	}
 }
 
@@ -1594,10 +1567,9 @@ impl<'e, 'a> ArchiveFgets<'e, 'a> {
 	}
 }
 
-// _alpm_open_archive: the reader over the file and its fstat. libarchive
-// also reads the first header to pick the format, which unpack does next
+// _alpm_open_archive: the reader over the file and its fstat
 pub struct Archive {
-	pub reader: tar::Archive<Filter>,
+	pub reader: tar::Reader,
 	pub meta: fs::Metadata,
 	// how far the decoder read the file, see Filter
 	pub consumed: Rc<Cell<u64>>,
@@ -1605,16 +1577,13 @@ pub struct Archive {
 	pub settings: DecompressionSettings,
 }
 
-impl Archive {
-	// the blocks archive_read_data_block hands an entry's data out in:
-	// they end where the filter's output blocks end. without a filter
-	// the reads of archive_read_open_fd's buffer (_alpm_open_archive:
-	// ALPM_BUFFER_SIZE, or st_blksize when larger)
-	pub fn block_size(&self) -> u64 {
-		match out_block_size(&self.settings) {
-			0 => self.meta.blksize().max(ALPM_BUFFER_SIZE),
-			n => n as u64,
-		}
+// the blocks libarchive's read-ahead buffers hold: the filter's output
+// blocks, without a filter the reads of archive_read_open_fd's buffer
+// (_alpm_open_archive: ALPM_BUFFER_SIZE, or st_blksize when larger)
+fn block_size(meta: &fs::Metadata, s: &DecompressionSettings) -> u64 {
+	match out_block_size(s) {
+		0 => meta.blksize().max(ALPM_BUFFER_SIZE),
+		n => n as u64,
 	}
 }
 
@@ -1626,10 +1595,11 @@ pub(crate) fn archive_io_err(e: alpm_compress::Error) -> io::Error {
 }
 
 // the error is errno at the failing step (open, fstat, the first read
-// of archive_read_open_fd: EISDIR for a directory), or the decoder's
-// error in what archive_read_open reads through the filter. the filter
-// is the one libarchive's bidding would pick, for the four alpm-compress
-// has; anything else is read as a plain tar
+// of archive_read_open_fd: EISDIR for a directory), the decoder's error
+// in what archive_read_open reads through the filter, or no format
+// taking the data. the filter is the one libarchive's bidding would
+// pick, for the four alpm-compress has; anything else is read as a
+// plain tar. of the formats only tar (and empty data) is read
 pub fn open_archive(path: &[u8]) -> io::Result<Archive> {
 	let mut file = File::open(c_path(path))?;
 	let meta = file.metadata()?;
@@ -1643,8 +1613,12 @@ pub fn open_archive(path: &[u8]) -> io::Result<Archive> {
 	let mut filter = Filter::new(decoder, &settings);
 	filter.open()?;
 	let consumed = filter.consumed.clone();
+	let reader = tar::Reader::new(filter, block_size(&meta, &settings));
+	if !reader.recognized() {
+		return Err(io::Error::other("Unrecognized archive format"));
+	}
 	Ok(Archive {
-		reader: tar::Archive::new(filter),
+		reader,
 		meta,
 		consumed,
 		settings,
@@ -1682,11 +1656,12 @@ enum Failure {
 }
 
 // what create_filesystem_object makes of an entry
-enum Object<'e> {
+#[derive(Clone, Debug)]
+pub(crate) enum Object {
 	File,
 	Dir,
-	Symlink(&'e [u8]),
-	HardLink(&'e [u8]),
+	Symlink(Vec<u8>),
+	HardLink(Vec<u8>),
 	// mknod type, rdev
 	Node(FileType, u64),
 }
@@ -1745,33 +1720,32 @@ fn wanted<L: AsRef<[u8]>>(list: &[L], name: &[u8]) -> bool {
 	list.iter().any(|l| until_nul(l.as_ref()) == &name[..end])
 }
 
-// libarchive consumes an entry's padding to 512 bytes with its data (the
-// last read, or the skip). the tar reader reads it with the next header,
-// so it is checked against the length of a plain archive; past a filter
-// a missing padding only shows at the next header
-pub(crate) fn check_padding(
-	entry: &Entry,
-	size: u64,
-	plain_len: Option<u64>,
-) -> io::Result<()> {
-	let end = entry.raw_file_position() + size.next_multiple_of(512);
-	match plain_len.is_some_and(|len| end > len) {
-		true => Err(ErrorKind::UnexpectedEof.into()),
-		false => Ok(()),
+// archive_write_disk's write_data_block: the block at offset into f,
+// seeking from *fd_offset (where the last write ended), cut at filesize.
+// the bytes written; Err is "Seek failed" or "Write failed"
+pub(crate) fn write_block(
+	f: &mut File,
+	fd_offset: &mut i64,
+	(offset, data): (i64, &[u8]),
+	filesize: i64,
+) -> Result<usize, (io::Error, &'static str)> {
+	// past the file size the C's size_t count wraps; write(2) fails
+	// once it runs off the mapped memory after the block
+	if offset > filesize && !data.is_empty() {
+		let fault = rustix::io::Errno::FAULT.into();
+		return Err((fault, "Write failed"));
 	}
-}
-
-// archive_read_data_skip
-pub(crate) fn skip_data(
-	entry: &mut Entry,
-	size: u64,
-	plain_len: Option<u64>,
-) -> io::Result<()> {
-	let n = io::copy(entry, &mut io::sink())?;
-	if n < size {
-		return Err(ErrorKind::UnexpectedEof.into());
+	let n = data.len().min((filesize - offset) as usize);
+	if n == 0 {
+		return Ok(0);
 	}
-	check_padding(entry, size, plain_len)
+	if offset != *fd_offset {
+		f.seek(io::SeekFrom::Start(offset as u64))
+			.map_err(|e| (e, "Seek failed"))?;
+	}
+	f.write_all(&data[..n]).map_err(|e| (e, "Write failed"))?;
+	*fd_offset = offset + n as i64;
+	Ok(n)
 }
 
 // archive_write_disk state across entries
@@ -1781,8 +1755,6 @@ struct Disk<'p> {
 	// st_dev/st_ino of a regular archive file, never overwritten
 	// (archive_read_extract's skip file)
 	archive: Option<(u64, u64)>,
-	// archive length when unfiltered, see check_padding
-	plain_len: Option<u64>,
 }
 
 impl Disk<'_> {
@@ -1803,7 +1775,7 @@ impl Disk<'_> {
 		perm: u32,
 	) -> io::Result<Option<File>> {
 		let path = self.full(rel);
-		match *obj {
+		match obj {
 			Object::HardLink(target) => {
 				// cleanup_pathname_fsobj (only fails on an empty name)
 				// and check_symlinks_fsobj on the target fail as EPERM.
@@ -1836,7 +1808,7 @@ impl Disk<'_> {
 			Object::Dir => mkdir_mode(&path, perm)?,
 			Object::Node(kind, rdev) => {
 				let mode = Mode::from_raw_mode(perm);
-				mknodat(CWD, &path, kind, mode, rdev)?;
+				mknodat(CWD, &path, *kind, mode, *rdev)?;
 				fs::set_permissions(
 					&path,
 					Permissions::from_mode(perm),
@@ -1937,7 +1909,7 @@ impl Disk<'_> {
 		perm: u32,
 	) -> io::Result<Option<File>> {
 		// a hard link to its own (cleaned) name is refused up front
-		if let Object::HardLink(target) = *obj
+		if let Object::HardLink(target) = obj
 			&& target == rel
 		{
 			return Err(io::Error::other("hard link to itself"));
@@ -1985,33 +1957,7 @@ impl Disk<'_> {
 		mode: u32,
 		size: u64,
 	) -> Result<(), Failure> {
-		let header = entry.header();
-		let target = entry.link_name_bytes().unwrap_or_default();
-		let rdev = || {
-			let major = header
-				.device_major()
-				.ok()
-				.flatten()
-				.unwrap_or(0);
-			let minor = header
-				.device_minor()
-				.ok()
-				.flatten()
-				.unwrap_or(0);
-			makedev(major, minor)
-		};
-		let obj = match mode & S_IFMT {
-			S_IFDIR => Object::Dir,
-			S_IFLNK => Object::Symlink(&target),
-			// hard links carry no type bits
-			0 => Object::HardLink(&target),
-			S_IFCHR => {
-				Object::Node(FileType::CharacterDevice, rdev())
-			}
-			S_IFBLK => Object::Node(FileType::BlockDevice, rdev()),
-			S_IFIFO => Object::Node(FileType::Fifo, 0),
-			_ => Object::File,
-		};
+		let obj = object(entry);
 		// _alpm_unpack's archive_entry_set_perm, then libarchive drops
 		// SUID/SGID/sticky and applies the umask
 		let perm = match mode & S_IFMT {
@@ -2024,55 +1970,91 @@ impl Disk<'_> {
 				"Invalid empty pathname",
 			))
 		})?;
-		let file = self
+		let mut file = self
 			.restore(&rel, &obj, perm)
 			.map_err(Failure::Warn)?;
-		// only a regular file takes data, the rest is skipped with the
+		// a hard link carrying data (pax) writes it into the target
+		if let (None, Object::HardLink(_)) = (&file, &obj)
+			&& size > 0
+		{
+			file = open_link_data(&self.full(&rel))
+				.map_err(Failure::Warn)?;
+		}
+		// only an open file takes data, the rest is skipped with the
 		// next header
 		match file {
-			Some(f) if size > 0 => {
-				copy_data(entry, f, size)?;
-				check_padding(entry, size, self.plain_len)
-					.map_err(Failure::Read)
-			}
+			Some(f) if size > 0 => copy_data(entry, f, size),
 			_ => Ok(()),
 		}
 	}
 }
 
+// what create_filesystem_object makes of an entry: a hard link or
+// symlink by its link name, else by the type bits (an unknown type is a
+// regular file)
+pub(crate) fn object(entry: &Entry) -> Object {
+	if let Some(t) = entry.hardlink() {
+		return Object::HardLink(t.to_vec());
+	}
+	if let Some(t) = entry.symlink() {
+		return Object::Symlink(t.to_vec());
+	}
+	let (major, minor) = entry.rdev();
+	let rdev = makedev(major, minor);
+	match entry.mode() & S_IFMT {
+		S_IFDIR => Object::Dir,
+		S_IFCHR => Object::Node(FileType::CharacterDevice, rdev),
+		S_IFBLK => Object::Node(FileType::BlockDevice, rdev),
+		S_IFIFO => Object::Node(FileType::Fifo, 0),
+		_ => Object::File,
+	}
+}
+
+// create_filesystem_object after linkat for an entry with data: the
+// link, when a regular file, opened to take it
+pub(crate) fn open_link_data(path: &Path) -> io::Result<Option<File>> {
+	if !fs::symlink_metadata(path)?.is_file() {
+		return Ok(None);
+	}
+	let f = OpenOptions::new()
+		.write(true)
+		.truncate(true)
+		.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+		.open(path)?;
+	Ok(Some(f))
+}
+
 // copy_data then finish_entry: read failures are fatal, the first write
-// failure ends the entry with a warning. either way the file is extended
-// with zeros to the entry size
+// failure ends the entry with a warning. either way the file is set to
+// the entry size
 fn copy_data(
 	entry: &mut Entry,
 	mut file: File,
 	size: u64,
 ) -> Result<(), Failure> {
-	let r = pour(entry, &mut file, size);
-	let len = file.metadata().map_err(Failure::Warn)?.len();
-	if len != size {
+	let mut fd_offset = 0;
+	let r = pour(entry, &mut file, &mut fd_offset, size as i64);
+	if fd_offset != size as i64 {
 		file.set_len(size).map_err(Failure::Warn)?;
 	}
 	r
 }
 
-fn pour(entry: &mut Entry, file: &mut File, size: u64) -> Result<(), Failure> {
-	let mut buf = vec![0; 64 * 1024];
-	let mut got = 0;
-	while got < size {
-		let n = match entry.read(&mut buf) {
-			Ok(0) => {
-				let e = ErrorKind::UnexpectedEof.into();
-				return Err(Failure::Read(e));
-			}
-			Ok(n) => n,
-			Err(e) if e.kind() == ErrorKind::Interrupted => {
-				continue;
-			}
-			Err(e) => return Err(Failure::Read(e)),
-		};
-		got += n as u64;
-		file.write_all(&buf[..n]).map_err(Failure::Warn)?;
+fn pour(
+	entry: &mut Entry,
+	file: &mut File,
+	fd_offset: &mut i64,
+	size: i64,
+) -> Result<(), Failure> {
+	while let Some((offset, data)) =
+		entry.data_block().map_err(Failure::Read)?
+	{
+		let n = write_block(file, fd_offset, (offset, &data), size)
+			.map_err(|(e, _)| Failure::Warn(e))?;
+		if n < data.len() {
+			let e = rustix::io::Errno::OVERFLOW.into();
+			return Err(Failure::Warn(e));
+		}
 	}
 	Ok(())
 }
@@ -2081,11 +2063,9 @@ fn pour(entry: &mut Entry, file: &mut File, size: u64) -> Result<(), Failure> {
 // a non-empty list keeps only the entries whose name up to its first '/'
 // is in it (empty is the C's NULL list: every entry), breakfirst stops
 // after the first extracted one. entries libarchive warned about are
-// logged and do not fail the call. libarchive reads the first header
-// while opening (format bidding), its failure is an open failure; the
-// loop ends at any later header that cannot be read, which is no error.
-// logs go to cb like the C's _alpm_log; libarchive's error texts are the
-// port's, an fstat failure is logged as an open failure
+// logged and do not fail the call. the loop ends at any header that
+// cannot be read, which is no error. logs go to cb like the C's
+// _alpm_log; an fstat failure is logged as an open failure
 pub fn unpack<L: AsRef<[u8]>>(
 	cb: &mut dyn Callbacks,
 	path: &[u8],
@@ -2106,17 +2086,9 @@ pub fn unpack<L: AsRef<[u8]>>(
 		log_parts(cb, LogLevel::Error, &msg);
 		UnpackError::Open(e)
 	};
-	let mut archive = open_archive(path).map_err(|e| open_failed(cb, e))?;
+	let archive = open_archive(path).map_err(|e| open_failed(cb, e))?;
 	let meta = &archive.meta;
-	let plain = archive.settings == DecompressionSettings::None;
-	let plain_len = plain.then_some(meta.len());
 	let skip_file = meta.is_file().then(|| (meta.dev(), meta.ino()));
-	let mut entries =
-		archive.reader.entries().map_err(|e| open_failed(cb, e))?;
-	let first = match entries.next() {
-		Some(Err(e)) => return Err(open_failed(cb, e)),
-		first => first,
-	};
 	if let Err(e) = enter(prefix) {
 		let msg: [&[u8]; 5] = [
 			b"could not change directory to ",
@@ -2131,22 +2103,16 @@ pub fn unpack<L: AsRef<[u8]>>(
 	let disk = Disk {
 		prefix,
 		archive: skip_file,
-		plain_len,
 	};
-	for entry in first.into_iter().chain(entries) {
-		// archive_read_next_header != ARCHIVE_OK ends the loop
-		let Ok(mut entry) = entry else { break };
-		let Ok((mode, size)) = tar_mode_size(&entry) else {
-			break;
-		};
-		let size = size as u64;
-		let name = until_nul(&entry.path_bytes()).to_vec();
+	// archive_read_next_header != ARCHIVE_OK ends the loop
+	for mut entry in archive.reader.entries().map_while(Result::ok) {
+		let (mode, size) = (entry.mode(), entry.size() as u64);
+		let name = entry.path_bytes().to_vec();
 		if !list.is_empty() {
 			if !wanted(list, &name) {
-				skip_data(&mut entry, size, plain_len)
-					.map_err(|e| {
-						UnpackError::Read(name, e)
-					})?;
+				entry.skip().map_err(|e| {
+					UnpackError::Read(name, e)
+				})?;
 				continue;
 			}
 			log_parts(

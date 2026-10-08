@@ -42,6 +42,7 @@ use crate::signing::{
 	SIG_PACKAGE_UNKNOWN_OK, SigResult, check_pgp_helper, extract_keyid,
 	key_import, key_in_keychain, sigpath,
 };
+use crate::tar;
 use crate::util::{
 	self, ArchiveFgets, DataBlocks, Entry, alpm_access, hash_sdbm,
 	parsedate, strtoofft, until_nul,
@@ -52,12 +53,7 @@ const MAX_SIGFILE_SIZE: u64 = 16384;
 
 // mode_t file type bits, archive_entry.h AE_IF*
 const AE_IFMT: u32 = 0o170000;
-const AE_IFREG: u32 = 0o100000;
-const AE_IFLNK: u32 = 0o120000;
-const AE_IFCHR: u32 = 0o020000;
-const AE_IFBLK: u32 = 0o060000;
 const AE_IFDIR: u32 = 0o040000;
-const AE_IFIFO: u32 = 0o010000;
 
 // why a package file was refused, the C's pkg_invalid label
 #[derive(Debug)]
@@ -139,14 +135,13 @@ fn open_err(e: io::Error) -> Error {
 	}
 }
 
-// _alpm_open_archive and the C's errno check after it: the reader,
-// st_size and the data block size. a failed open(2) is logged with its
-// strerror, a stream the decoder refuses with the decoder's text (the
-// C: libarchive's)
+// _alpm_open_archive and the C's errno check after it: the reader and
+// st_size. a failed open(2) is logged with its strerror, a stream the
+// decoder refuses with the decoder's text (the C: libarchive's)
 fn open_archive(
 	cb: &mut dyn Callbacks,
 	path: &[u8],
-) -> Result<(tar::Archive<util::Filter>, i64, u64), Error> {
+) -> Result<(tar::Reader, i64), Error> {
 	log(cb, LogLevel::Debug, &[b"opening archive ", path, b"\n"]);
 	let archive = util::open_archive(path).map_err(|e| {
 		let text = util::strerror(&e);
@@ -154,8 +149,7 @@ fn open_archive(
 		log(cb, LogLevel::Error, &msg);
 		open_err(e)
 	})?;
-	let block = archive.block_size();
-	Ok((archive.reader, archive.meta.len() as i64, block))
+	Ok((archive.reader, archive.meta.len() as i64))
 }
 
 fn log(cb: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
@@ -250,9 +244,8 @@ fn parse_descfile(
 	cb: &mut dyn Callbacks,
 	pkg: &mut Package,
 	entry: &mut Entry,
-	block: u64,
 ) -> Result<(), Reason> {
-	let mut lines = ArchiveFgets::new(DataBlocks::new(entry, block));
+	let mut lines = ArchiveFgets::new(DataBlocks::new(entry));
 	let mut linenum: c_int = 0;
 	loop {
 		let line = match lines.next() {
@@ -313,29 +306,6 @@ fn push_file(files: &mut FileList, path: &[u8], mode: u32, size: i64) {
 	files.files.push(PkgFile { name, size, mode });
 }
 
-// archive_entry_mode and archive_entry_size of a tar entry the way
-// libarchive's tar reader sets them: the type from the type flag over the
-// header's permission bits. a hard link has no type bits and size 0
-pub(crate) fn tar_mode_size(entry: &Entry) -> io::Result<(u32, i64)> {
-	let header = entry.header();
-	let perm = header.mode()? & !AE_IFMT;
-	let size = entry.size() as i64;
-	let name = entry.path_bytes();
-	// the header's type flag byte, as libarchive's tar reader sees it
-	let (kind, size) = match header.entry_type().as_byte() {
-		b'5' => (AE_IFDIR, size),
-		b'1' => (0, 0),
-		b'2' => (AE_IFLNK, 0),
-		b'3' => (AE_IFCHR, 0),
-		b'4' => (AE_IFBLK, 0),
-		b'6' => (AE_IFIFO, 0),
-		// a regular entry named with a trailing '/' is a directory
-		_ if name.last() == Some(&b'/') => (AE_IFDIR, 0),
-		_ => (AE_IFREG, size),
-	};
-	Ok((kind | perm, size))
-}
-
 // an entry of libarchive's mtree reader: "./" stripped like
 // build_filelist_from_mtree does, archive_entry_mode and _size
 fn mtree_file(e: &mtree::Entry) -> (&[u8], u32, i64) {
@@ -391,23 +361,7 @@ pub fn pkg_load_internal(
 	if pkgfile.is_empty() {
 		return Err(Error::WrongArgs);
 	}
-	let (mut archive, size, block) = open_archive(cb, pkgfile)?;
-	let mut entries = archive.entries().map_err(Error::Open)?;
-	// libarchive picks the format while opening: a first header no
-	// reader takes is _alpm_open_archive's failure, logged with the
-	// reader's text
-	let first = entries.next().transpose().map_err(|e| {
-		let text = e.to_string();
-		let msg = [
-			b"could not open file ",
-			pkgfile,
-			b": ",
-			text.as_bytes(),
-			b"\n",
-		];
-		log(cb, LogLevel::Error, &msg);
-		Error::Open(e)
-	})?;
+	let (archive, size) = open_archive(cb, pkgfile)?;
 	let msg = [b"starting package load for ", pkgfile, b"\n"];
 	log(cb, LogLevel::Debug, &msg);
 	let mut pkg = Package {
@@ -417,14 +371,13 @@ pub fn pkg_load_internal(
 	};
 	let (mut config, mut hit_mtree) = (false, false);
 
-	for entry in first.map(Ok).into_iter().chain(entries) {
+	for entry in archive.entries() {
 		let mut entry = entry.map_err(Error::Archive)?;
 		let name = entry.path_bytes().to_vec();
 		// the .PKGINFO and .MTREE branches continue before the break
 		// check below, so the walk always goes one entry further
 		if name == b".PKGINFO" {
-			let parsed =
-				parse_descfile(cb, &mut pkg, &mut entry, block);
+			let parsed = parse_descfile(cb, &mut pkg, &mut entry);
 			if let Err(why) = parsed {
 				let msg = [
 					b"could not parse package description file in ",
@@ -464,13 +417,10 @@ pub fn pkg_load_internal(
 		} else if simple_path(&mut pkg, &name) {
 			continue;
 		} else if full && !hit_mtree {
-			let (mode, size) = tar_mode_size(&entry)
-				.map_err(Error::Archive)?;
+			let (mode, size) = (entry.mode(), entry.size());
 			push_file(&mut pkg.files, &name, mode, size);
 		}
-		// archive_read_data_skip reads through the data
-		io::copy(&mut entry, &mut io::sink())
-			.map_err(Error::Archive)?;
+		entry.skip().map_err(Error::Archive)?;
 		if (!full || hit_mtree) && config {
 			break;
 		}
@@ -685,10 +635,9 @@ pub fn changelog(pkg: &Package) -> Result<Vec<u8>, Error> {
 	let Some(PkgFrom::File(path)) = &pkg.origin else {
 		return Err(Error::WrongArgs);
 	};
-	let (mut archive, ..) = open_archive(&mut (), until_nul(path))?;
-	let entries = archive.entries().map_err(Error::Open)?;
+	let (archive, _) = open_archive(&mut (), until_nul(path))?;
 	// a header error ends the search like the C's while loop
-	for mut entry in entries.map_while(Result::ok) {
+	for mut entry in archive.entries().map_while(Result::ok) {
 		if *entry.path_bytes() == *b".CHANGELOG" {
 			return util::content(&mut entry)
 				.map_err(Error::Archive);

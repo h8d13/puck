@@ -277,6 +277,13 @@ pub fn ustar_nodes(nodes: &[TarNode]) -> Vec<u8> {
 
 // ustar archive of any entries, every one owned by uid:gid
 pub fn ustar_owned(nodes: &[TarNode], owner: (u32, u32)) -> Vec<u8> {
+	let mut out = ustar_entries(nodes, owner);
+	out.resize(out.len() + 1024, 0);
+	out
+}
+
+// the members of ustar_owned without the end-of-archive blocks
+pub fn ustar_entries(nodes: &[TarNode], owner: (u32, u32)) -> Vec<u8> {
 	let mut out = Vec::new();
 	for n in nodes {
 		let name = long_field(&mut out, &n.name, b'L');
@@ -286,7 +293,26 @@ pub fn ustar_owned(nodes: &[TarNode], owner: (u32, u32)) -> Vec<u8> {
 		out.extend_from_slice(&h);
 		push_data(&mut out, &n.data);
 	}
-	out.resize(out.len() + 1024, 0);
+	out
+}
+
+// one pax record, "len key=value\n" with len counting itself
+pub fn pax_record(key: &[u8], value: &[u8]) -> Vec<u8> {
+	let rest = key.len() + value.len() + 3;
+	let mut len = rest + 1;
+	while len != rest + len.to_string().len() {
+		len = rest + len.to_string().len();
+	}
+	[len.to_string().as_bytes(), b" ", key, b"=", value, b"\n"].concat()
+}
+
+// an extension member of type kind ('x', 'g', 'A', 'L', ...) with this
+// body, for the member after it
+pub fn ext_member(kind: u8, body: &[u8]) -> Vec<u8> {
+	let mut out =
+		header(b"././@PaxHeader", b"", 0o644, body.len(), kind, (0, 0))
+			.to_vec();
+	push_data(&mut out, body);
 	out
 }
 
