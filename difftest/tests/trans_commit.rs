@@ -857,7 +857,8 @@ fn fc_hooks_fuzz() {
 		ran_total += ran(&r).len();
 		mark(&r, &mut seen);
 	}
-	// gen_case commits packages in about a third of the cases
+	// gen_case's transactions trigger hooks in a fifth to a third of
+	// the cases (empty or failing ones run none)
 	let msg = format!("{ran_total} hooks ran in {n} cases: {seen:?}");
-	assert!(ran_total > n / 4, "{msg}");
+	assert!(ran_total > n / 8, "{msg}");
 }
