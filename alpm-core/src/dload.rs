@@ -170,6 +170,22 @@ impl DownloadState {
 		h.map(|(_, e)| *e)
 	}
 
+	// every host's error count in lookup order, and a state rebuilt from
+	// them: the sandbox helper gets a copy like the C's forked child
+	pub fn hosts(&self) -> &[(Vec<u8>, i32)] {
+		&self.server_errors
+	}
+
+	pub fn from_hosts(
+		hosts: Vec<(Vec<u8>, i32)>,
+		interrupted: bool,
+	) -> Self {
+		DownloadState {
+			server_errors: hosts,
+			interrupted,
+		}
+	}
+
 	// find_server_errors: the entry of the url's host, created on first
 	// use; None when the url has no host
 	fn find(&mut self, url: &[u8]) -> Option<(&[u8], &mut i32)> {
@@ -298,7 +314,7 @@ fn path(p: &[u8]) -> &Path {
 }
 
 // strerror(errno): std formats "<text> (os error N)"
-fn strerror(e: &io::Error) -> Vec<u8> {
+pub(crate) fn strerror(e: &io::Error) -> Vec<u8> {
 	let s = e.to_string();
 	let s = match e.raw_os_error() {
 		Some(n) => s
