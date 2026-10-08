@@ -13,7 +13,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use pacman_common::util_common::{mbasename, mdirname};
-use rustix::fs::{Access, AtFlags, CWD, accessat};
+use rustix::fs::Access;
 
 use crate::backup::needbackup;
 use crate::be_local::{INFRQ_FILES, scan_zu};
@@ -35,8 +35,9 @@ use crate::trans::{
 	runscriptlet, trans_in,
 };
 use crate::util::{
-	CALLER_PREFIX, PATH_MAX, compute_md5sum, files_in_directory,
-	fnmatch_patterns, ldconfig, llstat, strerror, until_nul,
+	CALLER_PREFIX, PATH_MAX, alpm_access, compute_md5sum,
+	files_in_directory, fnmatch_patterns, ldconfig, llstat, strerror,
+	until_nul,
 };
 
 use LogLevel::{Debug, Error, Warning};
@@ -291,26 +292,6 @@ fn dir_is_mountpoint(
 	}
 }
 
-// _alpm_access(handle, NULL, path, amode) for W_OK and F_OK: faccessat
-// without following a last symlink, a debug line on failure
-fn access_logged(
-	cb: &mut dyn Callbacks,
-	path: &[u8],
-	mode: Access,
-) -> Result<(), rustix::io::Errno> {
-	let flags = AtFlags::SYMLINK_NOFOLLOW;
-	let Err(e) = accessat(CWD, os(path), mode, flags) else {
-		return Ok(());
-	};
-	let what: &[u8] = match mode == Access::EXISTS {
-		true => b"\" does not exist: ",
-		false => b"\" is not writable: ",
-	};
-	let err = strerror(&e.into());
-	logv(cb, Debug, &[b"\"", path, what, &err, b"\n"]);
-	Err(e)
-}
-
 // can_remove_file (static in C): false only for a file that exists but
 // is not writable for another reason than its permissions (EROFS). a
 // mountpoint directory counts as removable
@@ -322,12 +303,12 @@ fn can_remove_file(h: &mut Handle, name: &[u8]) -> bool {
 	{
 		return true;
 	}
-	let Err(e) = access_logged(cb, &filepath, Access::WRITE_OK) else {
+	let Err(e) = alpm_access(cb, None, &filepath, Access::WRITE_OK) else {
 		return true;
 	};
 	if e == rustix::io::Errno::ACCESS
 		|| e == rustix::io::Errno::TXTBSY
-		|| access_logged(cb, &filepath, Access::EXISTS).is_err()
+		|| alpm_access(cb, None, &filepath, Access::EXISTS).is_err()
 	{
 		return true;
 	}

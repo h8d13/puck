@@ -12,11 +12,13 @@ fn unpadded_needs_room() {
 	assert_eq!(decode_signature(b"\n\n\n\n").unwrap(), b"");
 }
 
-// collects what the callbacks get, answers no
+// collects what the callbacks get, answers no. debug lines apart from
+// the errors and warnings a frontend shows without --debug
 #[derive(Default)]
 struct Log {
 	questions: Vec<(Option<Vec<u8>>, Vec<u8>)>,
 	lines: Vec<(LogLevel, String)>,
+	debug: Vec<String>,
 }
 
 impl Callbacks for Log {
@@ -33,7 +35,10 @@ impl Callbacks for Log {
 
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {
 		let msg = String::from_utf8_lossy(msg).into_owned();
-		self.lines.push((level, msg));
+		match level {
+			LogLevel::Debug => self.debug.push(msg),
+			_ => self.lines.push((level, msg)),
+		}
 	}
 }
 
@@ -135,6 +140,9 @@ fn checks_before_gpg() {
 	let r = gpgme_checksig(&mut kr, &mut cb, Some(&f), None);
 	assert_eq!(r, Err(Errno::SigMissing));
 	assert!(cb.lines.is_empty());
+	let sig = String::from_utf8_lossy(&sigpath(&f)).into_owned();
+	let opened = format!("sig path {sig} could not be opened\n");
+	assert_eq!(cb.debug.last(), Some(&opened));
 	// the keyring check comes first, once, then the base64
 	for _ in 0..2 {
 		let r = gpgme_checksig(&mut kr, &mut cb, Some(&f), Some(b"Zg"));

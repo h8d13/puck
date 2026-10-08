@@ -67,7 +67,23 @@ impl CheckEnv for Env {
 		(path == b"skipped").then_some(false)
 	}
 
-	fn mtree(&self, _: &Package) -> Result<Vec<MtreeEntry>, MtreeError> {
+	fn files(&mut self, _: &mut Output, pkg: &Package) -> Vec<File> {
+		pkg.files.files.clone()
+	}
+
+	fn is_backup(
+		&mut self,
+		_: &mut Output,
+		pkg: &Package,
+		path: &[u8],
+	) -> bool {
+		is_backup(&pkg.backup, path)
+	}
+
+	fn mtree(
+		&mut self,
+		_: &Package,
+	) -> Result<Vec<MtreeEntry>, MtreeError> {
 		self.mtree.clone().ok_or(MtreeError::Missing)
 	}
 }
@@ -132,13 +148,13 @@ fn s(v: &[u8]) -> String {
 #[test]
 fn fast() {
 	let t = Tmp::new("fast");
-	let env = Env {
+	let mut env = Env {
 		root: t.root(),
 		mtree: None,
 	};
 	let p = pkg(&["a", "d/", "a/", "m", "skipped"], &[]);
 	let mut o = Output::default();
-	assert_eq!(check_pkg_fast(&mut o, &cfg(false), &env, &p), 1);
+	assert_eq!(check_pkg_fast(&mut o, &cfg(false), &mut env, &p), 1);
 	let root = s(&t.root());
 	assert_eq!(s(&o.stdout), "p: 5 total files, 2 missing files\n");
 	assert_eq!(
@@ -149,13 +165,13 @@ fn fast() {
 
 	// quiet: missing files on stdout, the type warning stays
 	let mut o = Output::default();
-	assert_eq!(check_pkg_fast(&mut o, &cfg(true), &env, &p), 1);
+	assert_eq!(check_pkg_fast(&mut o, &cfg(true), &mut env, &p), 1);
 	assert_eq!(s(&o.stdout), format!("p {root}m\n"));
 	assert!(s(&o.stderr).contains("(File type mismatch)"));
 
 	let mut o = Output::default();
 	let one = pkg(&["a"], &[]);
-	assert_eq!(check_pkg_fast(&mut o, &cfg(false), &env, &one), 0);
+	assert_eq!(check_pkg_fast(&mut o, &cfg(false), &mut env, &one), 0);
 	assert_eq!(s(&o.stdout), "p: 1 total file, 0 missing files\n");
 }
 
@@ -176,14 +192,14 @@ fn full() {
 			..entry(&t, "a", MtreeType::File, b"")
 		},
 	];
-	let env = Env {
+	let mut env = Env {
 		root: t.root(),
 		mtree: Some(mtree),
 	};
 	let root = s(&t.root());
 	let p = pkg(&[], &["b"]);
 	let mut o = Output::default();
-	assert_eq!(check_pkg_full(&mut o, &cfg(false), &env, &p), 1);
+	assert_eq!(check_pkg_full(&mut o, &cfg(false), &mut env, &p), 1);
 	assert_eq!(
 		s(&o.stdout),
 		format!(
@@ -201,15 +217,15 @@ fn full() {
 
 	// quiet: one line per altered file, backup notes dropped
 	let mut o = Output::default();
-	assert_eq!(check_pkg_full(&mut o, &cfg(true), &env, &p), 1);
+	assert_eq!(check_pkg_full(&mut o, &cfg(true), &mut env, &p), 1);
 	assert_eq!(s(&o.stdout), format!("p {root}d\np {root}l\n"));
 	assert_eq!(s(&o.stderr), "");
 
-	let env = Env {
+	let mut env = Env {
 		root: t.root(),
 		mtree: None,
 	};
 	let mut o = Output::default();
-	assert_eq!(check_pkg_full(&mut o, &cfg(false), &env, &p), 0);
+	assert_eq!(check_pkg_full(&mut o, &cfg(false), &mut env, &p), 0);
 	assert_eq!(s(&o.stdout), "p: no mtree file\n");
 }

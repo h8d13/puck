@@ -41,6 +41,19 @@ pub fn rust_pacman() -> PathBuf {
 	bin
 }
 
+// drops the "[HH:MM:SS] " PACMAN_DEBUG puts before stamped lines: the C
+// and the port read the wall clock separately
+pub fn unstamp(err: &[u8]) -> Vec<u8> {
+	let mut out = Vec::new();
+	for line in err.split_inclusive(|&c| c == b'\n') {
+		let stamped = line.len() >= 11
+			&& line[0] == b'[' && line[3] == b':'
+			&& line[6] == b':' && line[9] == b']';
+		out.extend_from_slice(if stamped { &line[11..] } else { line });
+	}
+	out
+}
+
 // <tmp>/difftest-<tag>-<pid>-<n>/ holding root/ and db/sync/, resolved
 // like alpm_initialize resolves it, removed on drop
 pub struct TempRoot(PathBuf);

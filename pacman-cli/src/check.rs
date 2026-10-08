@@ -3,11 +3,12 @@
 // against the filesystem)
 //
 // what the C asks libalpm through config->handle (root, dbpath, NoExtract
-// matching, the package's mtree) goes through CheckEnv; files are looked
-// at with plain std calls on root + path, like the C. the C prints to
-// stdout and, through pm_printf, to stderr: both are appended to an
-// Output. messages are the untranslated msgids, _n() picks the singular
-// for 1 like ngettext without a catalog.
+// matching, the package's mtree, files list and backup entries, which a
+// local package lazy-loads at the getter) goes through CheckEnv; files
+// are looked at with plain std calls on root + path, like the C. the C
+// prints to stdout and, through pm_printf, to stderr: both are appended
+// to an Output. messages are the untranslated msgids, _n() picks the
+// singular for 1 like ngettext without a catalog.
 //
 // mtree entries come from libarchive's mtree reader (alpm_core::mtree
 // through be_local::read_mtree), in file order. an entry libarchive
@@ -19,9 +20,11 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
+use alpm_core::backup::Backup;
 use alpm_core::be_local::{
 	LocalDb, MtreeEntry, MtreeError, MtreeType, Sha256Checksum,
 };
+use alpm_core::filelist;
 use alpm_core::handle::Handle;
 use alpm_core::package::Package;
 use alpm_core::util::{strerror, until_nul};
@@ -39,11 +42,28 @@ pub trait CheckEnv {
 	// alpm_option_match_noextract: None nothing matched (C -1),
 	// Some(false) a pattern matched (C 0), Some(true) a negated one
 	fn match_noextract(&self, path: &[u8]) -> Option<bool>;
+	// alpm_pkg_get_files. a local package lazy-loads them here, o holds
+	// what the check printed before
+	fn files(
+		&mut self,
+		o: &mut Output,
+		pkg: &Package,
+	) -> Vec<filelist::File>;
+	// alpm_pkg_get_backup has an entry named path, loaded like files
+	fn is_backup(
+		&mut self,
+		o: &mut Output,
+		pkg: &Package,
+		path: &[u8],
+	) -> bool;
 	// alpm_pkg_mtree_open + alpm_pkg_mtree_next until the end
-	fn mtree(&self, pkg: &Package) -> Result<Vec<MtreeEntry>, MtreeError>;
+	fn mtree(
+		&mut self,
+		pkg: &Package,
+	) -> Result<Vec<MtreeEntry>, MtreeError>;
 }
 
-// the env of a handle and its local db
+// the env of a handle and its local db, packages loaded before
 pub struct HandleEnv<'a> {
 	pub handle: &'a Handle,
 	pub db: &'a LocalDb,
@@ -62,9 +82,34 @@ impl CheckEnv for HandleEnv<'_> {
 		self.handle.match_noextract(path)
 	}
 
-	fn mtree(&self, pkg: &Package) -> Result<Vec<MtreeEntry>, MtreeError> {
-		self.db.mtree(pkg)
+	fn files(
+		&mut self,
+		_: &mut Output,
+		pkg: &Package,
+	) -> Vec<filelist::File> {
+		pkg.files.files.clone()
 	}
+
+	fn is_backup(
+		&mut self,
+		_: &mut Output,
+		pkg: &Package,
+		path: &[u8],
+	) -> bool {
+		is_backup(&pkg.backup, path)
+	}
+
+	fn mtree(
+		&mut self,
+		pkg: &Package,
+	) -> Result<Vec<MtreeEntry>, MtreeError> {
+		self.db.mtree(pkg, &mut ())
+	}
+}
+
+// the strcmp loop over alpm_pkg_get_backup
+pub fn is_backup(backup: &[Backup], path: &[u8]) -> bool {
+	backup.iter().any(|b| until_nul(&b.name) == path)
 }
 
 // _n(singular, plural, n) without a catalog
@@ -140,10 +185,11 @@ fn file_exists(
 pub fn check_pkg_fast(
 	o: &mut Output,
 	c: &Config,
-	env: &impl CheckEnv,
+	env: &mut impl CheckEnv,
 	pkg: &Package,
 ) -> i32 {
-	let root = until_nul(env.root());
+	// owned: the lazy getters borrow env mutably
+	let root = &until_nul(env.root()).to_vec();
 	let rootlen = root.len();
 	if rootlen + 1 > PATH_MAX {
 		let msg = cat(&[b"path too long: ", root, b"\n"]);
@@ -151,9 +197,9 @@ pub fn check_pkg_fast(
 		return 1;
 	}
 	let pkgname = until_nul(pkg.name.as_deref().unwrap_or_default());
-	let files = &pkg.files.files;
+	let files = env.files(o, pkg);
 	let mut errors = 0usize;
-	for file in files {
+	for file in &files {
 		let path = until_nul(&file.name);
 		if rootlen + 1 + path.len() > PATH_MAX {
 			let msg = cat(&[b"path too long: ", root, path, b"\n"]);
@@ -358,12 +404,18 @@ fn entry_filepath(
 	Some(fp)
 }
 
+// the entry's path with a leading "./" stripped
+fn entry_path(e: &MtreeEntry) -> &[u8] {
+	let path = until_nul(&e.path);
+	path.strip_prefix(b"./").unwrap_or(path)
+}
+
 // the checks after the type: file_errors of one entry
 fn entry_errors(
 	o: &mut Output,
 	c: &Config,
+	env: &mut impl CheckEnv,
 	pkg: &Package,
-	path: &[u8],
 	fp: &[u8],
 	st: &Metadata,
 	e: &MtreeEntry,
@@ -373,8 +425,9 @@ fn entry_errors(
 	if e.kind == MtreeType::Link {
 		errors += link(o, c, pkgname, fp, st, e);
 	}
-	// expected to fail when a backup file was modified
-	let backup = pkg.backup.iter().any(|b| until_nul(&b.name) == path);
+	// expected to fail when a backup file was modified. the first entry
+	// to get here loads the files in the C, after the warnings above
+	let backup = env.is_backup(o, pkg, entry_path(e));
 	if e.kind != MtreeType::Dir && st.mtime() != e.mtime {
 		let what = b"Modification time mismatch";
 		errors += mismatch(o, c, pkgname, fp, backup, what);
@@ -394,10 +447,11 @@ fn entry_errors(
 pub fn check_pkg_full(
 	o: &mut Output,
 	c: &Config,
-	env: &impl CheckEnv,
+	env: &mut impl CheckEnv,
 	pkg: &Package,
 ) -> i32 {
-	let root = until_nul(env.root());
+	// owned: the lazy getters borrow env mutably
+	let root = &until_nul(env.root()).to_vec();
 	let rootlen = root.len();
 	if rootlen + 1 > PATH_MAX {
 		let msg = cat(&[b"path too long: ", root, b"\n"]);
@@ -420,8 +474,7 @@ pub fn check_pkg_full(
 	};
 	let (mut errors, mut file_count) = (0usize, 0usize);
 	for e in &entries {
-		let path = until_nul(&e.path);
-		let path = path.strip_prefix(b"./").unwrap_or(path);
+		let path = entry_path(e);
 		let Some(fp) = entry_filepath(o, c, env, pkg, path) else {
 			continue;
 		};
@@ -454,7 +507,7 @@ pub fn check_pkg_full(
 			errors += 1;
 			continue;
 		}
-		let file_errors = entry_errors(o, c, pkg, path, &fp, &st, e);
+		let file_errors = entry_errors(o, c, env, pkg, &fp, &st, e);
 		if c.quiet != 0 && file_errors != 0 {
 			quiet_line(o, pkgname, &fp);
 		}

@@ -22,7 +22,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
 
 use pacman_common::util_common::safe_fgets;
-use rustix::fs::{Access, AtFlags, CWD, accessat};
+use rustix::fs::Access;
 
 use crate::be_local::{INFRQ_ALL, INFRQ_DESC};
 use crate::callbacks::{Callbacks, Event, HookWhen, LogLevel, logv};
@@ -35,8 +35,8 @@ use crate::hook::{AddTarget, Targets, hook_run};
 use crate::package::Package;
 use crate::pkghash::PkgHash;
 use crate::util::{
-	CALLER_PREFIX, PATH_MAX, SCRIPTLET_SHELL, copyfile, makepath_mode,
-	run_chroot, strerror, unpack_single, until_nul,
+	CALLER_PREFIX, PATH_MAX, SCRIPTLET_SHELL, alpm_access, copyfile,
+	makepath_mode, run_chroot, strerror, unpack_single, until_nul,
 };
 use crate::{remove, sync};
 
@@ -94,19 +94,9 @@ fn mkdtemp(template: &[u8]) -> Option<Vec<u8>> {
 	None
 }
 
-// "is not readable" debug line of _alpm_access with a NULL dir
+// _alpm_access(NULL, path, R_OK) == 0
 pub(crate) fn readable(path: &[u8], cb: &mut dyn Callbacks) -> bool {
-	let flags = AtFlags::SYMLINK_NOFOLLOW;
-	let Err(e) = accessat(CWD, os(path), Access::READ_OK, flags) else {
-		return true;
-	};
-	let e = strerror(&e.into());
-	logv(
-		cb,
-		LogLevel::Debug,
-		&[b"\"", path, b"\" is not readable: ", &e, b"\n"],
-	);
-	false
+	alpm_access(cb, None, path, Access::READ_OK).is_ok()
 }
 
 // _alpm_runscriptlet: runs `. <copy>; <script> <ver> [<oldver>]` with
