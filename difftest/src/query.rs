@@ -6,20 +6,23 @@
 // pacman_deptest read the global config (op_q_* flags, group, quiet,
 // logmask, colstr, handle), print to the C stdout and through pm_printf
 // to the C stderr: both are swapped for open_memstreams under FRONTEND,
-// like check.rs. getcols() reads COLUMNS (cache reset per run), -Qo's
-// search_path reads PATH, dates go through localtime with TZ=UTC: all
-// three are set for the run and put back.
+// like check.rs. libalpm's log lines go through the frontend's cb_log
+// (as setup_libalpm leaves it) to that stderr, in order with the op's.
+// getcols() reads COLUMNS (cache reset per run), -Qo's search_path reads
+// PATH, dates go through localtime with TZ=UTC: all three are set for
+// the run and put back.
 use std::ffi::{OsString, c_int, c_void};
 use std::ptr;
 
 use pacman_cli::conf::{ColStr, Config};
 
+use crate::callback::cb_log;
 use crate::cli_util::{FRONTEND, config, init};
 use crate::conf::ColStrC;
 use crate::handle::{
 	ALPM, alpm_db_set_usage, alpm_initialize, alpm_option_add_ignoregroup,
 	alpm_option_add_ignorepkg, alpm_option_add_noextract,
-	alpm_register_syncdb, alpm_release,
+	alpm_option_set_logcb, alpm_register_syncdb, alpm_release,
 };
 use crate::pkg_show::{columns_cache_reset, utc};
 use crate::{
@@ -109,13 +112,15 @@ impl QueryWorld {
 	// alpm_initialize on root and dbpath (existing dirs), then what
 	// setup_libalpm takes from cfg here: IgnorePkg, IgnoreGroup,
 	// NoExtract, and the repos registered in order with siglevel 0 and
-	// their usage
+	// their usage. cb_log as the logcb once the dbs are registered, it
+	// logs while a run holds FRONTEND
 	pub fn open(root: &[u8], dbpath: &[u8], cfg: &Config) -> Self {
+		init();
 		let (root, dbpath) = (cstr(root), cstr(dbpath));
 		let _guard = ALPM.lock().unwrap_or_else(|e| e.into_inner());
 		let mut err = 0;
 		// SAFETY: valid C strings, err is writable; the handle copies
-		// every string
+		// every string. cb_log only reads config, valid after init
 		unsafe {
 			let h = alpm_initialize(
 				root.as_ptr(),
@@ -141,6 +146,7 @@ impl QueryWorld {
 				assert!(!db.is_null(), "register {:?}", r.name);
 				alpm_db_set_usage(db, r.usage);
 			}
+			alpm_option_set_logcb(h, Some(cb_log), ptr::null_mut());
 			QueryWorld { h }
 		}
 	}
@@ -295,7 +301,11 @@ impl Drop for QueryWorld {
 	fn drop(&mut self) {
 		let _guard = ALPM.lock().unwrap_or_else(|e| e.into_inner());
 		// SAFETY: h came from alpm_initialize, nothing of it is used
-		// afterwards
-		unsafe { alpm_release(self.h) };
+		// afterwards. no cb_log on release: config and stderr belong
+		// to whichever run holds FRONTEND meanwhile
+		unsafe {
+			alpm_option_set_logcb(self.h, None, ptr::null_mut());
+			alpm_release(self.h);
+		}
 	}
 }
