@@ -156,7 +156,7 @@ copied. State: todo until a patch lands, then the patch file name.
 | alpm-pkginfo | unknown keys (`basever`), `url = `, `pkgtype` must be first xdata, duplicate single keys, missing optional keys, leading-space lines, xdata spaces, `size = +5`, text builddate | no | 0501-0506 (`PacmanPackageInfo`) |
 | alpm-compress | `GzDecoder` reads one member (libarchive: all) | no | 0551 |
 | alpm-compress | no content sniffing (the port duplicates it in be_sync and be_package) | `.db` files have no extension | 0552 (`from_magic`) |
-| alpm-compress | truncated gzip/xz (bzip2 when cut early) stream ends cleanly: partial extract reported as success, libarchive fails | rare (`-U` on a truncated download) | todo |
+| alpm-compress | truncated stream: libarchive fails the whole 64/128 KiB filter block the cut lands in (at open inside the first one), the decoders fail at the cut | rare (`-U` on a truncated download) | done in the port, no patch: every decoder fails every cut (UnexpectedEof); `util::Filter` redoes libarchive's blocks |
 | alpm-compress | gzip-in-gzip, lz4, lzma archives; non-gzip `.MTREE` inside packages | no (makepkg writes gzip) | open |
 | all | non-UTF-8 text refused (pacman is byte based) | no | open: deep type change, decide after the units report |
 
@@ -169,6 +169,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `alpm-core::base64` | `base64` crate | done: crate decodes; base64.c framing and signing.c 3/4 check kept |
 | `be_package` reader instead of alpm-package `PackageReader` | alpm-package | kept: needs a valid `PackageFileName` (pacman takes any name), parses `.BUILDINFO`, reads `.INSTALL` as String, iterator drops data entries; uses alpm-compress + alpm-pkginfo + alpm-mtree instead |
 | `be_package` tar mode/size rules | tar crate (raw headers) | kept: libarchive's type-flag -> mode/size semantics, not in ALPM |
+| `util::Filter` + `tar::Archive` instead of alpm-compress `TarballReader` | alpm-compress | kept: libarchive's block-wise filter output sits between decoder and tar reader, `TarballReader` only wraps a `CompressionDecoder` |
 | `pacman-cli::package::format_date_utc` | `time` crate | done: time does the calendar; `%c` field layout is a format! (no `formatting` feature) |
 | glibc wcwidth table in `pacman-cli::util` | `unicode-width` | done: unicode-width, glibc -1 mapping |
 | generated glibc class/towupper tables in `alpm-core::regex` | std `char` Unicode methods | done: std classes, `to_uppercase` when single-char; divergence counted (`class_divergence`, `towupper_divergence`) |
@@ -205,7 +206,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `lib/libalpm/alpm_list.c` | 650 | - | replaced by `Vec`, no port |
 | `lib/libalpm/rawstr.c` | 135 | - | no callers, not ported |
 | `lib/libalpm/base64.c` | 196 | `alpm-core::base64` | via `base64` crate + base64.c framing: difftest by input class via `alpm_decode_signature` |
-| `lib/libalpm/util.c` | 1657 | `alpm-core::util` (partial) | strip_newline, get_fullpath, hash_sdbm, strtoofft, parsedate, splitname, fnmatch, fnmatch_patterns: difftest fuzz; makepath(_mode), copyfile, read_file, files_in_directory: difftest fs fuzz (tree snapshots); compute_md5sum/sha256sum, test_checksum via alpm-types `Checksum`: difftest on temp files; realloc/greedy_grow replaced by Vec; open_archive (from_magic), unpack/unpack_single (archive_read_extract translation, logs through Callbacks): difftest `unpack` (trees, rc, pm_errno, log lines, libarchive texts cut) |
+| `lib/libalpm/util.c` | 1657 | `alpm-core::util` (partial) | strip_newline, get_fullpath, hash_sdbm, strtoofft, parsedate, splitname, fnmatch, fnmatch_patterns: difftest fuzz; makepath(_mode), copyfile, read_file, files_in_directory: difftest fs fuzz (tree snapshots); compute_md5sum/sha256sum, test_checksum via alpm-types `Checksum`: difftest on temp files; realloc/greedy_grow replaced by Vec; open_archive (from_magic, `Filter`: libarchive's filter blocks and open read-ahead), unpack/unpack_single (archive_read_extract translation, logs through Callbacks): difftest `unpack` (trees, rc, pm_errno, log lines, libarchive texts cut; compressed archives cut at ~70 points per filter) |
 | `lib/libalpm/pkghash.c` | 351 | `alpm-core::pkghash` | add, add_sorted, remove, find, growth: difftest sequence fuzz, bucket layout and list order compared every step; find_mut/iter_mut: unit tests, difftest through db |
 | `lib/libalpm/filelist.c` | 147 | `alpm-core::filelist` | sort, contains, difference, intersection: difftest fuzz |
 | `lib/libalpm/backup.c` | 100 | `alpm-core::backup` | backup_dup, needbackup: difftest fuzz; split_backup covered by alpm-db |
@@ -386,7 +387,11 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
   size 0, regular entry ending in '/' is a dir). A second `.PKGINFO`
   overwrites single values and appends lists like the C. With `full` off
   the walk reads one entry past `.PKGINFO`/`.MTREE` like the C. `.MTREE`
-  is all or nothing, on failure the archive list stays.
+  is all or nothing, on failure the archive list stays. A cut package
+  fails where libarchive's filter block fails (`util::Filter`); a
+  `.CHANGELOG` whose data read fails is an error here, the C hands out
+  what it read. A cut gzip inside `.MTREE` is not read in blocks
+  (packager only).
 - `regex`: glibc behaviour in C.UTF-8 only. pacman calls `setlocale(LC_ALL,
   "")`, so search depends on the user's locale (collation ranges, `[=e=]`,
   ASCII-only icase in C). Pike VM without backrefs (linear), memoized DFS
@@ -397,11 +402,14 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
   Classes and towupper come from std `char` (the toolchain's Unicode).
 - `be_local`/`be_package` mtree via `alpm_mtree::libarchive` (patch 0404+):
   file order, duplicates merged, libarchive defaults; any filter by
-  `from_magic`. An entry with a warning: the C walk stops there (UPSTREAM
-  bug), the port keeps checking; an mtree without sha256 is "information
-  not available" (C: mismatch on a zero digest). `url = ` is `None` here,
-  `""` in the C (both display None). Output goes into
-  `Output{stdout,stderr}`.
+  `from_magic`, read through `util::Filter`: a cut local mtree fails to
+  open inside the first block (128 KiB for text, the uudecode bidder's
+  read-ahead), later the read failure ends the data like libarchive's
+  mtree readline (UPSTREAM). An entry with a warning: the C walk stops
+  there (UPSTREAM bug), the port keeps checking; an mtree without sha256
+  is "information not available" (C: mismatch on a zero digest).
+  `url = ` is `None` here, `""` in the C (both display None). Output
+  goes into `Output{stdout,stderr}`.
 - `getopt` keeps glibc 2.44 semantics (optopt starts at 0, nextchar as an
   argv position). `parseargs` returns `Err(exit status)` where the C exits.
   `LIB_VERSION` hard-coded from meson, should sit next to
@@ -436,8 +444,11 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
 - `unpack`: names joined to the prefix and modes set by chmod with the
   umask fixed at 022, the process cwd and umask are never touched. A
   directory entry carrying data is skipped by size (libarchive stops
-  there, UPSTREAM.md); a cut gzip/xz stream extracts what was decoded and
-  succeeds (libarchive fails to open, parity table).
+  there, UPSTREAM.md). Filtered archives are read through `Filter`
+  (libarchive's 64 KiB output blocks, 128 KiB for zstd, and the open's
+  read-ahead): a cut stream fails at open inside the first block, later
+  a data read reaching the failed block fails the extraction and a
+  header read ends it with success, like the C.
 - `run_chroot`/`unpack` share one chdir check on effective ids
   (`AT_EACCESS`, like chdir).
 - `hook`/`run_chroot`: chroot(8) (`/usr/bin/chroot`) instead of the C
