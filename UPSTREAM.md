@@ -31,6 +31,9 @@ Every finding states who controls the input that triggers it:
 | `-Qii` crashes on a backup path that is now a directory | local |
 | `-Si`/`-Qip` crash on huge build dates | packager |
 | `.pacsave` rotation regex built from an unescaped file name | real (rare) |
+| `.pacsave` shift loop runs to the highest number found | local |
+| backup entry without a hash crashes the remove | local |
+| unremovable package forgotten with its files left | env |
 | `-Fx -l` conflict check is dead | real |
 | `_alpm_pkg_check_meta` name check swapped | packager |
 | `string_length` buffer one byte short | packager |
@@ -144,6 +147,58 @@ lone `{`) jumps to cleanup without shifting, then the caller renames the
 file to `.pacsave`, overwriting an existing `.pacsave`: an older saved
 config is lost. Error paths after a successful regcomp (375, 402, 410)
 skip `regfree`. **env** for the leak.
+
+A match shorter than the basename (`*`, `?`, `{0,}` in the name: `a*b`
+matches `b.pacsave.1`) puts the `strtoul` offset past the end of
+`d_name`, which then reads stale bytes of the dirent buffer. **real
+(rare)**, same names.
+
+- port: same regex; a number past the end of the name reads as 0
+- difftest: metacharacter names that cannot match shorter (`a.conf`,
+  `c+.conf`, `[x`), decoys the unescaped regex matches
+
+## `.pacsave` shift loop runs to the highest number found
+
+Practice: **local**. Needs a hand-made `<file>.pacsave.<N>` next to a
+modified backup file.
+
+remove.c:399 renames once per number from the highest `N` down to 1,
+missing ones included: `x.pacsave.4000000000` makes four billion
+`rename` calls (the removal hangs). `N` at `ULONG_MAX` wraps
+`log_max + 1` to 0, nothing shifts and `.pacsave` overwrites an existing
+`.pacsave.1`.
+
+- port: same loop
+- difftest: numbers up to 7
+
+## backup entry without a hash crashes the remove
+
+Practice: **local**. Needs a `%BACKUP%` line without a tab in the local
+`files` (pacman itself writes `(null)`, see below).
+
+remove.c:536 `strcmp(filehash, backup->hash)` with the NULL hash
+`_alpm_split_backup` gives such a line, once the file's md5 computes.
+
+- port: the file counts as modified (saved as `.pacsave`)
+- difftest: never feeds the C that entry
+
+## unremovable package forgotten with its files left
+
+Practice: **env**: a file of the package on a read-only mount (EROFS).
+Not reproduced end to end (the difftest has no read-only mount), read
+from the code.
+
+`remove_package_files` returns -1 with `ALPM_ERR_PKG_CANT_REMOVE` before
+touching anything (remove.c:628), but `_alpm_remove_single_package`
+drops that result (718, "TODO check returned errors"), then logs
+"removed", runs post_remove and deletes the db entry: the files stay on
+disk, owned by no package, and the transaction reports success. The -1
+checks of its callers (remove.c:781, add.c:508) are dead, and on the
+removal path `alpm_pkg_has_scriptlet` (727) resets pm_errno. Files that
+fail to unlink later are only counted, with the same outcome.
+
+- port: same behaviour, the files result returned
+- difftest: unlink/rmdir/rename failures in 0555 dirs compared
 
 ## `-Fx -l` conflict check is dead
 
