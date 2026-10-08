@@ -660,11 +660,9 @@ fn gen_cfg(rng: &mut Rng, base: &Config) -> Config {
 		_ => ColStr::PLAIN,
 	};
 	// --debug, --debug=2, and the load lines alone (no stamps). not for
-	// -Qpi and -Qpc: query's check_signature does not go through
-	// signing.rs, be_package::changelog does not log "opening archive"
-	// (PORTING.md follow-ups)
-	let debug =
-		c.op_q_isfile == 0 || c.op_q_info == 0 && c.op_q_changelog == 0;
+	// -Qpc: be_package::changelog does not log "opening archive"
+	// (PORTING.md follow-up)
+	let debug = c.op_q_isfile == 0 || c.op_q_changelog == 0;
 	c.logmask = match rng.below(10) {
 		0 => 0,
 		1 if debug => LOG_ERROR | LOG_WARNING | LOG_DEBUG,

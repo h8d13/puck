@@ -15,25 +15,28 @@
 // no operation here starts, and are left out.
 //
 // handle->gpgdir and handle->known_keys live in Keyring, the question and
-// the error/warning log lines go through Callbacks. pm_errno is Err as
-// in the other modules. debug logging is not modelled.
+// the log lines go through Callbacks. pm_errno is Err as in the other
+// modules. RET_ERR/GOTO_ERR's lines (C file and line) are not logged.
 // alpm_siglist_cleanup is dropping the Vec.
 
 use std::ffi::{OsStr, OsString, c_int, c_uint};
 use std::fs::File;
 use std::io::{Read, Write};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use rustix::fs::{Access, AtFlags, CWD, accessat};
+use rustix::fs::Access;
+
+mod err_codes;
 
 use crate::base64;
-use crate::callbacks::{Callbacks, LogLevel, Question};
+use crate::callbacks::{Callbacks, LogLevel, Question, logv};
 use crate::db::Db;
 use crate::error::Errno;
 use crate::package::Package;
-use crate::util::{strerror, until_nul};
+use crate::util::{alpm_access, strerror, until_nul};
+use err_codes::ERR_CODES;
 
 pub use crate::db::{SIG_DATABASE, SIG_USE_DEFAULT};
 
@@ -121,9 +124,35 @@ pub struct Keyring {
 	// init_gpgme ran, its keyring warning comes once. the C flag is
 	// process wide, this one per keyring
 	init: bool,
+	// what the last key lookup's gpg said on stderr, or why it did not
+	// run: logged when the lookup fails (gpgme drops gpg's stderr)
+	stderr: Vec<u8>,
 }
 
-// the gpgme_error_t texts pacman logs as "GPGME error: %s"
+// gpg_err_code values pacman's paths tell apart
+const ERR_GENERAL: u32 = 1;
+const ERR_BAD_SIGNATURE: u32 = 8;
+const ERR_NO_PUBKEY: u32 = 9;
+const ERR_NO_DATA: u32 = 58;
+const ERR_BAD_DATA: u32 = 89;
+const ERR_CERT_REVOKED: u32 = 94;
+const ERR_CRL_TOO_OLD: u32 = 96;
+const ERR_WRONG_KEY_USAGE: u32 = 125;
+const ERR_KEY_EXPIRED: u32 = 153;
+const ERR_SIG_EXPIRED: u32 = 154;
+
+// gpg_strerror in the C locale: libgpg-error's text for the code
+// (err_codes.rs, sorted), its "Unknown error code" for an unassigned
+// one. codes with GPG_ERR_SYSTEM_ERROR (errno texts) are not mapped
+pub fn gpg_strerror(code: u32) -> &'static [u8] {
+	let code = code & 0xffff;
+	let found = ERR_CODES.binary_search_by_key(&code, |&(c, _)| c);
+	let text = found.map_or("Unknown error code", |i| ERR_CODES[i].1);
+	text.as_bytes()
+}
+
+// the gpgme_error_t texts pacman logs as "GPGME error: %s" and
+// "gpg error: %s"
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GpgError {
 	// reading a data stream failed, strerror's text
@@ -135,42 +164,131 @@ enum GpgError {
 	InvValue,
 	// gpg could not be run or its output not read
 	InvEngine,
+	// a key lookup found nothing
+	Eof,
 }
 
 impl GpgError {
 	// gpgme_strerror in the C locale
 	fn text(&self) -> &[u8] {
-		match self {
-			GpgError::Read(text) => text,
-			GpgError::NoData => b"No data",
-			GpgError::General => b"General error",
-			GpgError::BadData => b"Bad data",
-			GpgError::AmbiguousName => b"Ambiguous name",
-			GpgError::InvValue => b"Invalid value",
-			GpgError::InvEngine => b"Invalid crypto engine",
-		}
+		let code = match self {
+			GpgError::Read(text) => return text,
+			GpgError::NoData => ERR_NO_DATA,
+			GpgError::General => ERR_GENERAL,
+			GpgError::BadData => ERR_BAD_DATA,
+			GpgError::AmbiguousName => 107,
+			GpgError::InvValue => 55,
+			GpgError::InvEngine => 150,
+			GpgError::Eof => 16383,
+		};
+		gpg_strerror(code)
 	}
 }
 
-// gpg_err_code of gpgme_signature_t.status, as far as pacman tells
-// them apart
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Code {
-	NoError,
-	KeyExpired,
-	SigExpired,
-	NoPubkey,
-	// bad signature, revoked key, unsupported algorithm, general, no data
-	Other,
-}
+// gpgme_sigsum_t bits and list_sigsum's words for them, in its order
+const SUM_VALID: u32 = 0x1;
+const SUM_GREEN: u32 = 0x2;
+const SUM_RED: u32 = 0x4;
+const SUM_KEY_REVOKED: u32 = 0x10;
+const SUM_KEY_EXPIRED: u32 = 0x20;
+const SUM_SIG_EXPIRED: u32 = 0x40;
+const SUM_KEY_MISSING: u32 = 0x80;
+const SUM_CRL_TOO_OLD: u32 = 0x200;
+const SUM_BAD_POLICY: u32 = 0x400;
+const SUM_SYS_ERROR: u32 = 0x800;
+const SIGSUM: [(u32, &[u8]); 11] = [
+	(SUM_VALID, b"valid"),
+	(SUM_GREEN, b"green"),
+	(SUM_RED, b"red"),
+	(SUM_KEY_REVOKED, b"key revoked"),
+	(SUM_KEY_EXPIRED, b"key expired"),
+	(SUM_SIG_EXPIRED, b"sig expired"),
+	(SUM_KEY_MISSING, b"key missing"),
+	(0x100, b"crl missing"),
+	(SUM_CRL_TOO_OLD, b"crl too old"),
+	(SUM_BAD_POLICY, b"bad policy"),
+	(SUM_SYS_ERROR, b"sys error"),
+];
 
-// gpgme_signature_t: fpr, status, validity (gpgme's UNDEFINED is
-// already UNKNOWN, ULTIMATE already FULL)
+// gpgme_signature_t, the fields pacman reads or logs. status and
+// validity_reason are gpg error values (their low 16 bits the code);
+// validity is gpgme's after parse_trust (UNDEFINED already UNKNOWN,
+// ULTIMATE already FULL)
 #[derive(Debug, Clone)]
 struct GpgSig {
 	fpr: Option<Vec<u8>>,
-	code: Code,
+	status: u32,
 	validity: SigValidity,
+	validity_reason: u32,
+	timestamp: u64,
+	exp_timestamp: u64,
+	wrong_key_usage: bool,
+	summary: u32,
+}
+
+impl GpgSig {
+	// calc_sig_summary
+	fn calc_summary(&mut self) {
+		let code = self.status & 0xffff;
+		let good =
+			matches!(code, 0 | ERR_SIG_EXPIRED | ERR_KEY_EXPIRED);
+		let mut sum = match self.validity {
+			SigValidity::Full if good => SUM_GREEN,
+			SigValidity::Never if good => SUM_RED,
+			SigValidity::Full | SigValidity::Never => 0,
+			_ if code == ERR_BAD_SIGNATURE => SUM_RED,
+			_ => 0,
+		};
+		sum |= match code {
+			ERR_SIG_EXPIRED => SUM_SIG_EXPIRED,
+			ERR_KEY_EXPIRED => SUM_KEY_EXPIRED,
+			ERR_NO_PUBKEY => SUM_KEY_MISSING,
+			ERR_CERT_REVOKED => SUM_KEY_REVOKED,
+			0 | ERR_BAD_SIGNATURE => 0,
+			_ => SUM_SYS_ERROR,
+		};
+		sum |= match self.validity_reason & 0xffff {
+			ERR_CRL_TOO_OLD
+				if self.validity == SigValidity::Unknown =>
+			{
+				SUM_CRL_TOO_OLD
+			}
+			ERR_CERT_REVOKED => SUM_KEY_REVOKED,
+			_ => 0,
+		};
+		if self.wrong_key_usage {
+			sum |= SUM_BAD_POLICY;
+		}
+		if sum == SUM_GREEN {
+			sum |= SUM_VALID;
+		}
+		self.summary = sum;
+	}
+}
+
+// string_validity, gpgme_validity_t of a signature
+fn string_validity(v: SigValidity) -> &'static [u8] {
+	match v {
+		SigValidity::Unknown => b"unknown",
+		SigValidity::Never => b"never",
+		SigValidity::Marginal => b"marginal",
+		SigValidity::Full => b"full",
+	}
+}
+
+// string_validity of the owner_trust gpgme's set_ownertrust makes of the
+// colon listing's field: letters up to the first digit, the last wins
+fn owner_trust(field: &[u8]) -> &'static [u8] {
+	let letters = field.iter().take_while(|c| !c.is_ascii_digit());
+	letters.fold(b"unknown", |_, c| -> &'static [u8] {
+		match c {
+			b'n' => b"never",
+			b'm' => b"marginal",
+			b'f' => b"full",
+			b'u' => b"ultimate",
+			_ => b"unknown",
+		}
+	})
 }
 
 // gpgme_user_id_t
@@ -191,6 +309,8 @@ struct Key {
 	expires: i64,
 	expired: bool,
 	disabled: bool,
+	// the colon listing's ownertrust field
+	ownertrust: Vec<u8>,
 }
 
 // gpgme_keylist_mode_t of the three lookups
@@ -216,12 +336,6 @@ fn first_read(path: &[u8]) -> Result<(), GpgError> {
 
 fn os(b: &[u8]) -> &OsStr {
 	OsStr::from_bytes(b)
-}
-
-// _alpm_access: faccessat(AT_SYMLINK_NOFOLLOW), true when allowed
-fn access(path: &[u8], mode: Access) -> bool {
-	let flags = AtFlags::SYMLINK_NOFOLLOW;
-	accessat(CWD, until_nul(path), mode, flags).is_ok()
 }
 
 // leading decimal digits like gpgme's timestamp parsing, 0 when none
@@ -439,6 +553,7 @@ fn parse_keylist(out: &[u8]) -> Vec<Key> {
 				expires: number(field(&f, 6)),
 				expired: field(&f, 1) == b"e",
 				disabled: field(&f, 11).contains(&b'D'),
+				ownertrust: field(&f, 8).to_vec(),
 				..Key::default()
 			});
 			in_sub = false;
@@ -499,19 +614,213 @@ struct Verify {
 	plaintext_seen: usize,
 }
 
-// gpg-error code of a status argument (low 16 bits)
-fn err_code(n: i64) -> Code {
-	match n & 0xffff {
-		0 => Code::NoError,
-		9 => Code::NoPubkey,
-		153 => Code::KeyExpired,
-		154 => Code::SigExpired,
-		_ => Code::Other,
+fn digits(s: &[u8]) -> usize {
+	s.iter().take_while(|c| c.is_ascii_digit()).count()
+}
+
+fn skip_spaces(s: &[u8]) -> &[u8] {
+	let n = s.iter().take_while(|&&c| c == b' ').count();
+	&s[n..]
+}
+
+// the text up to the first ' ' and what follows it, if there is one
+fn split_word(s: &[u8]) -> (&[u8], Option<&[u8]>) {
+	match s.iter().position(|&c| c == b' ') {
+		Some(i) => (&s[..i], Some(&s[i + 1..])),
+		None => (s, None),
 	}
 }
 
-fn digits(s: &[u8]) -> bool {
-	!s.is_empty() && s.iter().all(u8::is_ascii_digit)
+// a field "ends" where the C checks *tail == ' ' or *tail == '\0'
+fn ends(tail: &[u8]) -> bool {
+	matches!(tail.first(), None | Some(b' '))
+}
+
+// atoi: blanks, a sign, decimal digits, 0 when there are none. the
+// int wraps into gpgme_error_t like the C's assignment
+fn atoi(s: &[u8]) -> u32 {
+	let n = s.iter().take_while(|c| c.is_ascii_whitespace()).count();
+	let s = &s[n..];
+	let (neg, s) = match s.first() {
+		Some(b'-') => (true, &s[1..]),
+		Some(b'+') => (false, &s[1..]),
+		_ => (false, s),
+	};
+	let v = s[..digits(s)].iter().fold(0i32, |v, &c| {
+		v.wrapping_mul(10).wrapping_add(i32::from(c - b'0'))
+	});
+	(if neg { v.wrapping_neg() } else { v }) as u32
+}
+
+// strtoul(s, &tail, 10) without its sign and blank handling (gpg
+// prints none here): the value and the tail, None without digits or on
+// overflow (errno)
+fn strtoul(s: &[u8]) -> Option<(u64, &[u8])> {
+	let n = digits(s);
+	let v = s[..n].iter().try_fold(0u64, |v, &c| {
+		v.checked_mul(10)?.checked_add(u64::from(c - b'0'))
+	});
+	(n > 0).then_some(())?;
+	Some((v?, &s[n..]))
+}
+
+// strtol(s, &tail, 0) on an algorithm number: decimal, 0x hex or 0
+// octal, only whether it parses matters
+fn strtol0(s: &[u8]) -> Option<&[u8]> {
+	let n = s.iter().take_while(|c| c.is_ascii_whitespace()).count();
+	let s = &s[n..];
+	let s = s.strip_prefix(b"-").or(s.strip_prefix(b"+")).unwrap_or(s);
+	let hex = s.len() > 2
+		&& (s.starts_with(b"0x") || s.starts_with(b"0X"))
+		&& s[2].is_ascii_hexdigit();
+	let (body, radix) = match hex {
+		true => (&s[2..], 16),
+		false if s.first() == Some(&b'0') => (s, 8),
+		false => (s, 10),
+	};
+	let n = body
+		.iter()
+		.take_while(|&&c| (c as char).is_digit(radix))
+		.count();
+	let v = i64::from_str_radix(
+		std::str::from_utf8(&body[..n]).ok()?,
+		radix,
+	);
+	(n > 0 && v.is_ok()).then(|| &body[n..])
+}
+
+// _gpgme_parse_timestamp on a status field: leading blanks, then
+// seconds since the epoch. its "yyyymmddThhmmss" form, which gpg prints
+// in no status line read here, is not converted. None is the C's
+// (time_t)-1 or a field without digits (end == tail)
+fn parse_timestamp(s: &[u8]) -> Option<(u64, &[u8])> {
+	let (v, tail) = strtoul(skip_spaces(s))?;
+	(v != u64::MAX).then_some((v, tail))
+}
+
+impl Verify {
+	// prepare_new_sig: a signature that only had NEWSIG is reused
+	fn prepare_new_sig(&mut self) {
+		let sig = GpgSig {
+			fpr: None,
+			status: 0,
+			validity: SigValidity::Unknown,
+			validity_reason: 0,
+			timestamp: 0,
+			exp_timestamp: 0,
+			wrong_key_usage: false,
+			summary: 0,
+		};
+		match (self.only_newsig_seen, self.sigs.last_mut()) {
+			(true, Some(last)) => *last = sig,
+			_ => self.sigs.push(sig),
+		}
+		self.did_prepare_new_sig = true;
+		self.only_newsig_seen = false;
+	}
+
+	// parse_new_sig: GOODSIG and friends carry the long key id, ERRSIG
+	// the fingerprint as 7th field when gpg knows it
+	fn new_sig(&mut self, kw: &[u8], args: &[u8]) -> Result<(), GpgError> {
+		let (keyid, end) = split_word(args);
+		if !self.did_prepare_new_sig {
+			self.prepare_new_sig();
+		}
+		self.did_prepare_new_sig = false;
+		let sig = self.sigs.last_mut().expect("just prepared");
+		let got_fpr = match kw {
+			b"ERRSIG" => errsig(sig, end)?,
+			_ => {
+				sig.status = match kw {
+					b"GOODSIG" => 0,
+					b"EXPSIG" => ERR_SIG_EXPIRED,
+					b"EXPKEYSIG" => ERR_KEY_EXPIRED,
+					b"BADSIG" => ERR_BAD_SIGNATURE,
+					_ => ERR_CERT_REVOKED,
+				};
+				false
+			}
+		};
+		if !keyid.is_empty() && !got_fpr {
+			sig.fpr = Some(keyid.to_vec());
+		}
+		Ok(())
+	}
+
+	fn status(&mut self, kw: &[u8], args: &[u8]) -> Result<(), GpgError> {
+		let unprepared = !self.did_prepare_new_sig;
+		let sig = self.sigs.last_mut();
+		if kw == b"NEWSIG" {
+			if let Some(sig) = sig {
+				sig.calc_summary();
+			}
+			self.prepare_new_sig();
+			self.only_newsig_seen = true;
+			return Ok(());
+		}
+		if NEW_SIG.contains(&kw) {
+			if let Some(sig) = sig.filter(|_| unprepared) {
+				sig.calc_summary();
+			}
+			self.only_newsig_seen = false;
+			return self.new_sig(kw, args);
+		}
+		let validity = trust(kw);
+		// a TRUST_ line before any signature is ignored
+		if validity.is_some() && sig.is_none() {
+			return Ok(());
+		}
+		let resets =
+			[&b"VALIDSIG"[..], b"NODATA", b"UNEXPECTED", b"ERROR"];
+		if validity.is_some() || resets.contains(&kw) {
+			self.only_newsig_seen = false;
+		}
+		match (kw, sig) {
+			(b"VALIDSIG", Some(sig)) => valid_sig(sig, args)?,
+			(b"VALIDSIG", None) => return Err(GpgError::InvEngine),
+			(b"NODATA", None) => return Err(GpgError::NoData),
+			(b"UNEXPECTED", None) => return Err(GpgError::BadData),
+			(b"NODATA" | b"UNEXPECTED", Some(sig)) => {
+				sig.status = ERR_NO_DATA;
+			}
+			(b"ERROR", sig) => return error_status(sig, args),
+			(b"PLAINTEXT", _) => {
+				self.plaintext_seen += 1;
+				if self.plaintext_seen > 1 {
+					return Err(GpgError::BadData);
+				}
+			}
+			(_, Some(sig)) => {
+				if let Some(v) = validity {
+					parse_trust(sig, v, args);
+				}
+			}
+			_ => {}
+		}
+		Ok(())
+	}
+
+	// EOF: the last summary, a last signature that only had NEWSIG
+	// dropped; then gpgme_op_verify_result's fix for a summary still
+	// empty
+	fn finish(mut self) -> Vec<GpgSig> {
+		if let Some(sig) = self.sigs.last_mut()
+			&& !self.did_prepare_new_sig
+		{
+			sig.calc_summary();
+		}
+		if self.only_newsig_seen {
+			self.sigs.pop();
+		}
+		for sig in self.sigs.iter_mut().filter(|s| s.summary == 0) {
+			sig.summary = match sig.status & 0xffff {
+				ERR_KEY_EXPIRED => SUM_KEY_EXPIRED,
+				ERR_NO_PUBKEY => SUM_KEY_MISSING,
+				_ => 0,
+			};
+		}
+		self.sigs
+	}
 }
 
 // the TRUST_* keywords, None for every other one
@@ -534,129 +843,99 @@ const NEW_SIG: &[&[u8]] = &[
 	b"REVKEYSIG",
 ];
 
-impl Verify {
-	fn prepare_new_sig(&mut self) {
-		self.sigs.push(GpgSig {
-			fpr: None,
-			code: Code::NoError,
-			validity: SigValidity::Unknown,
-		});
-		self.did_prepare_new_sig = true;
-	}
+// parse_trust: the validity and the error code in front of the model
+fn parse_trust(sig: &mut GpgSig, validity: SigValidity, args: &[u8]) {
+	sig.validity = validity;
+	sig.validity_reason = atoi(split_word(args).0);
+}
 
-	// parse_new_sig: GOODSIG and friends carry the long key id, ERRSIG
-	// the fingerprint as 7th field when gpg knows it
-	fn new_sig(&mut self, kw: &[u8], args: &[u8]) -> Result<(), GpgError> {
-		if !self.did_prepare_new_sig {
-			self.prepare_new_sig();
-		}
-		self.did_prepare_new_sig = false;
-		let sig = self.sigs.last_mut().expect("just prepared");
-		let mut parts = args.split(|&c| c == b' ');
-		let keyid = parts.next().unwrap_or_default();
-		if !keyid.is_empty() {
-			sig.fpr = Some(keyid.to_vec());
-		}
-		sig.code = match kw {
-			b"GOODSIG" => Code::NoError,
-			b"EXPSIG" => Code::SigExpired,
-			b"EXPKEYSIG" => Code::KeyExpired,
-			_ => Code::Other,
-		};
-		if kw != b"ERRSIG" {
-			return Ok(());
-		}
-		// <pkalgo> <hashalgo> <class> <time> <rc> [<fpr>]
-		let rest: Vec<&[u8]> =
-			parts.filter(|p| !p.is_empty()).collect();
-		if rest.len() < 5 || !digits(rest[0]) || !digits(rest[1]) {
-			return Ok(());
-		}
-		if !digits(rest[3]) {
-			return Err(GpgError::InvEngine);
-		}
-		if rest[4] == b"9" {
-			sig.code = Code::NoPubkey;
-		}
-		if let Some(fpr) = rest.get(5) {
-			sig.fpr = Some(fpr.to_vec());
-		}
-		Ok(())
-	}
+// <pkalgo> <hashalgo> <class> of an ERRSIG line: what follows them
+fn errsig_algos(s: &[u8]) -> Option<&[u8]> {
+	let tail = strtol0(s).filter(|t| t.first() == Some(&b' '))?;
+	let s = skip_spaces(tail);
+	let tail = strtol0(s).filter(|t| t.first() == Some(&b' '))?;
+	// the sig class is skipped
+	let s = skip_spaces(tail);
+	let i = s.iter().position(|&c| c == b' ')?;
+	Some(skip_spaces(&s[i..]))
+}
 
-	fn status(&mut self, kw: &[u8], args: &[u8]) -> Result<(), GpgError> {
-		if kw == b"NEWSIG" {
-			self.prepare_new_sig();
-			self.only_newsig_seen = true;
-			return Ok(());
-		}
-		if NEW_SIG.contains(&kw) {
-			self.only_newsig_seen = false;
-			return self.new_sig(kw, args);
-		}
-		let validity = trust(kw);
-		let resets =
-			[&b"VALIDSIG"[..], b"NODATA", b"UNEXPECTED", b"ERROR"];
-		if validity.is_some() || resets.contains(&kw) {
-			self.only_newsig_seen = false;
-		}
-		let sig = self.sigs.last_mut();
-		match (kw, sig) {
-			(b"VALIDSIG", Some(sig)) => {
-				let fpr = args.split(|&c| c == b' ').next();
-				let fpr = fpr.filter(|f| !f.is_empty());
-				sig.fpr = Some(fpr
-					.ok_or(GpgError::General)?
-					.to_vec());
-			}
-			(b"NODATA", None) => return Err(GpgError::NoData),
-			(b"UNEXPECTED", None) => return Err(GpgError::General),
-			(b"NODATA" | b"UNEXPECTED", Some(sig)) => {
-				sig.code = Code::Other;
-			}
-			(b"ERROR", sig) => return error_status(sig, args),
-			(b"PLAINTEXT", _) => {
-				self.plaintext_seen += 1;
-				if self.plaintext_seen > 1 {
-					return Err(GpgError::BadData);
-				}
-			}
-			(b"VALIDSIG", None) => return Err(GpgError::InvEngine),
-			(_, None) if validity.is_some() => {
-				return Err(GpgError::InvEngine);
-			}
-			(_, Some(sig)) => {
-				if let Some(v) = validity {
-					sig.validity = v;
-				}
-			}
-			_ => {}
-		}
-		Ok(())
+// parse_new_sig's ERRSIG arm on what follows the key id:
+// <pkalgo> <hashalgo> <class> <time> <rc> [<fpr>]. true when a
+// fingerprint came; a malformed line leaves GENERAL as status
+fn errsig(sig: &mut GpgSig, end: Option<&[u8]>) -> Result<bool, GpgError> {
+	let general = |sig: &mut GpgSig| {
+		sig.status = ERR_GENERAL;
+		Ok(false)
+	};
+	let Some(s) = end.and_then(errsig_algos) else {
+		return general(sig);
+	};
+	let (ts, tail) = parse_timestamp(s).ok_or(GpgError::InvEngine)?;
+	if !ends(tail) {
+		return Err(GpgError::InvEngine);
 	}
+	sig.timestamp = ts;
+	let s = skip_spaces(tail);
+	let Some((rc, tail)) = strtoul(s).filter(|(_, t)| ends(t)) else {
+		return general(sig);
+	};
+	sig.status = rc as u32;
+	if tail.is_empty() {
+		return Ok(false);
+	}
+	let s = skip_spaces(tail);
+	if s.is_empty() || s[0] == b'-' && ends(&s[1..]) {
+		return Ok(false);
+	}
+	sig.fpr = Some(s.to_vec());
+	Ok(true)
+}
 
-	// EOF: a last signature that only had NEWSIG is dropped
-	fn finish(mut self) -> Vec<GpgSig> {
-		if self.only_newsig_seen {
-			self.sigs.pop();
-		}
-		self.sigs
+// parse_valid_sig: <fpr> <date> <time> <exp time> ..., the algorithms
+// after are not checked
+fn valid_sig(sig: &mut GpgSig, args: &[u8]) -> Result<(), GpgError> {
+	let (fpr, end) = split_word(args);
+	if fpr.is_empty() {
+		return Err(GpgError::General);
 	}
+	sig.fpr = Some(fpr.to_vec());
+	// the creation date is skipped
+	let end = end.unwrap_or_default();
+	let Some(i) = end.iter().position(|&c| c == b' ') else {
+		return Ok(());
+	};
+	let (ts, tail) =
+		parse_timestamp(&end[i..]).ok_or(GpgError::InvEngine)?;
+	if !ends(tail) {
+		return Err(GpgError::InvEngine);
+	}
+	sig.timestamp = ts;
+	let (exp, tail) = parse_timestamp(tail).ok_or(GpgError::InvEngine)?;
+	if !ends(tail) {
+		return Err(GpgError::InvEngine);
+	}
+	sig.exp_timestamp = exp;
+	Ok(())
 }
 
 // parse_error of verify.c: ERROR <where> <code>
 fn error_status(sig: Option<&mut GpgSig>, args: &[u8]) -> Result<(), GpgError> {
-	let mut parts = args.split(|&c| c == b' ');
-	let place = parts.next().unwrap_or_default();
-	let which = parts.next().ok_or(GpgError::InvEngine)?;
-	let code = number(which);
-	if place == b"proc_pkt.plaintext" && code & 0xffff == 89 {
+	let (place, which) = split_word(args);
+	let which = which.ok_or(GpgError::InvEngine)?;
+	let code = atoi(split_word(which).0);
+	if place == b"proc_pkt.plaintext" && code & 0xffff == ERR_BAD_DATA {
 		return Err(GpgError::BadData);
 	}
-	if let Some(sig) = sig
-		&& place == b"verify.findkey"
-	{
-		sig.code = err_code(code);
+	let Some(sig) = sig else {
+		return Ok(());
+	};
+	match place {
+		b"verify.findkey" => sig.status = code,
+		b"verify.keyusage" if code & 0xffff == ERR_WRONG_KEY_USAGE => {
+			sig.wrong_key_usage = true;
+		}
+		_ => {}
 	}
 	Ok(())
 }
@@ -668,41 +947,47 @@ fn parse_verify(status: &[u8]) -> Result<Vec<GpgSig>, GpgError> {
 		let Some(rest) = line.strip_prefix(b"[GNUPG:] ") else {
 			continue;
 		};
-		let (kw, args) = match rest.iter().position(|&c| c == b' ') {
-			Some(i) => (&rest[..i], &rest[i + 1..]),
-			None => (rest, &b""[..]),
-		};
-		v.status(kw, args)?;
+		let (kw, args) = split_word(rest);
+		v.status(kw, args.unwrap_or_default())?;
 	}
 	Ok(v.finish())
 }
 
-// stdout of a run, stdin fed from a thread so neither pipe blocks
-fn run(c: &mut Command, stdin: Option<&[u8]>) -> Result<Vec<u8>, GpgError> {
+// a gpg run's stdout, stdin fed from a thread so no pipe blocks. stderr
+// goes to diag, or why gpg could not be run or read
+fn run(
+	c: &mut Command,
+	stdin: Option<&[u8]>,
+	diag: &mut Vec<u8>,
+) -> Result<Vec<u8>, GpgError> {
 	let input = match stdin {
 		Some(_) => Stdio::piped(),
 		None => Stdio::null(),
 	};
-	let mut child = c
+	let spawned = c
 		.stdin(input)
 		.stdout(Stdio::piped())
-		.stderr(Stdio::null())
-		.spawn()
-		.map_err(|_| GpgError::InvEngine)?;
+		.stderr(Stdio::piped())
+		.spawn();
+	let mut child = spawned.map_err(|e| {
+		*diag = [b"could not run gpg: ", &strerror(&e)[..]].concat();
+		GpgError::InvEngine
+	})?;
 	let pipe = child.stdin.take();
-	let mut out = Vec::new();
-	let mut stdout = child.stdout.take().expect("piped");
-	let read = std::thread::scope(|s| {
+	// gpgme ignores gpg's exit status, the status lines tell
+	let out = std::thread::scope(|s| {
 		if let (Some(mut pipe), Some(data)) = (pipe, stdin) {
 			// gpg may stop reading early, its status says why
 			s.spawn(move || pipe.write_all(data).ok());
 		}
-		stdout.read_to_end(&mut out)
+		child.wait_with_output()
 	});
-	// gpgme ignores gpg's exit status, the status lines tell
-	let waited = child.wait();
-	read.and(waited).map_err(|_| GpgError::InvEngine)?;
-	Ok(out)
+	let out = out.map_err(|e| {
+		*diag = [b"could not read gpg: ", &strerror(&e)[..]].concat();
+		GpgError::InvEngine
+	})?;
+	*diag = out.stderr;
+	Ok(out.stdout)
 }
 
 impl Keyring {
@@ -714,6 +999,7 @@ impl Keyring {
 			gpg: PathBuf::from("gpg"),
 			known_keys: Vec::new(),
 			init: false,
+			stderr: Vec::new(),
 		}
 	}
 
@@ -736,8 +1022,20 @@ impl Keyring {
 		&self.known_keys
 	}
 
-	fn file(&self, name: &[u8]) -> Vec<u8> {
-		[&self.gpgdir[..], name].concat()
+	// gpgme's engine file_name: the gpg Command runs, found in PATH
+	fn engine_file(&self) -> Vec<u8> {
+		let gpg = self.gpg.as_os_str();
+		if gpg.as_bytes().contains(&b'/') {
+			return gpg.as_bytes().to_vec();
+		}
+		let path = std::env::var_os("PATH").unwrap_or_default();
+		let found = std::env::split_paths(&path)
+			.map(|dir| dir.join(gpg))
+			.find(|p| p.is_file());
+		found.map_or_else(
+			|| gpg.as_bytes().to_vec(),
+			|p| p.into_os_string().into_vec(),
+		)
 	}
 
 	// build_argv's options for a gpg 2.x engine without a tty
@@ -768,16 +1066,18 @@ impl Keyring {
 		let mut c = self.command();
 		c.args(["--status-fd", "1", "--verify", "--", "-"]);
 		c.arg(os(path));
-		parse_verify(&run(&mut c, Some(sig))?)
+		parse_verify(&run(&mut c, Some(sig), &mut Vec::new())?)
 	}
 
 	// gpgme_get_key: Ok(None) is GPG_ERR_EOF, two different keys are
-	// ambiguous, a pattern under 8 characters is refused
+	// ambiguous, a pattern under 8 characters is refused. gpg's stderr
+	// kept for a failed lookup
 	fn get_key(
-		&self,
+		&mut self,
 		pattern: Option<&[u8]>,
 		mode: ListMode,
 	) -> Result<Option<Key>, GpgError> {
+		self.stderr.clear();
 		let pattern = pattern.ok_or(GpgError::InvValue)?;
 		if pattern.len() < 8 {
 			return Err(GpgError::InvValue);
@@ -790,7 +1090,7 @@ impl Keyring {
 			ListMode::Extern => "--search-keys",
 		});
 		c.arg("--").arg(os(pattern));
-		let out = run(&mut c, None)?;
+		let out = run(&mut c, None, &mut self.stderr)?;
 		let keys = match mode {
 			ListMode::Extern => parse_extern_keylist(&out),
 			_ => parse_keylist(&out),
@@ -816,7 +1116,7 @@ impl Keyring {
 		let mut c = self.command();
 		c.args(["--status-fd", "1", "--recv-keys", "--"])
 			.arg(os(id));
-		let out = run(&mut c, None)?;
+		let out = run(&mut c, None, &mut Vec::new())?;
 		let (mut considered, mut first) = (0, None);
 		for line in out.split(|&c| c == b'\n') {
 			let Some(rest) = line.strip_prefix(b"[GNUPG:] ") else {
@@ -834,21 +1134,45 @@ impl Keyring {
 	}
 }
 
-// init_gpgme: the keyring warning, once. the C also leaves pm_errno
-// NOT_A_FILE behind, which no caller reads on success
+fn debug(cb: &mut dyn Callbacks, parts: &[&[u8]]) {
+	logv(cb, LogLevel::Debug, parts);
+}
+
+// _alpm_access(handle, gpgdir, file, mode) of a keyring file
+fn keyring_access(
+	kr: &Keyring,
+	cb: &mut dyn Callbacks,
+	file: &[u8],
+	mode: Access,
+) -> bool {
+	alpm_access(cb, Some(&kr.gpgdir), file, mode).is_ok()
+}
+
+// init_gpgme: the keyring check and the engine lines, once. the C also
+// leaves pm_errno NOT_A_FILE behind, which no caller reads on success.
+// there is no gpgme library whose version could be logged
 fn init_gpgme(kr: &mut Keyring, cb: &mut dyn Callbacks) {
 	if kr.init {
 		return;
 	}
-	let pubring = access(&kr.file(b"pubring.gpg"), Access::READ_OK);
-	let trustdb = access(&kr.file(b"trustdb.gpg"), Access::READ_OK);
-	if !pubring || !trustdb {
+	// || in the C: trustdb.gpg is only looked at with a pubring
+	if !keyring_access(kr, cb, b"pubring.gpg", Access::READ_OK)
+		|| !keyring_access(kr, cb, b"trustdb.gpg", Access::READ_OK)
+	{
+		debug(cb, &[b"Signature verification will fail!\n"]);
 		cb.log(
 			LogLevel::Warning,
 			b"Public keyring not found; have you run \
 			'pacman-key --init'?\n",
 		);
 	}
+	debug(cb, &[b"GPGME version: none (gpg run directly)\n"]);
+	let file = kr.engine_file();
+	// the engine's home_dir is the gpgdir, NULL without one
+	let home = Some(&kr.gpgdir[..]).filter(|g| !g.is_empty());
+	let home = home.unwrap_or(b"(null)");
+	let info = [&b"GPGME engine info: file="[..], &file, b", home="];
+	debug(cb, &[&info.concat(), home, b"\n"]);
 	kr.init = true;
 }
 
@@ -856,6 +1180,10 @@ fn gpgme_error(cb: &mut dyn Callbacks, e: GpgError) -> Errno {
 	let msg = [b"GPGME error: ", e.text(), b"\n"].concat();
 	cb.log(LogLevel::Error, &msg);
 	Errno::Gpgme
+}
+
+fn gpg_error(cb: &mut dyn Callbacks, text: &[u8]) {
+	debug(cb, &[b"gpg error: ", text, b"\n"]);
 }
 
 // _alpm_key_in_keychain: Some(true) known (cached from then on),
@@ -867,17 +1195,36 @@ pub fn key_in_keychain(
 ) -> Option<bool> {
 	let fpr = until_nul(fpr);
 	if kr.known_keys.iter().any(|k| k == fpr) {
+		debug(cb, &[b"key ", fpr, b" found in cache\n"]);
 		return Some(true);
 	}
 	init_gpgme(kr, cb);
+	debug(cb, &[b"looking up key ", fpr, b" locally\n"]);
 	match kr.get_key(Some(fpr), ListMode::Local) {
-		Ok(None) => Some(false),
-		Ok(Some(key)) if key.expired => Some(false),
+		Ok(None) => {
+			debug(cb, &[b"key lookup failed, unknown key\n"]);
+			Some(false)
+		}
+		Ok(Some(key)) if key.expired => {
+			let msg = b"key lookup success, but key is expired\n";
+			debug(cb, &[msg]);
+			Some(false)
+		}
 		Ok(Some(_)) => {
+			debug(cb, &[b"key lookup success, key exists\n"]);
 			kr.known_keys.push(fpr.to_vec());
 			Some(true)
 		}
-		Err(_) => None,
+		Err(e) => {
+			gpg_error(cb, e.text());
+			// not in the C (gpgme drops gpg's stderr): what gpg
+			// said, so a failing lookup can be told apart
+			let said = kr.stderr.split(|&c| c == b'\n');
+			for line in said.filter(|l| !l.is_empty()) {
+				debug(cb, &[line, b"\n"]);
+			}
+			None
+		}
 	}
 }
 
@@ -889,45 +1236,91 @@ fn key_import_wkd(
 	email: &[u8],
 	fpr: &[u8],
 ) -> bool {
-	match kr.get_key(Some(email), ListMode::LocateExternal) {
-		Ok(Some(_)) => key_in_keychain(kr, cb, fpr) != Some(false),
-		_ => false,
-	}
+	debug(cb, &[b"looking up key ", email, b" using WKD\n"]);
+	// None is the C's gpg_err left at GPG_ERR_NO_ERROR
+	let err = match kr.get_key(Some(email), ListMode::LocateExternal) {
+		Ok(Some(_)) => {
+			if key_in_keychain(kr, cb, fpr) != Some(false) {
+				return true;
+			}
+			let msg = b"key lookup failed: WKD imported wrong \
+				fingerprint or key expired\n";
+			debug(cb, &[msg]);
+			None
+		}
+		Ok(None) => Some(GpgError::Eof),
+		Err(e) => Some(e),
+	};
+	gpg_error(cb, err.as_ref().map_or(gpg_strerror(0), GpgError::text));
+	false
 }
 
 // key_search_keyserver: Ok(Some) found (C 1), Ok(None) not found (C 0),
 // Err on a failed lookup (C -1). "0x" in front, keyservers want it; on
 // a miss the last 8 characters are tried
 fn key_search_keyserver(
-	kr: &Keyring,
+	kr: &mut Keyring,
+	cb: &mut dyn Callbacks,
 	fpr: &[u8],
 ) -> Result<Option<Key>, GpgError> {
 	let full = [b"0x", fpr].concat();
-	match kr.get_key(Some(&full), ListMode::Extern)? {
-		Some(key) => return Ok(Some(key)),
-		None if fpr.len() <= 8 => return Ok(None),
-		None => {}
+	let short = fpr.len().checked_sub(8).filter(|&n| n > 0);
+	let short = short.map(|n| [b"0x", &fpr[n..]].concat());
+	// what is logged, what is searched: the first line shows the
+	// fingerprint without its "0x"
+	let tries = [Some((fpr, &full[..])), short.as_deref().map(|s| (s, s))];
+	for (shown, pattern) in tries.into_iter().flatten() {
+		debug(cb, &[b"looking up key ", shown, b" remotely\n"]);
+		match kr.get_key(Some(pattern), ListMode::Extern) {
+			Ok(Some(key)) => return Ok(Some(key)),
+			Ok(None) => {
+				let msg = b"key lookup failed, unknown key\n";
+				debug(cb, &[msg]);
+			}
+			Err(e) => {
+				gpg_error(cb, e.text());
+				return Err(e);
+			}
+		}
 	}
-	let short = [b"0x", &fpr[fpr.len() - 8..]].concat();
-	kr.get_key(Some(&short), ListMode::Extern)
+	gpg_error(cb, GpgError::Eof.text());
+	Ok(None)
 }
 
 // _alpm_access(gpgdir, "pubring.gpg", W_OK), logged when refused
 fn writable(kr: &Keyring, cb: &mut dyn Callbacks) -> bool {
-	if access(&kr.file(b"pubring.gpg"), Access::WRITE_OK) {
+	if keyring_access(kr, cb, b"pubring.gpg", Access::WRITE_OK) {
 		return true;
 	}
 	cb.log(LogLevel::Error, b"keyring is not writable\n");
 	false
 }
 
-// key_import_keyserver: exactly one key considered and imported
+// key_import_keyserver: exactly one key considered and imported. a gpg
+// that cannot be run fails without a line (CHECK_ERR)
 fn key_import_keyserver(
 	kr: &Keyring,
 	cb: &mut dyn Callbacks,
 	key: &Key,
 ) -> bool {
-	writable(kr, cb) && matches!(kr.recv_key(key), Ok((1, Some(true))))
+	if !writable(kr, cb) {
+		return false;
+	}
+	debug(cb, &[b"importing key\n"]);
+	match kr.recv_key(key) {
+		Ok((1, Some(true))) => true,
+		Ok((1, Some(false))) => {
+			// gpg_err is still GPG_ERR_NO_ERROR there
+			gpg_error(cb, gpg_strerror(0));
+			false
+		}
+		Ok(_) => {
+			let msg = b"could not import key, 0 results\n";
+			debug(cb, &[msg]);
+			false
+		}
+		Err(_) => false,
+	}
 }
 
 // email_from_uid: between the last '<' and the last '>' after it
@@ -971,11 +1364,17 @@ pub fn key_import(
 	{
 		return true;
 	}
-	let msg: &[u8] = match key_search_keyserver(kr, fpr) {
-		Ok(Some(key)) if key_import_keyserver(kr, cb, &key) => {
-			return true;
+	let msg: &[u8] = match key_search_keyserver(kr, cb, fpr) {
+		Ok(Some(key)) => {
+			// fetch_key.uid, NULL for a key without uids
+			let uid = key.uids.first().map(|u| &u.uid[..]);
+			let uid = uid.unwrap_or(b"(null)");
+			debug(cb, &[b"key \"", uid, b"\" on keyserver\n"]);
+			if key_import_keyserver(kr, cb, &key) {
+				return true;
+			}
+			b"\" could not be imported\n"
 		}
-		Ok(Some(_)) => b"\" could not be imported\n",
 		_ => b"\" could not be looked up remotely\n",
 	};
 	cb.log(LogLevel::Error, &[b"key \"", fpr, msg].concat());
@@ -1005,6 +1404,59 @@ fn result_key(key: &Key) -> (PgpKey, bool) {
 	(pk, key.disabled)
 }
 
+fn decimal(n: impl std::fmt::Display) -> Vec<u8> {
+	n.to_string().into_bytes()
+}
+
+// the per-signature lines of _alpm_gpgme_checksig, before its key lookup
+fn log_sig(cb: &mut dyn Callbacks, sig: &GpgSig) {
+	let fpr = sig.fpr.as_deref().unwrap_or(b"(null)");
+	debug(cb, &[b"fingerprint: ", fpr, b"\n"]);
+	let words = SIGSUM.iter().filter(|(bit, _)| sig.summary & bit != 0);
+	for (_, word) in words {
+		debug(cb, &[b"summary: ", word, b"\n"]);
+	}
+	if sig.summary == 0 {
+		debug(cb, &[b"summary: (empty)\n"]);
+	}
+	debug(cb, &[b"status: ", gpg_strerror(sig.status), b"\n"]);
+	debug(cb, &[b"timestamp: ", &decimal(sig.timestamp), b"\n"]);
+	// (time_t)timestamp > time(NULL)
+	let now = std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.map_or(0, |d| d.as_secs() as i64);
+	if sig.timestamp as i64 > now {
+		let msg = b"signature timestamp is greater than system time.\n";
+		debug(cb, &[msg]);
+	}
+	let exp = decimal(sig.exp_timestamp);
+	debug(cb, &[b"exp_timestamp: ", &exp, b"\n"]);
+	let validity = string_validity(sig.validity);
+	let reason = gpg_strerror(sig.validity_reason);
+	debug(cb, &[b"validity: ", validity, b"; reason: ", reason, b"\n"]);
+}
+
+// the key line of a found key with uids
+fn log_key(cb: &mut dyn Callbacks, key: &Key) {
+	let Some(uid) = key.uids.first() else {
+		return;
+	};
+	let fpr = key.fpr.as_deref().unwrap_or(b"(null)");
+	let trust = owner_trust(&key.ownertrust);
+	let disabled: &[u8] = if key.disabled { b"1" } else { b"0" };
+	let parts: [&[u8]; 8] = [
+		b"key: ",
+		fpr,
+		b", ",
+		&uid.uid,
+		b", owner_trust ",
+		trust,
+		b", disabled ",
+		disabled,
+	];
+	debug(cb, &[&parts.concat(), b"\n"]);
+}
+
 // _alpm_gpgme_checksig: the signatures of the file at path, from
 // base64_sig or "<path>.sig". Ok holds a result per signature, whatever
 // they say; Err is the pm_errno (NotAFile, SigMissing, SigInvalid,
@@ -1016,20 +1468,24 @@ pub fn gpgme_checksig(
 	base64_sig: Option<&[u8]>,
 ) -> Result<Vec<SigResult>, Errno> {
 	let path = path.map(until_nul).ok_or(Errno::NotAFile)?;
-	if !access(path, Access::READ_OK) {
+	if alpm_access(cb, None, path, Access::READ_OK).is_err() {
 		return Err(Errno::NotAFile);
 	}
 	let sigfile = sigpath(path);
 	if base64_sig.is_none()
-		&& (!access(&sigfile, Access::READ_OK)
+		&& (alpm_access(cb, None, &sigfile, Access::READ_OK).is_err()
 			|| File::open(os(&sigfile)).is_err())
 	{
+		let msg =
+			[b"sig path ", &sigfile[..], b" could not be opened\n"];
+		debug(cb, &msg);
 		return Err(Errno::SigMissing);
 	}
 	if File::open(os(path)).is_err() {
 		return Err(Errno::NotAFile);
 	}
 	init_gpgme(kr, cb);
+	debug(cb, &[b"checking signature for ", path, b"\n"]);
 	let sig = match base64_sig {
 		Some(b) => {
 			decode_signature(b).map_err(|_| Errno::SigInvalid)?
@@ -1040,15 +1496,24 @@ pub fn gpgme_checksig(
 	};
 	let sigs = kr.verify(&sig, path).map_err(|e| gpgme_error(cb, e))?;
 	if sigs.is_empty() {
+		debug(cb, &[b"no signatures returned\n"]);
 		return Err(Errno::SigMissing);
 	}
+	let count = decimal(sigs.len());
+	debug(cb, &[&count, b" signatures returned\n"]);
 	let mut results = Vec::with_capacity(sigs.len());
 	for sig in sigs {
+		log_sig(cb, &sig);
 		let found = kr.get_key(sig.fpr.as_deref(), ListMode::Local);
 		let (key, disabled) = match found {
-			Ok(Some(k)) => result_key(&k),
+			Ok(Some(k)) => {
+				log_key(cb, &k);
+				result_key(&k)
+			}
 			// the signature's fpr, there is no key to point at
 			Ok(None) => {
+				let msg = b"key lookup failed, unknown key\n";
+				debug(cb, &[msg]);
 				let fingerprint = sig.fpr.clone();
 				(
 					PgpKey {
@@ -1060,14 +1525,14 @@ pub fn gpgme_checksig(
 			}
 			Err(e) => return Err(gpgme_error(cb, e)),
 		};
-		let status = match sig.code {
+		let status = match sig.status & 0xffff {
 			// key disabled is not in the status code
 			_ if disabled => SigStatus::KeyDisabled,
-			Code::NoError => SigStatus::Valid,
-			Code::KeyExpired => SigStatus::KeyExpired,
-			Code::SigExpired => SigStatus::SigExpired,
-			Code::NoPubkey => SigStatus::KeyUnknown,
-			Code::Other => SigStatus::Invalid,
+			0 => SigStatus::Valid,
+			ERR_KEY_EXPIRED => SigStatus::KeyExpired,
+			ERR_SIG_EXPIRED => SigStatus::SigExpired,
+			ERR_NO_PUBKEY => SigStatus::KeyUnknown,
+			_ => SigStatus::Invalid,
 		};
 		results.push(SigResult {
 			key,
@@ -1078,10 +1543,39 @@ pub fn gpgme_checksig(
 	Ok(results)
 }
 
-// _alpm_check_pgp_helper: the check, then the trust policy. Err(Some)
-// when the check failed with that pm_errno, Err(None) when a signature
-// is not acceptable. a missing signature is fine when optional. the
-// results come back either way (sigdata)
+// the trust policy on one result, with its lines
+fn acceptable(
+	cb: &mut dyn Callbacks,
+	r: &SigResult,
+	marginal: bool,
+	unknown: bool,
+) -> bool {
+	if !matches!(r.status, SigStatus::Valid | SigStatus::KeyExpired) {
+		debug(cb, &[b"signature is not valid\n"]);
+		return false;
+	}
+	debug(cb, &[b"signature is valid\n"]);
+	let (msg, ok): (&[u8], bool) = match r.validity {
+		SigValidity::Full => (b"signature is fully trusted\n", true),
+		SigValidity::Marginal => {
+			(b"signature is marginal trust\n", marginal)
+		}
+		SigValidity::Unknown => {
+			(b"signature is unknown trust\n", unknown)
+		}
+		SigValidity::Never => {
+			(b"signature should never be trusted\n", false)
+		}
+	};
+	debug(cb, &[msg]);
+	ok
+}
+
+// _alpm_check_pgp_helper: the check, then the trust policy up to the
+// first refused signature. Err(Some) when the check failed with that
+// pm_errno, Err(None) when a signature is not acceptable. a missing
+// signature is fine when optional. the results come back either way
+// (sigdata)
 pub fn check_pgp_helper(
 	kr: &mut Keyring,
 	cb: &mut dyn Callbacks,
@@ -1094,20 +1588,19 @@ pub fn check_pgp_helper(
 	let siglist = match gpgme_checksig(kr, cb, path, base64_sig) {
 		Ok(list) => list,
 		Err(Errno::SigMissing) if optional => {
+			debug(cb, &[b"missing optional signature\n"]);
 			return (Ok(()), Vec::new());
 		}
-		Err(e) => return (Err(Some(e)), Vec::new()),
+		Err(Errno::SigMissing) => {
+			debug(cb, &[b"missing required signature\n"]);
+			return (Err(Some(Errno::SigMissing)), Vec::new());
+		}
+		Err(e) => {
+			debug(cb, &[b"signature check failed\n"]);
+			return (Err(Some(e)), Vec::new());
+		}
 	};
-	let trusted = |r: &SigResult| match (r.status, r.validity) {
-		(SigStatus::Valid | SigStatus::KeyExpired, v) => match v {
-			SigValidity::Full => true,
-			SigValidity::Marginal => marginal,
-			SigValidity::Unknown => unknown,
-			SigValidity::Never => false,
-		},
-		_ => false,
-	};
-	let ok = siglist.iter().all(trusted);
+	let ok = siglist.iter().all(|r| acceptable(cb, r, marginal, unknown));
 	(if ok { Ok(()) } else { Err(None) }, siglist)
 }
 

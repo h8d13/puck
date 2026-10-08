@@ -15,8 +15,6 @@
 // callbacks, which print at once. the C's stderr is unbuffered, so the
 // Output is flushed before every load and at each package or target:
 // the op's lines and the callbacks' come out in the C's order.
-// not modelled: gpgme checks of package files with a .sig (-Qpi reports
-// ALPM_ERR_GPGME there).
 use std::ffi::{OsStr, c_int};
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read};
@@ -39,6 +37,7 @@ use alpm_core::package::{
 	DbCaches, Package, PkgFrom, PkgReason, compute_optionalfor,
 	compute_requiredby, pkg_should_ignore,
 };
+use alpm_core::signing::{self, pkg_check_pgp_signature};
 use alpm_core::sync::sync_get_new_version;
 use alpm_core::util::{compute_md5sum, fnmatch, until_nul};
 use pacman_common::util_common::{PATH_MAX, mbasename, mdirname};
@@ -50,7 +49,9 @@ use crate::package::{
 	dump_pkg_search,
 };
 use crate::pacman::{PKG_LOCALITY_FOREIGN, PKG_LOCALITY_NATIVE};
-use crate::util::{Output, SigResult, check_syncdbs, pm_printf};
+use crate::util::{
+	Output, SigResult, SigStatus, SigValidity, check_syncdbs, pm_printf,
+};
 const LOCAL_PREFIX: &[u8] = b"local/";
 // fcntl.h on linux: the access(R_OK) probes open without blocking on a
 // fifo
@@ -128,23 +129,16 @@ impl PkgEnv for Env<'_> {
 		Vec::new()
 	}
 
-	// _alpm_gpgme_checksig up to gpgme: the file must be readable, then
-	// a base64 signature or a readable "<file>.sig" is needed
+	// alpm_pkg_check_pgp_signature on the handle's keyring, logging
+	// through its callbacks
 	fn check_signature(
 		&mut self,
 		pkg: &Package,
 	) -> Result<Vec<SigResult>, Errno> {
-		let file =
-			until_nul(pkg.filename.as_deref().unwrap_or_default());
-		if !readable(file) {
-			return Err(Errno::NotAFile);
-		}
-		let sig = cat(&[file, b".sig"]);
-		if pkg.base64_sig.is_none() && !readable(&sig) {
-			return Err(Errno::SigMissing);
-		}
-		// gpgme verification is not ported
-		Err(Errno::Gpgme)
+		let results = self.handle.with_callbacks(|h, cb| {
+			pkg_check_pgp_signature(h.keyring_mut(), cb, pkg)
+		})?;
+		Ok(results.iter().map(sig_result).collect())
 	}
 
 	fn root(&mut self) -> Vec<u8> {
@@ -194,6 +188,31 @@ impl PkgEnv for Env<'_> {
 	fn backup(&mut self, pkg: &Package) -> Vec<Backup> {
 		let p = self.loaded(INFRQ_FILES).unwrap_or(pkg);
 		p.backup.clone()
+	}
+}
+
+// the part of an alpm_sigresult_t signature_display reads
+fn sig_result(r: &signing::SigResult) -> SigResult {
+	use signing::{SigStatus as S, SigValidity as V};
+	let status = match r.status {
+		S::Valid => SigStatus::Valid,
+		S::KeyExpired => SigStatus::KeyExpired,
+		S::SigExpired => SigStatus::SigExpired,
+		S::KeyUnknown => SigStatus::KeyUnknown,
+		S::KeyDisabled => SigStatus::KeyDisabled,
+		S::Invalid => SigStatus::Invalid,
+	};
+	let validity = match r.validity {
+		V::Full => SigValidity::Full,
+		V::Marginal => SigValidity::Marginal,
+		V::Never => SigValidity::Never,
+		V::Unknown => SigValidity::Unknown,
+	};
+	SigResult {
+		status,
+		validity,
+		uid: r.key.uid.clone(),
+		fingerprint: r.key.fingerprint.clone().unwrap_or_default(),
 	}
 }
 

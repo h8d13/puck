@@ -1,8 +1,8 @@
 // C side of src/util/testpkg.c. its main() is not linkable: main's body
 // after alpm_initialize runs on a CSigHandle (the fixture root, dbpath
 // and gpgdir in place of config.h's), the load at a chosen siglevel.
-// output_cb's lines come from the handle's log recorder (errors and
-// warnings, like output_cb), the failure texts from the C alpm_strerror
+// output_cb's lines come from the handle's log recorder (its errors
+// and warnings, like output_cb), the failure texts from the C alpm_strerror
 use std::ffi::c_int;
 
 use alpm_core::error::Errno;
@@ -18,10 +18,11 @@ pub fn c_testpkg(
 	let call = h.pkg_load(path, true, siglevel);
 	let mut out = Vec::new();
 	for (level, msg) in &call.events.logs {
-		let prefix: &[u8] = if *level == 1 {
-			b"error: "
-		} else {
-			b"warning: "
+		// output_cb prints errors and warnings only
+		let prefix: &[u8] = match level {
+			1 => b"error: ",
+			2 => b"warning: ",
+			_ => continue,
 		};
 		out.extend_from_slice(prefix);
 		out.extend_from_slice(msg);

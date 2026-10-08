@@ -3,10 +3,10 @@
 // same read-only command lines on generated fixture roots (local db,
 // sync .db and .files, a pacman.conf, every path option pointing into
 // the fixture), stdout, stderr and exit status compared byte for byte.
-// prints one line per command; every one must be equal but the --debug
-// lines known() explains. root-only commands (-Sy, -Fy, -D, -Sc) run
-// under fakeroot, the dbs they fetch or write and the cache dir compared
-// too.
+// prints one line per command; every one must be equal (is_goto_err
+// names the only lines dropped). root-only commands (-Sy, -Fy, -D, -Sc)
+// run under fakeroot, the dbs they fetch or write and the cache dir
+// compared too.
 // scripts/cli-parity-fixtures.sh runs it with the table shown
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -19,14 +19,27 @@ use difftest::{
 	section, snapshot, unstamp, write_db, write_package,
 };
 
-// --debug in the world with the default SigLevel (Required, unsigned
-// dbs): the C logs the failed .sig lookup (util.c _alpm_access, signing.c
-// "sig path ... could not be opened", "missing required signature") and
-// GOTO_ERR's "got error ... (signing.c: <line>)"; the port's signing
-// logs errors and warnings only and never RET_ERR/GOTO_ERR lines
-// (PORTING.md)
-fn known(label: &str, siglevel: Option<&str>) -> bool {
-	siglevel.is_none() && label.contains("--debug")
+// GOTO_ERR logs "got error <n> at <func> (<C file>: <line>)" with
+// --debug (signing.c with the default SigLevel, _cache_mtree_open on a
+// bad mtree), the C's source position, which the port does not log by
+// design (PORTING.md). those lines alone are dropped from the C's
+// stderr, in any run; the rest compares
+fn is_goto_err(line: &[u8]) -> bool {
+	let key = b"got error ";
+	let Some(i) = line.windows(key.len()).position(|w| w == key) else {
+		return false;
+	};
+	let rest = &line[i + key.len()..];
+	let n = rest.iter().take_while(|c| c.is_ascii_digit()).count();
+	n > 0 && rest[n..].starts_with(b" at ")
+}
+
+fn without_goto_err(err: &[u8]) -> Vec<u8> {
+	let lines = err.split_inclusive(|&c| c == b'\n');
+	lines.filter(|l| !is_goto_err(l))
+		.flatten()
+		.copied()
+		.collect()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -336,11 +349,10 @@ fn commands(w: &SyncWorld) -> Vec<Vec<String>> {
 		vec!["-Q", "--color=always", "-i", "owner"],
 		vec!["-Ss", "--color=always", "a"],
 		vec!["-Q", "--debug"],
-		// the lazy loads' lines between the op's. no --debug on a
-		// failing mtree open: the C's GOTO_ERR line (PORTING.md)
+		// the lazy loads' lines between the op's
 		vec!["-Qk", "--debug"],
-		vec!["-Qkk", "--debug", "nofiles", "owner"],
-		vec!["-Qkk", "--debug=2", "owner", "nofiles"],
+		vec!["-Qkk", "--debug"],
+		vec!["-Qkk", "--debug=2"],
 		vec!["-Qkk", "nofiles", "badmtree", "emptymtree"],
 		vec!["-Qi", "--debug"],
 		vec!["-Qii", "--debug=2"],
@@ -394,7 +406,8 @@ fn world(
 			})
 		};
 		restore();
-		let cr = run(&c, &args, dir, root);
+		let mut cr = run(&c, &args, dir, root);
+		cr.err = without_goto_err(&cr.err);
 		let synced_c = written();
 		restore();
 		let rr = run(&r, &args, dir, root);
@@ -553,7 +566,7 @@ fn parity() {
 		for (label, ok, diff) in world(w, level, true) {
 			total += 1;
 			equal += usize::from(ok);
-			if !ok && !known(&label, level) {
+			if !ok {
 				failures.push(format!(
 					"world {i}: {label}\n{}",
 					diff.unwrap_or_default()
