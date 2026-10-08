@@ -141,7 +141,67 @@ Twin roots, C vs Rust, real packages and mirrors in a user namespace
 do not: real package sets with hooks, scriptlets, capabilities and backup
 files, real HTTPS mirrors, a real keyring, landlock and DownloadUser.
 
-Gate: every step equal on `scripts/twin-root.sh`. State: todo.
+Gate: every step equal on `scripts/twin-root.sh`. State: harness done,
+gate not met (diffs below, all owned or reported).
+
+```
+cargo build --release -p pacman-cli
+scripts/twin-root.sh            # exit 0 only if every step is equal
+scripts/twin-root.sh --keep     # keep .tmp/twin (steps/NN-*/report.txt)
+scripts/twin-root.sh --clean    # remove a kept .tmp/twin
+```
+
+Setup (C only, then the Rust root starts as a copy): pacman-key keyring,
+`-Syy`/`-Fyy` of core and extra, a `-Sw` prefetch of every package the
+steps install (host cache hits skipped; the host cache itself is a read
+only CacheDir). Steps, the same argv and env on both sides
+(`LC_ALL=C`, `TZ=Europe/Berlin`); a diff carried from the step before
+is counted, not repeated:
+
+| Step | argv | Result (master 8ce1038) |
+|---|---|---|
+| sy | `-Sy` | log offset |
+| download | `-Sw -dd which less iana-etc`, empty cache only | no new diff |
+| base-filesystem | `-S filesystem` | no new diff |
+| base-core | `-S glibc bash coreutils pacman` (112 packages, systemd, hooks) | optdepend markers, newuidmap/newgidmap caps |
+| base-extra | `-S iputils less nano logrotate` | no new diff |
+| qi | `-Qi pacman iputils` | Build Date zone |
+| qii-backup / si | `-Qii nano`, `-Si iputils` | no new diff |
+| reinstall-backup | edited `etc/pacman.conf`, `-S pacman` (kept, no .pacnew) | no new diff |
+| local-install | `-U twin-backup-1-1` (unsigned local package) | no new diff |
+| pacnew | edited backup file, `-U twin-backup-2-1` | no new diff |
+| qii-pacnew | `-Qii twin-backup` | Build Date zone |
+| pacsave | `-R twin-backup` | no new diff |
+| downgrade | `-U` older `less` from the host cache | no new diff |
+| rns-nosave | edited `etc/logrotate.conf`, `-Rns logrotate` | no new diff |
+| qkk / dk | `-Qkk`, `-Dk` | no new diff |
+| sc | `-Sc`, answers y y n n y | error text for download dirs |
+| fy / f / fl | `-Fy`, `-F ping`, `-Fl iputils` | no new diff |
+
+Diffs, latest run:
+- pacman.log stamps: Rust UTC (+0000), C local (+0200); output unit.
+  Normalised, the logs are equal.
+- `security.capability` missing on usr/bin/newuidmap, newgidmap (shadow):
+  xattr unit.
+- optdepends after install/upgrade lack ` [installed]`/` [pending]`:
+  `pacman-cli/src/callback.rs` runs with `Lookup for ()`, whose
+  `installed()` (and `db_name()`, the provider list's repository
+  headers) is still the pre-trans.c stub. Repro: `-S gzip` on a root
+  with grep, C prints `grep: zegrep/... [installed]`. Needs the local
+  db and the transaction's add list reachable from the callbacks
+  (emitted in add.rs/remove.rs); open.
+- `-Qi`/`-Qii` Build Date in UTC, C in local time (`package.rs`
+  `format_date`): the log stamps' cause, no local zone; output unit.
+- `-Sc` on a leftover `download-XXXXXX` dir: C logs libarchive's
+  "Error reading fd 8", the port "Is a directory" (libarchive error
+  texts are the port's, `be_package.rs` `open_archive`).
+
+Harness choices: every pacman-visible path is under a tmpfs on /mnt
+private to the session (DownloadUser alpm cannot traverse the 0700
+home); a fixed etc/machine-id (systemd's scriptlet keeps it); content of
+the java keystore and ldconfig's aux-cache not compared (dates, inode
+numbers); `download-XXXXXX` names canonicalised. Runtime ~2-3 min warm
+(network bound), ~620 MiB per root.
 
 ### 4. Drop-in
 
