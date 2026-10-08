@@ -23,7 +23,7 @@ use alpm_core::package::Package;
 use alpm_core::util::hash_sdbm;
 use difftest::{
 	CSpace, CSpaceResult, CbEvent, LocalEntry, Rng, TempRoot, c_getmntent,
-	iters, section,
+	iters, loose_sections, section,
 };
 
 const NAMES: [&str; 5] = ["a", "b", "foo", "lib-x", "z9"];
@@ -232,36 +232,57 @@ fn build_tree(rng: &mut Rng, root: &Path) -> Vec<String> {
 		paths.push(format!("usr/bin/missing{i}"));
 		paths.push(format!("var/lib/m{i}"));
 	}
-	// a dir listed as a file (alpm-db refuses "usr/lib" next to
-	// "usr/lib/", so one no parent entry names)
+	// a dir no "etc/d/" entry names, listed as a file
 	fs::create_dir(root.join("etc/d")).unwrap();
 	paths.push("etc/d".into());
 	paths
 }
 
-// parents listed, sorted, no duplicates: what alpm-db accepts
-fn file_section(paths: &[String]) -> Vec<u8> {
+// a files list as the C reads it: parents listed or left out, a dir also
+// listed without its '/', duplicates, any order (the reader sorts)
+fn file_section(rng: &mut Rng, paths: &[String]) -> Vec<u8> {
 	let mut all: Vec<String> = Vec::new();
 	for p in paths {
 		let mut end = 0;
 		while let Some(i) = p[end..].find('/') {
 			end += i + 1;
-			all.push(p[..end].to_string());
+			match rng.below(8) {
+				0 => {}
+				1 => all.push(p[..end - 1].to_string()),
+				_ => all.push(p[..end].to_string()),
+			}
 		}
 		all.push(p.clone());
 	}
 	all.sort();
-	all.dedup();
+	// shared parents are listed once per path otherwise
+	if rng.below(4) != 0 {
+		all.dedup();
+	}
+	if rng.below(4) == 0 {
+		for i in (1..all.len()).rev() {
+			all.swap(i, rng.below(i + 1));
+		}
+	}
 	section("FILES", &all).into_bytes()
 }
 
-fn local_desc(name: &str) -> Vec<u8> {
-	format!("%NAME%\n{name}\n\n%VERSION%\n1.0-1\n\n%BASE%\n{name}\n\n\
-		%DESC%\nA package\n\n%URL%\nhttps://example.org/\n\n\
-		%ARCH%\nx86_64\n\n%BUILDDATE%\n1700000000\n\n\
-		%INSTALLDATE%\n1700000001\n\n%PACKAGER%\nA B <a@b.org>\n\n\
-		%SIZE%\n42\n\n%VALIDATION%\npgp\n\n")
-	.into_bytes()
+fn local_desc(rng: &mut Rng, name: &str) -> Vec<u8> {
+	let rest = loose_sections(
+		rng,
+		&[
+			("BASE", name),
+			("DESC", "A package"),
+			("URL", "https://example.org/"),
+			("ARCH", "x86_64"),
+			("BUILDDATE", "1700000000"),
+			("INSTALLDATE", "1700000001"),
+			("PACKAGER", "A B <a@b.org>"),
+			("SIZE", "42"),
+			("VALIDATION", "pgp"),
+		],
+	);
+	format!("%NAME%\n{name}\n\n%VERSION%\n1.0-1\n\n{rest}").into_bytes()
 }
 
 // local packages owning random subsets of paths, their names
@@ -277,8 +298,8 @@ fn write_local(rng: &mut Rng, fx: &TempRoot, paths: &[String]) -> Vec<String> {
 		own.retain(|_| rng.below(3) == 0);
 		entries.push(LocalEntry {
 			dir: format!("{name}-1.0-1"),
-			desc: Some(local_desc(name)),
-			files: Some(file_section(&own)),
+			desc: Some(local_desc(rng, name)),
+			files: Some(file_section(rng, &own)),
 			install: false,
 		});
 		names.push(name.into());

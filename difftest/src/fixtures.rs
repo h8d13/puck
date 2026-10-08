@@ -15,6 +15,8 @@ use alpm_compress::compression::{
 	ZstdThreads,
 };
 
+use crate::Rng;
+
 // the C binary of PACMAN_BUILD
 pub fn c_pacman() -> PathBuf {
 	let dir = match std::env::var_os("PACMAN_BUILD") {
@@ -138,6 +140,29 @@ pub fn section(key: &str, values: &[String]) -> String {
 		return String::new();
 	}
 	format!("%{key}%\n{}\n\n", values.join("\n"))
+}
+
+// desc sections a test does not look at, as the C reads them: each of
+// keys (with its typical value) left out now and then, or its value
+// empty, blank, oddly spaced or not a number; sometimes a key the reader
+// does not know (warned about, its lines skipped)
+pub fn loose_sections(rng: &mut Rng, keys: &[(&str, &str)]) -> String {
+	const ODD: [&str; 8] = [" ", "\t", "a  b ", " x", "-1", "abc", "é", ""];
+	const UNKNOWN: [&str; 3] =
+		["%FOO%\nbar\nbaz\n\n", "%%\n\n", "%name%\nx\n\n"];
+	let mut out = String::new();
+	for (key, typical) in keys {
+		let value = match rng.below(8) {
+			0 => continue,
+			1 | 2 => ODD[rng.below(ODD.len())],
+			_ => typical,
+		};
+		out += &format!("%{key}%\n{value}\n\n");
+	}
+	if rng.below(6) == 0 {
+		out += UNKNOWN[rng.below(UNKNOWN.len())];
+	}
+	out
 }
 
 // tar entry: regular file or directory
