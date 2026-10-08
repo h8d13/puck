@@ -1,6 +1,6 @@
 // C side of lib/libalpm/be_package.c through the exported API: one handle
 // on a fixture root, package files loaded with alpm_pkg_load at siglevel
-// 0 and read through the package mirror
+// 0 and read through the package mirror, with the lines each load logs
 use std::ffi::{c_int, c_void};
 use std::path::Path;
 use std::ptr;
@@ -10,9 +10,10 @@ use alpm_core::package::Package;
 
 use crate::cstr;
 use crate::handle::{
-	_alpm_pkg_validate_internal, ALPM, alpm_errno, alpm_initialize,
-	alpm_pkg_changelog_close, alpm_pkg_changelog_open,
-	alpm_pkg_changelog_read, alpm_pkg_free, alpm_pkg_load, alpm_release,
+	_alpm_pkg_validate_internal, ALPM, CLogs, alpm_errno, alpm_initialize,
+	alpm_option_set_logcb, alpm_pkg_changelog_close,
+	alpm_pkg_changelog_open, alpm_pkg_changelog_read, alpm_pkg_free,
+	alpm_pkg_load, alpm_release, record_log,
 };
 use crate::package::{CPkg, CPkgBox, read_pkg};
 
@@ -20,6 +21,7 @@ use crate::package::{CPkg, CPkgBox, read_pkg};
 // and alpm_release are not thread safe
 pub struct CPkgHandle {
 	h: *mut c_void,
+	logs: *mut CLogs,
 	_guard: MutexGuard<'static, ()>,
 }
 
@@ -30,6 +32,9 @@ pub struct CLoaded {
 	pub pkg: Package,
 	pub changelog: Option<Vec<u8>>,
 }
+
+// alpm_pkg_load's result (Err is pm_errno) and the lines it logged
+pub type CLoad = (Result<CLoaded, c_int>, CLogs);
 
 impl CPkgHandle {
 	// root and dbpath must exist
@@ -47,11 +52,43 @@ impl CPkgHandle {
 			)
 		};
 		assert!(!h.is_null(), "alpm_initialize failed: {err}");
-		CPkgHandle { h, _guard: guard }
+		let logs = Box::into_raw(Box::new(CLogs::new()));
+		// SAFETY: h is live, logs stays valid until after the release
+		unsafe {
+			alpm_option_set_logcb(h, Some(record_log), logs.cast())
+		};
+		CPkgHandle {
+			h,
+			logs,
+			_guard: guard,
+		}
+	}
+
+	// what the C logged since the last call
+	fn take_logs(&self) -> CLogs {
+		// SAFETY: logs is live until drop, the C is not running
+		std::mem::take(unsafe { &mut *self.logs })
+	}
+
+	// alpm_pkg_load(handle, path, full, 0, &pkg) with its log lines; the
+	// changelog reads after it are not logged
+	pub fn load_logged(&self, path: &[u8], full: bool) -> CLoad {
+		self.take_logs();
+		let r = self.load_pkg(path, full);
+		let logs = self.take_logs();
+		(r.map(|pkg| self.loaded(pkg)), logs)
 	}
 
 	// alpm_pkg_load(handle, path, full, 0, &pkg), Err is pm_errno
 	pub fn load(&self, path: &[u8], full: bool) -> Result<CLoaded, c_int> {
+		self.load_logged(path, full).0
+	}
+
+	fn load_pkg(
+		&self,
+		path: &[u8],
+		full: bool,
+	) -> Result<*mut CPkg, c_int> {
 		let path = cstr(path);
 		let mut pkg: *mut CPkg = ptr::null_mut();
 		// SAFETY: live handle, valid string, pkg receives a new
@@ -70,13 +107,19 @@ impl CPkgHandle {
 			// SAFETY: live handle
 			return Err(unsafe { alpm_errno(self.h) });
 		}
+		Ok(pkg)
+	}
+
+	// the package's fields and changelog, the package freed
+	fn loaded(&self, pkg: *mut CPkg) -> CLoaded {
 		let out = CLoaded {
 			pkg: read_pkg(pkg),
 			changelog: self.changelog(pkg),
 		};
 		// SAFETY: pkg came from alpm_pkg_load, not used afterwards
 		unsafe { alpm_pkg_free(pkg) };
-		Ok(out)
+		self.take_logs();
+		out
 	}
 
 	fn changelog(&self, pkg: *mut CPkg) -> Option<Vec<u8>> {
@@ -141,5 +184,8 @@ impl Drop for CPkgHandle {
 	fn drop(&mut self) {
 		// SAFETY: h is live and not used afterwards
 		unsafe { alpm_release(self.h) };
+		// SAFETY: from Box::into_raw in new, the handle using it is
+		// released; the lock is released after
+		drop(unsafe { Box::from_raw(self.logs) });
 	}
 }

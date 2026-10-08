@@ -355,8 +355,8 @@ pub fn c_pacman_sync<S: AsRef<[u8]>>(
 
 // generated worlds: a few repos sharing package and group names with
 // each other and the local db, so -Sl markers, group merges and
-// requiredby across dbs come up. desc/files texts stay within what
-// alpm-repo-db/alpm-db accept (be_sync and be_local pin the rest)
+// requiredby across dbs come up. desc/files texts are what repo-add and
+// pacman write (be_sync and be_local cover the odd ones)
 
 pub const REPOS: [&str; 3] = ["core", "extra", "multilib"];
 pub const NAMES: [&str; 8] =
@@ -506,8 +506,6 @@ fn gen_pkg(rng: &mut Rng, name: &str) -> GenPkg {
 		desc.push_str(&section("DESC", &one(description(rng))));
 	}
 	if rng.below(2) == 0 {
-		// lowercase host with a path: alpm-repo-db lowercases the host
-		// and appends '/' to a bare one
 		let url = format!(
 			"https://{}.org/{}",
 			word(rng, 1, 6).to_lowercase(),

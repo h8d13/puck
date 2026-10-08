@@ -1,9 +1,11 @@
 // alpm_core::be_package against the C alpm_pkg_load: package files built
-// under /tmp (a .PKGINFO per the alpm-pkginfo spec, file trees with dirs,
-// symlinks and odd names, .MTREE, .INSTALL, .CHANGELOG, every compression
-// alpm-compress has), loaded by both with full on and off, every field,
-// the changelog and the error compared. odd inputs the C accepts pin each
-// divergence; copies of real cached packages give counts
+// under TMPDIR (a makepkg-like .PKGINFO or random lines parse_descfile
+// reads, file trees with dirs, symlinks and odd names, .MTREE, .INSTALL,
+// .CHANGELOG, every compression alpm-compress has), loaded by both with
+// full on and off; every field, the changelog, pm_errno and the log
+// lines compared. odd inputs pin each divergence left; copies of real
+// cached packages give counts
+use std::ffi::c_int;
 use std::fs;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
@@ -16,10 +18,15 @@ use alpm_compress::compression::{
 	ZstdThreads,
 };
 use alpm_core::be_package::{
-	Error, changelog, pkg_load, pkg_validate_internal,
+	Error, changelog, pkg_load, pkg_load_level, pkg_validate_internal,
 };
+use alpm_core::callbacks::{Callbacks, LogLevel};
 use alpm_core::package::Package;
+use alpm_core::signing::Keyring;
 use difftest::{CPkgHandle, Rng, iters};
+
+// alpm_loglevel_t and message of each log line
+type CLogs = Vec<(c_int, Vec<u8>)>;
 
 // one archive per iteration, compressed and loaded four times
 fn pkg_iters() -> usize {
@@ -66,26 +73,92 @@ fn bytes(p: &Path) -> &[u8] {
 }
 
 // what a load gives on either side: the package and its changelog, or
-// pm_errno
-type Outcome = Result<(Package, Option<Vec<u8>>), i32>;
+// pm_errno, and the lines it logged
+#[derive(Debug, PartialEq)]
+struct Outcome {
+	r: Result<(Package, Option<Vec<u8>>), i32>,
+	logs: CLogs,
+}
+
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+	hay.windows(needle.len()).position(|w| w == needle)
+}
+
+// the C's lines the port does not log: RET_ERR/GOTO_ERR's debug lines (C
+// source position) and those carrying libarchive's error texts
+fn c_only(msg: &[u8]) -> bool {
+	let heads: [&[u8]; 4] = [
+		b"returning error ",
+		b"got error ",
+		b"error while reading package ",
+		b"error while reading mtree of package ",
+	];
+	heads.iter().any(|h| msg.starts_with(h))
+}
+
+// an open failure's text is strerror, libarchive's or the port's reader's:
+// cut after the path
+fn cut_text(mut msg: Vec<u8>) -> Vec<u8> {
+	let head = b"could not open file ";
+	if msg.starts_with(head)
+		&& let Some(i) = find(&msg[head.len()..], b": ")
+	{
+		msg.truncate(head.len() + i + 2);
+	}
+	msg
+}
+
+fn norm(logs: CLogs) -> CLogs {
+	logs.into_iter()
+		.filter(|(_, m)| !c_only(m))
+		.map(|(l, m)| (l, cut_text(m)))
+		.collect()
+}
 
 fn load_c(h: &CPkgHandle, path: &Path, full: bool) -> Outcome {
-	let l = h.load(bytes(path), full)?;
-	Ok((l.pkg, l.changelog))
+	let (r, logs) = h.load_logged(bytes(path), full);
+	Outcome {
+		r: r.map(|l| (l.pkg, l.changelog)),
+		logs: norm(logs),
+	}
+}
+
+// the port's lines, as the C's logcb sees them
+#[derive(Default)]
+struct Logs(CLogs);
+
+impl Callbacks for Logs {
+	fn log(&mut self, level: LogLevel, msg: &[u8]) {
+		self.0.push((level as c_int, msg.to_vec()));
+	}
 }
 
 fn load_rust(path: &Path, full: bool) -> Outcome {
-	let pkg = pkg_load(bytes(path), full).map_err(|e| e.errno() as i32)?;
-	let log = match changelog(&pkg) {
-		Ok(log) => Some(log),
-		Err(Error::NotFound) => None,
-		Err(e) => panic!("changelog of {}: {e:?}", path.display()),
-	};
-	Ok((pkg, log))
+	let (mut kr, mut cb) = (Keyring::new(b""), Logs::default());
+	let r = pkg_load_level(&mut kr, &mut cb, bytes(path), full, 0);
+	let r = r.map_err(|e| e.errno() as i32).map(|pkg| {
+		let log = match changelog(&pkg) {
+			Ok(log) => Some(log),
+			Err(Error::NotFound) => None,
+			Err(e) => {
+				panic!("changelog of {}: {e:?}", path.display())
+			}
+		};
+		(pkg, log)
+	});
+	Outcome {
+		r,
+		logs: norm(cb.0),
+	}
 }
 
 fn lossy(b: &[u8]) -> String {
 	String::from_utf8_lossy(b).into_owned()
+}
+
+fn show_logs(logs: &CLogs) -> String {
+	let lines: Vec<_> = logs.iter().map(|(l, m)| (l, lossy(m))).collect();
+	format!("{lines:#?}")
 }
 
 // field name and printable value, to show which fields differ
@@ -197,7 +270,16 @@ fn fields(p: &Package) -> Vec<(&'static str, String)> {
 
 // the differing fields of two outcomes, for assert messages
 fn diff(c: &Outcome, r: &Outcome) -> String {
-	match (c, r) {
+	let logs = if c.logs == r.logs {
+		String::new()
+	} else {
+		format!(
+			"  logs:\n    C {}\n    R {}\n",
+			show_logs(&c.logs),
+			show_logs(&r.logs)
+		)
+	};
+	logs + &match (&c.r, &r.r) {
 		(Ok((a, la)), Ok((b, lb))) => {
 			let mut out = String::new();
 			for ((k, x), (_, y)) in fields(a).iter().zip(fields(b))
@@ -223,7 +305,7 @@ fn diff(c: &Outcome, r: &Outcome) -> String {
 
 // how two outcomes relate, the form the pinned cases are written in
 fn observe(c: &Outcome, r: &Outcome) -> String {
-	match (c, r) {
+	match (&c.r, &r.r) {
 		_ if c == r => "same".into(),
 		(Ok(_), Err(35)) => "rust invalid".into(),
 		(Ok(_), Err(51)) => "rust libarchive".into(),
@@ -241,12 +323,16 @@ fn observe(c: &Outcome, r: &Outcome) -> String {
 			if la != lb {
 				keys.push("changelog");
 			}
+			if c.logs != r.logs {
+				keys.push("logs");
+			}
 			format!("fields {}", keys.join(","))
 		}
-		_ => format!(
+		(Err(a), Err(b)) if a == b => "logs".into(),
+		(a, b) => format!(
 			"errno C {:?} R {:?}",
-			c.as_ref().err(),
-			r.as_ref().err()
+			a.as_ref().err(),
+			b.as_ref().err()
 		),
 	}
 }
@@ -513,7 +599,7 @@ fn real_packages() {
 		for full in [false, true] {
 			let (c, r) =
 				(load_c(&h, path, full), load_rust(path, full));
-			if let (Ok((c, _)), Ok((r, _))) = (&c, &r) {
+			if let (Ok((c, _)), Ok((r, _))) = (&c.r, &r.r) {
 				let slash = c
 					.url
 					.as_ref()
@@ -990,7 +1076,7 @@ fn fuzz_packages() {
 		let g = gen_pkg(&mut rng, &fx);
 		write_pkg(&path, g.comp, &g.entries);
 		assert_same(&h, &path, &g);
-		if let Ok((p, _)) = load_rust(&path, true) {
+		if let Ok((p, _)) = load_rust(&path, true).r {
 			loaded += 1;
 			mtree += usize::from(
 				g.entries.iter().any(|e| e.name == b".MTREE")
@@ -1026,145 +1112,455 @@ fn pkginfo_with(edits: &[(&str, Option<&str>)], extra: &[&str]) -> Vec<u8> {
 	out
 }
 
-// .PKGINFO inputs the C reads and alpm-pkginfo refuses or normalises,
-// plus the checks both apply. one line changed against PKGINFO
+// a one-entry package of info in every compression, loaded alike
+fn assert_pkginfo(h: &CPkgHandle, path: &Path, what: &str, info: &[u8]) {
+	let entries = [file(b".PKGINFO", info), file(b"a", b"x")];
+	for comp in COMPS {
+		write_pkg(path, comp, &entries);
+		assert_same(h, path, &(what, comp, lossy(info)));
+	}
+}
+
+// .PKGINFO inputs around parse_descfile's lines, keys and values and the
+// checks after it: one line changed against PKGINFO, or whole files
 #[test]
 fn fixed_pkginfo() {
 	let fx = Fixture::new();
 	let h = fx.handle();
 	let path = fx.pkg("odd.pkg.tar");
-	let inv = "rust invalid";
 	let w = |k: &str, v: &str| pkginfo_with(&[(k, Some(v))], &[]);
 	let drop = |k: &str| pkginfo_with(&[(k, None)], &[]);
 	let add = |l: &str| pkginfo_with(&[], &[l]);
 	let mut non_utf8 = w("pkgdesc", "pkgdesc = caf");
 	let at = non_utf8.windows(3).position(|x| x == b"caf").unwrap();
 	non_utf8.insert(at + 3, 0xe9);
-	let cases: Vec<(&str, Vec<u8>, &str)> = vec![
-		// normalised values
-		// an empty url: no url here, "" in the C (both display None)
-		("empty url", w("url", "url = "), "fields url"),
-		("trailing space", w("pkgname", "pkgname = foo "), inv),
-		("crlf", PKGINFO.replace('\n', "\r\n").into_bytes(), inv),
-		("non-utf8", non_utf8, inv),
-		("name with '*'", w("pkgname", "pkgname = f*"), inv),
-		("relation without version", add("depend = a>="), inv),
-		("relation with desc", add("depend = a: desc"), inv),
-		("optdepend without space", add("optdepend = a:b"), inv),
-		("absolute backup", add("backup = /etc/foo"), inv),
-		("directory backup", add("backup = etc/foo/"), inv),
-		// read alike: parse_descfile's lines and numbers, unknown,
-		// repeated and missing keys, xdata in any order
-		("size with '+'", w("size", "size = +5"), "same"),
-		("xdata spaces", add("xdata = a = b "), "same"),
+	let mut cases: Vec<(&str, Vec<u8>)> = vec![
+		("empty url", w("url", "url = ")),
+		("trailing space", w("pkgname", "pkgname = foo ")),
+		("crlf", PKGINFO.replace('\n', "\r\n").into_bytes()),
+		("crlf version", w("pkgver", "pkgver = 1.0-1\r")),
+		("non-utf8", non_utf8),
+		("name with '*'", w("pkgname", "pkgname = f*")),
+		("relation without version", add("depend = a>=")),
+		("relation with desc", add("depend = a: desc")),
+		("relation only desc", add("depend = : desc")),
+		("relation operators", add("conflict = a<=>1")),
+		("empty relation", add("provides = ")),
+		("optdepend without space", add("optdepend = a:b")),
+		("absolute backup", add("backup = /etc/foo")),
+		("directory backup", add("backup = etc/foo/")),
+		("empty backup", add("backup = ")),
+		("size with '+'", w("size", "size = +5")),
+		("size empty", w("size", "size = ")),
+		("size junk", w("size", "size = 5k")),
+		("size leading zeros", w("size", "size = 000123")),
+		("size negative", w("size", "size = -1")),
+		("size past i64", w("size", "size = 9223372036854775808")),
+		("size u64 max", w("size", "size = 18446744073709551615")),
+		("size past u64", w("size", "size = 18446744073709551616")),
+		("xdata spaces", add("xdata = a = b ")),
 		(
 			"pkgtype not first",
 			w("xdata", "xdata = a=b")
 				.into_iter()
 				.chain(b"xdata = pkgtype=pkg\n".iter().copied())
 				.collect(),
-			"same",
 		),
-		("xdata without pkgtype", w("xdata", "xdata = a=b"), "same"),
-		("xdata empty value", add("xdata = a="), "same"),
-		("unknown key", add("foo = bar"), "same"),
-		("basever", add("basever = 1"), "same"),
-		("pkgtype key", add("pkgtype = pkg"), "same"),
-		("duplicate pkgdesc", add("pkgdesc = second"), "same"),
-		("no url", drop("url"), "same"),
-		("no packager", drop("packager"), "same"),
-		("no pkgdesc", drop("pkgdesc"), "same"),
-		("no pkgbase", drop("pkgbase"), "same"),
-		("no builddate", drop("builddate"), "same"),
-		("no size", drop("size"), "same"),
-		("no arch", drop("arch"), "same"),
-		("builddate junk", w("builddate", "builddate = 5x"), "same"),
-		("syntax error line", add("garbage"), "same"),
-		("key=value", add("group=foo"), "same"),
-		("indented key", add("  group = x"), "same"),
-		("empty pkgdesc", w("pkgdesc", "pkgdesc = "), "same"),
-		// alpm-types keeps these as read (vendor/patches)
-		("url without path", w("url", "url = https://a.org"), "same"),
-		("url case", w("url", "url = HTTPS://A.org/x?y#z"), "same"),
+		("xdata without pkgtype", w("xdata", "xdata = a=b")),
+		("xdata empty value", add("xdata = a=")),
+		("xdata empty name", add("xdata = =b")),
+		("xdata only '='", add("xdata = =")),
+		("unknown key", add("foo = bar")),
+		("unknown empty key", add(" = bar")),
+		("basever", add("basever = 1")),
+		("pkgtype key", add("pkgtype = pkg")),
+		("duplicate pkgdesc", add("pkgdesc = second")),
+		("duplicate pkgname", add("pkgname = bar")),
+		("duplicate pkgver", add("pkgver = 2-1")),
+		("no url", drop("url")),
+		("no packager", drop("packager")),
+		("no pkgdesc", drop("pkgdesc")),
+		("no pkgbase", drop("pkgbase")),
+		("no builddate", drop("builddate")),
+		("no size", drop("size")),
+		("no arch", drop("arch")),
+		("no xdata", drop("xdata")),
+		("builddate junk", w("builddate", "builddate = 5x")),
+		("builddate empty", w("builddate", "builddate = ")),
+		("builddate '+'", w("builddate", "builddate = +5")),
+		("builddate blank", w("builddate", "builddate =  7")),
+		("builddate trailing", w("builddate", "builddate = 7 ")),
+		("negative builddate", w("builddate", "builddate = -5")),
 		(
-			"desc whitespace",
-			w("pkgdesc", "pkgdesc = a  b \t c "),
-			"same",
+			"builddate past i64",
+			w("builddate", "builddate = 9223372036854775808"),
 		),
-		("xdata empty value", add("xdata = a="), "same"),
+		(
+			"builddate i64 min",
+			w("builddate", "builddate = -9223372036854775808"),
+		),
+		("syntax error line", add("garbage")),
+		("key=value", add("group=foo")),
+		("key =value", add("group =foo")),
+		("key= value", add("group= foo")),
+		("key = at the end", add("group =")),
+		("key two spaces", add("group  = x")),
+		("key tab", add("group\t= x")),
+		("value tab", add("group = \tx")),
+		("indented key", add("  group = x")),
+		("space in key", add("a b = c")),
+		("indented comment", add(" # x = y")),
+		("comment no space", add("#x = y")),
+		("empty pkgdesc", w("pkgdesc", "pkgdesc = ")),
+		("blank pkgdesc", w("pkgdesc", "pkgdesc =  ")),
+		("empty packager", w("packager", "packager = ")),
+		("url without path", w("url", "url = https://a.org")),
+		("url case", w("url", "url = HTTPS://A.org/x?y#z")),
+		("desc whitespace", w("pkgdesc", "pkgdesc = a  b \t c ")),
 		(
 			"Unknown Packager",
 			w("packager", "packager = Unknown Packager"),
-			"same",
 		),
-		(
-			"packager without name",
-			w("packager", "packager = <a@b.c>"),
-			"same",
-		),
-		("depend with .so", add("depend = foo.sound"), "same"),
-		("depend pkgrel zero", add("depend = a=1-01"), "same"),
-		("optdepend spaces", add("optdepend = a:  x  y "), "same"),
-		("no xdata", drop("xdata"), "same"),
-		("uppercase arch", w("arch", "arch = X86_64"), "same"),
-		("unknown arch", w("arch", "arch = foo"), "same"),
-		("builddate '+'", w("builddate", "builddate = +5"), "same"),
-		(
-			"negative builddate",
-			w("builddate", "builddate = -5"),
-			"same",
-		),
-		(
-			"size past i64",
-			w("size", "size = 18446744073709551615"),
-			"same",
-		),
-		("non-SPDX license", w("license", "license = GPL"), "same"),
+		("packager without name", w("packager", "packager = <a@b.c>")),
+		("depend with .so", add("depend = foo.sound")),
+		("depend pkgrel zero", add("depend = a=1-01")),
+		("optdepend spaces", add("optdepend = a:  x  y ")),
+		("uppercase arch", w("arch", "arch = X86_64")),
+		("unknown arch", w("arch", "arch = foo")),
+		("empty arch", w("arch", "arch = ")),
+		("non-SPDX license", w("license", "license = GPL")),
 		(
 			"license expression",
 			w("license", "license = MIT OR Apache-2.0"),
-			"same",
 		),
-		("group with space", add("group = a b"), "same"),
-		("epoch 0", w("pkgver", "pkgver = 0:1-1"), "same"),
-		("uppercase name", w("pkgname", "pkgname = Foo"), "same"),
+		("empty license", w("license", "license = ")),
+		("group with space", add("group = a b")),
+		("empty group", add("group = ")),
+		("epoch 0", w("pkgver", "pkgver = 0:1-1")),
+		("uppercase name", w("pkgname", "pkgname = Foo")),
 		(
 			"leading blank lines",
 			[b"\n  \n", PKGINFO.as_bytes()].concat(),
-			"same",
 		),
-		// refused by both
-		("xdata without '='", add("xdata = ab"), "same"),
-		("version without '-'", w("pkgver", "pkgver = 1.0"), "same"),
+		("no final newline", PKGINFO.trim_end().as_bytes().to_vec()),
+		("empty", Vec::new()),
+		("only newline", b"\n".to_vec()),
+		// nul bytes: a nul ends key and value as C strings, a line
+		// starting with one is empty
+		("nul in value", add("group = a\0b")),
+		("nul in key", add("gro\0up = a")),
+		("nul before separator", add("a\0b = c")),
+		("nul starting a line", add("\0group = a")),
 		(
-			"version with two '-'",
-			w("pkgver", "pkgver = 1-0-1"),
-			"same",
+			"nul after last newline",
+			[PKGINFO.as_bytes(), b"a\0b = c"].concat(),
 		),
+		("nul in name", w("pkgname", "pkgname = foo\0bar")),
+		// refused by both, each with its error line
+		("xdata without '='", add("xdata = ab")),
 		(
-			"name starting with '.'",
-			w("pkgname", "pkgname = .foo"),
-			"same",
+			"xdata without '=' after unknown key",
+			[PKGINFO.as_bytes(), b"foo = 1\nxdata = ab\nbar = 2\n"]
+				.concat(),
+		),
+		("version without '-'", w("pkgver", "pkgver = 1.0")),
+		("empty version", w("pkgver", "pkgver = ")),
+		("no version", drop("pkgver")),
+		("empty name", w("pkgname", "pkgname = ")),
+		("no name", drop("pkgname")),
+		("name nul", w("pkgname", "pkgname = \0foo")),
+		("version with two '-'", w("pkgver", "pkgver = 1-0-1")),
+		("version with '/'", w("pkgver", "pkgver = 1/0-1")),
+		("name starting with '.'", w("pkgname", "pkgname = .foo")),
+		("name starting with '-'", w("pkgname", "pkgname = -foo")),
+		(
+			"several meta errors",
+			pkginfo_with(
+				&[
+					("pkgname", Some("pkgname = -foo")),
+					("pkgver", Some("pkgver = 1-2/3-4")),
+				],
+				&[],
+			),
 		),
 	];
-	let mut wrong = Vec::new();
-	for (what, info, want) in cases {
-		let entries = [file(b".PKGINFO", &info), file(b"a", b"x")];
-		write_pkg(&path, Comp::None, &entries);
-		for full in [false, true] {
-			let (c, r) = (
-				load_c(&h, &path, full),
-				load_rust(&path, full),
-			);
-			let got = observe(&c, &r);
-			if got != want {
-				wrong.push(format!(
-					"{what}, full {full}: {got}"
-				));
-			}
-		}
+	// name and version over NAME_MAX together
+	let long = format!("pkgname = {}", "a".repeat(250));
+	cases.push(("too long", w("pkgname", &long)));
+	let long = format!("pkgname = {}", "a".repeat(248));
+	cases.push(("NAME_MAX", w("pkgname", &long)));
+	for (what, info) in cases {
+		assert_pkginfo(&h, &path, what, &info);
 	}
-	assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+// line lengths around parse_descfile's 512 KiB limit and lines over
+// libarchive's data blocks: the first line is read without the check as
+// long as it sits in the first block
+#[test]
+fn fixed_pkginfo_long_lines() {
+	let fx = Fixture::new();
+	let h = fx.handle();
+	let path = fx.pkg("long.pkg.tar");
+	const MAX: usize = 512 * 1024;
+	let line = |n: usize| {
+		let head = b"pkgdesc = ";
+		[&head[..], &vec![b'd'; n - head.len()][..], b"\n"].concat()
+	};
+	let cases: Vec<(&str, Vec<u8>)> = vec![
+		(
+			"desc of 100k",
+			[PKGINFO.as_bytes(), &line(100_000)].concat(),
+		),
+		("max - 1", [PKGINFO.as_bytes(), &line(MAX - 1)].concat()),
+		("max", [PKGINFO.as_bytes(), &line(MAX)].concat()),
+		(
+			"first line max - 1",
+			[&line(MAX - 1), PKGINFO.as_bytes()].concat(),
+		),
+		("first line max", [&line(MAX), PKGINFO.as_bytes()].concat()),
+		(
+			"unknown keys then max",
+			[PKGINFO.as_bytes(), b"foo = 1\n", &line(MAX + 5)]
+				.concat(),
+		),
+		(
+			"no newline, max",
+			[PKGINFO.as_bytes(), &line(MAX)[..MAX]].concat(),
+		),
+	];
+	for (what, info) in cases {
+		assert_pkginfo(&h, &path, what, &info);
+	}
+}
+
+// a big .PKGINFO with nul bytes near libarchive's data block ends: a
+// block without a '\n' after the nul ends the line there, one with a
+// '\n' later keeps it in the line. placed after a file of random size to
+// move the block ends, and cut short in a plain tar
+#[test]
+fn fuzz_pkginfo_blocks() {
+	let fx = Fixture::new();
+	let h = fx.handle();
+	let path = fx.pkg("blocks.pkg.tar");
+	let mut rng = Rng::new(0xb10c);
+	let n = (iters() / 2000).max(40);
+	for i in 0..n {
+		let mut info = PKGINFO.as_bytes().to_vec();
+		let size = 4096 + rng.below(300_000);
+		while info.len() < size {
+			let key = word(&mut rng, LOWER, 1, 6);
+			let val = word(&mut rng, ALNUM, 0, 2000);
+			info.extend_from_slice(
+				format!("{key} = {val}").as_bytes(),
+			);
+			info.push(match rng.below(6) {
+				0 => 0,
+				_ => b'\n',
+			});
+		}
+		let pad = rng.below(140_000);
+		let mut entries = vec![file(b".PKGINFO", &info)];
+		if rng.below(2) == 0 {
+			entries.insert(0, file(b"pad", &vec![b'p'; pad]));
+		}
+		let comp = COMPS[i % COMPS.len()];
+		write_pkg(&path, comp, &entries);
+		if matches!(comp, Comp::None) && rng.below(3) == 0 {
+			// the .PKGINFO data cut short
+			let data = fs::read(&path).unwrap();
+			let start = 512 + entries.len().saturating_sub(1)
+				* (512 + pad.next_multiple_of(512));
+			let cut = start + rng.below(info.len());
+			fs::write(&path, &data[..cut]).unwrap();
+		}
+		assert_same(&h, &path, &(comp, size, pad));
+	}
+}
+
+const PKGINFO_KEYS: [&str; 25] = [
+	"pkgname",
+	"pkgbase",
+	"pkgver",
+	"basever",
+	"pkgdesc",
+	"group",
+	"url",
+	"license",
+	"builddate",
+	"packager",
+	"arch",
+	"size",
+	"depend",
+	"optdepend",
+	"makedepend",
+	"checkdepend",
+	"conflict",
+	"replaces",
+	"provides",
+	"backup",
+	"xdata",
+	"pkgtype",
+	"foo",
+	"PKGNAME",
+	"",
+];
+
+// a value for key: numbers strtoll/strtoull treat differently, odd
+// relations, xdata with and without '=', text with blanks and bytes
+// past ASCII
+fn raw_value(rng: &mut Rng, key: &str) -> Vec<u8> {
+	let num = [
+		"",
+		" ",
+		"0",
+		"5",
+		"+5",
+		"-5",
+		" 7",
+		"7 ",
+		"1e3",
+		"0x10",
+		"007",
+		"1720811171",
+		"9223372036854775807",
+		"9223372036854775808",
+		"18446744073709551615",
+		"99999999999999999999",
+		"-9223372036854775808",
+	];
+	let rel = [
+		"",
+		":",
+		": d",
+		"a>=",
+		"a<",
+		"a: ",
+		"a: d",
+		"a=1: d",
+		"<1",
+		"a<=>1",
+		"a::b",
+		"a: b: c",
+		"foo.sound",
+		"lib:libx.so.1",
+		"a=1:2-3",
+		"a>=1-01",
+	];
+	let xdata = ["pkgtype=pkg", "a=b", "=", "a=", "=b", "a = b", "ab"];
+	let v = match key {
+		"builddate" | "size" => pick(rng, &num).to_string(),
+		"depend" | "optdepend" | "makedepend" | "checkdepend"
+		| "conflict" | "replaces" | "provides" => match rng.below(3) {
+			0 => pick(rng, &rel).to_string(),
+			1 => optdepend(rng),
+			_ => relation(rng),
+		},
+		// mostly with '=', a failed one ends the load
+		"xdata" if rng.below(8) == 0 => "ab".into(),
+		"xdata" => pick(rng, &xdata[..6]).to_string(),
+		"pkgname" => match rng.below(6) {
+			0 => pick(rng, &["", "-a", ".a", "a*", "a/b", "é"])
+				.into(),
+			_ => pkgname(rng),
+		},
+		"pkgver" => match rng.below(6) {
+			0 => pick(rng, &["", "1", "1-2-3", "1/2-3", "1-"])
+				.into(),
+			_ => full_version(rng),
+		},
+		_ => match rng.below(5) {
+			0 => String::new(),
+			1 => pick(rng, &[" ", "  ", "\t", "é", " a "]).into(),
+			_ => word(rng, b"ab yz09:=<>#-./", 0, 12),
+		},
+	};
+	v.into_bytes()
+}
+
+// a .PKGINFO of random lines parse_descfile reads: every key it knows
+// and unknown ones, empty and blank values, separators that are and are
+// not " = ", comments, blank lines, duplicates, CRLF, nul and non-UTF-8
+// bytes, no final newline. most have a name and version that load
+fn gen_raw_pkginfo(rng: &mut Rng) -> Vec<u8> {
+	let mut lines: Vec<Vec<u8>> = Vec::new();
+	if rng.below(12) != 0 {
+		lines.push(format!("pkgname = {}", pkgname(rng)).into_bytes());
+	}
+	if rng.below(12) != 0 {
+		let v = full_version(rng);
+		lines.push(format!("pkgver = {v}").into_bytes());
+	}
+	for _ in 0..rng.below(24) {
+		let key = pick(rng, &PKGINFO_KEYS);
+		let sep = match rng.below(16) {
+			0 => "=",
+			1 => " =",
+			2 => "= ",
+			3 => "  = ",
+			4 => "\t= ",
+			5 => " =\t",
+			_ => " = ",
+		};
+		let head = match rng.below(20) {
+			0 => " ",
+			1 => "#",
+			2 => "# ",
+			_ => "",
+		};
+		let value = raw_value(rng, key);
+		let line = [head.as_bytes(), key.as_bytes(), sep.as_bytes()];
+		lines.push([&line.concat()[..], &value].concat());
+	}
+	for _ in 0..rng.below(3) {
+		lines.push(Vec::new());
+	}
+	for i in (1..lines.len()).rev() {
+		lines.swap(i, rng.below(i + 1));
+	}
+	let mut out = Vec::new();
+	for mut line in lines {
+		// a byte that is no ASCII, a nul, a CR
+		match rng.below(30) {
+			0 => line.insert(rng.below(line.len() + 1), 0),
+			1 => line.insert(rng.below(line.len() + 1), 0xff),
+			2 => line.insert(rng.below(line.len() + 1), 0x80),
+			3 | 4 => line.push(b'\r'),
+			_ => {}
+		}
+		out.extend_from_slice(&line);
+		out.push(b'\n');
+	}
+	if rng.below(10) == 0 {
+		out.pop();
+	}
+	out
+}
+
+#[test]
+fn fuzz_pkginfo() {
+	let fx = Fixture::new();
+	let h = fx.handle();
+	let path = fx.pkg("raw.pkg.tar");
+	let mut rng = Rng::new(0x9a7f);
+	let n = (iters() / 50).max(200);
+	let mut loaded = 0;
+	for _ in 0..n {
+		let info = gen_raw_pkginfo(&mut rng);
+		let mut entries =
+			vec![file(b".PKGINFO", &info), file(b"a", b"x")];
+		if rng.below(10) == 0 {
+			// a second .PKGINFO reads into the same package
+			let second = gen_raw_pkginfo(&mut rng);
+			entries.push(file(b".PKGINFO", &second));
+		}
+		let comp = COMPS[rng.below(COMPS.len())];
+		write_pkg(&path, comp, &entries);
+		assert_same(&h, &path, &(comp, &entries));
+		loaded += usize::from(load_rust(&path, false).r.is_ok());
+	}
+	eprintln!("fuzz_pkginfo: {n} files, {loaded} loaded");
+	assert!(loaded * 4 > n, "{loaded} of {n} loaded");
 }
 
 fn mtree_of(fx: &Fixture, text: &str) -> Entry {
@@ -1652,7 +2048,7 @@ fn compressed_cuts() {
 			);
 			for full in [false, true] {
 				let c = load_c(&h, &path, full);
-				errnos.insert((full, c.err()));
+				errnos.insert((full, c.r.err()));
 			}
 		}
 	}

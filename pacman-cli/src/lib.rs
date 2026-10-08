@@ -8,6 +8,7 @@ pub mod files;
 pub mod getopt;
 pub mod package;
 pub mod pacman;
+pub mod pacman_conf;
 pub mod query;
 pub mod remove;
 pub mod sync;

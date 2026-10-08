@@ -194,7 +194,8 @@ fn read_sections() {
 fn read_error_is_sticky() {
 	let t = Tmp::new("sticky");
 	t.init();
-	t.pkg("foo-1.0-1", "%BUILDDATE%\nx\n", FILES);
+	// an xdata line without '=' fails the read
+	t.pkg("foo-1.0-1", "%DESC%\nd\n\n%XDATA%\nnoequals\n", FILES);
 	let db = LocalDb::register(&t.dbpath()).unwrap();
 	let fresh =
 		db.populate(&mut ()).unwrap().iter().next().unwrap().clone();
@@ -202,9 +203,10 @@ fn read_error_is_sticky() {
 	// files first: loaded, then the desc failure blocks later sections
 	db.read(&mut p, INFRQ_FILES, &mut ()).unwrap();
 	let r = db.read(&mut p, INFRQ_DESC, &mut ());
-	assert!(matches!(r, Err(ReadError::Desc(_))));
+	assert!(matches!(r, Err(ReadError::XData(_))));
 	assert_eq!(p.infolevel, INFRQ_FILES | INFRQ_ERROR);
-	assert!(p.desc.is_none());
+	// what was read before the error stays, like the C
+	assert_eq!(p.desc.as_deref(), Some(&b"d"[..]));
 	let r = db.read(&mut p, INFRQ_SCRIPTLET, &mut ());
 	assert!(matches!(r, Err(ReadError::Earlier)));
 	// loaded sections still answer

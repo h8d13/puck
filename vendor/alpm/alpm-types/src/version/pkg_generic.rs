@@ -71,8 +71,6 @@ impl Version {
     /// Compare two Versions and return a number
     ///
     /// The comparison algorithm is based on libalpm/ pacman's vercmp behavior.
-    /// Unlike [`Version::cmp`], the [`PackageRelease`] is only compared if both versions have
-    /// one, so `1.0` and `1.0-1` are considered to be the same version.
     ///
     /// * `1` if `a` is newer than `b`
     /// * `0` if `a` and `b` are considered to be the same version
@@ -98,41 +96,15 @@ impl Version {
     ///     Version::vercmp(&Version::from_str("0.1.0")?, &Version::from_str("1.0.0")?),
     ///     -1
     /// );
-    /// assert_eq!(
-    ///     Version::vercmp(&Version::from_str("1.0.0")?, &Version::from_str("1.0.0-1")?),
-    ///     0
-    /// );
     /// # Ok(())
     /// # }
     /// ```
     pub fn vercmp(a: &Version, b: &Version) -> i8 {
-        match a.vercmp_ordering(b) {
+        match a.cmp(b) {
             Ordering::Less => -1,
             Ordering::Equal => 0,
             Ordering::Greater => 1,
         }
-    }
-
-    /// The [`Ordering`] behind [`Version::vercmp`].
-    pub(crate) fn vercmp_ordering(&self, other: &Version) -> Ordering {
-        match (&self.pkgrel, &other.pkgrel) {
-            (Some(_), Some(_)) => self.cmp(other),
-            _ => self.cmp_without_pkgrel(other),
-        }
-    }
-
-    /// Compares the [`Epoch`] and [`PackageVersion`] of two versions.
-    fn cmp_without_pkgrel(&self, other: &Version) -> Ordering {
-        // An unset epoch is considered to be `0` (see alpm-epoch).
-        let epoch_cmp = self
-            .epoch
-            .unwrap_or_default()
-            .cmp(&other.epoch.unwrap_or_default());
-        if epoch_cmp.is_ne() {
-            return epoch_cmp;
-        }
-
-        self.pkgver.cmp(&other.pkgver)
     }
 }
 
@@ -221,8 +193,21 @@ impl Display for Version {
 
 impl Ord for Version {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.cmp_without_pkgrel(other)
-            .then_with(|| self.pkgrel.cmp(&other.pkgrel))
+        match (self.epoch, other.epoch) {
+            (Some(self_epoch), Some(other_epoch)) if self_epoch.cmp(&other_epoch).is_ne() => {
+                return self_epoch.cmp(&other_epoch);
+            }
+            (Some(_), None) => return Ordering::Greater,
+            (None, Some(_)) => return Ordering::Less,
+            (_, _) => {}
+        }
+
+        let pkgver_cmp = self.pkgver.cmp(&other.pkgver);
+        if pkgver_cmp.is_ne() {
+            return pkgver_cmp;
+        }
+
+        self.pkgrel.cmp(&other.pkgrel)
     }
 }
 
@@ -315,8 +300,6 @@ mod tests {
     #[case(Version::from_str("1-1").unwrap(), "1-1")]
     #[case(Version::from_str("1").unwrap(), "1")]
     #[case(Version::from_str("1:1").unwrap(), "1:1")]
-    #[case(Version::from_str("1-01").unwrap(), "1-01")]
-    #[case(Version::from_str("1-1.01").unwrap(), "1-1.01")]
     fn version_to_string(#[case] version: Version, #[case] to_str: &str) {
         assert_eq!(format!("{version}"), to_str);
     }
@@ -377,14 +360,6 @@ mod tests {
         Version::from_str("1.a1a.1"),
         Ordering::Equal
     )]
-    // An unset epoch is considered to be `0`
-    #[case(Version::from_str("0:1.0"), Version::from_str("1.0"), Ordering::Equal)]
-    #[case(
-        Version::from_str("0:1.1"),
-        Version::from_str("1.0"),
-        Ordering::Greater
-    )]
-    #[case(Version::from_str("0:2"), Version::from_str("1:1"), Ordering::Less)]
     fn version_cmp(
         #[case] version_a: Result<Version, Error>,
         #[case] version_b: Result<Version, Error>,
@@ -443,28 +418,5 @@ mod tests {
             Version::vercmp(&version_b, &version_a),
             reverse_vercmp_result
         );
-    }
-
-    /// Ensure that [`Version::vercmp`] only compares the pkgrel if both versions have one, while
-    /// [`Version::cmp`] orders a version without pkgrel before one with it.
-    #[rstest]
-    #[case("1.0", "1.0-1", 0, Ordering::Less)]
-    #[case("1.0-5", "1.0", 0, Ordering::Greater)]
-    #[case("1.0-1", "1.0-2", -1, Ordering::Less)]
-    #[case("1.1", "1.0-2", 1, Ordering::Greater)]
-    #[case("1:1.0", "2.0-1", 1, Ordering::Greater)]
-    fn version_vercmp_one_sided_pkgrel(
-        #[case] version_a: &str,
-        #[case] version_b: &str,
-        #[case] vercmp: i8,
-        #[case] ordering: Ordering,
-    ) -> Result<(), Error> {
-        let version_a = Version::from_str(version_a)?;
-        let version_b = Version::from_str(version_b)?;
-
-        assert_eq!(Version::vercmp(&version_a, &version_b), vercmp);
-        assert_eq!(Version::vercmp(&version_b, &version_a), -vercmp);
-        assert_eq!(version_a.cmp(&version_b), ordering);
-        Ok(())
     }
 }

@@ -38,7 +38,6 @@ use crate::{Error, VersionSegments};
 /// See [alpm-epoch] for details on the format.
 ///
 /// An Epoch wraps a [`usize`].
-/// An unset epoch is considered to be `0`, which is what [`Default`] returns.
 ///
 /// ## Examples
 /// ```
@@ -51,7 +50,7 @@ use crate::{Error, VersionSegments};
 /// ```
 ///
 /// [alpm-epoch]: https://alpm.archlinux.page/specifications/alpm-epoch.7.html
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 pub struct Epoch(pub usize);
 
@@ -106,7 +105,6 @@ impl Display for Epoch {
 ///
 /// A [`PackageRelease`] wraps a [`usize`] for its `major` version and an optional [`usize`] for its
 /// `minor` version.
-/// When parsed from a string with leading zeros (e.g. `01`), that string is kept for display.
 ///
 /// [`PackageRelease`] is used to indicate the build version of a package.
 /// It is mostly useful in conjunction with a [`PackageVersion`] (see [`Version`]).
@@ -133,9 +131,6 @@ pub struct PackageRelease {
     pub major: usize,
     /// The optional minor version of this package release.
     pub minor: Option<usize>,
-    /// The parsed string, if it differs from the formatted numbers (leading zeros).
-    #[cfg_attr(feature = "serde", serde(skip))]
-    text: Option<String>,
 }
 
 impl PackageRelease {
@@ -151,11 +146,7 @@ impl PackageRelease {
     /// # }
     /// ```
     pub fn new(major: usize, minor: Option<usize>) -> Self {
-        PackageRelease {
-            major,
-            minor,
-            text: None,
-        }
+        PackageRelease { major, minor }
     }
 }
 
@@ -186,20 +177,10 @@ impl AlpmParser for PackageRelease {
                 None
             };
 
-            Ok(Self::new(major, minor))
+            Ok(Self { major, minor })
         };
 
-        parser
-            .with_taken()
-            .map(|(mut release, taken): (Self, &str)| {
-                // Keep e.g. `01` as is, its numbers would format as `1`.
-                if release.to_string() != taken {
-                    release.text = Some(taken.to_string());
-                }
-                release
-            })
-            .layer("alpm-pkgrel")
-            .parse_next(input)
+        parser.layer("alpm-pkgrel").parse_next(input)
     }
 
     fn delimiter_error_context<'a, O, P>(
@@ -231,9 +212,6 @@ impl FromStr for PackageRelease {
 
 impl Display for PackageRelease {
     fn fmt(&self, fmt: &mut Formatter) -> std::fmt::Result {
-        if let Some(text) = &self.text {
-            return write!(fmt, "{text}");
-        }
         write!(fmt, "{}", self.major)?;
         if let Some(minor) = self.minor {
             write!(fmt, ".{minor}")?;
@@ -445,9 +423,6 @@ mod tests {
     #[case("1.0")]
     #[case("10.5")]
     #[case("0.1")]
-    #[case("01")]
-    #[case("1.01")]
-    #[case("00.010")]
     fn valid_pkgrel(#[case] pkgrel: &str) {
         let parsed = PackageRelease::from_str(pkgrel);
         assert!(parsed.is_ok(), "Expected pkgrel {pkgrel} to be valid.");
@@ -496,9 +471,6 @@ mod tests {
     #[case("1.1", "1.0", Ordering::Greater)]
     #[case("1.1", "0", Ordering::Greater)]
     #[case("11", "1", Ordering::Greater)]
-    #[case("01", "1", Ordering::Equal)]
-    #[case("1.01", "1.1", Ordering::Equal)]
-    #[case("1.010", "1.9", Ordering::Greater)]
     fn pkgrel_cmp(#[case] first: &str, #[case] second: &str, #[case] order: Ordering) {
         let first = PackageRelease::from_str(first).unwrap();
         let second = PackageRelease::from_str(second).unwrap();

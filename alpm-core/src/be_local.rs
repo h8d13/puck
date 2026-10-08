@@ -1,23 +1,21 @@
 // port of lib/libalpm/be_local.c, reading side: validate, populate and
 // local_db_read.
 //
-// the desc and files formats are read by the alpm-db crate's
-// libalpm-compatible readers, not by a translation of the C line reader;
-// their typed values are mapped onto the pacman Package model (see
-// PORTING.md for where the two disagree).
+// desc and files are read like the C: safe_fgets into a 1024 byte line
+// (longer lines come in 1023 byte pieces), the READ_* macros, keys
+// matched as C strings. a NULL from fgets at the end of the file leaves
+// the line as it was, the C then reads the last value once more as a key.
 //
 // lazy loading keeps the C infolevel bits: read() loads the requested
 // sections once, a failed read marks the package INFRQ_ERROR and later
-// reads give up. populate and read log through the caller's Callbacks
-// like the C through handle->logcb; not modelled: the name/version
-// mismatch and unknown key lines (alpm-db refuses such files whole) and
-// _alpm_pkg_check_meta's warnings. mtree reading and the writing side are
-// the last sections. not ported: changelog.
+// reads give up; what a failing section read before the error stays.
+// populate and read log through the caller's Callbacks like the C
+// through handle->logcb. mtree reading and the writing side are the last
+// sections. not ported: changelog.
 
 use std::ffi::{OsStr, c_int};
-use std::fmt::Display;
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
-use std::io::{self, ErrorKind, Read, Seek, Write};
+use std::io::{self, BufReader, ErrorKind, Read, Seek, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{
 	DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt,
@@ -25,23 +23,23 @@ use std::os::unix::fs::{
 use std::path::{Path, PathBuf};
 
 use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
-use alpm_db::desc::{Section, parse_libalpm};
-use alpm_db::files::DbFiles;
 use alpm_mtree::libarchive::{self, Entry};
-use alpm_types::{ExtraDataEntry, PackageInstallReason, PackageValidation};
+use pacman_common::util_common::safe_fgets;
 
-use crate::backup::Backup;
+use crate::backup::split_backup;
 use crate::callbacks::{Callbacks, LogLevel, logv};
-use crate::deps::{Depend, dep_compute_string, dep_from_string};
+use crate::deps::{dep_compute_string, dep_from_string};
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
 use crate::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
-	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, PkgReason, PkgXData,
+	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, PkgReason, check_meta,
+	parse_xdata,
 };
 use crate::pkghash::PkgHash;
 use crate::util::{
-	Filter, hash_sdbm, makepath, mkdir_mode, splitname, strerror, until_nul,
+	Filter, hash_sdbm, makepath, mkdir_mode, parsedate, splitname,
+	strerror, strip_newline, strtoofft, until_nul,
 };
 
 // ALPM_LOCAL_DB_VERSION
@@ -88,10 +86,10 @@ impl DbError {
 pub enum ReadError {
 	// INFRQ_ERROR from an earlier read, no retry
 	Earlier,
-	// desc/files missing, unreadable or not UTF-8
+	// desc/files could not be opened, or a desc read failed (ferror)
 	Io(io::Error),
-	Desc(alpm_db::Error),
-	Files(alpm_db::files::Error),
+	// a %XDATA% line without '=' (_alpm_pkg_parse_xdata NULL)
+	XData(Vec<u8>),
 }
 
 // the local alpm_db_t once registered: its validated directory
@@ -257,6 +255,8 @@ impl LocalDb {
 			};
 			// local_db_read(pkg, INFRQ_BASE) never fails
 			let _ = self.read(&mut pkg, INFRQ_BASE, cb);
+			// metadata errors are only logged for installed packages
+			check_meta(name, version, cb);
 			let parts: [&[u8]; 3] = [
 				b"adding '",
 				name,
@@ -276,8 +276,7 @@ impl LocalDb {
 	}
 
 	// local_db_read: loads the sections of inforeq not loaded yet. on
-	// error the sections read before stay, the failing one is left
-	// untouched (alpm-db parses a file whole) and INFRQ_ERROR is set
+	// error what was read stays, INFRQ_ERROR is set
 	pub fn read(
 		&self,
 		pkg: &mut Package,
@@ -328,13 +327,6 @@ impl LocalDb {
 		})
 	}
 
-	// the open section read whole: alpm-db parses str
-	fn read_text(mut f: File) -> Result<String, ReadError> {
-		let mut s = String::new();
-		f.read_to_string(&mut s).map_err(ReadError::Io)?;
-		Ok(s)
-	}
-
 	fn wants(pkg: &Package, inforeq: c_int, bit: c_int) -> bool {
 		inforeq & bit != 0 && pkg.infolevel & bit == 0
 	}
@@ -347,18 +339,12 @@ impl LocalDb {
 	) -> Result<(), ReadError> {
 		if Self::wants(pkg, inforeq, INFRQ_DESC) {
 			let f = self.open_section(pkg, b"desc", cb)?;
-			let s = Self::read_text(f)?;
-			let desc =
-				parse_libalpm(&s).map_err(ReadError::Desc)?;
-			apply_desc(pkg, desc);
+			read_desc(pkg, &mut Lines::new(f), cb)?;
 			pkg.infolevel |= INFRQ_DESC;
 		}
 		if Self::wants(pkg, inforeq, INFRQ_FILES) {
 			let f = self.open_section(pkg, b"files", cb)?;
-			let s = Self::read_text(f)?;
-			let files = DbFiles::from_str_libalpm(&s)
-				.map_err(ReadError::Files)?;
-			apply_files(pkg, &files);
+			read_files(pkg, &mut Lines::new(f));
 			pkg.infolevel |= INFRQ_FILES;
 		}
 		if Self::wants(pkg, inforeq, INFRQ_SCRIPTLET) {
@@ -373,113 +359,281 @@ impl LocalDb {
 	}
 }
 
-fn text(v: &impl Display) -> Vec<u8> {
-	v.to_string().into_bytes()
+// sizeof(line) in local_db_read
+const LINE_SIZE: usize = 1024;
+
+// the open desc or files: safe_fgets(line, sizeof(line), fp) and the
+// stream's end-of-file flag, sticky since glibc 2.28 (fgets at the end
+// returns NULL without reading)
+struct Lines {
+	r: BufReader<File>,
+	eof: bool,
+	// line as a C string: up to its first nul, the '\n' gone once
+	// stripped
+	line: Vec<u8>,
 }
 
-fn texts<T: Display>(v: &[T]) -> Vec<Vec<u8>> {
-	v.iter().map(text).collect()
-}
-
-// relations go through their alpm-types string form into pacman's
-// alpm_dep_from_string, which is what the C does with the line
-fn deps<T: Display>(v: &[T]) -> Vec<Depend> {
-	v.iter().map(|d| dep_from_string(&text(d))).collect()
-}
-
-// the C table: "md5" is not mapped by local_db_read, it warns and sets no
-// bit
-fn validation_bits(v: &[PackageValidation]) -> c_int {
-	v.iter().fold(0, |bits, m| {
-		bits | match m {
-			PackageValidation::None => PKG_VALIDATION_NONE,
-			PackageValidation::Sha256 => PKG_VALIDATION_SHA256SUM,
-			PackageValidation::Pgp => PKG_VALIDATION_SIGNATURE,
-			PackageValidation::Md5 => 0,
+impl Lines {
+	fn new(f: File) -> Self {
+		Lines {
+			r: BufReader::new(f),
+			eof: false,
+			line: Vec::new(),
 		}
-	})
-}
+	}
 
-// the C's per-key assignments: a repeated value overwrites, a repeated
-// list appends, a missing section leaves the field unset
-fn apply_desc(pkg: &mut Package, desc: Vec<Section>) {
-	for section in desc {
-		apply_section(pkg, section);
+	// Ok(false) is NULL at the end of the file, the line stays as it
+	// was; Err is NULL from a read error (ferror)
+	fn fgets(&mut self) -> io::Result<bool> {
+		if self.eof {
+			return Ok(false);
+		}
+		let Some(l) = safe_fgets(&mut self.r, LINE_SIZE)? else {
+			self.eof = true;
+			return Ok(false);
+		};
+		// fgets stops at '\n' or a full buffer, else it met the end
+		self.eof = !l.ends_with(b"\n") && l.len() < LINE_SIZE - 1;
+		self.line = until_nul(&l).to_vec();
+		Ok(true)
+	}
+
+	// _alpm_strip_newline(line, 0): the stripped length
+	fn strip(&mut self) -> usize {
+		let n = strip_newline(&self.line).len();
+		self.line.truncate(n);
+		n
+	}
+
+	// READ_NEXT: NULL at the end keeps the line
+	fn next(&mut self) -> io::Result<&[u8]> {
+		self.fgets()?;
+		self.strip();
+		Ok(&self.line)
+	}
+
+	// READ_AND_STORE
+	fn store(&mut self) -> io::Result<Option<Vec<u8>>> {
+		Ok(Some(self.next()?.to_vec()))
+	}
+
+	// READ_AND_STORE_ALL and READ_AND_SPLITDEP: lines up to a blank
+	// one or the end of the file
+	fn list<T>(
+		&mut self,
+		out: &mut Vec<T>,
+		f: impl Fn(&[u8]) -> T,
+	) -> io::Result<()> {
+		while self.fgets()? && self.strip() != 0 {
+			out.push(f(&self.line));
+		}
+		Ok(())
 	}
 }
 
-fn apply_section(pkg: &mut Package, section: Section) {
-	match section {
-		// only feed the C's mismatch log
-		Section::Name(_) | Section::Version(_) => {}
-		Section::Base(v) => pkg.base = Some(text(&v)),
-		// description and url as read, alpm-types normalizes Display
-		Section::Desc(v) => pkg.desc = Some(text(&v.as_original_str())),
-		// an empty value is alpm-db's None
-		Section::Url(v) => {
-			pkg.url = Some(v
-				.map(|u| text(&u.as_original_str()))
-				.unwrap_or_default())
-		}
-		Section::Arch(v) => pkg.arch = Some(text(&v)),
-		Section::BuildDate(v) => pkg.builddate = v,
-		Section::InstallDate(v) => pkg.installdate = v,
-		Section::Packager(v) => pkg.packager = Some(text(&v)),
-		// _alpm_strtoofft casts the unsigned long long to off_t: values
-		// past i64::MAX wrap (gcc's implementation-defined conversion)
-		Section::Size(v) => pkg.isize = v as i64,
-		Section::Groups(v) => pkg.groups.extend(texts(&v)),
-		Section::Reason(PackageInstallReason::Explicit) => {
-			pkg.reason = PkgReason::Explicit
-		}
-		Section::Reason(PackageInstallReason::Depend) => {
-			pkg.reason = PkgReason::Depend
-		}
-		Section::License(v) => pkg.licenses.extend(texts(&v)),
-		Section::Validation(v) => pkg.validation |= validation_bits(&v),
-		Section::Replaces(v) => pkg.replaces.extend(deps(&v)),
-		Section::Depends(v) => pkg.depends.extend(deps(&v)),
-		Section::OptDepends(v) => pkg.optdepends.extend(deps(&v)),
-		Section::Conflicts(v) => pkg.conflicts.extend(deps(&v)),
-		Section::Provides(v) => pkg.provides.extend(deps(&v)),
-		Section::MakeDepends(v) => pkg.makedepends.extend(deps(&v)),
-		Section::CheckDepends(v) => pkg.checkdepends.extend(deps(&v)),
-		Section::XData(v) => {
-			let v: Vec<ExtraDataEntry> = v.into();
-			pkg.xdata.extend(v.iter().map(|x| PkgXData {
-				name: x.key().as_bytes().to_vec(),
-				value: x.value().as_bytes().to_vec(),
-			}))
+fn line_vec(s: &[u8]) -> Vec<u8> {
+	s.to_vec()
+}
+
+// _read_pkgreason
+fn read_reason(name: &[u8], line: &[u8], cb: &mut dyn Callbacks) -> PkgReason {
+	match line {
+		b"0" => PkgReason::Explicit,
+		b"1" => PkgReason::Depend,
+		_ => {
+			let parts: [&[u8]; 5] = [
+				b"unknown install reason for package ",
+				name,
+				b": ",
+				line,
+				b"\n",
+			];
+			logv(cb, LogLevel::Error, &parts);
+			PkgReason::Unknown
 		}
 	}
 }
 
-// the C sorts the file list after reading (_alpm_filelist_sort), backups
-// keep file order
-fn apply_files(pkg: &mut Package, files: &DbFiles) {
-	let paths: &[PathBuf] = files.as_ref();
-	pkg.files = FileList {
-		files: paths
-			.iter()
-			.map(|p| PkgFile {
-				name: p.as_os_str().as_bytes().to_vec(),
-				..PkgFile::default()
-			})
-			.collect(),
-	};
-	pkg.files.sort();
-	pkg.backup = files
-		.backups()
-		.iter()
-		.map(|b| Backup {
-			name: b.path.inner().as_os_str().as_bytes().to_vec(),
-			// None is the "(null)" the C wrote for a NULL hash
-			hash: Some(match &b.md5 {
-				Some(md5) => text(md5),
-				None => b"(null)".to_vec(),
-			}),
-		})
-		.collect();
+// %VALIDATION% values onto their bits, others warned about
+fn read_validation(
+	pkg: &mut Package,
+	lines: &[Vec<u8>],
+	cb: &mut dyn Callbacks,
+) {
+	for v in lines {
+		pkg.validation |= match &v[..] {
+			b"none" => PKG_VALIDATION_NONE,
+			b"sha256" => PKG_VALIDATION_SHA256SUM,
+			b"pgp" => PKG_VALIDATION_SIGNATURE,
+			_ => {
+				let parts: [&[u8]; 5] = [
+					b"unknown validation type for package ",
+					pkg.name_bytes(),
+					b": ",
+					v,
+					b"\n",
+				];
+				logv(cb, LogLevel::Warning, &parts);
+				0
+			}
+		};
+	}
+}
+
+// "local database is inconsistent: <what> mismatch on package <name>"
+fn mismatch(what: &[u8], name: &[u8], cb: &mut dyn Callbacks) {
+	let parts: [&[u8]; 5] = [
+		b"local database is inconsistent: ",
+		what,
+		b" mismatch on package ",
+		name,
+		b"\n",
+	];
+	logv(cb, LogLevel::Error, &parts);
+}
+
+// the desc part of local_db_read. a key repeated overwrites a value and
+// appends to a list
+fn read_desc(
+	pkg: &mut Package,
+	f: &mut Lines,
+	cb: &mut dyn Callbacks,
+) -> Result<(), ReadError> {
+	let deps = dep_from_string;
+	while !f.eof {
+		f.fgets().map_err(ReadError::Io)?;
+		if f.strip() == 0 {
+			continue;
+		}
+		let key = f.line.clone();
+		let name = pkg.name_bytes().to_vec();
+		let io = ReadError::Io;
+		match &key[..] {
+			b"%NAME%" => {
+				if f.next().map_err(io)? != &name[..] {
+					mismatch(b"name", &name, cb);
+				}
+			}
+			b"%VERSION%" => {
+				let v = pkg
+					.version
+					.as_deref()
+					.unwrap_or_default();
+				if f.next().map_err(io)? != until_nul(v) {
+					mismatch(b"version", &name, cb);
+				}
+			}
+			b"%BASE%" => pkg.base = f.store().map_err(io)?,
+			b"%DESC%" => pkg.desc = f.store().map_err(io)?,
+			b"%GROUPS%" => {
+				f.list(&mut pkg.groups, line_vec).map_err(io)?
+			}
+			b"%URL%" => pkg.url = f.store().map_err(io)?,
+			b"%LICENSE%" => f
+				.list(&mut pkg.licenses, line_vec)
+				.map_err(io)?,
+			b"%ARCH%" => pkg.arch = f.store().map_err(io)?,
+			// _alpm_parsedate: 0 for anything but a number
+			b"%BUILDDATE%" => {
+				let v = parsedate(f.next().map_err(io)?);
+				pkg.builddate = v.unwrap_or(0);
+			}
+			b"%INSTALLDATE%" => {
+				let v = parsedate(f.next().map_err(io)?);
+				pkg.installdate = v.unwrap_or(0);
+			}
+			b"%PACKAGER%" => {
+				pkg.packager = f.store().map_err(io)?
+			}
+			b"%REASON%" => {
+				let line = f.next().map_err(io)?.to_vec();
+				pkg.reason = read_reason(&name, &line, cb);
+			}
+			b"%VALIDATION%" => {
+				let mut v = Vec::new();
+				f.list(&mut v, line_vec).map_err(io)?;
+				read_validation(pkg, &v, cb);
+			}
+			// _alpm_strtoofft: -1 for anything but bare digits, the
+			// unsigned long long cast to off_t wraps past i64::MAX
+			b"%SIZE%" => {
+				let v = strtoofft(f.next().map_err(io)?);
+				pkg.isize = v.map_or(-1, |v| v as i64);
+			}
+			b"%REPLACES%" => {
+				f.list(&mut pkg.replaces, deps).map_err(io)?
+			}
+			b"%DEPENDS%" => {
+				f.list(&mut pkg.depends, deps).map_err(io)?
+			}
+			b"%OPTDEPENDS%" => {
+				f.list(&mut pkg.optdepends, deps).map_err(io)?
+			}
+			b"%MAKEDEPENDS%" => f
+				.list(&mut pkg.makedepends, deps)
+				.map_err(io)?,
+			b"%CHECKDEPENDS%" => f
+				.list(&mut pkg.checkdepends, deps)
+				.map_err(io)?,
+			b"%CONFLICTS%" => {
+				f.list(&mut pkg.conflicts, deps).map_err(io)?
+			}
+			b"%PROVIDES%" => {
+				f.list(&mut pkg.provides, deps).map_err(io)?
+			}
+			b"%XDATA%" => {
+				let mut lines = Vec::new();
+				f.list(&mut lines, line_vec).map_err(io)?;
+				// entries before a bad line stay
+				for l in lines {
+					let x = parse_xdata(&l)
+						.ok_or(ReadError::XData(l))?;
+					pkg.xdata.push(x);
+				}
+			}
+			_ => {
+				let parts: [&[u8]; 4] = [
+					&name,
+					b": unknown key '",
+					&key,
+					b"' in local database\n",
+				];
+				logv(cb, LogLevel::Warning, &parts);
+				f.list(&mut Vec::new(), |_| ()).map_err(io)?;
+			}
+		}
+	}
+	Ok(())
+}
+
+// the files part of local_db_read: any NULL from fgets ends it, lines
+// outside the two sections are skipped. a second %FILES% replaces the
+// list, %BACKUP% appends. the C sorts the file list
+// (_alpm_filelist_sort), backups keep file order
+fn read_files(pkg: &mut Package, f: &mut Lines) {
+	let more = |f: &mut Lines| f.fgets().unwrap_or(false);
+	while more(f) {
+		f.strip();
+		match &f.line[..] {
+			b"%FILES%" => {
+				let mut files = Vec::new();
+				while more(f) && f.strip() != 0 {
+					files.push(PkgFile {
+						name: f.line.clone(),
+						..PkgFile::default()
+					});
+				}
+				pkg.files = FileList { files };
+				pkg.files.sort();
+			}
+			b"%BACKUP%" => {
+				while more(f) && f.strip() != 0 {
+					pkg.backup.push(split_backup(&f.line));
+				}
+			}
+			_ => {}
+		}
+	}
 }
 
 // mtree: _cache_mtree_open/_cache_mtree_next
@@ -609,10 +763,8 @@ impl LocalDb {
 // writing side: _alpm_local_db_prepare, _alpm_local_db_write,
 // _alpm_local_db_remove and alpm_pkg_set_reason
 //
-// desc and files are written by a translation of the C writer, not by
-// alpm-db's Display: alpm-db writes validated values only, always writes
-// sections pacman leaves out and orders and sorts differently (see
-// PORTING.md). fields go through %s, so each is cut at its first nul. the
+// desc and files are written by a translation of the C writer. fields go
+// through %s, so each is cut at its first nul. the
 // C sets the umask (0000 for prepare, 0022 for write) around its mkdir and
 // fopen; the port gives the same modes by chmod. logging is not modelled
 

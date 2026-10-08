@@ -87,7 +87,7 @@ truncated and its tail parsed as an unknown key (swallowing lines up to
 the next blank line), a long path becomes two file entries, which then
 take part in ownership queries and conflict checks.
 
-- port: `alpm-db` keeps lines whole (listed as a divergence)
+- port: splits like the C (owned reader, difftest `be_local`)
 
 ## Include matching nothing is fatal
 
@@ -110,7 +110,8 @@ be_sync.c:552-555 parses `line`, captured at the section header
 freed, so `alpm_dep_from_string(line)` reads freed memory. Applies to
 every relation section. Fix idea: use `buf.line` like READ_AND_STORE_ALL.
 
-- difftest: relation lines kept far below the buffer size
+- port: parses the current line (the fix idea)
+- difftest: lines of 512 bytes and more never inside a relation section
 
 ## `-Qii` crashes on a backup path that is now a directory
 
@@ -386,6 +387,25 @@ declarations. No existing MR found for it.
   **packager**
 - `_alpm_strtoofft` does not range-check: 2^63..2^64-1 become negative
   (util.c:1435). **packager**
+- `local_db_read` loops `while(!feof(fp))`, and a `safe_fgets` NULL at
+  the end leaves `line` as it was: a desc whose last value is not
+  followed by a blank line reads that value again as a key, logging
+  "unknown key" (`%DESC%\nfoo\n`), or storing a key-like value twice
+  (`%BASE%\n%DESC%\n` sets desc to "%DESC%") (be_local.c:748-755,
+  685-688). pacman writes a blank line after every section. **local**
+- every READ_* macro of `sync_db_read` treats the end of the entry data
+  as an error (be_sync.c:533-555): a list, `%FILES%` or a value running
+  into the end of a desc without its blank line (or final newline)
+  invalidates the whole db. repo-add writes the blank lines.
+  **packager**
+- `_alpm_archive_fgets` checks `max_line_size` only once the line buffer
+  exists, so a line over 512 KiB is accepted when it sits in the first
+  data block it is read from (util.c:1269-1273), refused elsewhere.
+  **packager**
+- `_alpm_pkg_check_meta`'s "invalid package metadata (name or version
+  missing)" has no '\n' (package.c:835); its length check cannot fire for
+  local entries, whose directory names are at most NAME_MAX.
+  **none**
 - `HAVE_STRUCT_DIRENT_D_TYPE` is never defined by meson, the d_type
   shortcut is dead and a symlink to a dir in `local/` becomes a package
   (be_local.c:392). **local**
@@ -498,6 +518,26 @@ declarations. No existing MR found for it.
   (be_package.c:419, from libarchive). **packager**, cosmetic
 - the swapped `_alpm_pkg_check_meta` check lets `pkgname = f*` load
   (be_package.c:667). See above. **packager**
+- a nul byte in `.PKGINFO` ends a line only when no '\n' follows in the
+  same libarchive data block (`_alpm_archive_fgets`, util.c:1263-1266),
+  so `a = b\0c = d\n` reads as one line or two depending on compression
+  and where the entry sits in the archive. **packager**
+- `size = ` past `LLONG_MAX` is cast to a negative `off_t` (util.c:1435,
+  be_package.c:220), up to `ULLONG_MAX` (which gives -1). **packager**
+- an `xdata` value without '=' refuses the whole package with only
+  "could not parse package description file", no line naming the cause
+  (be_package.c:248-251). **packager**, message only
+- a line whose first space does not start " = " (`key\t= v`, an indented
+  key) is dropped with a debug line only (be_package.c:182-186); unknown
+  key lines read before `pkgname` name the package "error"
+  (be_package.c:254). **packager**, cosmetic
+- the first `_alpm_archive_fgets` allocation skips the `max_line_size`
+  check (util.c:1269-1279): a first line inside the first data block may
+  pass 512 KiB. Data blocks stay below that (64/128 KiB filters, fd reads
+  of st_blksize), so **none**
+- `_alpm_pkg_check_meta`'s "invalid package metadata (name or version
+  missing)" lacks its '\n' (package.c:835). **none** from be_package (the
+  load refuses both before)
 
 ## `src/pacman/check.c` minor
 
@@ -666,7 +706,7 @@ be_local.c:1118 prints `%s` of `backup->hash`, NULL when the package had
 no md5 for that file; glibc writes `(null)`. The reader then keeps
 `(null)` as the hash string.
 
-- port: writes `(null)` like the C, the reader maps it back
+- port: writes `(null)` like the C, the reader keeps it as the hash
 - difftest: `be_local_write`
 
 ## local db writing and `_alpm_unpack` minor
@@ -714,6 +754,34 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
   upgrade (add.c:508, remove.c:718). **api**
 - the -1 check after `_alpm_remove_single_package` is dead, it always
   returns 0 (add.c:508-511). **none**
+
+## `pacman-conf.c` / `testpkg.c` minor
+
+- `DisableSandboxFilesystem` cannot be queried: the `DisableSandbox` test
+  appears twice (pacman-conf.c:415-418), `pacman-conf
+  DisableSandboxFilesystem` warns "unknown directive" and exits 1.
+  **real (rare)**
+- `--repo-list --repo nope` prints nothing and exits 0, `--repo nope`
+  alone fails (pacman-conf.c:126-135). **none**
+- testpkg always opens the built-in DBPATH/GPGDIR, never pacman.conf's
+  `GPGDir`; without `/var/lib/pacman` "cannot initialize alpm"
+  (testpkg.c:63-71). **env**
+- dead checks: `if(!config)` after `parse_opts` (pacman-conf.c:461-464),
+  `alpm_release == -1` (testpkg.c:98-100). **none**
+
+## `src/pacman/sync.c` -Sc minor
+
+- `sync_cleandb` reads an uninitialised `st_mode` after a failed `stat`
+  (sync.c:93-97), a dangling symlink in the sync dir. **local** (port:
+  not a directory)
+- failures cancel out in the exit status: `unlink_verbose` returns -1,
+  an unreadable cache dir or failed `trans_release` adds +1 (sync.c:41-53,
+  115, 126, 256, 302, 306, 207, 917); one of each exits 0. **env**
+- an `rmrf` failure in `sync_cleandb` is printed with a leftover errno
+  and not counted, `-Sc` exits 0 after "could not remove" (sync.c:98-102).
+  **env**
+- PATH_MAX overflow in `sync_cleandb` prints and carries on with the
+  truncated path (sync.c:86-90). **none** (port mirrors it)
 
 ## transaction prepare minor
 
@@ -935,14 +1003,13 @@ maintainer of this repo, not from here.
 
 # ALPM findings
 
-Corrected in `vendor/patches/` (see PORTING.md "ALPM patches for
-parity"): epoch Ord 0101, one-sided pkgrel 0102, pkgrel text 0103, Url
-0104, Packager 0105, RelationOrSoname 0106, ExtraDataEntry 0107,
-OptionalDependency 0108, PackageDescription 0109, desc v2 detection 0201,
-blank lines 0202/0301, backups 0205, files blank line 0206, `%DATA%` 0303,
-`usr` == `usr/` 0305, mtree order/duplicates/defaults/types/keywords
-0401-0410, mtree gzip members 0403, pkginfo strictness 0501-0506, gzip
-members 0551, content sniffing 0552. Further notes from the patch work:
+Applied in `vendor/patches/` today: mtree 0401-0411 (until the mtree
+reader is owned), gzip members 0551, content sniffing 0552. Kept as
+reports in `vendor/upstream-reports/`, no longer applied: version
+ordering 0101/0102, `Unknown Packager` 0105, relation backtracking 0106,
+empty xdata value 0107. The alpm-db/alpm-repo-db/alpm-pkginfo findings
+below came from patches dropped with the owned readers (PORTING.md
+"Owned readers"); they stay valid as reports. Further notes from the patch work:
 
 - alpm-mtree `Error::Parse` display broken (`error-parse` wants `$source`,
   code passes `error`), fixed in 0411. **api**

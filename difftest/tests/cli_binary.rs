@@ -4,15 +4,19 @@
 // sync .db and .files, a pacman.conf, every path option pointing into
 // the fixture), stdout, stderr and exit status compared byte for byte.
 // prints one line per command; every one must be equal but the --debug
-// lines known() explains. root-only commands (-Sy, -Fy, -D) run under
-// fakeroot, the dbs they fetch or write compared too.
+// lines known() explains. root-only commands (-Sy, -Fy, -D, -Sc) run
+// under fakeroot, the dbs they fetch or write and the cache dir compared
+// too.
 // scripts/cli-parity-fixtures.sh runs it with the table shown
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use difftest::{LocalEntry, Rng, SyncWorld, section, snapshot};
+use difftest::{
+	Comp, DbFile, LocalEntry, Rng, SyncWorld, section, snapshot,
+	write_package,
+};
 
 fn c_pacman() -> PathBuf {
 	let dir = match std::env::var_os("PACMAN_BUILD") {
@@ -119,6 +123,11 @@ fn setup(w: &SyncWorld, siglevel: Option<&str>) -> Vec<String> {
 	}
 	// the local db -D runs start from
 	copy_dir(&dir.join("db/local"), &dir.join("local.orig"));
+	cache_files(w);
+	// files of no registered db, for -Sc
+	for f in ["old.db", "old.files.sig"] {
+		fs::write(dir.join("db/sync").join(f), "x").unwrap();
+	}
 	for e in fs::read_dir(dir.join("db/sync")).unwrap() {
 		let e = e.unwrap();
 		fs::copy(e.path(), dir.join("mirror").join(e.file_name()))
@@ -136,6 +145,32 @@ fn setup(w: &SyncWorld, siglevel: Option<&str>) -> Vec<String> {
 		format!("--gpgdir={}", p("gnupg")),
 		format!("--logfile={}", p("log/pacman.log")),
 	]
+}
+
+// the cache -Sc cleans, kept in cache.orig: each sync package's current
+// version with a .sig, an older one, a .part and a foreign package.
+// files libalpm cannot load stay out (be_package does not log
+// libarchive's texts, PORTING.md)
+fn cache_files(w: &SyncWorld) {
+	let cache = w.fx.dir().join("cache");
+	let mut pkgs = Vec::new();
+	for d in &w.dbs {
+		if let DbFile::Valid(p) = d {
+			pkgs.extend(p.iter().map(|p| (&p.name, &p.version)));
+		}
+	}
+	for (name, version) in pkgs {
+		let file = format!("{name}-{version}-x86_64.pkg.tar.gz");
+		write_package(&cache.join(&file), name, version, Comp::Gzip);
+		fs::write(cache.join(format!("{file}.sig")), "sig").unwrap();
+		let old = format!("{name}-0.1-1-x86_64.pkg.tar.zst");
+		write_package(&cache.join(old), name, "0.1-1", Comp::Zstd);
+	}
+	let part = "foreign-1.0-1-any.pkg.tar.part";
+	write_package(&cache.join(part), "foreign", "1.0-1", Comp::None);
+	let foreign = "foreign-1.0-1-any.pkg.tar.gz";
+	write_package(&cache.join(foreign), "foreign", "1.0-1", Comp::Gzip);
+	copy_dir(&cache, &w.fx.dir().join("cache.orig"));
 }
 
 // an installed package owning real files under the root, for -Ql/-Qo/-Qk.
@@ -159,8 +194,6 @@ fn owner_pkg(w: &SyncWorld) {
 		section("VERSION", &one("1.0-1")),
 		section("BASE", &one("owner")),
 		section("DESC", &one("owns files")),
-		// alpm-db wants a URL (PORTING.md, ALPM divergences)
-		section("URL", &one("https://example.org/owner")),
 		section("ARCH", &one("x86_64")),
 		section("BUILDDATE", &one("1700000000")),
 		section("INSTALLDATE", &one("1700000001")),
@@ -259,7 +292,11 @@ fn commands(w: &SyncWorld) -> Vec<Vec<String>> {
 		vec!["-Fyy"],
 		vec!["-Fyl"],
 		vec!["-S", sync],
+		// as root: stdin is empty, every question gets no
 		vec!["-Sc"],
+		vec!["-Scc"],
+		vec!["-Sc", "--noconfirm"],
+		vec!["-Scc", "--noconfirm"],
 		// transactions as far as --print goes, no root needed
 		vec!["-Sp", sync],
 		vec!["-S", "--print", sync],
@@ -318,12 +355,13 @@ fn world(
 	for cmd in commands(w) {
 		let mut args = cmd.clone();
 		args.extend(paths.iter().cloned());
-		let root = refresh(&cmd) || writes_local(&cmd);
+		let root = refresh(&cmd) || writes_local(&cmd) || cleans(&cmd);
 		let dir = w.fx.dir();
 		let restore = || {
 			if root {
 				restore_sync(dir);
 				restore_local(dir);
+				restore_cache(dir);
 			}
 		};
 		let written = || {
@@ -331,6 +369,7 @@ fn world(
 				(
 					snapshot_sync(dir),
 					snapshot(&dir.join("db/local")),
+					snapshot(&dir.join("cache")),
 				)
 			})
 		};
@@ -382,6 +421,11 @@ fn refresh(cmd: &[String]) -> bool {
 		.is_some_and(|c| c.starts_with("-Sy") || c.starts_with("-Fy"))
 }
 
+// -Sc/-Scc: root only, removes from the cache and sync dirs
+fn cleans(cmd: &[String]) -> bool {
+	cmd.first().is_some_and(|c| c.starts_with("-Sc"))
+}
+
 // -D without -k: root only, writes the local db
 fn writes_local(cmd: &[String]) -> bool {
 	cmd.first()
@@ -408,6 +452,13 @@ fn restore_local(dir: &Path) {
 	let local = dir.join("db/local");
 	fs::remove_dir_all(&local).unwrap();
 	copy_dir(&dir.join("local.orig"), &local);
+}
+
+// cache/ back to what the fixture wrote
+fn restore_cache(dir: &Path) {
+	let cache = dir.join("cache");
+	fs::remove_dir_all(&cache).unwrap();
+	copy_dir(&dir.join("cache.orig"), &cache);
 }
 
 // db/sync back to what the fixture wrote, with an old mtime so a

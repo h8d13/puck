@@ -1,5 +1,6 @@
 // port of lib/libalpm/package.c, the alpm_pkg_t data model, its pure
-// helpers, reverse dependencies and the ignore check.
+// helpers, reverse dependencies, the ignore check, xdata parsing and the
+// metadata check.
 //
 // not modelled: handle, ops vtable, origin_data.db, removes and oldpkg.
 // the alpm_pkg_get_* accessors are plain field reads with default_pkg_ops;
@@ -10,6 +11,7 @@ use std::cmp::Ordering;
 use std::ffi::{c_int, c_ulong};
 
 use crate::backup::Backup;
+use crate::callbacks::{Callbacks, LogLevel, logv};
 use crate::deps::{Depend, depcmp};
 use crate::filelist::FileList;
 use crate::handle::Handle;
@@ -21,6 +23,20 @@ use crate::version::vercmp;
 pub struct PkgXData {
 	pub name: Vec<u8>,
 	pub value: Vec<u8>,
+}
+
+// limits.h on linux
+pub(crate) const NAME_MAX: usize = 255;
+
+// _alpm_pkg_parse_xdata: "name=value" split at the first '=', None
+// without one
+pub fn parse_xdata(s: &[u8]) -> Option<PkgXData> {
+	let s = until_nul(s);
+	let sep = s.iter().position(|&c| c == b'=')?;
+	Some(PkgXData {
+		name: s[..sep].to_vec(),
+		value: s[sep + 1..].to_vec(),
+	})
 }
 
 // alpm_pkgreason_t, discriminants as in alpm.h
@@ -231,4 +247,47 @@ pub fn pkg_should_ignore(handle: &Handle, pkg: &Package) -> bool {
 		|pats: &[Vec<u8>], s: &[u8]| pats.iter().any(|p| fnmatch(p, s));
 	matches(handle.ignorepkgs(), pkg.name_bytes())
 		|| pkg.groups.iter().any(|g| matches(handle.ignoregroups(), g))
+}
+
+// _alpm_pkg_check_meta on a package with this name and version, every
+// failed check logged. true is the C's 0. the name is the fnmatch
+// pattern, the character class the string, as in the C
+pub fn check_meta(name: &[u8], version: &[u8], cb: &mut dyn Callbacks) -> bool {
+	let (name, version) = (until_nul(name), until_nul(version));
+	if name.is_empty() || version.is_empty() {
+		// the C's message has no '\n'
+		let msg = b"invalid package metadata (name or version missing)";
+		cb.log(LogLevel::Error, msg);
+		return false;
+	}
+	let mut ok = true;
+	let mut fail = |why: &[u8]| {
+		ok = false;
+		let parts: [&[u8]; 6] = [
+			b"invalid metadata for package ",
+			name,
+			b"-",
+			version,
+			b" (",
+			why,
+		];
+		logv(cb, LogLevel::Error, &parts);
+	};
+	if matches!(name[0], b'-' | b'.') {
+		fail(b"package name cannot start with '.' or '-')\n");
+	}
+	if fnmatch(name, b"[![:alnum:]+_.@-]") {
+		fail(b"package name contains invalid characters)\n");
+	}
+	let dashes = version.iter().filter(|&&c| c == b'-').count();
+	if dashes >= 2 {
+		fail(b"package version contains invalid characters)\n");
+	}
+	if version.contains(&b'/') {
+		fail(b"package version contains invalid characters)\n");
+	}
+	if name.len() + version.len() + 1 > NAME_MAX {
+		fail(b"package name and version too long)\n");
+	}
+	ok
 }

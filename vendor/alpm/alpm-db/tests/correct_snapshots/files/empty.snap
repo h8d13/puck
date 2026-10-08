@@ -1,8 +1,0 @@
----
-source: alpm-db/tests/correct.rs
-description: empty DbFiles JSON representation.
-expression: json
----
-{
-  "files": []
-}

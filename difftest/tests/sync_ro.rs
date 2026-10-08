@@ -9,7 +9,7 @@ use difftest::{
 	sync_read_only,
 };
 use pacman_cli::conf::{ColStr, Config, LOG_ERROR, LOG_WARNING};
-use pacman_cli::sync::{Unported, pacman_sync};
+use pacman_cli::sync::{Deferred, pacman_sync};
 use pacman_cli::util::Output;
 
 // a fixture and four handles per case: far slower than string fuzz
@@ -235,12 +235,12 @@ fn unported() {
 		set(&mut cfg);
 		pacman_sync(&cfg, &mut h, t, 0, &mut out)
 	};
-	assert_eq!(run(|c| c.op_s_clean = 1, &none), Err(Unported::Clean));
+	assert_eq!(run(|c| c.op_s_clean = 1, &none), Err(Deferred::Clean));
 	assert_eq!(
 		run(|c| c.op_s_upgrade = 1, &none),
-		Err(Unported::Transaction)
+		Err(Deferred::Transaction)
 	);
-	assert_eq!(run(|_| {}, &[b"a"]), Err(Unported::Transaction));
+	assert_eq!(run(|_| {}, &[b"a"]), Err(Deferred::Transaction));
 }
 
 #[test]

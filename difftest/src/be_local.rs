@@ -1,14 +1,16 @@
 // C side of lib/libalpm/be_local.c, reached through the public handle API:
 // alpm_initialize registers and validates the local db, the pkgcache
-// populates it, the lazy getters run local_db_read.
+// populates it, the lazy getters run local_db_read. every _alpm_log line
+// after alpm_initialize is recorded.
 use std::ffi::{c_int, c_void};
 
 use alpm_core::package::Package;
 
 use crate::cstr;
 use crate::handle::{
-	_alpm_db_get_pkgcache_hash, ALPM, alpm_db_get_pkgcache, alpm_errno,
-	alpm_get_localdb, alpm_initialize, alpm_release,
+	_alpm_db_get_pkgcache_hash, ALPM, CLogs, alpm_db_get_pkgcache,
+	alpm_errno, alpm_get_localdb, alpm_initialize, alpm_option_set_logcb,
+	alpm_release, record_log,
 };
 use crate::package::{CPkg, list_data, read_pkg};
 use crate::package::{
@@ -44,12 +46,13 @@ pub struct CLocalDb {
 }
 
 // Err is the alpm_errno_t of alpm_initialize (validate) or of the
-// pkgcache (populate). root and dbpath must be existing directories
+// pkgcache (populate), next to the log lines of the populate and loads.
+// root and dbpath must be existing directories
 pub fn c_local_db(
 	root: &[u8],
 	dbpath: &[u8],
 	loads: Loads,
-) -> Result<CLocalDb, c_int> {
+) -> (Result<CLocalDb, c_int>, CLogs) {
 	let _guard = ALPM.lock().unwrap_or_else(|e| e.into_inner());
 	let (root, dbpath) = (cstr(root), cstr(dbpath));
 	let mut err = 0;
@@ -58,13 +61,20 @@ pub fn c_local_db(
 		alpm_initialize(root.as_ptr(), dbpath.as_ptr(), &mut err)
 	};
 	if h.is_null() {
-		return Err(err);
+		return (Err(err), CLogs::new());
 	}
+	let mut logs = CLogs::new();
+	let ctx: *mut CLogs = &mut logs;
+	// SAFETY: h is live, logs outlives the handle; nothing else
+	// touches logs while the C runs
+	unsafe { alpm_option_set_logcb(h, Some(record_log), ctx.cast()) };
 	let r = read_localdb(h, loads);
+	// SAFETY: h is live, the release lines are not wanted
+	unsafe { alpm_option_set_logcb(h, None, std::ptr::null_mut()) };
 	// SAFETY: h came from alpm_initialize, no transaction, no lock held;
 	// nothing from it is used afterwards
 	unsafe { alpm_release(h) };
-	r
+	(r, logs)
 }
 
 fn read_localdb(h: *mut c_void, loads: Loads) -> Result<CLocalDb, c_int> {

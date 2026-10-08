@@ -1,6 +1,0 @@
----
-source: alpm-repo-db/tests/correct.rs
-description: empty RepoFiles JSON representation.
-expression: json
----
-[]
