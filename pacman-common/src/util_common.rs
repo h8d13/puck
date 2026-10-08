@@ -7,14 +7,18 @@
 
 use std::ffi::OsStr;
 use std::fs::{self, Metadata};
-use std::io::{self, BufRead, ErrorKind};
+use std::io::{self, BufRead, Read};
 use std::os::unix::ffi::OsStrExt;
 
 // limits.h on linux, the buffer size of paths and lines in the C
 pub const PATH_MAX: usize = 4096;
 
-// what a C string would see of these bytes
-pub(crate) fn until_nul(s: &[u8]) -> &[u8] {
+// what a C string would see of these bytes. contains() is memchr for
+// bytes: the common nul-free case costs what the C's strlen does
+pub fn until_nul(s: &[u8]) -> &[u8] {
+	if !s.contains(&0) {
+		return s;
+	}
 	match s.iter().position(|&c| c == 0) {
 		Some(i) => &s[..i],
 		None => s,
@@ -95,26 +99,9 @@ pub fn safe_fgets_into<R: BufRead>(
 	let Some(max) = size.checked_sub(1) else {
 		return Ok(false);
 	};
-	while out.len() < max {
-		let avail = match r.fill_buf() {
-			Ok(b) => b,
-			Err(e) if e.kind() == ErrorKind::Interrupted => {
-				continue;
-			}
-			Err(e) => return Err(e),
-		};
-		if avail.is_empty() {
-			break;
-		}
-		let want = avail.len().min(max - out.len());
-		let nl = avail[..want].iter().position(|&c| c == b'\n');
-		let n = nl.map_or(want, |i| i + 1);
-		out.extend_from_slice(&avail[..n]);
-		r.consume(n);
-		if nl.is_some() {
-			break;
-		}
-	}
+	// read_until finds the '\n' with memchr like glibc's fgets, take()
+	// stops it at size - 1; it retries EINTR itself
+	r.by_ref().take(max as u64).read_until(b'\n', out)?;
 	Ok(!(out.is_empty() && max > 0))
 }
 

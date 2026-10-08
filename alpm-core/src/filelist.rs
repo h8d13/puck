@@ -28,19 +28,6 @@ fn name(f: &File) -> &[u8] {
 	until_nul(&f.name)
 }
 
-// strcmp on two names: one walk that stops at the first difference or
-// nul, without cutting both at their nul first (sort and its pre-sorted
-// check run this once per pair of a package's files)
-fn strcmp(a: &File, b: &File) -> Ordering {
-	let (a, b) = (&a.name, &b.name);
-	let n =
-		a.iter().zip(b)
-			.take_while(|&(x, y)| x == y && *x != 0)
-			.count();
-	let at = |s: &[u8]| s.get(n).copied().unwrap_or(0);
-	at(a).cmp(&at(b))
-}
-
 // _alpm_filelist_pathcmp: strcmp where one side ending right where the
 // other has a '/' skips that '/', so "usr" equals "usr/". the C returns
 // *p1 - *p2 on plain char: signed on x86_64, there bytes >= 0x80 sort
@@ -70,10 +57,10 @@ impl FileList {
 	pub fn sort(&mut self) {
 		// the C's pre-sorted check: written lists are sorted, one pass
 		// and no scratch allocation
-		if self.files.windows(2).all(|w| strcmp(&w[0], &w[1]).is_le()) {
+		if self.files.windows(2).all(|w| name(&w[0]) <= name(&w[1])) {
 			return;
 		}
-		self.files.sort_by(strcmp);
+		self.files.sort_by(|a, b| name(a).cmp(name(b)));
 	}
 
 	// alpm_filelist_contains: binary search, files must be sorted.

@@ -212,14 +212,14 @@ pub fn check_pkg_fast(
 		filepath.truncate(rootlen);
 		filepath.extend_from_slice(path);
 		let filepath = &filepath[..];
-		match file_exists(o, c, env, pkgname, &filepath, rootlen) {
+		match file_exists(o, c, env, pkgname, filepath, rootlen) {
 			Exists::Yes(st) => {
 				// the C reads path[plen - 1], files lists never
 				// hold empty names
 				let expect_dir = path.last() == Some(&b'/');
 				if expect_dir != st.is_dir() {
 					let what = b"File type mismatch";
-					warn(o, c, pkgname, &filepath, what);
+					warn(o, c, pkgname, filepath, what);
 					errors += 1;
 				}
 			}

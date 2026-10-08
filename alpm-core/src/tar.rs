@@ -30,7 +30,7 @@ use std::io::{self, ErrorKind, Read};
 
 use crate::filter::Filter;
 use crate::util::{
-	S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG,
+	S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, until_nul,
 };
 
 // archive.h results; err_combine keeps the lowest
@@ -390,12 +390,6 @@ impl Ae {
 		let major = self.rdev.map_or(0, |r| r.0);
 		self.rdev = Some((major, m));
 	}
-}
-
-// a C string read out of a fixed or counted buffer
-fn until_nul(s: &[u8]) -> &[u8] {
-	let end = s.iter().position(|&c| c == 0).unwrap_or(s.len());
-	&s[..end]
 }
 
 fn is_null(h: &[u8]) -> bool {

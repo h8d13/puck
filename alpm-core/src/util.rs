@@ -30,15 +30,7 @@ use crate::filter::{self, Code};
 use crate::handle::Handle;
 use crate::tar;
 
-pub use pacman_common::util_common::{PATH_MAX, llstat};
-
-// what a C string would see of these bytes
-pub fn until_nul(s: &[u8]) -> &[u8] {
-	match s.iter().position(|&c| c == 0) {
-		Some(i) => &s[..i],
-		None => s,
-	}
-}
+pub use pacman_common::util_common::{PATH_MAX, llstat, until_nul};
 
 // _alpm_strip_newline: trailing '\n' only, '\r' stays
 pub fn strip_newline(s: &[u8]) -> &[u8] {
