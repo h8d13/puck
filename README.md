@@ -1,17 +1,25 @@
-# saruman
+# puck
 
-Rust port of `pacman`, file by file, checked against the upstream C with
-differential tests.
-
-Builds on the official Arch ALPM crates where they already cover a part.
-
-Testing needs rust toolchain + `fakechroot fakeroot`
+> https://en.wikipedia.org/wiki/Pac-Man
 
 ## Setup
 
 ```
-git clone --recurse-submodules git@github.com:h8d13/ratman.git
-cd ratman
+cargo build --release -p pacman-cli
+./target/release/puck --help
+```
+
+Rust port of `pacman`, file by file, checked against the upstream C with
+differential tests.
+
+
+### Testing
+
+Needs rust toolchain + `fakechroot fakeroot`
+
+```shell
+git clone --recurse-submodules git@github.com:h8d13/puck.git
+cd puck
 meson setup pacman/build pacman && ninja -C pacman/build
 cargo test --release
 ```
@@ -21,7 +29,7 @@ Building the C reference follows upstream: `pacman/doc/index.asciidoc`
 
 ## Layout
 
-- `pacman/`, `alpm/`: submodules, upstream pacman (C reference) and ALPM
+- `pacman/`, `alpm/`: submodules, upstreams
 - `alpm-core/`, `pacman-common/`, `pacman-cli/`, `vercmp/`: the port
 - `difftest/`: equivalence tests against the C, the only crate calling C
 
@@ -32,5 +40,3 @@ Building the C reference follows upstream: `pacman/doc/index.asciidoc`
 - `UPSTREAM.md`: findings in the C reference, with practical reach
 
 ---
-
-Used: Anthropic Claude Opus 5.5: ~20M tokens.
