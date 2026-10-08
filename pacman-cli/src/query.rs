@@ -3,17 +3,18 @@
 // filters and -q
 //
 // config->handle is the Handle passed in, its local and sync dbs answer
-// what the C asks libalpm. a package is cloned out of the db cache once
-// the getters the C calls on it (desc, files, scriptlet) loaded it in
-// place, so filters and displays can walk the caches again (requiredby,
-// sync lookups) while it is shown. stdout and stderr go into an Output
-// like check.rs, pm_printf filtered by the config's logmask. getcols()
-// and getenv("PATH") come in through QueryEnv. messages are the
-// untranslated msgids.
+// what the C asks libalpm. a local package is cloned out of the db cache
+// and reloaded in place where a getter the C calls on it (desc, files,
+// scriptlet) lazy-loads, so filters and displays can walk the caches
+// again (requiredby, sync lookups) while it is shown. stdout and stderr
+// go into an Output like check.rs, pm_printf filtered by the config's
+// logmask. getcols() and getenv("PATH") come in through QueryEnv.
+// messages are the untranslated msgids.
 //
-// libalpm's log lines (lazy-load errors) go to the handle's callbacks.
-// not modelled: gpgme checks of package files with a .sig (-Qpi reports
-// ALPM_ERR_GPGME there).
+// libalpm's log lines (lazy-load errors, debug lines) go to the handle's
+// callbacks, which print at once. the C's stderr is unbuffered, so the
+// Output is flushed before every load and at each package or target:
+// the op's lines and the callbacks' come out in the C's order.
 use std::ffi::{OsStr, c_int};
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read};
@@ -22,28 +23,35 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
+use alpm_core::backup::Backup;
 use alpm_core::be_local::{
 	INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET, MtreeEntry, MtreeError,
 };
-use alpm_core::be_package::{self, pkg_load};
+use alpm_core::be_package::{self, pkg_load_level};
 use alpm_core::db::{DB_USAGE_UPGRADE, Db};
+use alpm_core::deps::depcmp_literal;
 use alpm_core::error::Errno;
+use alpm_core::filelist;
 use alpm_core::handle::Handle;
 use alpm_core::package::{
 	DbCaches, Package, PkgFrom, PkgReason, compute_optionalfor,
-	compute_requiredby, pkg_compare_versions, pkg_should_ignore,
+	compute_requiredby, pkg_should_ignore,
 };
+use alpm_core::signing::{self, pkg_check_pgp_signature};
+use alpm_core::sync::sync_get_new_version;
 use alpm_core::util::{compute_md5sum, fnmatch, until_nul};
 use pacman_common::util_common::{PATH_MAX, mbasename, mdirname};
 
-use crate::check::{CheckEnv, check_pkg_fast, check_pkg_full};
+use crate::check::{CheckEnv, check_pkg_fast, check_pkg_full, is_backup};
 use crate::conf::{Config, LOG_ERROR, LOG_WARNING, cat};
 use crate::package::{
 	FileProbe, PkgEnv, dump_pkg_changelog, dump_pkg_files, dump_pkg_full,
 	dump_pkg_search,
 };
 use crate::pacman::{PKG_LOCALITY_FOREIGN, PKG_LOCALITY_NATIVE};
-use crate::util::{Output, SigResult, check_syncdbs, pm_printf};
+use crate::util::{
+	Output, SigResult, SigStatus, SigValidity, check_syncdbs, pm_printf,
+};
 const LOCAL_PREFIX: &[u8] = b"local/";
 // fcntl.h on linux: the access(R_OK) probes open without blocking on a
 // fifo
@@ -78,13 +86,23 @@ fn version(pkg: &Package) -> &[u8] {
 	until_nul(pkg.version.as_deref().unwrap_or_default())
 }
 
-// the libalpm calls of package.c on config->handle. pm_printf output is
-// kept apart and appended to stderr after the display, which writes
-// nothing else there
+// the libalpm calls of package.c on config->handle, pos the list position
+// of a local package's cache entry. pm_printf output is kept apart and
+// appended to stderr after the display, which writes nothing else there
 struct Env<'a> {
 	handle: &'a mut Handle,
 	config: &'a Config,
+	pos: Option<usize>,
 	err: Vec<u8>,
+}
+
+impl Env<'_> {
+	// the cache entry with req loaded. the Output was flushed before the
+	// display, which only writes stdout and err up to here
+	fn loaded(&mut self, req: c_int) -> Option<&Package> {
+		let dbs = self.handle.dbs_mut();
+		dbs.local?.load_pkg_at(dbs.dbext, dbs.cb, self.pos?, req)
+	}
 }
 
 impl DbCaches for Env<'_> {
@@ -111,23 +129,16 @@ impl PkgEnv for Env<'_> {
 		Vec::new()
 	}
 
-	// _alpm_gpgme_checksig up to gpgme: the file must be readable, then
-	// a base64 signature or a readable "<file>.sig" is needed
+	// alpm_pkg_check_pgp_signature on the handle's keyring, logging
+	// through its callbacks
 	fn check_signature(
 		&mut self,
 		pkg: &Package,
 	) -> Result<Vec<SigResult>, Errno> {
-		let file =
-			until_nul(pkg.filename.as_deref().unwrap_or_default());
-		if !readable(file) {
-			return Err(Errno::NotAFile);
-		}
-		let sig = cat(&[file, b".sig"]);
-		if pkg.base64_sig.is_none() && !readable(&sig) {
-			return Err(Errno::SigMissing);
-		}
-		// gpgme verification is not ported
-		Err(Errno::Gpgme)
+		let results = self.handle.with_callbacks(|h, cb| {
+			pkg_check_pgp_signature(h.keyring_mut(), cb, pkg)
+		})?;
+		Ok(results.iter().map(sig_result).collect())
 	}
 
 	fn root(&mut self) -> Vec<u8> {
@@ -168,12 +179,50 @@ impl PkgEnv for Env<'_> {
 	fn error(&mut self, msg: &[u8]) {
 		pm_printf(&mut self.err, self.config, LOG_ERROR, msg);
 	}
+
+	fn has_scriptlet(&mut self, pkg: &Package) -> bool {
+		let p = self.loaded(INFRQ_SCRIPTLET).unwrap_or(pkg);
+		p.scriptlet != 0
+	}
+
+	fn backup(&mut self, pkg: &Package) -> Vec<Backup> {
+		let p = self.loaded(INFRQ_FILES).unwrap_or(pkg);
+		p.backup.clone()
+	}
 }
 
-// check.c on config->handle. file packages keep libalpm's default ops,
-// whose mtree_open returns NULL
+// the part of an alpm_sigresult_t signature_display reads
+fn sig_result(r: &signing::SigResult) -> SigResult {
+	use signing::{SigStatus as S, SigValidity as V};
+	let status = match r.status {
+		S::Valid => SigStatus::Valid,
+		S::KeyExpired => SigStatus::KeyExpired,
+		S::SigExpired => SigStatus::SigExpired,
+		S::KeyUnknown => SigStatus::KeyUnknown,
+		S::KeyDisabled => SigStatus::KeyDisabled,
+		S::Invalid => SigStatus::Invalid,
+	};
+	let validity = match r.validity {
+		V::Full => SigValidity::Full,
+		V::Marginal => SigValidity::Marginal,
+		V::Never => SigValidity::Never,
+		V::Unknown => SigValidity::Unknown,
+	};
+	SigResult {
+		status,
+		validity,
+		uid: r.key.uid.clone(),
+		fingerprint: r.key.fingerprint.clone().unwrap_or_default(),
+	}
+}
+
+// check.c on config->handle, pos as in Env. file packages keep libalpm's
+// default ops, whose mtree_open returns NULL
 struct Checks<'a> {
-	handle: &'a Handle,
+	handle: &'a mut Handle,
+	pos: Option<usize>,
+	// alpm_pkg_get_backup once loaded
+	backup: Option<Vec<Backup>>,
 }
 
 impl CheckEnv for Checks<'_> {
@@ -189,63 +238,110 @@ impl CheckEnv for Checks<'_> {
 		self.handle.match_noextract(path)
 	}
 
-	fn mtree(&self, pkg: &Package) -> Result<Vec<MtreeEntry>, MtreeError> {
-		let local = self.handle.localdb().and_then(Db::local);
+	fn files(
+		&mut self,
+		o: &mut Output,
+		pkg: &Package,
+	) -> Vec<filelist::File> {
+		let loaded = self
+			.pos
+			.and_then(|i| local_at(self.handle, o, i, INFRQ_FILES));
+		loaded.as_ref().unwrap_or(pkg).files.files.clone()
+	}
+
+	fn is_backup(
+		&mut self,
+		o: &mut Output,
+		pkg: &Package,
+		path: &[u8],
+	) -> bool {
+		if self.backup.is_none() {
+			let loaded = self.pos.and_then(|i| {
+				local_at(self.handle, o, i, INFRQ_FILES)
+			});
+			let p = loaded.as_ref().unwrap_or(pkg);
+			self.backup = Some(p.backup.clone());
+		}
+		is_backup(self.backup.as_deref().unwrap_or_default(), path)
+	}
+
+	fn mtree(
+		&mut self,
+		pkg: &Package,
+	) -> Result<Vec<MtreeEntry>, MtreeError> {
+		let dbs = self.handle.dbs_mut();
+		let local = dbs.local.as_deref().and_then(Db::local);
 		match (&pkg.origin, local) {
 			(Some(PkgFrom::LocalDb), Some(local)) => {
-				local.mtree(pkg)
+				local.mtree(pkg, dbs.cb)
 			}
 			_ => Err(MtreeError::Missing),
 		}
 	}
 }
 
-// the getters filter calls on a local package: the reason (-Qe/-Qd)
-// and its provides (-Qt requiredby)
-fn filter_req(c: &Config) -> c_int {
-	match c.op_q_explicit != 0 || c.op_q_deps != 0 || c.op_q_unrequired != 0
-	{
-		true => INFRQ_DESC,
-		false => 0,
-	}
+// a package -Q shows: the copy filter and display read and, for a local
+// one, the list position of its cache entry
+struct Shown {
+	pos: Option<usize>,
+	pkg: Package,
 }
 
-// the getters display calls once filter passed, in the C's order: -i
-// (desc, scriptlet) and the groups of -Qu's ignore check (skipped for a
-// name in IgnorePkg), then files (-ii backup, -l, -k). a failed read is
-// sticky, so the order decides what a broken entry still shows. -Qkk
-// loads files up front, the C only once an mtree entry reaches the
-// backup check
-fn display_req(c: &Config, handle: &Handle, pkg: &Package) -> [c_int; 2] {
-	let plain = c.op_q_info == 0
-		&& c.op_q_list == 0
-		&& c.op_q_changelog == 0
-		&& c.op_q_check == 0;
-	let ignored = || {
-		let name = pkg.name_bytes();
-		handle.ignorepkgs().iter().any(|p| fnmatch(p, name))
-	};
-	let mut first = 0;
-	if c.op_q_upgrade != 0 && plain && c.quiet == 0 && !ignored() {
-		first |= INFRQ_DESC;
-	}
-	if c.op_q_info != 0 {
-		first |= INFRQ_DESC | INFRQ_SCRIPTLET;
-	}
-	let files = c.op_q_list != 0 || c.op_q_check != 0 || c.op_q_info > 1;
-	[first, if files { INFRQ_FILES } else { 0 }]
-}
-
-// the local cache entry at list position i with each of reqs loaded in
-// turn, copied out. None past the end
-fn local_at(handle: &mut Handle, i: usize, reqs: &[c_int]) -> Option<Package> {
+// the local cache entry at list position i with req loaded, copied out.
+// None past the end. the op's output goes out first, the load logs
+// through the callbacks
+fn local_at(
+	handle: &mut Handle,
+	o: &mut Output,
+	i: usize,
+	req: c_int,
+) -> Option<Package> {
+	o.flush();
 	let dbs = handle.dbs_mut();
-	let db = dbs.local?;
-	let mut pkg = None;
-	for &req in reqs {
-		pkg = db.load_pkg_at(dbs.dbext, dbs.cb, i, req);
+	dbs.local?.load_pkg_at(dbs.dbext, dbs.cb, i, req).cloned()
+}
+
+impl Shown {
+	// a getter of req on a local package: the entry loads, the copy
+	// follows it
+	fn load(&mut self, handle: &mut Handle, o: &mut Output, req: c_int) {
+		let pos = self.pos;
+		if let Some(pkg) = pos.and_then(|i| local_at(handle, o, i, req))
+		{
+			self.pkg = pkg;
+		}
 	}
-	pkg.cloned()
+}
+
+// the loads of find_requiredby on the local cache: every entry's desc in
+// list order for its depends, the shown package's own for its provides
+// at the first depend it does not match by name and version, at its own
+// list position the latest
+fn requiredby_loads(handle: &mut Handle, o: &mut Output, s: &mut Shown) {
+	let Some(pos) = s.pos else {
+		return;
+	};
+	o.flush();
+	let dbs = handle.dbs_mut();
+	let Some(db) = dbs.local else {
+		return;
+	};
+	let mut own = false;
+	for j in 0.. {
+		let Some(p) = db.load_pkg_at(dbs.dbext, dbs.cb, j, INFRQ_DESC)
+		else {
+			break;
+		};
+		own |= j == pos;
+		if !own && p.depends.iter().any(|d| !depcmp_literal(&s.pkg, d))
+		{
+			let _ = db.load_pkg_at(
+				dbs.dbext, dbs.cb, pos, INFRQ_DESC,
+			);
+			own = true;
+		}
+	}
+	s.load(handle, o, INFRQ_DESC);
 }
 
 // pkg_get_locality: native when a sync db has a package of that name
@@ -259,22 +355,6 @@ fn locality(handle: &mut Handle, pkg: &Package) -> u16 {
 	}
 }
 
-// alpm_sync_get_new_version: the first sync db holding a package of
-// that name decides. its version and the db's usage when it is newer
-fn new_version(handle: &mut Handle, pkg: &Package) -> Option<(Vec<u8>, c_int)> {
-	let dbs = handle.dbs_mut();
-	for db in dbs.sync {
-		let usage = db.usage();
-		let Ok(spkg) = db.get_pkg(dbs.dbext, dbs.cb, pkg.name_bytes())
-		else {
-			continue;
-		};
-		let newer = pkg_compare_versions(spkg, pkg).is_gt();
-		return newer.then(|| (version(spkg).to_vec(), usage));
-	}
-	None
-}
-
 // is_unrequired: nothing depends on pkg, at level 1 nothing optionally
 // either
 fn is_unrequired(handle: &mut Handle, pkg: &Package, level: u16) -> bool {
@@ -284,22 +364,33 @@ fn is_unrequired(handle: &mut Handle, pkg: &Package, level: u16) -> bool {
 	level != 1 || compute_optionalfor(pkg, handle).is_empty()
 }
 
-fn filter(c: &Config, handle: &mut Handle, pkg: &Package) -> bool {
-	if c.op_q_explicit != 0 && pkg.reason != PkgReason::Explicit {
+fn filter(
+	c: &Config,
+	handle: &mut Handle,
+	o: &mut Output,
+	s: &mut Shown,
+) -> bool {
+	// alpm_pkg_get_reason
+	if c.op_q_explicit != 0 || c.op_q_deps != 0 {
+		s.load(handle, o, INFRQ_DESC);
+	}
+	if c.op_q_explicit != 0 && s.pkg.reason != PkgReason::Explicit {
 		return false;
 	}
-	if c.op_q_deps != 0 && pkg.reason != PkgReason::Depend {
+	if c.op_q_deps != 0 && s.pkg.reason != PkgReason::Depend {
 		return false;
 	}
-	if c.op_q_locality != 0 && c.op_q_locality != locality(handle, pkg) {
+	if c.op_q_locality != 0 && c.op_q_locality != locality(handle, &s.pkg) {
 		return false;
 	}
-	if c.op_q_unrequired != 0
-		&& !is_unrequired(handle, pkg, c.op_q_unrequired)
+	if c.op_q_unrequired != 0 {
+		requiredby_loads(handle, o, s);
+		if !is_unrequired(handle, &s.pkg, c.op_q_unrequired) {
+			return false;
+		}
+	}
+	if c.op_q_upgrade != 0 && sync_get_new_version(handle, &s.pkg).is_none()
 	{
-		return false;
-	}
-	if c.op_q_upgrade != 0 && new_version(handle, pkg).is_none() {
 		return false;
 	}
 	true
@@ -307,19 +398,32 @@ fn filter(c: &Config, handle: &mut Handle, pkg: &Package) -> bool {
 
 // the plain line: "name version", with -Qu " -> newversion" and
 // " [ignored]" for an ignored package or a db not used for upgrades
-fn plain_line(c: &Config, handle: &mut Handle, pkg: &Package) -> Vec<u8> {
+fn plain_line(
+	c: &Config,
+	handle: &mut Handle,
+	o: &mut Output,
+	s: &mut Shown,
+) -> Vec<u8> {
 	let cs = &c.colstr;
 	if c.quiet != 0 {
-		return cat(&[pkg.name_bytes(), b"\n"]);
+		return cat(&[s.pkg.name_bytes(), b"\n"]);
 	}
-	let (name, ver) = (pkg.name_bytes(), version(pkg));
+	let (name, ver) = (s.pkg.name_bytes(), version(&s.pkg));
 	let mut out = cat(&[cs.title, name, b" ", cs.version, ver, cs.nocolor]);
 	// filter made sure there is a newer version
 	if c.op_q_upgrade != 0
-		&& let Some((newver, usage)) = new_version(handle, pkg)
+		&& let Some((i, newpkg)) = sync_get_new_version(handle, &s.pkg)
 	{
-		out.extend(cat(&[b" -> ", cs.version, &newver, cs.nocolor]));
-		if pkg_should_ignore(handle, pkg)
+		let usage = handle.syncdbs()[i].usage();
+		let newver = version(&newpkg);
+		out.extend(cat(&[b" -> ", cs.version, newver, cs.nocolor]));
+		// alpm_pkg_should_ignore reads the groups of a name IgnorePkg
+		// does not match
+		let name = s.pkg.name_bytes();
+		if !handle.ignorepkgs().iter().any(|p| fnmatch(p, name)) {
+			s.load(handle, o, INFRQ_DESC);
+		}
+		if pkg_should_ignore(handle, &s.pkg)
 			|| usage & DB_USAGE_UPGRADE == 0
 		{
 			out.extend_from_slice(b" [ignored]");
@@ -329,40 +433,57 @@ fn plain_line(c: &Config, handle: &mut Handle, pkg: &Package) -> Vec<u8> {
 	out
 }
 
+// display: each part loads what its getters ask for, in the C's order
 fn display(
 	c: &Config,
 	handle: &mut Handle,
 	env: &QueryEnv,
-	pkg: &Package,
+	s: &mut Shown,
 	o: &mut Output,
 ) -> i32 {
 	let mut ret = 0;
-	let mut penv = Env {
-		handle,
-		config: c,
-		err: Vec::new(),
-	};
 	if c.op_q_info != 0 {
-		let extra = c.op_q_info > 1;
-		let out = &mut o.stdout;
-		dump_pkg_full(out, &mut penv, pkg, extra, env.cols, &c.colstr);
+		// alpm_pkg_get_builddate first, scriptlet and backup through
+		// Env where dump_pkg_full asks
+		s.load(handle, o, INFRQ_DESC);
+		let mut penv = Env {
+			handle,
+			config: c,
+			pos: s.pos,
+			err: Vec::new(),
+		};
+		let (extra, out) = (c.op_q_info > 1, &mut o.stdout);
+		dump_pkg_full(
+			out, &mut penv, &s.pkg, extra, env.cols, &c.colstr,
+		);
 		o.stderr.append(&mut penv.err);
 	}
 	if c.op_q_list != 0 {
-		let root = penv.handle.root();
-		let quiet = c.quiet != 0;
-		dump_pkg_files(&mut o.stdout, pkg, root, quiet, &c.colstr);
+		s.load(handle, o, INFRQ_FILES);
+		let (root, quiet) = (handle.root(), c.quiet != 0);
+		dump_pkg_files(&mut o.stdout, &s.pkg, root, quiet, &c.colstr);
 	}
 	if c.op_q_changelog != 0 {
-		dump_pkg_changelog(&mut o.stdout, &mut penv, pkg);
+		let mut penv = Env {
+			handle,
+			config: c,
+			pos: s.pos,
+			err: Vec::new(),
+		};
+		dump_pkg_changelog(&mut o.stdout, &mut penv, &s.pkg);
 		o.stderr.append(&mut penv.err);
 	}
-	let handle = penv.handle;
 	if c.op_q_check != 0 {
-		let checks = Checks { handle };
+		// before the mtree open logs
+		o.flush();
+		let mut checks = Checks {
+			handle,
+			pos: s.pos,
+			backup: None,
+		};
 		ret = match c.op_q_check {
-			1 => check_pkg_fast(o, c, &checks, pkg),
-			_ => check_pkg_full(o, c, &checks, pkg),
+			1 => check_pkg_fast(o, c, &mut checks, &s.pkg),
+			_ => check_pkg_full(o, c, &mut checks, &s.pkg),
 		};
 	}
 	if c.op_q_info == 0
@@ -370,7 +491,7 @@ fn display(
 		&& c.op_q_changelog == 0
 		&& c.op_q_check == 0
 	{
-		let line = plain_line(c, handle, pkg);
+		let line = plain_line(c, handle, o, s);
 		o.stdout.extend(line);
 	}
 	ret
@@ -524,8 +645,15 @@ fn query_fileowner(
 		pm_printf(&mut o.stderr, c, LOG_ERROR, msg);
 		return 1;
 	}
+	// alpm_db_get_pkgcache before the first target
+	let dbs = handle.dbs_mut();
+	if let Some(db) = dbs.local {
+		let _ = db.pkgcache(dbs.dbext, dbs.cb);
+	}
 	let mut ret = 0;
 	for t in targets {
+		// the last target's lines before this one's loads
+		o.flush();
 		if !query_owner(c, handle, env, t, o) {
 			ret += 1;
 		}
@@ -601,6 +729,15 @@ fn groups(
 	groups.into_iter().map(copy).collect()
 }
 
+// filter on a group member: the group cache loaded every desc
+fn member(c: &Config, h: &mut Handle, o: &mut Output, pkg: &Package) -> bool {
+	let mut s = Shown {
+		pos: None,
+		pkg: pkg.clone(),
+	};
+	filter(c, h, o, &mut s)
+}
+
 fn query_group(
 	c: &Config,
 	handle: &mut Handle,
@@ -609,8 +746,10 @@ fn query_group(
 ) -> i32 {
 	if targets.is_empty() {
 		for (name, pkgs) in groups(handle, None) {
-			for pkg in pkgs.iter().filter(|p| filter(c, handle, p))
-			{
+			for pkg in pkgs.iter() {
+				if !member(c, handle, o, pkg) {
+					continue;
+				}
 				let line = [
 					&name[..],
 					b" ",
@@ -624,6 +763,8 @@ fn query_group(
 	}
 	let mut ret = 0;
 	for grpname in targets {
+		// the last target's lines before this one's loads
+		o.flush();
 		let grpname = until_nul(grpname);
 		let found = groups(handle, Some(grpname));
 		let Some((_, pkgs)) = found.into_iter().next() else {
@@ -632,7 +773,10 @@ fn query_group(
 			ret += 1;
 			continue;
 		};
-		for pkg in pkgs.iter().filter(|p| filter(c, handle, p)) {
+		for pkg in pkgs.iter() {
+			if !member(c, handle, o, pkg) {
+				continue;
+			}
 			let name = pkg.name_bytes();
 			match c.quiet {
 				0 => o.stdout
@@ -674,7 +818,11 @@ fn target_pkg(
 ) -> Option<Target> {
 	let strname = until_nul(target);
 	if c.op_q_isfile != 0 {
-		return match pkg_load(strname, true) {
+		// alpm_pkg_load(handle, strname, 1, 0): logs through the handle
+		let loaded = handle.with_callbacks(|h, cb| {
+			pkg_load_level(h.keyring_mut(), cb, strname, true, 0)
+		});
+		return match loaded {
 			Ok(pkg) => Some(Target::File(Box::new(pkg))),
 			Err(e) => {
 				let why = e.errno().strerror().as_bytes();
@@ -707,9 +855,8 @@ fn target_pkg(
 	found
 }
 
-// filter + display of one package, local entries loaded by what each
-// asks for. None past the end of the cache, Some(None) when filtered
-// out, else the display result
+// filter + display of one package. None past the end of the cache,
+// Some(None) when filtered out, else the display result
 fn show(
 	c: &Config,
 	handle: &mut Handle,
@@ -717,23 +864,20 @@ fn show(
 	target: Target,
 	o: &mut Output,
 ) -> Option<Option<i32>> {
-	let (i, pkg) = match target {
-		Target::Local(i) => {
-			(Some(i), local_at(handle, i, &[filter_req(c)])?)
-		}
-		Target::File(pkg) => (None, *pkg),
+	let mut s = match target {
+		Target::Local(i) => Shown {
+			pos: Some(i),
+			pkg: local_at(handle, o, i, 0)?,
+		},
+		Target::File(pkg) => Shown {
+			pos: None,
+			pkg: *pkg,
+		},
 	};
-	if !filter(c, handle, &pkg) {
+	if !filter(c, handle, o, &mut s) {
 		return Some(None);
 	}
-	let pkg = match i {
-		Some(i) => {
-			let reqs = display_req(c, handle, &pkg);
-			local_at(handle, i, &reqs)?
-		}
-		None => pkg,
-	};
-	Some(Some(display(c, handle, env, &pkg, o)))
+	Some(Some(display(c, handle, env, &mut s, o)))
 }
 
 // pacman_query: the -Q operation on targets, returns the exit status
@@ -785,6 +929,8 @@ pub fn pacman_query(
 		return query_fileowner(c, handle, env, targets, o);
 	} else {
 		for t in targets {
+			// the last target's lines before this one's loads
+			o.flush();
 			match target_pkg(c, handle, t, o) {
 				Some(target) => {
 					let shown =

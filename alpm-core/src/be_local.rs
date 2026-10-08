@@ -669,12 +669,27 @@ pub fn read_mtree(path: &[u8]) -> Result<Vec<MtreeEntry>, MtreeError> {
 
 impl LocalDb {
 	// alpm_pkg_mtree_open + alpm_pkg_mtree_next to the end, on
-	// _alpm_local_db_pkgpath(db, pkg, "mtree")
+	// _alpm_local_db_pkgpath(db, pkg, "mtree"). an open failure is
+	// logged like _cache_mtree_open
 	pub fn mtree(
 		&self,
 		pkg: &Package,
+		cb: &mut dyn Callbacks,
 	) -> Result<Vec<MtreeEntry>, MtreeError> {
-		read_mtree(&self.pkgpath(pkg, b"mtree"))
+		let path = self.pkgpath(pkg, b"mtree");
+		let r = read_mtree(&path);
+		if let Err(MtreeError::Read(e)) = &r {
+			let text = e.text();
+			let parts: [&[u8]; 5] = [
+				b"error while reading file ",
+				&path,
+				b": ",
+				&text,
+				b"\n",
+			];
+			logv(cb, LogLevel::Error, &parts);
+		}
+		r
 	}
 }
 

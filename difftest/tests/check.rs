@@ -197,16 +197,16 @@ impl RustSide {
 	}
 
 	fn check(&self, name: &str, full: bool, cfg: &Config) -> CCheck {
-		let env = HandleEnv {
+		let mut env = HandleEnv {
 			handle: &self.handle,
 			db: &self.db,
 		};
 		let mut o = Output::default();
 		let pkg = self.pkg(name);
 		let ret = if full {
-			check_pkg_full(&mut o, cfg, &env, pkg)
+			check_pkg_full(&mut o, cfg, &mut env, pkg)
 		} else {
-			check_pkg_fast(&mut o, cfg, &env, pkg)
+			check_pkg_fast(&mut o, cfg, &mut env, pkg)
 		};
 		CCheck {
 			ret,
