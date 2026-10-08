@@ -1016,11 +1016,19 @@ impl Worker {
 	}
 }
 
+// no idle pool: a server that answers HTTP/1.1 without "Connection: close"
+// and then closes (pactest's server, after any response) leaves a dead
+// pooled connection, which hyper writes the next request (a redirect hop
+// or the .sig) to and fails with an empty reply. curl retries such a
+// reused connection on a fresh one when it died before any byte
+// (Curl_retry_request); reqwest cannot tell a reused connection from a
+// fresh one, so every request gets its own and no retry is ever needed
 fn build_client(settings: &Settings) -> reqwest::Result<Client> {
 	let timeout = (!settings.disable_dl_timeout).then_some(LOW_SPEED_TIME);
 	Client::builder()
 		.timeout(timeout)
 		.connect_timeout(CONNECT_TIMEOUT)
+		.pool_max_idle_per_host(0)
 		.redirect(Policy::limited(MAX_REDIRS))
 		.referer(false)
 		.tcp_keepalive(KEEPALIVE)
