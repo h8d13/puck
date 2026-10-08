@@ -211,14 +211,22 @@ Not needed for an English-locale replacement; noted so it is not lost.
 | Item | State |
 |---|---|
 | translations: pacman and libalpm messages through gettext (49 `po` languages); the port prints the English msgids | later |
+| libalpm C ABI (`alpm.h`, `libalpm.so.16` via a `cdylib`) for C/Go/Python/Vala front ends (pamac, pyalpm, yay; paru through alpm.rs): a distro-level choice, would sit as a thin unsafe crate on the public Rust API; needs stable package/db addresses, `#[repr(C)]` public structs, `alpm_list_t` ownership per function, a C shim for `va_list` log callbacks | later |
 | locale-dependent behaviour beyond C.UTF-8: regex collation ranges and `[=e=]`, `strcoll` sort of glob results, non-UTF-8 locales for display (`mbstowcs`/`wcwidth`), pax NFC composition | later |
 
-### 4. Drop-in
+### 4. Public Rust API
 
-libalpm C ABI (`alpm.h`) exported from the Rust library so existing
-front-ends (yay, paru via alpm.rs, pamac, pyalpm) keep working.
+alpm-core as a library for Rust front ends, the counterpart of libalpm
+for Rust: a deliberate `pub` surface (today `pub` often means "difftest
+needs it"), docs and examples, semver, and shapes meant for callers
+rather than the frontend's internals (`dbs_mut` split borrows,
+`with_callbacks`, the `Callbacks` trait). Rust front ends (paru today goes
+through alpm.rs over the C library) could target it natively.
 
-Gate: those front-ends' basic operations against the Rust libalpm.
+Gate: the pacman binary and a small example front end (query, search,
+sync transaction) built only on the public API; `cargo doc` without
+private items; the difftests reach internals through a test-only feature,
+not through the public surface. State: todo.
 
 ## Owned readers (replacing ALPM parser patches)
 

@@ -28,7 +28,8 @@ whoever writes it.
   cut with `util::until_nul` where the C sees a C string.
 - `ctype` in the C runs in the C locale: use the `is_ascii_*` predicates.
 - Platform-dependent C types keep their C alias (`c_char`, `c_ulong`).
-- NULL handling of exported functions belongs to a future C ABI layer:
+- NULL handling of exported functions belongs to a C ABI layer, if one is
+  ever built (PORTING.md "Later"):
   pin it in difftest, do not model it in the Rust API.
 - Where the C is undefined (out of bounds, uninitialized memory), the port
   does the safe thing and difftest must never feed the C that input.
