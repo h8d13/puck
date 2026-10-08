@@ -9,11 +9,13 @@
 // the callbacks and the id mapping read package structs directly: the
 // alpm_pkg_get_* getters reset pm_errno.
 use std::collections::VecDeque;
-use std::ffi::{CStr, c_char, c_int, c_ulong, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
 
-use alpm_core::deps::{DepMissing, DepMod, Depend};
+use alpm_core::deps::{DepMissing, Depend};
+use alpm_core::trans::{TRANS_FLAG_NODEPVERSION, TRANS_FLAG_NOLOCK};
 
+use crate::handle::log_message;
 use crate::handle::{
 	_alpm_db_get_pkgcache_hash, ALPM, CDb, alpm_db_set_usage, alpm_errno,
 	alpm_get_localdb, alpm_initialize, alpm_option_set_assumeinstalled,
@@ -23,13 +25,11 @@ use crate::handle::{
 	alpm_trans_release,
 };
 use crate::package::{
-	_alpm_pkg_free, CPkg, field, list_data, read_pkg, with_strs,
+	_alpm_pkg_free, CDepend, CPkg, field, list_data, read_dep, read_pkg,
+	with_strs,
 };
-use crate::{CList, alpm_list_add, alpm_list_free, cstr, opt_ptr, vsnprintf};
+use crate::{CList, alpm_list_add, alpm_list_free, cstr, opt_ptr};
 
-// alpm_trans_flag_t
-const TRANS_FLAG_NODEPVERSION: c_int = 1 << 3;
-const TRANS_FLAG_NOLOCK: c_int = 1 << 17;
 // alpm_question_type_t
 const QUESTION_INSTALL_IGNOREPKG: c_int = 1;
 const QUESTION_SELECT_PROVIDER: c_int = 1 << 5;
@@ -65,16 +65,6 @@ pub struct Setup {
 	pub local_usage: c_int,
 	// one per sync db
 	pub usage: Vec<c_int>,
-}
-
-// alpm_depend_t, alpm.h
-#[repr(C)]
-pub(crate) struct CDepend {
-	name: *mut c_char,
-	version: *mut c_char,
-	desc: *mut c_char,
-	name_hash: c_ulong,
-	depmod: c_int,
 }
 
 // alpm_depmissing_t
@@ -140,30 +130,6 @@ unsafe extern "C" {
 	// aarch64 (indirect composite)
 }
 
-fn depmod_from_c(m: c_int) -> DepMod {
-	match m {
-		1 => DepMod::Any,
-		2 => DepMod::Eq,
-		3 => DepMod::Ge,
-		4 => DepMod::Le,
-		5 => DepMod::Gt,
-		6 => DepMod::Lt,
-		_ => panic!("C returned unknown alpm_depmod_t {m}"),
-	}
-}
-
-pub(crate) fn read_dep(d: *const CDepend) -> Depend {
-	// SAFETY: d is a live alpm_depend_t owned by the C
-	let c = unsafe { &*d };
-	Depend {
-		name: field(c.name).expect("C depend without a name"),
-		version: field(c.version),
-		desc: field(c.desc),
-		name_hash: c.name_hash,
-		depmod: depmod_from_c(c.depmod),
-	}
-}
-
 // copies a depmissing list out, frees entries and nodes
 pub(crate) fn take_misses(list: *mut CList) -> Vec<DepMissing> {
 	let out = list_data(list)
@@ -218,13 +184,8 @@ unsafe extern "C" fn log_cb(
 	fmt: *const c_char,
 	args: *mut c_void,
 ) {
-	let mut buf = [0 as c_char; 4096];
-	// SAFETY: fmt and args are the format and va_list of this
-	// _alpm_log call, used once; buf is writable for its length
-	let n = unsafe { vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args) };
-	assert!(n >= 0 && (n as usize) < buf.len(), "log message too long");
-	// SAFETY: vsnprintf nul-terminated buf
-	let msg = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_bytes().to_vec();
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
 	// SAFETY: ctx is the Recorder registered with the callback, no
 	// other reference to it is live while the C runs
 	let rec = unsafe { &mut *ctx.cast::<Recorder>() };
@@ -382,7 +343,8 @@ impl CGraph {
 		CGraph { h, rec }
 	}
 
-	// CDepend mirrors over owned strings, the C only reads them
+	// CDepend mirrors over owned strings, the C only reads them. the
+	// strings must outlive the mirrors: both come back as one tuple
 	#[allow(clippy::type_complexity)]
 	fn assume(
 		deps: &[Depend],
@@ -522,7 +484,8 @@ impl CGraph {
 		(r, calls)
 	}
 
-	// (return value, packages after, data entries)
+	// (return value, packages after, data entries). the arguments are
+	// _alpm_resolvedeps' plus the scripted answers
 	#[allow(clippy::too_many_arguments)]
 	pub fn resolvedeps(
 		&self,

@@ -1,9 +1,10 @@
 // alpm_core::deps::{checkdeps, sortbydeps, find_dbs_satisfier,
 // resolvedeps, recursedeps} against the C on real handles. each case
-// writes a fixture with a local db and three sync dbs over a small name
-// set (so dependency cycles, several providers and name clashes between
-// dbs are common), sets ignore lists, assumeinstalled, NODEPVERSION and
-// db usage on both handles, then runs random calls. compared: results in
+// writes a trans_prep world (gen_world: a local db and three sync dbs
+// over a small name set, so dependency cycles, several providers and
+// name clashes between dbs are common), sets ignore lists,
+// assumeinstalled, NODEPVERSION and db usage on both handles, then runs
+// random calls. compared: results in
 // order, missing-dep lists, questions asked (sequence and payload) with
 // the same scripted answers, log lines (level and text).
 //
@@ -27,18 +28,11 @@ use alpm_core::handle::Handle;
 use alpm_core::package::Package;
 use alpm_core::pkghash::PkgHash;
 use difftest::{
-	Asked, CGraph, Calls, Comp, LOG_FUNCTION, LocalEntry, PkgId, Rng,
-	Setup, TempRoot, iters, section, tar_dir, tar_file, ustar, write_db,
+	Asked, CGraph, Calls, LOG_FUNCTION, PkgId, Rng, Setup, TP_DEP_VERSIONS,
+	TP_GROUPS, TP_SYNC, TP_VIRTUAL, TempRoot, TpWorld, gen_world, iters,
+	tp_any_name, tp_relation, write_world,
 };
 
-const SYNC: [&str; 3] = ["core", "extra", "multi"];
-const NAMES: [&str; 8] = ["a", "b", "c", "d", "e", "f", "g", "h"];
-// provided only
-const VIRTUAL: [&str; 3] = ["v1", "v2", "libx"];
-const PKG_VERSIONS: [&str; 4] = ["1.0-1", "2.0-1", "1:0.5-1", "1.5-2"];
-const DEP_VERSIONS: [&str; 5] = ["1.0", "2.0", "1:0.5", "1.5", "1.0-1"];
-const OPS: [&str; 5] = ["=", ">=", "<=", ">", "<"];
-const GROUPS: [&str; 2] = ["g1", "g2"];
 const IGNORE: [&str; 5] = ["a", "c*", "[ef]", "v?", "x"];
 const USAGES: [c_int; 7] = [
 	DB_USAGE_ALL,
@@ -65,154 +59,46 @@ fn some<T>(rng: &mut Rng, n: usize, f: impl Fn(&mut Rng) -> T) -> Vec<T> {
 	(0..rng.below(n)).map(|_| f(rng)).collect()
 }
 
-fn any_name(rng: &mut Rng) -> &'static str {
-	match rng.below(5) {
-		0 => pick(rng, &VIRTUAL),
-		_ => pick(rng, &NAMES),
-	}
-}
-
 // mostly unversioned, so satisfiers and cycles are frequent; now and
 // then one dep_from_string takes apart oddly (empty name or version,
 // a description, "<=>", a pkgrel against a version)
+const ODD: [&str; 8] = [
+	"a>=",
+	"<1",
+	"b=1:2-3",
+	"c<=>1",
+	"d: for d",
+	"e>=1-01",
+	"v1=",
+	"libx>1.0-1",
+];
+
 fn relation(rng: &mut Rng) -> String {
-	const ODD: [&str; 8] = [
-		"a>=",
-		"<1",
-		"b=1:2-3",
-		"c<=>1",
-		"d: for d",
-		"e>=1-01",
-		"v1=",
-		"libx>1.0-1",
-	];
-	if rng.below(10) == 0 {
-		return pick(rng, &ODD).to_string();
-	}
-	let name = any_name(rng);
-	match rng.below(3) {
-		0 => format!(
-			"{name}{}{}",
-			pick(rng, &OPS),
-			pick(rng, &DEP_VERSIONS)
-		),
-		_ => name.to_string(),
+	match rng.below(10) {
+		0 => pick(rng, &ODD).to_string(),
+		_ => tp_relation(rng),
 	}
 }
 
-// "name" or "name=ver", the only versioned provisions that match
-// versioned deps, some ">=ver"
-fn provision(rng: &mut Rng) -> String {
-	let name = match rng.below(2) {
-		0 => pick(rng, &VIRTUAL),
-		_ => pick(rng, &NAMES),
-	};
-	let ver = pick(rng, &DEP_VERSIONS);
-	match rng.below(5) {
-		0 | 1 => name.to_string(),
-		2 | 3 => format!("{name}={ver}"),
-		_ => format!("{name}>={ver}"),
-	}
-}
-
-#[derive(Clone, Debug)]
-struct Pkg {
-	name: &'static str,
-	version: &'static str,
-	depends: Vec<String>,
-	provides: Vec<String>,
-	groups: Vec<String>,
-	// %REASON% 1 (local only)
-	asdep: bool,
-}
-
-// each name kept with probability 1/keep
-fn gen_pkgs(rng: &mut Rng, keep: usize) -> Vec<Pkg> {
-	let mut names = NAMES.to_vec();
-	names.retain(|_| rng.below(keep) == 0);
-	names.into_iter()
-		.map(|name| Pkg {
-			name,
-			version: pick(rng, &PKG_VERSIONS),
-			depends: some(rng, 4, relation),
-			provides: some(rng, 4, provision),
-			groups: {
-				let mut g = GROUPS.to_vec();
-				g.retain(|_| rng.below(3) == 0);
-				g.into_iter().map(String::from).collect()
-			},
-			asdep: rng.below(2) == 0,
-		})
-		.collect()
-}
-
-fn relations(p: &Pkg) -> String {
-	[
-		section("GROUPS", &p.groups),
-		section("DEPENDS", &p.depends),
-		section("PROVIDES", &p.provides),
-	]
-	.concat()
-}
-
-fn local_desc(p: &Pkg) -> String {
-	let reason = match p.asdep {
-		true => "%REASON%\n1\n\n",
-		false => "",
-	};
-	format!(
-		"%NAME%\n{0}\n\n%VERSION%\n{1}\n\n%BASE%\n{0}\n\n\
-		%DESC%\nA package\n\n%URL%\nhttps://example.org/\n\n\
-		%ARCH%\nx86_64\n\n%BUILDDATE%\n1700000000\n\n\
-		%INSTALLDATE%\n1700000001\n\n%PACKAGER%\nA B <a@b.org>\n\n\
-		%SIZE%\n42\n\n{reason}%VALIDATION%\npgp\n\n{2}",
-		p.name,
-		p.version,
-		relations(p)
-	)
-}
-
-fn sync_desc(p: &Pkg) -> String {
-	format!(
-		"%FILENAME%\n{0}-{1}-any.pkg.tar.zst\n\n\
-		%NAME%\n{0}\n\n%BASE%\n{0}\n\n%VERSION%\n{1}\n\n\
-		%CSIZE%\n1\n\n%ISIZE%\n2\n\n%SHA256SUM%\n{2}\n\n\
-		%ARCH%\nany\n\n%BUILDDATE%\n3\n\n\
-		%PACKAGER%\nA B <a@b.org>\n\n{3}",
-		p.name,
-		p.version,
-		"ab".repeat(32),
-		relations(p)
-	)
-}
-
-// an empty files file: the C dup (recursedeps) force-loads it
-fn write_fixture(fx: &TempRoot, local: &[Pkg], sync: &[Vec<Pkg>]) {
-	fx.reset_local();
-	let entries: Vec<LocalEntry> = local
-		.iter()
-		.map(|p| LocalEntry {
-			dir: format!("{}-{}", p.name, p.version),
-			desc: Some(local_desc(p).into_bytes()),
-			files: Some(Vec::new()),
-			install: false,
-		})
-		.collect();
-	fx.write_local(&entries);
-	for (name, pkgs) in SYNC.iter().zip(sync) {
-		let mut tar = Vec::new();
-		for p in pkgs {
-			let dir = format!("{}-{}/", p.name, p.version);
-			let desc = sync_desc(p);
-			tar.push(tar_dir(&dir));
-			tar.push(tar_file(
-				&format!("{dir}desc"),
-				desc.as_bytes(),
-			));
+// a trans_prep world with odd depends and some ">=ver" provisions
+// (those match no versioned dep). the trans_prep tests keep plain
+// relations: odd ones abort the C there (PORTING.md follow-ups)
+fn gen_deps_world(rng: &mut Rng) -> TpWorld {
+	let mut w = gen_world(rng, false);
+	let all = w.local.iter_mut().chain(w.sync.iter_mut().flatten());
+	for p in all.chain(w.files.iter_mut()) {
+		for d in p.depends.iter_mut() {
+			if rng.below(10) == 0 {
+				*d = pick(rng, &ODD).to_string();
+			}
 		}
-		let path = fx.sync_file(name, ".db");
-		write_db(&path, Comp::None, &ustar(&tar));
+		if rng.below(5) == 0 {
+			let ver = pick(rng, &TP_DEP_VERSIONS);
+			let name = tp_any_name(rng);
+			p.provides.push(format!("{name}>={ver}"));
+		}
 	}
+	w
 }
 
 fn gen_setup(rng: &mut Rng) -> Setup {
@@ -223,14 +109,14 @@ fn gen_setup(rng: &mut Rng) -> Setup {
 	};
 	Setup {
 		ignorepkg: pats(rng, &IGNORE),
-		ignoregroup: pats(rng, &GROUPS),
+		ignoregroup: pats(rng, &TP_GROUPS),
 		assumeinstalled: some(rng, 3, |r| {
-			let name = any_name(r);
+			let name = tp_any_name(r);
 			let s = match r.below(2) {
 				0 => name.to_string(),
 				_ => format!(
 					"{name}={}",
-					pick(r, &DEP_VERSIONS)
+					pick(r, &TP_DEP_VERSIONS)
 				),
 			};
 			dep_from_string(s.as_bytes())
@@ -240,7 +126,7 @@ fn gen_setup(rng: &mut Rng) -> Setup {
 			0 => DB_USAGE_SEARCH,
 			_ => DB_USAGE_ALL,
 		},
-		usage: SYNC.iter().map(|_| pick(rng, &USAGES)).collect(),
+		usage: TP_SYNC.iter().map(|_| pick(rng, &USAGES)).collect(),
 	}
 }
 
@@ -253,7 +139,7 @@ impl RustSide {
 	fn new(fx: &TempRoot, setup: &Setup) -> Self {
 		let mut handle =
 			Handle::initialize(&fx.root(), &fx.dbpath()).unwrap();
-		for name in SYNC {
+		for name in TP_SYNC {
 			handle.register_syncdb(name.as_bytes(), 0).unwrap();
 		}
 		handle.set_ignorepkgs(&setup.ignorepkg);
@@ -295,8 +181,8 @@ impl RustSide {
 	}
 
 	fn id(&self, p: &Package) -> PkgId {
-		let dbs =
-			std::iter::once(None).chain((0..SYNC.len()).map(Some));
+		let dbs = std::iter::once(None)
+			.chain((0..TP_SYNC.len()).map(Some));
 		for db in dbs {
 			if self.cache(db).iter().any(|q| ptr::eq(q, p)) {
 				return (db, p.name_bytes().to_vec());
@@ -438,7 +324,7 @@ impl Case<'_> {
 				.map(|(cache, &usage)| DbPkgs { usage, cache })
 				.collect();
 		let env = DepsEnv {
-			handle: &self.rs.handle,
+			opts: self.rs.handle.deps_opts(),
 			nodepversion: self.setup.nodepversion,
 			local: DbPkgs {
 				usage: self.setup.local_usage,
@@ -511,7 +397,7 @@ impl Case<'_> {
 
 	fn find_dbs_satisfier(&self, rng: &mut Rng, seen: &mut Seen) {
 		let mut dbs: Vec<Option<usize>> = std::iter::once(None)
-			.chain((0..SYNC.len()).map(Some))
+			.chain((0..TP_SYNC.len()).map(Some))
 			.collect();
 		dbs.retain(|d| rng.below(3 + 3 * usize::from(d.is_none())) > 1);
 		if rng.below(4) == 0 {
@@ -519,7 +405,7 @@ impl Case<'_> {
 		}
 		// virtual names reach the provider question
 		let dep = match rng.below(2) {
-			0 => pick(rng, &VIRTUAL).to_string(),
+			0 => pick(rng, &TP_VIRTUAL).to_string(),
 			_ => relation(rng),
 		};
 		let ans = answers(rng);
@@ -648,17 +534,15 @@ fn fixture_fuzz() {
 	let mut seen = Seen::default();
 	for _ in 0..n {
 		let fx = TempRoot::new("depsgraph");
-		// a small local db leaves providers to choose between
-		let local = gen_pkgs(&mut rng, 3);
-		let sync: Vec<Vec<Pkg>> =
-			SYNC.iter().map(|_| gen_pkgs(&mut rng, 2)).collect();
-		write_fixture(&fx, &local, &sync);
+		let world = gen_deps_world(&mut rng);
+		write_world(&fx, &world, &mut rng);
 		let setup = gen_setup(&mut rng);
-		let c = CGraph::new(&fx.root(), &fx.dbpath(), &SYNC, &setup);
+		let c = CGraph::new(&fx.root(), &fx.dbpath(), &TP_SYNC, &setup);
 		let rs = RustSide::new(&fx, &setup);
 		let local = rs.ids(None);
-		let sync: Vec<PkgId> =
-			(0..SYNC.len()).flat_map(|i| rs.ids(Some(i))).collect();
+		let sync: Vec<PkgId> = (0..TP_SYNC.len())
+			.flat_map(|i| rs.ids(Some(i)))
+			.collect();
 		let all = [&local[..], &sync[..]].concat();
 		let case = Case {
 			c: &c,

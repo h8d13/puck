@@ -16,7 +16,7 @@ use std::path::Path;
 use pacman_common::ini::{Ini, parse_ini};
 use pacman_common::util_common::wordsplit;
 
-use crate::callbacks::{Callbacks, Event, HookRun, HookWhen, LogLevel};
+use crate::callbacks::{Callbacks, Event, HookRun, HookWhen, LogLevel, logv};
 use crate::deps::find_satisfier;
 use crate::handle::Handle;
 use crate::package::{DbCaches, Package};
@@ -77,10 +77,6 @@ pub struct AddTarget<'a> {
 pub struct Targets<'a> {
 	pub add: &'a [AddTarget<'a>],
 	pub remove: &'a [&'a Package],
-}
-
-fn logv(cb: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
-	cb.log(level, &parts.concat());
 }
 
 // a value through printf %s: glibc prints NULL as "(null)"

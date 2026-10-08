@@ -26,23 +26,17 @@ fn desc(name: &str, version: &str, extra: &str) -> String {
 
 // ustar with regular files only, short names
 fn tar(files: &[(&str, &str)]) -> Vec<u8> {
-	let mut out = Vec::new();
+	let mut b = tar::Builder::new(Vec::new());
 	for (name, data) in files {
-		let mut h = [0u8; 512];
-		h[..name.len()].copy_from_slice(name.as_bytes());
-		let size = format!("{:011o}\0", data.len());
-		h[124..136].copy_from_slice(size.as_bytes());
-		h[156] = b'0';
-		h[257..263].copy_from_slice(b"ustar\0");
-		h[148..156].fill(b' ');
-		let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
-		h[148..155].copy_from_slice(format!("{sum:06o}\0").as_bytes());
-		out.extend_from_slice(&h);
-		out.extend_from_slice(data.as_bytes());
-		out.resize(out.len().next_multiple_of(512), 0);
+		let mut h = tar::Header::new_ustar();
+		// raw name bytes, set_path would normalise them
+		h.as_old_mut().name[..name.len()]
+			.copy_from_slice(name.as_bytes());
+		h.set_size(data.len() as u64);
+		h.set_cksum();
+		b.append(&h, data.as_bytes()).unwrap();
 	}
-	out.resize(out.len() + 1024, 0);
-	out
+	b.into_inner().unwrap()
 }
 
 const SYNC_FOO: &str = "%FILENAME%\nfoo-2-1-any.pkg.tar.zst\n\n\

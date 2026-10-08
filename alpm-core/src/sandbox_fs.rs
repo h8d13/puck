@@ -17,7 +17,7 @@ use landlock::{
 };
 use rustix::fs::{Mode, OFlags};
 
-use crate::callbacks::{Callbacks, LogLevel};
+use crate::callbacks::{Callbacks, LogLevel, logv};
 use crate::util::strerror;
 use crate::util::until_nul;
 
@@ -68,7 +68,7 @@ fn open_dir(path: &[u8]) -> io::Result<rustix::fd::OwnedFd> {
 }
 
 fn error(cb: &mut dyn Callbacks, parts: &[&[u8]]) -> bool {
-	cb.log(LogLevel::Error, &parts.concat());
+	logv(cb, LogLevel::Error, parts);
 	false
 }
 

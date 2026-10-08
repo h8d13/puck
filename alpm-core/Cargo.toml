@@ -16,12 +16,14 @@ lz4_flex.workspace = true
 pacman-common = { path = "../pacman-common" }
 reqwest.workspace = true
 rustix.workspace = true
+time.workspace = true
 twox-hash.workspace = true
 zstd.workspace = true
 
 # test fixtures: archives in every compression
 [dev-dependencies]
 alpm-compress.workspace = true
+tar.workspace = true
 
 [lints]
 workspace = true

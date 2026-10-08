@@ -10,7 +10,7 @@
 //
 // restrictions are only ever applied in a child process spawned for one
 // probe run, never in the test harness itself.
-use std::ffi::{CStr, CString, c_char, c_int, c_long, c_uint, c_void};
+use std::ffi::{CString, c_char, c_int, c_long, c_uint, c_void};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek};
 use std::os::fd::AsRawFd;
@@ -24,11 +24,12 @@ use std::sync::MutexGuard;
 use alpm_core::callbacks::{Callbacks, DownloadEvent, LogLevel};
 
 use crate::cstr;
+use crate::handle::log_message;
 use crate::handle::{
 	ALPM, alpm_initialize, alpm_option_set_dlcb, alpm_option_set_logcb,
 	alpm_release,
 };
-use crate::vsnprintf;
+use crate::package::text;
 
 unsafe extern "C" {
 	fn _alpm_sandbox_fs_restrict_writes_to(
@@ -145,28 +146,17 @@ impl Callbacks for SbRecorder {
 	}
 }
 
-fn bytes(p: *const c_char) -> Vec<u8> {
-	// SAFETY: libalpm passes nul-terminated strings
-	unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
-}
-
-// longest text the log callback keeps
-const LOG_BUF: usize = 1 << 16;
-
 unsafe extern "C" fn log_cb(
 	ctx: *mut c_void,
 	level: c_int,
 	fmt: *const c_char,
 	args: *mut c_void,
 ) {
-	let mut buf = vec![0 as c_char; LOG_BUF];
-	// SAFETY: fmt and args are the printf pair _alpm_log got, used once;
-	// buf is writable for its length. ctx is the CSandbox's boxed SbRecorder
-	let rec = unsafe {
-		vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
-		&mut *ctx.cast::<SbRecorder>()
-	};
-	rec.0.push(CbRec::Log(level, bytes(buf.as_ptr())));
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
+	// SAFETY: ctx is the CSandbox's boxed SbRecorder
+	let rec = unsafe { &mut *ctx.cast::<SbRecorder>() };
+	rec.0.push(CbRec::Log(level, msg));
 }
 
 unsafe extern "C" fn dl_cb(
@@ -192,7 +182,7 @@ unsafe extern "C" fn dl_cb(
 	};
 	// SAFETY: ctx is the CSandbox's boxed SbRecorder
 	let rec = unsafe { &mut *ctx.cast::<SbRecorder>() };
-	rec.0.push(CbRec::Dl(bytes(filename), event, a, b));
+	rec.0.push(CbRec::Dl(text(filename), event, a, b));
 }
 
 // the alpm_download_event_*_t of kind: zeroed (padding included),

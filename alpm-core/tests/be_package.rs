@@ -55,35 +55,20 @@ impl Drop for Pkg {
 	}
 }
 
-fn octal(field: &mut [u8], v: u64) {
-	let w = field.len() - 1;
-	let s = format!("{v:0w$o}");
-	field[..w].copy_from_slice(s.as_bytes());
-}
-
-// (name, type flag, data), short names only
+// (name, type flag, data), short names only; mtime 0
 fn ustar(entries: &[(&[u8], u8, &[u8])]) -> Vec<u8> {
-	let mut out = Vec::new();
+	let mut b = tar::Builder::new(Vec::new());
 	for &(name, kind, data) in entries {
-		let mut h = [0u8; 512];
-		h[..name.len()].copy_from_slice(name);
-		octal(&mut h[100..108], 0o644);
-		octal(&mut h[108..116], 0);
-		octal(&mut h[116..124], 0);
-		octal(&mut h[124..136], data.len() as u64);
-		octal(&mut h[136..148], 0);
-		h[156] = kind;
-		h[257..263].copy_from_slice(b"ustar\0");
-		h[263..265].copy_from_slice(b"00");
-		h[148..156].fill(b' ');
-		let sum: u64 = h.iter().map(|&b| u64::from(b)).sum();
-		octal(&mut h[148..155], sum);
-		out.extend_from_slice(&h);
-		out.extend_from_slice(data);
-		out.resize(out.len().next_multiple_of(512), 0);
+		let mut h = tar::Header::new_ustar();
+		// raw name bytes, set_path would normalise them
+		h.as_old_mut().name[..name.len()].copy_from_slice(name);
+		h.set_mode(0o644);
+		h.set_size(data.len() as u64);
+		h.set_entry_type(tar::EntryType::new(kind));
+		h.set_cksum();
+		b.append(&h, data).unwrap();
 	}
-	out.resize(out.len() + 1024, 0);
-	out
+	b.into_inner().unwrap()
 }
 
 fn names(p: &Package) -> Vec<&[u8]> {

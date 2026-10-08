@@ -18,7 +18,7 @@ use rustix::fs::Access;
 use crate::backup::needbackup;
 use crate::be_local::{INFRQ_FILES, scan_zu};
 use crate::callbacks::{
-	Callbacks, Event, LogLevel, PackageOp, PackageOperation, Progress,
+	Callbacks, Event, LogLevel, PackageOp, PackageOperation, Progress, logv,
 };
 use crate::deps::{
 	DepMissing, checkdeps, dep_compute_string, find_satisfier, recursedeps,
@@ -31,8 +31,8 @@ use crate::trans::{
 	PrepareData, PrepareError, TRANS_FLAG_CASCADE, TRANS_FLAG_DBONLY,
 	TRANS_FLAG_NODEPS, TRANS_FLAG_NODEPVERSION, TRANS_FLAG_NOSAVE,
 	TRANS_FLAG_NOSCRIPTLET, TRANS_FLAG_RECURSE, TRANS_FLAG_RECURSEALL,
-	TRANS_FLAG_UNNEEDED, Trans, TransState, View, interrupted, log,
-	opt_str, runscriptlet, trans_in,
+	TRANS_FLAG_UNNEEDED, Trans, TransState, View, interrupted, opt_str,
+	runscriptlet, trans_in,
 };
 use crate::util::{
 	CALLER_PREFIX, PATH_MAX, alpm_access, compute_md5sum,
@@ -52,7 +52,7 @@ pub fn remove_pkg(h: &mut Handle, pkg: &Package) -> Result<(), Errno> {
 	let name = opt_str(&pkg.name).to_vec();
 	if pkg_find(&trans.remove, pkg.name_bytes()).is_some() {
 		let msg = [b"skipping duplicate target: ", &name[..], b"\n"];
-		log(h.callbacks(), Debug, &msg);
+		logv(h.callbacks(), Debug, &msg);
 		return Ok(());
 	}
 	let msg = [
@@ -60,7 +60,7 @@ pub fn remove_pkg(h: &mut Handle, pkg: &Package) -> Result<(), Errno> {
 		&name[..],
 		b" to the transaction remove list\n",
 	];
-	log(h.callbacks(), Debug, &msg);
+	logv(h.callbacks(), Debug, &msg);
 	let dbs = h.dbs_mut();
 	let (dbext, cb) = (dbs.dbext, dbs.cb);
 	let full = dbs
@@ -102,7 +102,7 @@ fn cascade(
 					&miss.target[..],
 					b" in database -- skipping\n",
 				];
-				log(cb, Error, &msg);
+				logv(cb, Error, &msg);
 				continue;
 			};
 			if pkg_find(&trans.remove, info.name_bytes()).is_some()
@@ -114,7 +114,7 @@ fn cascade(
 				opt_str(&info.name),
 				b" in target list\n",
 			];
-			log(cb, Debug, &msg);
+			logv(cb, Debug, &msg);
 			trans.remove.push(info.dup());
 		}
 		lp = checkdeps_rev(view, cb, trans);
@@ -149,7 +149,7 @@ fn keep_needed(
 				opt_str(&gone.name),
 				b" from target list\n",
 			];
-			log(cb, Warning, &msg);
+			logv(cb, Warning, &msg);
 		}
 		lp = checkdeps_rev(view, cb, trans);
 	}
@@ -188,13 +188,13 @@ pub(crate) fn remove_prepare(
 	let nodeps = flags & TRANS_FLAG_NODEPS != 0;
 	let explicit = flags & TRANS_FLAG_RECURSEALL != 0;
 	if recurse && !cascading {
-		log(cb, Debug, &[b"finding removable dependencies\n"]);
+		logv(cb, Debug, &[b"finding removable dependencies\n"]);
 		recursedeps(view.local, &mut trans.remove, explicit, cb);
 	}
 
 	if !nodeps {
 		cb.event(&Event::CheckdepsStart);
-		log(cb, Debug, &[b"looking for unsatisfied dependencies\n"]);
+		logv(cb, Debug, &[b"looking for unsatisfied dependencies\n"]);
 		let lp = checkdeps_rev(view, cb, trans);
 		if !lp.is_empty() {
 			if cascading {
@@ -210,7 +210,7 @@ pub(crate) fn remove_prepare(
 	}
 
 	if cascading && recurse {
-		log(cb, Debug, &[b"finding removable dependencies\n"]);
+		logv(cb, Debug, &[b"finding removable dependencies\n"]);
 		recursedeps(view.local, &mut trans.remove, explicit, cb);
 	}
 
@@ -268,7 +268,7 @@ fn dir_is_mountpoint(
 					&strerror(&e),
 					b"\n",
 				];
-				log(cb, Debug, &msg);
+				logv(cb, Debug, &msg);
 				return false;
 			}
 		},
@@ -286,7 +286,7 @@ fn dir_is_mountpoint(
 				&strerror(&e),
 				b"\n",
 			];
-			log(cb, Debug, &msg);
+			logv(cb, Debug, &msg);
 			false
 		}
 	}
@@ -314,7 +314,7 @@ fn can_remove_file(h: &mut Handle, name: &[u8]) -> bool {
 	}
 	let err = strerror(&e.into());
 	let msg = [b"cannot remove file '", &filepath[..], b"': ", &err, b"\n"];
-	log(cb, Error, &msg);
+	logv(cb, Error, &msg);
 	false
 }
 
@@ -346,7 +346,7 @@ fn shift_pacsave(cb: &mut dyn Callbacks, file: &[u8]) {
 				&strerror(&e),
 				b"\n",
 			];
-			log(cb, Error, &msg);
+			logv(cb, Error, &msg);
 			return;
 		}
 	};
@@ -368,7 +368,7 @@ fn shift_pacsave(cb: &mut dyn Callbacks, file: &[u8]) {
 			file,
 			b" due to PATH_MAX overflow\n",
 		];
-		log(cb, Error, &msg);
+		logv(cb, Error, &msg);
 	};
 	// log_max at ULONG_MAX wraps to 0 and shifts nothing, like the C
 	let mut i = log_max.wrapping_add(1);
@@ -421,7 +421,7 @@ fn has_entries(cb: &mut dyn Callbacks, path: &[u8]) -> Option<bool> {
 					b"\n",
 				],
 			};
-			log(cb, Debug, &msg);
+			logv(cb, Debug, &msg);
 			None
 		}
 	}
@@ -440,7 +440,7 @@ fn unlink_dir(
 ) -> Unlinked {
 	let keep = |h: &mut Handle, why: &[u8]| {
 		let msg = [b"keeping directory ", file, b" (", why, b")\n"];
-		log(h.callbacks(), Debug, &msg);
+		logv(h.callbacks(), Debug, &msg);
 		Unlinked::Done
 	};
 	match has_entries(h.callbacks(), file) {
@@ -480,11 +480,11 @@ fn unlink_dir(
 			&err,
 			b"\n",
 		];
-		log(h.callbacks(), Debug, &msg);
+		logv(h.callbacks(), Debug, &msg);
 		return Unlinked::Failed;
 	}
 	let msg = [b"removed directory ", file, b" (no remaining owners)\n"];
-	log(h.callbacks(), Debug, &msg);
+	logv(h.callbacks(), Debug, &msg);
 	Unlinked::Done
 }
 
@@ -503,7 +503,7 @@ fn save_file(h: &mut Handle, oldpkg: &Package, file: &[u8]) -> Unlinked {
 			&err,
 		];
 		let what = what.concat();
-		log(h.callbacks(), Error, &[&what[..], b")\n"]);
+		logv(h.callbacks(), Error, &[&what[..], b")\n"]);
 		logaction(h, &[b"error: ", &what[..], b")\n"]);
 		return Unlinked::Failed;
 	}
@@ -528,7 +528,7 @@ fn unlink_file(
 	let mut file = [&root[..], name].concat();
 	if file.is_empty() || file.len() >= PATH_MAX {
 		let msg = [b"path too long to unlink ", &root[..], name, b"\n"];
-		log(h.callbacks(), Debug, &msg);
+		logv(h.callbacks(), Debug, &msg);
 		return Unlinked::Failed;
 	}
 	// a trailing '/' would follow a directory replaced by a symlink
@@ -537,7 +537,7 @@ fn unlink_file(
 	}
 	let Ok(buf) = llstat(&file) else {
 		let msg = [b"file ", &file[..], b" does not exist\n"];
-		log(h.callbacks(), Debug, &msg);
+		logv(h.callbacks(), Debug, &msg);
 		return Unlinked::Skipped;
 	};
 
@@ -549,7 +549,7 @@ fn unlink_file(
 				name,
 				b"\n",
 			];
-			log(h.callbacks(), Debug, &msg);
+			logv(h.callbacks(), Debug, &msg);
 			return Unlinked::Failed;
 		}
 		file.push(b'/');
@@ -563,7 +563,7 @@ fn unlink_file(
 				&file[..],
 				b"'\n",
 			];
-			log(h.callbacks(), Debug, &msg);
+			logv(h.callbacks(), Debug, &msg);
 		} else {
 			// an unreadable file counts as unmodified. a NULL
 			// hash crashes the C's strcmp (UPSTREAM.md), here
@@ -579,12 +579,12 @@ fn unlink_file(
 		}
 	}
 
-	log(h.callbacks(), Debug, &[b"unlinking ", &file[..], b"\n"]);
+	logv(h.callbacks(), Debug, &[b"unlinking ", &file[..], b"\n"]);
 	if let Err(e) = fs::remove_file(os(&file)) {
 		let what: [&[u8]; 4] =
 			[b"cannot remove ", &file, b" (", &strerror(&e)];
 		let what = what.concat();
-		log(h.callbacks(), Error, &[&what[..], b")\n"]);
+		logv(h.callbacks(), Error, &[&what[..], b")\n"]);
 		logaction(h, &[b"error: ", &what[..], b")\n"]);
 		return Unlinked::Failed;
 	}
@@ -633,14 +633,14 @@ fn remove_package_files(
 				opt_str(&oldpkg.name),
 				b"', can't remove all files\n",
 			];
-			log(h.callbacks(), Debug, &msg);
+			logv(h.callbacks(), Debug, &msg);
 			return Err(Errno::PkgCantRemove);
 		}
 	}
 
 	let count = files.len().to_string();
 	let msg = [b"removing ", count.as_bytes(), b" files\n"];
-	log(h.callbacks(), Debug, &msg);
+	logv(h.callbacks(), Debug, &msg);
 
 	let progress = |h: &mut Handle, percent: usize| {
 		if newpkg.is_none() {
@@ -662,7 +662,7 @@ fn remove_package_files(
 				until_nul(&file.name),
 				b" is in skip_remove, skipping removal\n",
 			];
-			log(h.callbacks(), Debug, &msg);
+			logv(h.callbacks(), Debug, &msg);
 			continue;
 		}
 		let r = unlink_file(h, oldpkg, newpkg, &file.name, nosave);
@@ -714,11 +714,11 @@ pub fn remove_single_package(
 			pkgver,
 			b")\n",
 		];
-		log(h.callbacks(), Debug, &msg);
+		logv(h.callbacks(), Debug, &msg);
 	} else {
 		h.callbacks().event(&Event::PackageOperationStart(op));
 		let msg = [b"removing package ", pkgname, b"-", pkgver, b"\n"];
-		log(h.callbacks(), Debug, &msg);
+		logv(h.callbacks(), Debug, &msg);
 		if scriptlet && let Some(path) = &install {
 			runscriptlet(
 				h,
@@ -761,7 +761,7 @@ pub fn remove_single_package(
 	}
 
 	let msg = [b"removing database entry '", pkgname, b"'\n"];
-	log(h.callbacks(), Debug, &msg);
+	logv(h.callbacks(), Debug, &msg);
 	remove_db_entry(h, oldpkg);
 	files
 }
@@ -783,7 +783,7 @@ fn remove_db_entry(h: &mut Handle, oldpkg: &Package) {
 			pkgver,
 			b"\n",
 		];
-		log(dbs.cb, Error, &msg);
+		logv(dbs.cb, Error, &msg);
 	}
 	if db.remove_pkg_from_cache(dbs.cb, oldpkg).is_err() {
 		let msg = [
@@ -791,7 +791,7 @@ fn remove_db_entry(h: &mut Handle, oldpkg: &Package) {
 			pkgname,
 			b"' from cache\n",
 		];
-		log(dbs.cb, Error, &msg);
+		logv(dbs.cb, Error, &msg);
 	}
 }
 

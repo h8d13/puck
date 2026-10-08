@@ -18,3 +18,4 @@ alpm-types.workspace = true
 lz4_flex = { workspace = true, features = ["frame"] }
 # pty pairs for the terminal tests (getcols, flush_term_input)
 rustix = { workspace = true, features = ["pty"] }
+time.workspace = true

@@ -9,7 +9,7 @@
 // with an UpdRecorder. kept logs: all but FUNCTION ones, RET_ERR/
 // GOTO_ERR's (__FILE__/__LINE__) and dload's internal debug lines.
 use std::cell::RefCell;
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CString, c_char, c_int, c_void};
 use std::ptr;
 use std::rc::Rc;
 use std::sync::MutexGuard;
@@ -24,17 +24,15 @@ use pacman_cli::conf::Config;
 use crate::callback::{cb_download, cb_event, cb_log};
 use crate::cli_util::init;
 use crate::files_op::pacman_files;
-use crate::fixtures::TempRoot;
+use crate::fixtures::{TempRoot, gen_pkgs, sync_tar};
 use crate::handle::*;
-use crate::package::{CPkg, list_data, read_pkg};
+use crate::package::{CPkg, list_data, read_pkg, text_or_empty};
 use crate::signing::{
 	_alpm_key_in_keychain, GPGME_PROTOCOL_OPENPGP, c_only,
 	gpgme_check_version, gpgme_set_engine_info,
 };
-use crate::sync_ro::{
-	CRun, FrontHandle, gen_pkgs, pacman_sync, run_op, sync_tar,
-};
-use crate::{CList, Rng, alpm_list_add, alpm_list_free, cstr, vsnprintf};
+use crate::sync_ro::{CRun, FrontHandle, pacman_sync, run_op};
+use crate::{CList, Rng, alpm_list_add, alpm_list_free, cstr};
 
 unsafe extern "C" {
 	fn alpm_db_update(
@@ -176,14 +174,6 @@ pub fn sync_db(seed: u64, files: bool) -> (Vec<u8>, Vec<(String, String)>) {
 	(sync_tar(&pkgs, files), names)
 }
 
-fn bytes(p: *const c_char) -> Vec<u8> {
-	if p.is_null() {
-		return Vec::new();
-	}
-	// SAFETY: libalpm passes nul-terminated strings
-	unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
-}
-
 struct Ctx {
 	rec: UpdRecord,
 	answer: bool,
@@ -242,7 +232,7 @@ unsafe extern "C" fn dl_cb(
 		};
 		(&mut *ctx.cast::<Ctx>(), ev)
 	};
-	ctx.rec.downloads.push((bytes(filename), ev));
+	ctx.rec.downloads.push((text_or_empty(filename), ev));
 }
 
 unsafe extern "C" fn log_cb(
@@ -257,14 +247,10 @@ unsafe extern "C" fn log_cb(
 		4 => LogLevel::Debug,
 		_ => return,
 	};
-	let mut buf = vec![0 as c_char; 8192];
-	// SAFETY: fmt and args are the printf pair _alpm_log got, used once;
-	// buf is writable for its length. ctx is the boxed Ctx
-	let ctx = unsafe {
-		vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
-		&mut *ctx.cast::<Ctx>()
-	};
-	let msg = bytes(buf.as_ptr());
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
+	// SAFETY: ctx is the boxed Ctx
+	let ctx = unsafe { &mut *ctx.cast::<Ctx>() };
 	if kept(level, &msg) {
 		ctx.rec.logs.push((level, msg));
 	}
@@ -276,7 +262,8 @@ unsafe extern "C" fn event_cb(ctx: *mut c_void, event: *mut c_void) {
 	let (ctx, e) = unsafe {
 		(&mut *ctx.cast::<Ctx>(), &*event.cast::<CEventMissing>())
 	};
-	let name = (e.kind == EVENT_DATABASE_MISSING).then(|| bytes(e.dbname));
+	let name = (e.kind == EVENT_DATABASE_MISSING)
+		.then(|| text_or_empty(e.dbname));
 	ctx.rec.events.push((e.kind, name));
 }
 
@@ -290,8 +277,8 @@ unsafe extern "C" fn question_cb(ctx: *mut c_void, q: *mut c_void) {
 		)
 	};
 	assert_eq!(q.kind, QUESTION_IMPORT_KEY, "db update asks import_key");
-	let uid = (!q.uid.is_null()).then(|| bytes(q.uid));
-	ctx.rec.questions.push((uid, bytes(q.fingerprint)));
+	let uid = (!q.uid.is_null()).then(|| text_or_empty(q.uid));
+	ctx.rec.questions.push((uid, text_or_empty(q.fingerprint)));
 	q.import = c_int::from(ctx.answer);
 }
 
