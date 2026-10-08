@@ -592,22 +592,10 @@ fn real_packages() {
 	let (mut same, mut diverged) = (0, Vec::new());
 	let mut paths: Vec<PathBuf> = rd.map(|e| e.unwrap().path()).collect();
 	paths.sort();
-	// url::Url adds the empty path's '/', alpm-types keeps the url as read
-	// (vendor/patches): counted, none expected
-	let mut url = 0;
 	for path in &paths {
 		for full in [false, true] {
 			let (c, r) =
 				(load_c(&h, path, full), load_rust(path, full));
-			if let (Ok((c, _)), Ok((r, _))) = (&c.r, &r.r) {
-				let slash = c
-					.url
-					.as_ref()
-					.map(|u| [&u[..], b"/"].concat());
-				url += usize::from(
-					c.url != r.url && slash == r.url,
-				);
-			}
 			if c == r {
 				same += 1;
 			} else {
@@ -622,13 +610,11 @@ fn real_packages() {
 		}
 	}
 	eprintln!(
-		"real packages: {} files, {same} loads same, {} diverged ({url} \
-		by url normalisation)",
+		"real packages: {} files, {same} loads same, {} diverged",
 		paths.len(),
 		diverged.len()
 	);
 	assert!(diverged.is_empty());
-	assert_eq!(url, 0);
 }
 
 const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
@@ -643,8 +629,8 @@ fn pick<'a>(rng: &mut Rng, items: &[&'a str]) -> &'a str {
 	items[rng.below(items.len())]
 }
 
-// alpm-types Name: first byte not '-' or '.'. now and then long enough
-// for check_meta's NAME_MAX
+// first byte not '-' or '.', which check_meta refuses. now and then
+// long enough for check_meta's NAME_MAX
 fn pkgname(rng: &mut Rng) -> String {
 	let first = word(rng, b"abcxyz0189@_+", 1, 1);
 	let max = if rng.below(20) == 0 { 260 } else { 14 };
@@ -669,9 +655,9 @@ fn full_version(rng: &mut Rng) -> String {
 	format!("{epoch}{}-{rel}", pkgver(rng))
 }
 
-// a relation alpm-types accepts: name, optionally an operator and a
-// version with optional epoch and pkgrel. names sometimes contain ".so",
-// which alpm-types tries as a soname first
+// a relation as makepkg writes it: name, optionally an operator and a
+// version with optional epoch and pkgrel, names sometimes with ".so"
+// (raw_value has the odd ones)
 fn relation(rng: &mut Rng) -> String {
 	let so = if rng.below(8) == 0 { ".so" } else { "" };
 	let name = word(rng, b"abcxyz0189_+-", 1, 1).replace('-', "a")
@@ -710,10 +696,11 @@ fn soname(rng: &mut Rng) -> String {
 	}
 }
 
-// a .PKGINFO per the alpm-pkginfo spec, lines shuffled (xdata in any
-// order), comments and blank lines in between, now and then a key pacman
-// ignores or a single key missing
-fn gen_pkginfo(rng: &mut Rng, name: &str, version: &str) -> String {
+// a makepkg-like .PKGINFO, lines shuffled (xdata in any order), comments
+// and blank lines in between, then what makepkg does not write and the C
+// reads anyway: any line left out, empty or doubled values, other
+// separators, trailing blanks, CRLF, unknown keys, random lines
+fn gen_pkginfo(rng: &mut Rng, name: &str, version: &str) -> Vec<u8> {
 	let mut lines = vec![
 		format!("pkgname = {name}"),
 		format!(
@@ -725,8 +712,8 @@ fn gen_pkginfo(rng: &mut Rng, name: &str, version: &str) -> String {
 			}
 		),
 		format!("pkgver = {version}"),
-		// runs of blanks, urls url::Url normalizes and makepkg's
-		// default packager are kept as read
+		// runs of blanks, upper case urls and makepkg's default
+		// packager are kept as read
 		format!(
 			"pkgdesc = {}{}{}",
 			word(rng, ALNUM, 1, 8),
@@ -851,25 +838,46 @@ fn gen_pkginfo(rng: &mut Rng, name: &str, version: &str) -> String {
 	for i in (1..lines.len()).rev() {
 		lines.swap(i, rng.below(i + 1));
 	}
-	// keys pacman ignores, or a single key it reads without
+	// keys pacman ignores
 	if rng.below(8) == 0 {
-		lines.push(pick(rng, &["basever = 1", "foo = bar"]).into());
+		let unknown = [
+			"basever = 1",
+			"foo = bar",
+			"PKGNAME = x",
+			" pkgname = y",
+		];
+		let at = rng.below(lines.len() + 1);
+		lines.insert(at, pick(rng, &unknown).into());
 	}
-	if rng.below(8) == 0 {
-		let single =
-			["pkgdesc", "url", "builddate", "packager", "size"];
-		let key = format!("{} = ", pick(rng, &single));
-		lines.retain(|l| !l.starts_with(&key));
-	}
-	let mut out = String::new();
+	let mut out = Vec::new();
 	for l in lines {
 		match rng.below(10) {
-			0 => out.push_str("# a comment\n"),
-			1 => out.push('\n'),
+			0 => out.extend_from_slice(b"# a comment\n"),
+			1 => out.push(b'\n'),
 			_ => {}
 		}
-		out.push_str(&l);
-		out.push('\n');
+		let mut l = l.into_bytes();
+		let sep = find(&l, b" = ");
+		match (rng.below(40), sep) {
+			(0, _) => continue,
+			(1, Some(at)) => l.truncate(at + 3),
+			(2, _) => {
+				out.extend_from_slice(&[&l[..], b"\n"].concat())
+			}
+			(3, Some(at)) => {
+				let other =
+					pick(rng, &["=", " =", "  = ", "\t= "]);
+				l.splice(at..at + 3, other.bytes());
+			}
+			(4, _) => l.push(b'\r'),
+			(5, _) => l.extend_from_slice(b" \t"),
+			_ => {}
+		}
+		out.extend_from_slice(&l);
+		out.push(b'\n');
+	}
+	if rng.below(8) == 0 {
+		out.extend_from_slice(&gen_raw_pkginfo(rng));
 	}
 	out
 }
@@ -1023,7 +1031,7 @@ fn gen_pkg(rng: &mut Rng, fx: &Fixture) -> Gen {
 	if rng.below(40) != 0 {
 		meta.push(file(
 			b".PKGINFO",
-			gen_pkginfo(rng, &name, &version).as_bytes(),
+			&gen_pkginfo(rng, &name, &version),
 		));
 	}
 	if rng.below(2) == 0 {
