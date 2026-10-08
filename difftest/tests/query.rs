@@ -1,17 +1,21 @@
 // pacman_cli::{query, deptest} against C pacman_query/pacman_deptest:
 // fixture roots under /tmp with a local db (desc, files, mtree,
-// changelog, install), sync dbs (newer, older, equal and absent
-// packages, usage without upgrade, junk files), package files, installed
-// files (some missing), a symlinked directory and PATH entries. random
-// -Q flag sets (-Qi/-Qii, -Ql, -Qc, -Qk/-Qkk, -Qo, -Qs, -Qg, -Qp, the
-// -Qd/-Qe/-Qm/-Qn/-Qt/-Qtt/-Qu filters, -q, colours) and target lists run
-// on a C handle in config->handle and on a Rust Handle over the same
-// files, one after the other on the same world (lazy loads and invalid
-// dbs carry over): stdout, stderr and return compared
+// changelog, install; each of the first three also missing or
+// unreadable, the mtree also empty or garbage), sync dbs (newer, older,
+// equal and absent packages, usage without upgrade, junk files), package
+// files, installed files (some missing), a symlinked directory and PATH
+// entries. random -Q flag sets (-Qi/-Qii, -Ql, -Qc, -Qk/-Qkk, -Qo, -Qs,
+// -Qg, -Qp, the -Qd/-Qe/-Qm/-Qn/-Qt/-Qtt/-Qu filters, -q, colours, debug
+// and function log levels) and target lists run on a C handle in
+// config->handle and on a Rust Handle over the same files, one after the
+// other on the same world (lazy loads and invalid dbs carry over), both
+// with the frontend's log callback: stdout, stderr (the op's lines and
+// libalpm's in one stream, so their order counts) and return compared
+use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
 use alpm_core::db::{DB_USAGE_ALL, DB_USAGE_UPGRADE};
@@ -19,13 +23,17 @@ use alpm_core::handle::Handle;
 use alpm_types::{Md5Checksum, Sha256Checksum};
 use difftest::{
 	CQuery, Comp, QueryWorld, Rng, TempRoot, iters, section, tar_dir,
-	tar_file, ustar, write_db,
+	tar_file, unstamp, ustar, write_db,
 };
-use pacman_cli::conf::{ColStr, Config, ConfigRepo};
+use pacman_cli::callback::Frontend;
+use pacman_cli::conf::{
+	ColStr, Config, ConfigRepo, LOG_DEBUG, LOG_ERROR, LOG_FUNCTION,
+	LOG_WARNING,
+};
 use pacman_cli::deptest::pacman_deptest;
 use pacman_cli::pacman::{PKG_LOCALITY_FOREIGN, PKG_LOCALITY_NATIVE};
 use pacman_cli::query::{QueryEnv, pacman_query};
-use pacman_cli::util::Output;
+use pacman_cli::util::{Output, Term};
 
 // one world per case (files, two handles), many runs on it
 fn worlds() -> usize {
@@ -57,12 +65,51 @@ struct Pkg {
 	// files present on disk
 	present: Vec<bool>,
 	backup: bool,
-	// no desc/files file: the lazy load fails and sticks
-	desc_file: bool,
-	files_file: bool,
-	mtree: bool,
+	// a desc/files file missing or unreadable: the lazy load fails and
+	// sticks
+	desc_file: Section,
+	files_file: Section,
+	mtree: Mtree,
 	changelog: bool,
 	install: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Section {
+	Ok,
+	Missing,
+	// mode 000: fopen fails with EACCES
+	Unreadable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Mtree {
+	Ok,
+	Missing,
+	// archive_read_open fails, logged
+	Unreadable,
+	Directory,
+	Empty,
+	Garbage,
+}
+
+fn section_state(rng: &mut Rng) -> Section {
+	match rng.below(16) {
+		0 => Section::Missing,
+		1 => Section::Unreadable,
+		_ => Section::Ok,
+	}
+}
+
+fn mtree_state(rng: &mut Rng) -> Mtree {
+	match rng.below(12) {
+		0..=2 => Mtree::Missing,
+		3 => Mtree::Unreadable,
+		4 => Mtree::Empty,
+		5 => Mtree::Garbage,
+		6 => Mtree::Directory,
+		_ => Mtree::Ok,
+	}
 }
 
 fn pick<'a>(rng: &mut Rng, items: &[&'a str]) -> &'a str {
@@ -141,9 +188,9 @@ fn gen_pkgs(rng: &mut Rng) -> Vec<Pkg> {
 			files,
 			present,
 			backup: rng.below(2) == 0,
-			desc_file: rng.below(12) != 0,
-			files_file: rng.below(12) != 0,
-			mtree: rng.below(3) != 0,
+			desc_file: section_state(rng),
+			files_file: section_state(rng),
+			mtree: mtree_state(rng),
 			changelog: rng.below(3) == 0,
 			install: rng.below(3) == 0,
 		});
@@ -216,19 +263,47 @@ fn mtree(p: &Pkg) -> Vec<u8> {
 	s.into_bytes()
 }
 
+// a section file as its state says
+fn write_section(path: &Path, state: Section, data: &[u8]) {
+	if state == Section::Missing {
+		return;
+	}
+	fs::write(path, data).unwrap();
+	if state == Section::Unreadable {
+		unreadable(path);
+	}
+}
+
+fn unreadable(path: &Path) {
+	fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+}
+
 fn write_local(fx: &TempRoot, pkgs: &[Pkg]) {
 	fx.reset_local();
 	for p in pkgs {
 		let dir = fx.local().join(format!("{}-{}", p.name, p.version));
 		fs::create_dir(&dir).unwrap();
-		if p.desc_file {
-			fs::write(dir.join("desc"), local_desc(p)).unwrap();
-		}
-		if p.files_file {
-			fs::write(dir.join("files"), local_files(p)).unwrap();
-		}
-		if p.mtree {
-			write_db(&dir.join("mtree"), Comp::Gzip, &mtree(p));
+		let desc = local_desc(p);
+		write_section(&dir.join("desc"), p.desc_file, desc.as_bytes());
+		let files = local_files(p);
+		write_section(
+			&dir.join("files"),
+			p.files_file,
+			files.as_bytes(),
+		);
+		let path = dir.join("mtree");
+		match p.mtree {
+			Mtree::Ok => write_db(&path, Comp::Gzip, &mtree(p)),
+			Mtree::Unreadable => {
+				write_db(&path, Comp::Gzip, &mtree(p));
+				unreadable(&path);
+			}
+			Mtree::Directory => fs::create_dir(&path).unwrap(),
+			Mtree::Empty => fs::write(&path, b"").unwrap(),
+			Mtree::Garbage => {
+				fs::write(&path, b"no mtree\n").unwrap()
+			}
+			Mtree::Missing => {}
 		}
 		if p.changelog {
 			let log = format!("changes of {}\n* one\n", p.name);
@@ -584,9 +659,19 @@ fn gen_cfg(rng: &mut Rng, base: &Config) -> Config {
 		0 => ColStr::COLOR,
 		_ => ColStr::PLAIN,
 	};
-	if rng.below(10) == 0 {
-		c.logmask = 0;
-	}
+	// --debug, --debug=2, and the load lines alone (no stamps). not for
+	// -Qpc: be_package::changelog does not log "opening archive"
+	// (PORTING.md follow-up)
+	let debug = c.op_q_isfile == 0 || c.op_q_changelog == 0;
+	c.logmask = match rng.below(10) {
+		0 => 0,
+		1 if debug => LOG_ERROR | LOG_WARNING | LOG_DEBUG,
+		2 if debug => {
+			LOG_ERROR | LOG_WARNING | LOG_DEBUG | LOG_FUNCTION
+		}
+		3 => LOG_ERROR | LOG_WARNING | LOG_FUNCTION,
+		_ => c.logmask,
+	};
 	c
 }
 
@@ -613,19 +698,81 @@ fn flags(c: &Config) -> String {
 	)
 }
 
+// where the Rust op and its callbacks write, in order like the C streams
+thread_local! {
+	static SINK: RefCell<Output> = RefCell::new(Output::default());
+}
+
+fn sink(o: &mut Output) {
+	SINK.with(|s| {
+		let mut s = s.borrow_mut();
+		s.stdout.append(&mut o.stdout);
+		s.stderr.append(&mut o.stderr);
+	});
+}
+
+// f on the World's handle with the frontend's callbacks for cfg (like
+// setup_libalpm) and the op's Output both writing to SINK
+fn rust_run(
+	w: &mut World,
+	cfg: &Config,
+	f: impl FnOnce(&mut Handle, &mut Output) -> i32,
+) -> CQuery {
+	// what the last world's handle logged on release
+	SINK.with(|s| s.take());
+	let term = Term::new(&b""[..], false, false);
+	let mut cb = Frontend::new(cfg.clone(), term);
+	cb.out.sink = Some(sink);
+	w.r.set_callbacks(Box::new(cb));
+	let mut o = Output {
+		sink: Some(sink),
+		..Output::default()
+	};
+	let ret = f(&mut w.r, &mut o);
+	o.flush();
+	let all = SINK.with(|s| std::mem::take(&mut *s.borrow_mut()));
+	CQuery {
+		ret,
+		stdout: all.stdout,
+		stderr: unstamp(&all.stderr),
+	}
+}
+
 fn rust_query(
 	w: &mut World,
 	cfg: &Config,
 	targets: &[Vec<u8>],
 	env: &QueryEnv,
 ) -> CQuery {
-	let mut o = Output::default();
-	let ret = pacman_query(cfg, &mut w.r, env, targets, &mut o);
-	CQuery {
-		ret,
-		stdout: o.stdout,
-		stderr: o.stderr,
+	rust_run(w, cfg, |h, o| pacman_query(cfg, h, env, targets, o))
+}
+
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+	hay.windows(needle.len()).position(|w| w == needle)
+}
+
+// stderr without what the port does not log: the C's RET_ERR/GOTO_ERR
+// debug lines (C source position) and libarchive's text in be_package's
+// open failure of a -Qp file (PORTING.md), cut after the path
+fn norm(err: &[u8], pkgs: &[u8]) -> Vec<u8> {
+	let open = [&b"could not open file "[..], pkgs].concat();
+	let mut out = Vec::new();
+	for line in err.split_inclusive(|&c| c == b'\n') {
+		let ret_err =
+			[&b"debug: returning error "[..], b"debug: got error "];
+		if ret_err.iter().any(|h| line.starts_with(h)) {
+			continue;
+		}
+		let cut = find(line, &open).and_then(|at| {
+			let at = at + open.len();
+			find(&line[at..], b": ").map(|n| at + n)
+		});
+		match cut {
+			Some(n) => out.extend([&line[..n], b"\n"].concat()),
+			None => out.extend_from_slice(line),
+		}
 	}
+	out
 }
 
 fn lossy(q: &CQuery) -> String {
@@ -645,12 +792,16 @@ fn compare(
 	cols: u16,
 	path: &[u8],
 ) -> CQuery {
-	let c = w.c.query(cfg, targets, cols, path);
+	let pkgs = w.fx.dir().join("pkgs");
+	let pkgs = pkgs.as_os_str().as_bytes();
+	let mut c = w.c.query(cfg, targets, cols, path);
+	c.stderr = norm(&unstamp(&c.stderr), pkgs);
 	let env = QueryEnv {
 		cols,
 		path: Some(path.to_vec()),
 	};
-	let r = rust_query(w, cfg, targets, &env);
+	let mut r = rust_query(w, cfg, targets, &env);
+	r.stderr = norm(&r.stderr, pkgs);
 	if c != r {
 		let t: Vec<_> = targets
 			.iter()
@@ -690,7 +841,7 @@ fn fixed() {
 	// files and scriptlet still load
 	let p0 = &w.pkgs[0];
 	let dir = w.fx.local().join(format!("{}-{}", p0.name, p0.version));
-	if p0.desc_file {
+	if p0.desc_file != Section::Missing {
 		fs::remove_file(dir.join("desc")).unwrap();
 	}
 	let literal = s(&format!("{}>=0", p0.name));
@@ -784,6 +935,24 @@ fn fixed() {
 	}
 }
 
+// -Qt on one named package as the first run on fresh worlds, the load
+// lines shown: find_requiredby loads each entry's desc in list order
+// and the target's own at its first depend not matching it literally
+#[test]
+fn requiredby_order() {
+	let mut rng = Rng::new(0x7e_9d);
+	for _ in 0..worlds() {
+		let mut w = open_world(&mut rng);
+		let mut cfg = w.cfg.clone();
+		cfg.op_q_unrequired = 1 + rng.below(2) as u16;
+		cfg.logmask = LOG_ERROR | LOG_WARNING | LOG_FUNCTION;
+		let p = &w.pkgs[rng.below(w.pkgs.len())];
+		let targets = vec![s(p.name)];
+		let path = w.path_env(&mut rng);
+		compare(&mut w, &cfg, &targets, 80, &path);
+	}
+}
+
 #[test]
 fn fuzz() {
 	cwd_clean();
@@ -793,13 +962,7 @@ fn fuzz() {
 		let mut w = open_world(&mut rng);
 		let base = w.cfg.clone();
 		for _ in 0..RUNS {
-			let mut cfg = gen_cfg(&mut rng, &base);
-			// the port loads files up front for -Qkk: with an
-			// unreadable desc that shows in later runs on the
-			// same handle (see the report)
-			if w.pkgs.iter().any(|p| !p.desc_file) {
-				cfg.op_q_check = cfg.op_q_check.min(1);
-			}
+			let cfg = gen_cfg(&mut rng, &base);
 			let targets = w.targets(&mut rng, &cfg);
 			let cols = [0, 40, 80, 200][rng.below(4)];
 			let path = w.path_env(&mut rng);
@@ -870,13 +1033,8 @@ impl Seen {
 }
 
 fn rust_deptest(w: &mut World, targets: &[Vec<u8>]) -> CQuery {
-	let mut o = Output::default();
-	let ret = pacman_deptest(&mut w.r, targets, &mut o);
-	CQuery {
-		ret,
-		stdout: o.stdout,
-		stderr: o.stderr,
-	}
+	let cfg = Config::new();
+	rust_run(w, &cfg, |h, o| pacman_deptest(h, targets, o))
 }
 
 const DEPS: [&str; 14] = [

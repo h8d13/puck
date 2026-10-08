@@ -17,25 +17,12 @@ use alpm_core::handle::Handle;
 use alpm_core::package::Package;
 use difftest::{
 	Call, CbRun, CbSetup, Rng, TempRoot, cb_active_bars, cb_both, iters,
-	widths_agree,
+	unstamp, widths_agree,
 };
 use pacman_cli::conf::{
 	ColStr, Config, LOG_DEBUG, LOG_ERROR, LOG_FUNCTION, LOG_WARNING,
 };
 use pacman_cli::pacman::{PM_OP_FILES, PM_OP_SYNC};
-
-// drops the "[HH:MM:SS] " PACMAN_DEBUG puts before stamped lines: the C
-// and the port read the wall clock separately
-fn unstamp(err: &[u8]) -> Vec<u8> {
-	let mut out = Vec::new();
-	for line in err.split_inclusive(|&c| c == b'\n') {
-		let stamped = line.len() >= 11
-			&& line[0] == b'[' && line[3] == b':'
-			&& line[6] == b':' && line[9] == b']';
-		out.extend_from_slice(if stamped { &line[11..] } else { line });
-	}
-	out
-}
 
 fn lossy(b: &[u8]) -> String {
 	String::from_utf8_lossy(b).into_owned()
