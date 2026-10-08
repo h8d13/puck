@@ -715,6 +715,20 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
 - the -1 check after `_alpm_remove_single_package` is dead, it always
   returns 0 (add.c:508-511). **none**
 
+## `src/pacman/sync.c` -Sc minor
+
+- `sync_cleandb` reads an uninitialised `st_mode` after a failed `stat`
+  (sync.c:93-97), a dangling symlink in the sync dir. **local** (port:
+  not a directory)
+- failures cancel out in the exit status: `unlink_verbose` returns -1,
+  an unreadable cache dir or failed `trans_release` adds +1 (sync.c:41-53,
+  115, 126, 256, 302, 306, 207, 917); one of each exits 0. **env**
+- an `rmrf` failure in `sync_cleandb` is printed with a leftover errno
+  and not counted, `-Sc` exits 0 after "could not remove" (sync.c:98-102).
+  **env**
+- PATH_MAX overflow in `sync_cleandb` prints and carries on with the
+  truncated path (sync.c:86-90). **none** (port mirrors it)
+
 ## transaction prepare minor
 
 - targets are the sync cache objects, mutated in place (sync.c:188-189,

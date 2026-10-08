@@ -121,8 +121,8 @@ script tests): meson's 338 ok / 6 expected fail, reproduced by
 unexpected pass (deprange001); vercmptest and the script tests pass.
 Failure classes: ~140 db desc files pactest writes with only the sections
 it sets, ~60 `.PKGINFO` with empty `pkgdesc`/`url`/`builddate`/`packager`
-(both: ALPM's spec-strict parsers, readers being owned), 5 `-Sc`, a few
-with other causes behind those.
+(both: ALPM's spec-strict parsers, readers being owned), `-Sc` (ported; its 4 failing clean tests are the `.PKGINFO`
+class), a few with other causes behind those.
 
 ### 4. Drop-in
 
@@ -266,18 +266,18 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | regcomp/regexec (glibc, used by db.c, remove.c, files.c) | - | `alpm-core::regex` | difftest fuzz vs glibc (C.UTF-8, 4 flag sets) on agreeing characters; classes/towupper via std, divergence per class counted |
 | `src/common/*.c` | 445 | `pacman-common::{util_common,ini}` | all of util-common.c and ini.c: difftest fuzz (safe_fgets on fmemopen + real file, llstat on /tmp tree, ini via recorded callback) |
 | `src/pacman/*.c` | 10124 | - | excl. symlinks into `src/common` |
-| `src/pacman/pacman.c` (in the above) | 1360 | `pacman-cli::{pacman,getopt}` (partial) | getopt_long: difftest per call vs libc (2M fuzz); parseargs, parsearg_*, checkargs_*, usage, version, needs_root, '-' stdin targets, main, cleanup, exit status, dispatch (-Q/-S/-R/-U/-F/-T, transactions up to the commit): difftest `cli_binary` vs the C binary (stdout/stderr/exit), parsed Config unit-tested; signals partial (std: default-kill, no SEGV cursor restore, no WINCH); -D, -Sc pending |
+| `src/pacman/pacman.c` (in the above) | 1360 | `pacman-cli::{pacman,getopt}` (partial) | getopt_long: difftest per call vs libc (2M fuzz); parseargs, parsearg_*, checkargs_*, usage, version, needs_root, '-' stdin targets, main, cleanup, exit status, dispatch (-Q/-S/-R/-U/-F/-T, transactions up to the commit): difftest `cli_binary` vs the C binary (stdout/stderr/exit), parsed Config unit-tested; signals partial (std: default-kill, no SEGV cursor restore, no WINCH) |
 | `src/pacman/callback.c` (in the above) | 1155 | `pacman-cli::callback` | cb_event, cb_question, cb_progress (ILoveCandy), cb_download (multibar, total bar), cb_log (delayed under bars): difftest lockstep vs C (every event x 16 configs, 11 questions x 12 configs x 27 inputs, progress/download fuzz, fake coarse clock) |
 | `src/pacman/check.c` (in the above) | 435 | `pacman-cli::check` | check_pkg_fast/full: difftest on fixture roots and dbs (all 22 message kinds), mtree readers compared per fixture and on 804 real mtrees |
 | `src/pacman/query.c` (in the above) | 521 | `pacman-cli::query` | every -Q mode, filter and message: difftest vs C pacman_query on fixture roots |
 | `src/pacman/deptest.c` (in the above) | 57 | `pacman-cli::deptest` | difftest vs C pacman_deptest |
-| `src/pacman/sync.c` (in the above) | 978 | `pacman-cli::sync` (partial) | sync_info, sync_list, sync_group, dispatch, check_syncdbs: difftest vs C pacman_sync (4 db states, warm caches); -Sy/-Syy: difftest vs C pacman_sync with the frontend callbacks (no bars); sync_trans/sync_prepare_execute: difftest `frontend_fuzz` (C never commits: --print or a declined question), the commit and its failure report through pactest; -Sc, -Ss pending |
+| `src/pacman/sync.c` (in the above) | 978 | `pacman-cli::sync` (partial) | sync_info, sync_list, sync_group, dispatch, check_syncdbs: difftest vs C pacman_sync (4 db states, warm caches); -Sy/-Syy: difftest vs C pacman_sync with the frontend callbacks (no bars); sync_trans/sync_prepare_execute: difftest `frontend_fuzz` (C never commits: --print or a declined question), the commit and its failure report through pactest; -Sc/-Scc (sync_cleancache, sync_cleandb_all, unlink_verbose under trans_init(0,0)): difftest `sync_clean` vs C pacman_sync with op_s_clean on seeded twin worlds (answers x -c/-cc/-ccc x CleanMethods x lock; rc, stdout, stderr, input read, tree with modes), PATH_MAX edges, cli_binary -Sc/-Scc under fakeroot |
 | `src/pacman/remove.c`, `upgrade.c` | 309 | `pacman-cli::{remove,upgrade}` | difftest `frontend_fuzz` vs C pacman_remove/pacman_upgrade (rc, stdout, stderr, input consumed); -U url fetch wired, untested (network) |
 | `src/pacman/database.c` (in the above) | 305 | `pacman-cli::database` | -D --asdeps/--asexplicit, -Dk, -Dkk: difftest vs C pacman_database on two copies of each fixture (ret, stdout, stderr, local db tree after), -Dkk on sync worlds; unit tests |
 | `src/pacman/files.c` (in the above) | 341 | `pacman-cli::files` | -F, -Fx, -Fq, --machinereadable, -Fl: difftest vs C pacman_files on .files dbs; -Fy: same, with the frontend callbacks |
 | `src/pacman/package.c` (in the above) | 587 | `pacman-cli::package` | dump_pkg_full (all origins, -i/-ii), dump_pkg_backups, dump_pkg_files, print_installed, print_groups, dump_pkg_search: difftest on a real C handle with refilled db caches and real files under the root, strftime %c vs `format_date_utc` fuzz + localtime limits; changelog and gpgme results: unit tests |
 | `src/pacman/conf.c` (in the above) | 1468 | `pacman-cli::conf` (partial) | config model, parseconfigfile, setdefaults (include, siglevel, cleanmethod, usage, repeating options, $repo/$arch, sysroot), glob(3) subset: difftest on random config trees (return, stderr, whole config_t), glob vs libc; setup_libalpm, register_repo: difftest reading the handle back through every getter; XferCommand download pending |
-| `src/pacman/util.c` (in the above) | 1981 | `pacman-cli::util` (partial: all but trans_init/release, sync_syncdbs, tcflush) | display_targets + table engine, print_packages (--print-format), optdepends lists, select/multiselect/yesno prompts (stdin via fmemopen), rmrf: difftest; earlier helpers: | indentprint, strreplace, string_display, list_display(_linebreak), signature_display, humanize_size, arg_to_string, console cursor helpers: difftest fuzz; glibc mbstowcs: difftest; wcwidth via unicode-width, divergence per class counted, display difftests on agreeing characters |
+| `src/pacman/util.c` (in the above) | 1981 | `pacman-cli::util` (partial: all but trans_init/release, sync_syncdbs, tcflush) | display_targets + table engine, print_packages (--print-format), optdepends lists, select/multiselect/yesno prompts (stdin via fmemopen), rmrf, rmrf_errno (the errno sync_cleandb prints): difftest; earlier helpers: | indentprint, strreplace, string_display, list_display(_linebreak), signature_display, humanize_size, arg_to_string, console cursor helpers: difftest fuzz; glibc mbstowcs: difftest; wcwidth via unicode-width, divergence per class counted, display difftests on agreeing characters |
 | `src/util/testpkg.c` | 103 | - | |
 | `src/pacman/pacman-conf.c` | 481 | - | the scripts read config values through it (pacman-key, makepkg) |
 
@@ -599,6 +599,7 @@ Follow-ups raised by port units:
 | `Question::SelectProvider` carries provider db names (today through `Lookup`); `Handle::replace_callbacks` has no frontend caller left | frontend | todo |
 | sandbox in `be_sync::downloader` (like `fetch_pkgurl`) | dbupdate | todo |
 | `umask(0022)` around `alpm_db_update` (rustix process) | dbupdate | todo |
+| be_package logs libarchive's open/read failures ("could not open file X: ..." for unknown formats and dirs, "error while reading package" for a cut first header, "could not parse package description file" for a cut `.PKGINFO`); `sync_clean` filters them today | cleancache | todo |
 | one `logv(cb, ...)` helper (copies in hook.rs, deps.rs, trans.rs, util's `log_parts`) | integrate2 | in progress: `callbacks::logv`, used by db, be_local, be_sync |
 | `-D` dispatch arm: `pacman_database(config, handle, targets, &mut o)` | m1close | done |
 | setup_libalpm's server adds through `Handle::dbs_mut()` (`Db::add_server` takes the callbacks) | m1close | done |
