@@ -96,7 +96,7 @@ pub struct Regex {
 	sb: bool,
 	// groups used by back-references, bit k for \k+1
 	refs: u16,
-	// bytes a match can start with, back-reference patterns only
+	// bytes a match can start with, None when it may start anywhere
 	fastmap: Option<Box<[bool; 256]>>,
 }
 
@@ -241,9 +241,31 @@ impl Str {
 		let mut pending: Vec<u8> = Vec::new();
 		let mut i = 0;
 		while i < raw.len() {
-			let mut cat = pending.clone();
-			cat.extend_from_slice(&raw[i..raw.len().min(i + 6)]);
-			let (wc, used) = match mbrtowc(&cat) {
+			let b = raw[i];
+			// ASCII in the initial state: mbrtowc gives the byte,
+			// towupper its ASCII upper case
+			if b.is_ascii() && pending.is_empty() {
+				let up = if icase {
+					b.to_ascii_uppercase()
+				} else {
+					b
+				};
+				s.buf.push(up);
+				s.wcs.push(u32::from(up));
+				if keep_orig {
+					s.orig.push(b);
+				}
+				i += 1;
+				continue;
+			}
+			// the state's bytes (under 6) and up to 6 more, on the stack
+			let mut stack = [0u8; 12];
+			let k = pending.len();
+			let more = (raw.len() - i).min(6);
+			stack[..k].copy_from_slice(&pending);
+			stack[k..k + more].copy_from_slice(&raw[i..i + more]);
+			let cat = &stack[..k + more];
+			let (wc, used) = match mbrtowc(cat) {
 				Mb::Char(wc, n) => {
 					let used = n - pending.len();
 					pending.clear();
@@ -254,7 +276,7 @@ impl Str {
 					// keeps the state of a character cut by the end, the
 					// next bytes then complete it
 					if icase && matches!(m, Mb::Short) {
-						pending = cat;
+						pending = cat.to_vec();
 					}
 					s.buf.push(raw[i]);
 					s.wcs.push(u32::from(raw[i]));
@@ -1410,9 +1432,7 @@ impl Regex {
 			refs: p.used,
 			fastmap: None,
 		};
-		if re.refs != 0 {
-			re.fastmap = re.build_fastmap();
-		}
+		re.fastmap = re.build_fastmap();
 		Ok(re)
 	}
 
@@ -1423,9 +1443,9 @@ impl Regex {
 		if self.refs == 0 { m.pike() } else { m.search() }
 	}
 
-	// re_compile_fastmap over the four initial states, only consulted for
-	// back-reference patterns: there a reference to a group that can be
-	// empty at the start is passed, any other stops the scan. None: a
+	// re_compile_fastmap over the four initial states, which regexec
+	// consults for every pattern. a back-reference to a group that can
+	// be empty at the start is passed, any other stops the scan. None: a
 	// match can start anywhere
 	fn build_fastmap(&self) -> Option<Box<[bool; 256]>> {
 		// groups whose close is reachable without consuming, glibc's
@@ -1682,15 +1702,17 @@ impl Matcher<'_> {
 	}
 
 	// epsilon closure of pc at the current position, consuming
-	// instructions and Match land in run with their NEXT constraints
+	// instructions and Match land in run with their NEXT constraints.
+	// stack is scratch space, empty between calls
 	fn closure(
 		&self,
 		pc: u32,
 		ctx: u8,
 		seen: &mut Seen,
 		run: &mut Vec<(u32, u16)>,
+		stack: &mut Vec<(u32, u16)>,
 	) {
-		let mut stack = vec![(pc, 0u16)];
+		stack.push((pc, 0u16));
 		while let Some((pc, cons)) = stack.pop() {
 			if !seen.insert(pc as usize, cons) {
 				continue;
@@ -1725,20 +1747,39 @@ impl Matcher<'_> {
 		let mut seen = Seen::new(insts.len());
 		let mut queued = Seen::new(insts.len());
 		let mut run = Vec::new();
-		for p in 0..=n {
+		let mut stack = Vec::new();
+		// threads waiting in the ring
+		let mut live = 0;
+		let mut p = 0;
+		while p <= n {
+			// re_search_internal's fastmap skip: with no thread left
+			// only a start can match, at a byte it may start with
+			if let (0, Some(map)) = (live, &self.re.fastmap) {
+				let rest = &self.s.buf[p..];
+				match rest
+					.iter()
+					.position(|&b| map[usize::from(b)])
+				{
+					Some(i) => p += i,
+					None => return false,
+				}
+			}
 			let mut arrived = std::mem::take(&mut ring[p % 8]);
+			live -= arrived.len();
 			run.clear();
 			let before = self.ctx_before(p);
 			let stepped = self.ctx_stepped(p);
 			seen.clear();
 			for &pc in &arrived {
-				self.closure(pc, stepped, &mut seen, &mut run);
+				let (s, r) = (&mut seen, &mut run);
+				self.closure(pc, stepped, s, r, &mut stack);
 			}
 			if self.can_start(p) {
 				if stepped != before {
 					seen.clear();
 				}
-				self.closure(0, before, &mut seen, &mut run);
+				let (s, r) = (&mut seen, &mut run);
+				self.closure(0, before, s, r, &mut stack);
 			}
 			queued.clear();
 			let after = self.ctx_after(p);
@@ -1755,14 +1796,17 @@ impl Matcher<'_> {
 				}
 				if self.step_byte(inst, cons, p) {
 					ring[(p + 1) % 8].push(pc + 1);
+					live += 1;
 				}
 				let k = self.step_mb(inst, cons, p);
 				if k > 0 {
 					ring[(p + k) % 8].push(pc + 1);
+					live += 1;
 				}
 			}
 			arrived.clear();
 			ring[p % 8] = arrived;
+			p += 1;
 		}
 		false
 	}
