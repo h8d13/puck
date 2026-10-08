@@ -36,6 +36,9 @@ xfail=(deprange001.py replace110.py
 	sync-update-package-removing-required-provides.py sync403.py
 	sync406.py upgrade078.py)
 
+# the binary runs outside cargo's test-runner.sh: same caps here, so a
+# runaway pacman fails its test instead of swapping the machine
+ulimit -v "${TEST_MEM_KB:-4194304}"
 keep=()
 [ -n "${PACTEST_LOGS:-}" ] && keep=(--keep-root)
 ok=0 fail=0 xfailed=0 xpassed=0
@@ -45,7 +48,8 @@ roots=$(mktemp -d)
 trap 'rm -rf "$log" "$roots"' EXIT
 for t in "${tests[@]}"; do
 	name=$(basename "$t")
-	TMPDIR=$roots RUNNING_UNDER_MESON=1 python3 "$suite/pactest.py" \
+	TMPDIR=$roots RUNNING_UNDER_MESON=1 timeout "${PACTEST_TIMEOUT:-300}" \
+		python3 "$suite/pactest.py" \
 		--scriptlet-shell /bin/sh --bindir "$bindir" \
 		--ldconfig /sbin/ldconfig --verbose "${keep[@]}" "$t" \
 		> "$log" 2>&1
