@@ -576,6 +576,7 @@ dependencies = [
  "alpm-types",
  "pacman-cli",
  "pacman-common",
+ "testpkg",
 ]
 
 [[package]]
@@ -2251,6 +2252,13 @@ dependencies = [
  "filetime",
  "libc",
  "xattr",
+]
+
+[[package]]
+name = "testpkg"
+version = "0.1.0"
+dependencies = [
+ "alpm-core",
 ]
 
 [[package]]

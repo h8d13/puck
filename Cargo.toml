@@ -1,6 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["alpm-core", "pacman-common", "pacman-cli", "vercmp", "difftest"]
+members = [
+	"alpm-core",
+	"pacman-common",
+	"pacman-cli",
+	"testpkg",
+	"vercmp",
+	"difftest",
+]
 # submodules: C reference and ALPM (its own workspace)
 exclude = ["pacman", "alpm", "vendor"]
 

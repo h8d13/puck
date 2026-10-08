@@ -11,6 +11,7 @@ publish = false
 alpm-core = { path = "../alpm-core" }
 pacman-common = { path = "../pacman-common" }
 pacman-cli = { path = "../pacman-cli" }
+testpkg = { path = "../testpkg" }
 alpm-compress.workspace = true
 alpm-db.workspace = true
 alpm-repo-db.workspace = true
