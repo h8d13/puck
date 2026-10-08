@@ -26,6 +26,7 @@ use crate::handle::{
 	alpm_option_set_dbext, alpm_register_syncdb, alpm_release,
 };
 use crate::pkg_show::{c_strftime_c, columns_cache_reset};
+use crate::signing::random_sig;
 use crate::{
 	CList, Rng, alpm_list_add, alpm_list_free, c_free, cstr, fclose,
 	fflush, open_memstream, stderr, stdout,
@@ -342,7 +343,7 @@ pub fn sync_read_only<S>(cfg: &Config, targets: &[S]) -> bool {
 // pacman_sync(targets) on fh. C preconditions: sync_read_only, and the
 // dump_pkg_full ones of PkgWorld::dump_full for every package -Si shows
 // (the generated worlds keep to them: dates localtime takes, no ESC,
-// no %PGPSIG%)
+// %PGPSIG% from random_sig)
 pub fn c_pacman_sync<S: AsRef<[u8]>>(
 	fh: &FrontHandle,
 	cfg: &Config,
@@ -512,6 +513,14 @@ fn gen_pkg(rng: &mut Rng, name: &str) -> GenPkg {
 			word(rng, 1, 6)
 		);
 		desc.push_str(&section("URL", &one(url)));
+	}
+	// -Sii's keys: packets alpm_extract_keyid is defined on. its own
+	// rng, the worlds other tests draw stay as they were
+	let seed = name.bytes().chain(version.bytes());
+	let seed = seed.fold(0x5195, |h: u64, b| h.wrapping_mul(31) ^ b as u64);
+	if let (Some(sig), _) = random_sig(&mut Rng::new(seed)) {
+		let sig = String::from_utf8(sig).expect("base64 is ascii");
+		desc.push_str(&section("PGPSIG", &one(sig)));
 	}
 	GenPkg {
 		name: name.to_string(),

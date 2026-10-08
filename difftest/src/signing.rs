@@ -29,7 +29,7 @@ use crate::handle::{
 	alpm_register_syncdb, alpm_release,
 };
 use crate::package::{CPkg, CPkgBox, field, read_pkg, take_strs};
-use crate::{CList, c_free, cstr, vsnprintf};
+use crate::{CList, Rng, c_free, cstr, vsnprintf};
 
 // alpm_pgpkey_t
 #[repr(C)]
@@ -176,6 +176,88 @@ pub fn encode_base64(raw: &[u8]) -> Vec<u8> {
 		}
 	}
 	out
+}
+
+// subpacket area: some creation times around at most one issuer
+pub fn subpackets(rng: &mut Rng, key: Option<[u8; 8]>) -> Vec<u8> {
+	let mut area = Vec::new();
+	let ctime = |area: &mut Vec<u8>, rng: &mut Rng| {
+		area.extend_from_slice(&[5, 2]);
+		area.extend_from_slice(&(rng.next_u64() as u32).to_be_bytes());
+	};
+	for _ in 0..rng.below(3) {
+		ctime(&mut area, rng);
+	}
+	if let Some(k) = key {
+		area.extend_from_slice(&[9, 16]);
+		area.extend_from_slice(&k);
+		for _ in 0..rng.below(2) {
+			ctime(&mut area, rng);
+		}
+	}
+	area
+}
+
+// one v4 binary-document signature packet in old or new format, and the
+// keyids alpm_extract_keyid finds in it (first issuer of each area)
+pub fn sig_packet(rng: &mut Rng) -> (Vec<u8>, Vec<Vec<u8>>) {
+	let mut keys = Vec::new();
+	let mut area = |rng: &mut Rng| {
+		let key = (rng.below(2) == 0).then(|| {
+			let k = rng.next_u64().to_be_bytes();
+			keys.push(k
+				.iter()
+				.map(|b| format!("{b:02X}"))
+				.collect());
+			k
+		});
+		subpackets(rng, key)
+	};
+	let (hashed, unhashed) = (area(rng), area(rng));
+	let mut body = vec![4, 0, 1, 8];
+	body.extend_from_slice(&(hashed.len() as u16).to_be_bytes());
+	body.extend_from_slice(&hashed);
+	body.extend_from_slice(&(unhashed.len() as u16).to_be_bytes());
+	body.extend_from_slice(&unhashed);
+	// hash prefix and an mpi-ish tail, long enough for 2-byte lengths
+	let tail = 2 + rng.below(220);
+	body.extend((0..tail).map(|_| rng.next_u64() as u8));
+	let n = body.len();
+	let mut pkt = match (rng.below(2), n < 192) {
+		(0, true) => vec![0xc2, n as u8],
+		(0, false) => {
+			let m = n - 192;
+			vec![0xc2, (m >> 8) as u8 + 192, m as u8]
+		}
+		(_, true) => vec![0x88, n as u8],
+		_ => vec![0x89, (n >> 8) as u8, n as u8],
+	};
+	pkt.extend_from_slice(&body);
+	(pkt, keys.into_iter().map(String::into_bytes).collect())
+}
+
+// %PGPSIG% and the keys the C extracts: packets, maybe followed by a
+// byte without the packet bit (the C stops there, keeping earlier
+// keys), or base64 that does not decode
+pub fn random_sig(rng: &mut Rng) -> (Option<Vec<u8>>, Vec<Vec<u8>>) {
+	match rng.below(5) {
+		0 => (None, Vec::new()),
+		1 => (Some(b"not*base64".to_vec()), Vec::new()),
+		_ => {
+			let (mut data, mut keys) = (Vec::new(), Vec::new());
+			for _ in 0..1 + rng.below(3) {
+				let (p, k) = sig_packet(rng);
+				data.extend(p);
+				keys.extend(k);
+			}
+			if rng.below(4) == 0 {
+				data.push(rng.below(0x80) as u8);
+				data.extend((0..rng.below(4))
+					.map(|_| rng.next_u64() as u8));
+			}
+			(Some(encode_base64(&data)), keys)
+		}
+	}
 }
 
 // what a call left on the callbacks: import questions (uid,
