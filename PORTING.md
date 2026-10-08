@@ -122,9 +122,8 @@ Gate: upstream's full meson suite against the Rust binaries,
 `scripts/upstream-suite.sh` (pactest's 341 tests, vercmptest and the two
 script tests): meson's 338 ok / 6 expected fail, reproduced by
 `pacman/build`. Rust with the owned readers (`.PKGINFO`, local and sync
-db): 336 ok / 6 xfail / 2 fail / 0 unexpected pass, vercmptest and the
-script tests included. Left: scriptlet-signal-handling (signals are not
-caught, SIGINT during a scriptlet ends pacman with 130) and
+db) and the soft interrupt handler: 337 ok / 6 xfail / 1 fail / 0
+unexpected pass, vercmptest and the script tests included. Left:
 upgrade-download-pkg-and-sig-with-filename (`-U` URL downloads through
 HTTP redirects: "Empty reply from server").
 
@@ -262,7 +261,8 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | regcomp/regexec (glibc, used by db.c, remove.c, files.c) | - | `alpm-core::regex` | difftest fuzz vs glibc (C.UTF-8, 4 flag sets) on agreeing characters; classes/towupper via std, divergence per class counted |
 | `src/common/*.c` | 445 | `pacman-common::{util_common,ini}` | all of util-common.c and ini.c: difftest fuzz (safe_fgets on fmemopen + real file, llstat on /tmp tree, ini via recorded callback) |
 | `src/pacman/*.c` | 10124 | - | excl. symlinks into `src/common` |
-| `src/pacman/pacman.c` (in the above) | 1360 | `pacman-cli::{pacman,getopt}` (partial) | getopt_long: difftest per call vs libc (2M fuzz); parseargs, parsearg_*, checkargs_*, usage, version, needs_root, '-' stdin targets, main, cleanup, exit status, dispatch (-Q/-S/-R/-U/-F/-T, transactions up to the commit): difftest `cli_binary` vs the C binary (stdout/stderr/exit), parsed Config unit-tested; signals partial (std: default-kill, no SEGV cursor restore, no WINCH) |
+| `src/pacman/pacman.c` (in the above) | 1360 | `pacman-cli::{pacman,getopt}` (partial) | getopt_long: difftest per call vs libc (2M fuzz); parseargs, parsearg_*, checkargs_*, usage, version, needs_root, '-' stdin targets, main, cleanup, exit status, dispatch (-Q/-S/-R/-U/-F/-T, transactions up to the commit): difftest `cli_binary` vs the C binary (stdout/stderr/exit), parsed Config unit-tested; signals: soft interrupt handler installed in main, handle published after setup, removed in cleanup before the release: difftest `sighandler` |
+| `src/pacman/sighandler.c` (in the above) | 146 | `pacman-cli::sighandler` (partial: no segv, winch handler) | soft_interrupt_handler, install/remove: difftest `sighandler` vs the C binary (SIGINT/SIGHUP before the handle, at a prepared transaction's prompt, from Pre/PostTransaction hooks, post_install, pre_remove; exit status, stdout, stderr, root tree, log) |
 | `src/pacman/callback.c` (in the above) | 1155 | `pacman-cli::callback` | cb_event, cb_question, cb_progress (ILoveCandy), cb_download (multibar, total bar), cb_log (delayed under bars): difftest lockstep vs C (every event x 16 configs, 11 questions x 12 configs x 27 inputs, progress/download fuzz, fake coarse clock) |
 | `src/pacman/check.c` (in the above) | 435 | `pacman-cli::check` | check_pkg_fast/full: difftest on fixture roots and dbs (all 22 message kinds), mtree readers compared per fixture and on 804 real mtrees |
 | `src/pacman/query.c` (in the above) | 521 | `pacman-cli::query` | every -Q mode, filter and message: difftest vs C pacman_query on fixture roots |
@@ -563,8 +563,27 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   (the C loads them as the check goes) and conflict.rs logs nothing, so
   the difftest drops debug lines inside that check and inside downloads
   (dload's internals). Hooks run with the transaction taken off the
-  handle. Signals are not caught, so nothing interrupts a commit from
-  outside; `trans_interrupt` works as before.
+  handle. Another thread interrupts a commit through
+  `Handle::interrupt()` (`Interrupt`): `set_state`/`trans_release`
+  publish COMMITTING/INTERRUPTED, lock/unlock the held lock, and
+  `trans::interrupted` sets a request into `trans.state` where the add
+  and remove loops and the commit's end read it (C: the handler writes
+  `trans->state` itself). Hooks run with the transaction off the handle
+  but still count as committing, like the C.
+- `sighandler`: signal-hook's self-pipe, a thread does the C handler's
+  work in its order (cursor below the bars from the multibar cursor the
+  callbacks publish, message, cursor shown, `trans_interrupt` or unlock
+  and `_exit(128 + signum)`). Divergence: the thread decides a moment
+  after delivery (C: at delivery), so a signal at a state edge (a hook
+  ending, COMMITTING being set) can land on the other side.
+  remove_soft_interrupt_handler is a flag read in signal context, the
+  default action then runs. Not ported: segv_handler (signal-hook
+  refuses SIGSEGV, safe Rust faults only on stack overflow, std's own
+  handler reports it), winch_handler (getcols is uncached, nothing to
+  reset; `flag::register_usize` would store the C's -1 once a cache
+  exists). SIGINT/SIGQUIT are still not ignored around the sandboxed
+  download and XferCommand (dload.c:936, conf.c:230): the soft handler
+  runs there, the C ignores both.
 
 Follow-ups raised by port units:
 
