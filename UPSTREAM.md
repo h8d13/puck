@@ -31,6 +31,9 @@ Every finding states who controls the input that triggers it:
 | `-Qii` crashes on a backup path that is now a directory | local |
 | `-Si`/`-Qip` crash on huge build dates | packager |
 | `.pacsave` rotation regex built from an unescaped file name | real (rare) |
+| `.pacsave` shift loop runs to the highest number found | local |
+| backup entry without a hash crashes the remove | local |
+| unremovable package forgotten with its files left | env |
 | `-Fx -l` conflict check is dead | real |
 | `_alpm_pkg_check_meta` name check swapped | packager |
 | `string_length` buffer one byte short | packager |
@@ -144,6 +147,58 @@ lone `{`) jumps to cleanup without shifting, then the caller renames the
 file to `.pacsave`, overwriting an existing `.pacsave`: an older saved
 config is lost. Error paths after a successful regcomp (375, 402, 410)
 skip `regfree`. **env** for the leak.
+
+A match shorter than the basename (`*`, `?`, `{0,}` in the name: `a*b`
+matches `b.pacsave.1`) puts the `strtoul` offset past the end of
+`d_name`, which then reads stale bytes of the dirent buffer. **real
+(rare)**, same names.
+
+- port: same regex; a number past the end of the name reads as 0
+- difftest: metacharacter names that cannot match shorter (`a.conf`,
+  `c+.conf`, `[x`), decoys the unescaped regex matches
+
+## `.pacsave` shift loop runs to the highest number found
+
+Practice: **local**. Needs a hand-made `<file>.pacsave.<N>` next to a
+modified backup file.
+
+remove.c:399 renames once per number from the highest `N` down to 1,
+missing ones included: `x.pacsave.4000000000` makes four billion
+`rename` calls (the removal hangs). `N` at `ULONG_MAX` wraps
+`log_max + 1` to 0, nothing shifts and `.pacsave` overwrites an existing
+`.pacsave.1`.
+
+- port: same loop
+- difftest: numbers up to 7
+
+## backup entry without a hash crashes the remove
+
+Practice: **local**. Needs a `%BACKUP%` line without a tab in the local
+`files` (pacman itself writes `(null)`, see below).
+
+remove.c:536 `strcmp(filehash, backup->hash)` with the NULL hash
+`_alpm_split_backup` gives such a line, once the file's md5 computes.
+
+- port: the file counts as modified (saved as `.pacsave`)
+- difftest: never feeds the C that entry
+
+## unremovable package forgotten with its files left
+
+Practice: **env**: a file of the package on a read-only mount (EROFS).
+Not reproduced end to end (the difftest has no read-only mount), read
+from the code.
+
+`remove_package_files` returns -1 with `ALPM_ERR_PKG_CANT_REMOVE` before
+touching anything (remove.c:628), but `_alpm_remove_single_package`
+drops that result (718, "TODO check returned errors"), then logs
+"removed", runs post_remove and deletes the db entry: the files stay on
+disk, owned by no package, and the transaction reports success. The -1
+checks of its callers (remove.c:781, add.c:508) are dead, and on the
+removal path `alpm_pkg_has_scriptlet` (727) resets pm_errno. Files that
+fail to unlink later are only counted, with the same outcome.
+
+- port: same behaviour, the files result returned
+- difftest: unlink/rmdir/rename failures in 0555 dirs compared
 
 ## `-Fx -l` conflict check is dead
 
@@ -773,6 +828,20 @@ Found through the conf difftest aborting only with longer TMPDIR paths.
 - `select_display` NULL handling (1427-1440), `target_cmp` returns 0/1
   (1043), `parseindex("")` is 0 (1447-1448). **none**
 
+## `callback.c` minor
+
+- `bar->eta = (total_size - sync_xfered) / rate` converts a negative
+  double to unsigned (callback.c:940), undefined: whenever the size is
+  unknown (no Content-Length) or ETA > UINT_MAX; x86_64 wraps ("--:--"),
+  aarch64 saturates ("00:00"). `(off_t)bar->rate` (851) same class.
+  **real**, display only. The port reproduces x86_64.
+- "name (n/m)" buffer sized by the digits of `howmany`, a larger
+  `downloaded` count is cut ("Total (10/4") (806-810). **none**
+- singular SELECT_PROVIDER line lacks the plural's ':' (521-522); libalpm
+  only asks with more than one provider. **none**
+- `parseindex` stores strtol's long in an int: "4294967298" selects entry
+  2 (util.c). **real (rare)**, user input
+
 ## `src/pacman/conf.c` minor
 
 - CacheServer `file://` URLs do not get the sysroot, Server ones do
@@ -796,6 +865,17 @@ Found through the conf difftest aborting only with longer TMPDIR paths.
 - `section->name` dangles after an include with a header, only ever
   NULL-checked (conf.c:1282, 1300); `replace_server_vars` reads the
   global instead of its parameter (conf.c:823). **none**
+- `register_repo`'s result is ignored (conf.c:964-966): a section that
+  fails to register (duplicate, `[local]`, a '/' in the name) is reported
+  and pacman carries on. **local**
+- "Failed to pass %s entry to libalpm" lacks its newline (conf.c:1005),
+  `--assume-installed 'foo>1'` reaches it and exits 255. **real**,
+  cosmetic
+- `'sandboxuser' (%s) does not exist` debug log lacks its newline
+  (handle.c:617). **none**
+- `_getumask` (umask(0) then restore) is not thread safe (dload.c:69-72),
+  concurrent calls chmod 0666. **api** (threaded users; the dload difftest
+  flake)
 
 To be written up and reported through pacman's usual channels by the
 maintainer of this repo, not from here.

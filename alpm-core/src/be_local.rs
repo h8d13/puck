@@ -108,7 +108,7 @@ fn os(path: &[u8]) -> &Path {
 // fscanf(f, "%zu") on the version file: C-locale whitespace skipped, then
 // strtoul base 10: optional sign, '-' negates modulo 2^64, overflow
 // saturates. None when no digit follows (t != 1)
-fn scan_zu(s: &[u8]) -> Option<u64> {
+pub(crate) fn scan_zu(s: &[u8]) -> Option<u64> {
 	let start = s.iter().position(|c| !b" \t\n\x0b\x0c\r".contains(c))?;
 	let s = &s[start..];
 	let (neg, s) = match s.first() {

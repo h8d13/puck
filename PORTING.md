@@ -17,6 +17,10 @@ References (git submodules):
   links upstream `libalpm_objlib.a` and `libcommon.a` statically, so
   internal (hidden) functions are comparable too. One module per C file.
 - `scripts/cli-parity.sh`: stdout/stderr/exit diff of a C binary vs its port
+- `scripts/cli-parity-fixtures.sh`: the milestone 1/2 gate, C `pacman` vs
+  the Rust binary on generated worlds (difftest `cli_binary`)
+- `scripts/pactest.sh <bin>`: upstream pactest (meson's list, args, xfail)
+  on a binary, the milestone 3 gate
 
 Rules for every port unit: `METHODOLOGY.md`.
 
@@ -64,7 +68,7 @@ already downloaded sync dbs.
 | package model, pkghash, group | done |
 | local db reader (`be_local.c` via `alpm-db`) | done (reading side) |
 | sync db reader (`be_sync.c` via `alpm-repo-db`, `alpm-compress`) | done (reading side) |
-| pacman.conf (`conf.c`) | done (parsing, no `setup_libalpm`) |
+| pacman.conf (`conf.c`) | done (parsing, `setup_libalpm`, `register_repo`; XferCommand pending) |
 | db layer and cache (`db.c`), minimal handle (`handle.c`) | done (no search, update, signatures) |
 | POSIX ERE for `-Ss`/`-Qs` (glibc regcomp/regexec, C.UTF-8) | done |
 | `-Qk`/`-Qkk` (`check.c`) + local mtree reading (`alpm-mtree`) | done |
@@ -72,14 +76,14 @@ already downloaded sync dbs.
 | frontend package display (`package.c`) | done |
 | db search, `DbCaches` for `Handle`, `query.c` (-Q*), `deptest.c` (-T) | done |
 | read-only `sync.c` (-Si, -Sl, -Sg) and `files.c` (-F, -Fl, -Fx) | done |
+| `-Ss`, `setup_libalpm`, `callback.c`, main dispatch, `pacman` binary | done |
 | `database.c` (-D, -Dk, -Dkk), db.c/backend log lines | done |
-| `-Ss`, `setup_libalpm`, main dispatch, `pacman` binary | done |
 
 Gate: `scripts/cli-parity.sh` between C `pacman` and the Rust binary with
 the same `--root`/`--dbpath`/`--config` on generated test roots and a
 read-only copy of a real system db; byte-identical stdout, stderr, exit.
-Fixtures (`scripts/cli-parity-fixtures.sh`, -D runs under fakeroot with
-the written db compared): 533/535, the two left are `--debug` in the
+Now: `scripts/cli-parity-fixtures.sh` (-D runs under fakeroot with the
+written db compared), 533/535 equal; the two left are `--debug` in the
 default-SigLevel world (signing debug lines, GOTO_ERR's C file:line).
 
 ### 2. Sync databases (`-Sy`)
@@ -88,9 +92,11 @@ default-SigLevel world (signing debug lines, GOTO_ERR's C file:line).
 |---|---|
 | downloads (`dload.c`): parallel, resume, mirrors, sandbox user | done (`reqwest`); sandbox child and Handle wiring pending |
 | signature verification (`signing.c`) | done (`gpg` over `--status-fd`, argv checked against gpgme's); Handle/db wiring pending |
-| db update/validation (`be_sync.c` writing side) | done (`alpm_db_update`, `-Sy`/`-Syy`/`-Fy`); sandbox child and progress bars pending |
+| db update/validation (`be_sync.c` writing side) | done (`alpm_db_update`, `-Sy`/`-Syy`/`-Fy` with progress bars); sandbox child pending |
 
-Gate: pactest sync/download tests against the Rust binary.
+Gate: pactest sync/download tests against the Rust binary. `-Sy`/`-Syy`/
+`-Fy` parity runs (fakeroot, `file://` mirror, fetched dbs compared) are
+in the milestone 1 gate and equal.
 
 ### 3. Transactions (`-S`, `-U`, `-R`)
 
@@ -100,12 +106,15 @@ Gate: pactest sync/download tests against the Rust binary.
 | deps resolution (`deps.c` rest + `graph.c`), `conflict.c`, `diskspace.c` | done |
 | `hook.c`, scriptlets (`_alpm_runscriptlet`), `_alpm_run_chroot`, `_alpm_ldconfig` | done (on unified callbacks, take `&mut Handle`) |
 | transaction prepare phase (`trans.c` model, `alpm_add/remove_pkg`, sysupgrade, sync/remove prepare, frontend prepare) | done |
-| transaction commit phase (downloads, validation, add.c, remove.c, hooks, db writes) | todo (after the prepare phase) |
+| transaction commit phase (downloads, validation, add.c, remove.c, hooks, db writes) | in progress (remove.c per package done) |
 | sandbox (landlock/seccomp, download helper) | done |
 | local db writing | done |
 
 Gate: the full pactest suite (`meson test` baseline 338 ok, 6 expected
-fail) run against the Rust binary.
+fail) run against the Rust binary. `scripts/pactest.sh` (341 pactests,
+meson's 338 counts 3 non-pactest tests): C 335 ok / 6 xfail; Rust today
+100 ok / 5 xfail / 235 fail / 1 unexpected pass (deprange001), the
+dispatch stops before the commit.
 
 ### 4. Drop-in
 
@@ -221,13 +230,14 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `lib/libalpm/trans.c` | 452 | `alpm-core::trans` (partial: no commit) | model, init/release/interrupt/getters, prepare dispatch, check_arch, sort: difftest `trans_prep` op sequences vs C (2000 cases, results, data lists, logs, events, questions, trans afterwards); _alpm_runscriptlet + grep: difftest under fakechroot |
 | `lib/libalpm/sync.c` | 1360 | `alpm-core::sync` (partial: no load/check/commit) | get_new_version, sysupgrade (literal, replacers), find_group_pkgs, compute_download_size, `_alpm_sync_prepare`, dbs_satisfier: difftest `trans_prep` |
 | `lib/libalpm/add.c` | 718 | `alpm-core::add` (partial) | alpm_add_pkg: difftest `trans_prep`; commit side in progress |
-| `lib/libalpm/remove.c` | 798 | `alpm-core::remove` (partial) | alpm_remove_pkg, `_alpm_remove_prepare` (cascade, recurse, unneeded, optdepend events): difftest `trans_prep`; commit side pending |
+| `lib/libalpm/remove.c` | 798 | `alpm-core::remove` (all but `_alpm_remove_packages`) | alpm_remove_pkg, `_alpm_remove_prepare` (cascade, recurse, unneeded, optdepend events): difftest `trans_prep`; `_alpm_remove_single_package` with can_remove_file, shift_pacsave, unlink_file, should_skip_file, remove_package_files, dir_is_mountpoint: difftest `remove_commit` on fixture roots and local dbs (files, dirs, symlinks, /proc mountpoint, read-only dirs, .pacsave rotations, other owners, NoUpgrade, skip_remove, NOSAVE/DBONLY/NOSCRIPTLET, upgrade path; trees, local db, cache, logs, events, progress, logfile, pm_errno), scriptlets under fakechroot, 2M fuzz |
 | `lib/libalpm/hook.c` | 679 | `alpm-core::hook` | parse/validate, dir scan and masking, triggers, Depends, AbortOnFail, NeedsTargets, run: difftest fuzz on root "/" and runs under fakechroot |
 | `lib/libalpm/sandbox*.c` | 608 | `alpm-core::{sandbox,sandbox_fs,sandbox_syscalls}` | restrict_writes_to (8 variants incl. injected landlock failures), syscalls_filter (list parsed from the C, raw syscall probes): errno per probe in spawned children vs C; callback pipe writer + parent loop: byte-stream fuzz; helper download vs C _alpm_download; uid switch: unit tests (root) |
 | regcomp/regexec (glibc, used by db.c, remove.c, files.c) | - | `alpm-core::regex` | difftest fuzz vs glibc (C.UTF-8, 4 flag sets) on agreeing characters; classes/towupper via std, divergence per class counted |
 | `src/common/*.c` | 445 | `pacman-common::{util_common,ini}` | all of util-common.c and ini.c: difftest fuzz (safe_fgets on fmemopen + real file, llstat on /tmp tree, ini via recorded callback) |
 | `src/pacman/*.c` | 10124 | - | excl. symlinks into `src/common` |
-| `src/pacman/pacman.c` (in the above) | 1360 | `pacman-cli::{pacman,getopt}` (partial) | getopt_long: difftest per call vs libc (2M fuzz); parseargs, parsearg_*, checkargs_*, usage, version, needs_root, '-' stdin targets, main up to parseconfig: difftest vs the C binary (stdout/stderr/exit), parsed Config unit-tested; dispatch, signals, setup_libalpm pending |
+| `src/pacman/pacman.c` (in the above) | 1360 | `pacman-cli::{pacman,getopt}` (partial) | getopt_long: difftest per call vs libc (2M fuzz); parseargs, parsearg_*, checkargs_*, usage, version, needs_root, '-' stdin targets, main, cleanup, exit status, dispatch (-Q/-S/-R/-U/-F/-T, transactions up to the commit): difftest `cli_binary` vs the C binary (stdout/stderr/exit), parsed Config unit-tested; signals partial (std: default-kill, no SEGV cursor restore, no WINCH); -D, -Sc pending |
+| `src/pacman/callback.c` (in the above) | 1155 | `pacman-cli::callback` | cb_event, cb_question, cb_progress (ILoveCandy), cb_download (multibar, total bar), cb_log (delayed under bars): difftest lockstep vs C (every event x 16 configs, 11 questions x 12 configs x 27 inputs, progress/download fuzz, fake coarse clock) |
 | `src/pacman/check.c` (in the above) | 435 | `pacman-cli::check` | check_pkg_fast/full: difftest on fixture roots and dbs (all 22 message kinds), mtree readers compared per fixture and on 804 real mtrees |
 | `src/pacman/query.c` (in the above) | 521 | `pacman-cli::query` | every -Q mode, filter and message: difftest vs C pacman_query on fixture roots |
 | `src/pacman/deptest.c` (in the above) | 57 | `pacman-cli::deptest` | difftest vs C pacman_deptest |
@@ -236,7 +246,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `src/pacman/database.c` (in the above) | 305 | `pacman-cli::database` | -D --asdeps/--asexplicit, -Dk, -Dkk: difftest vs C pacman_database on two copies of each fixture (ret, stdout, stderr, local db tree after), -Dkk on sync worlds; unit tests |
 | `src/pacman/files.c` (in the above) | 341 | `pacman-cli::files` | -F, -Fx, -Fq, --machinereadable, -Fl: difftest vs C pacman_files on .files dbs; -Fy: same, with the frontend callbacks |
 | `src/pacman/package.c` (in the above) | 587 | `pacman-cli::package` | dump_pkg_full (all origins, -i/-ii), dump_pkg_backups, dump_pkg_files, print_installed, print_groups, dump_pkg_search: difftest on a real C handle with refilled db caches and real files under the root, strftime %c vs `format_date_utc` fuzz + localtime limits; changelog and gpgme results: unit tests |
-| `src/pacman/conf.c` (in the above) | 1468 | `pacman-cli::conf` (partial) | config model, parseconfigfile, setdefaults (include, siglevel, cleanmethod, usage, repeating options, $repo/$arch, sysroot), glob(3) subset: difftest on random config trees (return, stderr, whole config_t), glob vs libc; setup_libalpm, register_repo, XferCommand download pending |
+| `src/pacman/conf.c` (in the above) | 1468 | `pacman-cli::conf` (partial) | config model, parseconfigfile, setdefaults (include, siglevel, cleanmethod, usage, repeating options, $repo/$arch, sysroot), glob(3) subset: difftest on random config trees (return, stderr, whole config_t), glob vs libc; setup_libalpm, register_repo: difftest reading the handle back through every getter; XferCommand download pending |
 | `src/pacman/util.c` (in the above) | 1981 | `pacman-cli::util` (partial: all but trans_init/release, sync_syncdbs, tcflush) | display_targets + table engine, print_packages (--print-format), optdepends lists, select/multiselect/yesno prompts (stdin via fmemopen), rmrf: difftest; earlier helpers: | indentprint, strreplace, string_display, list_display(_linebreak), signature_display, humanize_size, arg_to_string, console cursor helpers: difftest fuzz; glibc mbstowcs: difftest; wcwidth via unicode-width, divergence per class counted, display difftests on agreeing characters |
 | `src/util/testpkg.c` | 103 | - | |
 
@@ -327,6 +337,15 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
   (the C's force-load in `_alpm_pkg_dup`). Re-adding a target dropped to
   unresolvable keeps its removes like the C. The prepare data list holds
   the reported entries only, no stale depmissing leftovers.
+- frontend: one `util::Term` (stdin, ttys, cols, clocks as fn pointers)
+  and `Output` with an optional sink, flushed before stdin reads, before
+  `db_update` and after every callback; tests read the buffer. The
+  binary's uid is 0 (or FAKEROOTUID) under fakeroot (FAKEROOTKEY): /proc
+  shows the real uid where fakeroot fakes getuid. Transaction prompts and
+  callback prompts read stdin through separate buffers. No Callbacks hook
+  for `multibar_move_completed_up` (only package downloads set it). After
+  '-' targets the C reopens the tty on stdin; std cannot swap fd 0. Write
+  errors are dropped (the C dies of SIGPIPE). PACMAN_DEBUG stamps in UTC.
 - `be_sync::db_update` takes positions in `syncdbs()`, returns
   `Ok(true)` (C 0), `Ok(false)` (1, all up to date) or `Err` (-1). After
   several failed validations the errno is the last failure's, where the
@@ -447,6 +466,19 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
   Request over stdin, callbacks over stdout in the C pipe format.
   no_new_privs comes before landlock (needed unprivileged); getpwnam via
   `getent passwd`; parent sends SIGKILL after the loop (C: SIGTERM).
+- `remove` commit side: `remove_single_package(h, oldpkg, newpkg,
+  targ_count, pkg_count)` reads flags and skip_remove from `h.trans()`,
+  oldpkg is the `trans.remove` dup (every section loaded), newpkg's files
+  sorted. Returns the dropped remove_package_files result: `Ok(failed
+  files)`, `Err(PkgCantRemove)` is the pm_errno the C leaves on the
+  upgrade path only (the removal path's `alpm_pkg_has_scriptlet` resets
+  it). The debug lines of `_alpm_files_in_directory`, `_alpm_access` and
+  `_alpm_db_remove_pkgfromcache` are logged in remove.rs. A backup entry
+  without a hash counts as modified (C: strcmp on NULL); a `.pacsave.N`
+  number read past the end of the name is 0. `path too long` branches
+  are unreachable through the C's local db reader (lines over 1023 bytes
+  split), the EROFS branch of can_remove_file needs a read-only mount:
+  neither is difftested.
 
 Follow-ups raised by port units:
 
@@ -480,12 +512,13 @@ Follow-ups raised by port units:
 | `alpm_extract_keyid` wired into -Sii/-Qii `sig_keys` | sync | todo (ported in signing) |
 | `Handle` owns `signing::Keyring` (gpgdir, known_keys) and implements `SigCallbacks`; `Db::register_sync` calls `be_sync::sync_db_validate` | signing | with the callbacks unit |
 | query.rs's new_version copy onto `alpm_core::sync::sync_get_new_version` | query | todo (ported in transprep) |
-| `pacman_sync` dispatches to `sync_trans` (needs a `Ui`), re-export `TRANS_FLAG_*` in pacman.rs | transprep | with the frontend merge |
+| `pacman_sync` dispatches to `sync_trans` (needs a `Ui`), re-export `TRANS_FLAG_*` in pacman.rs | transprep | done |
 | "found cached pkg" debug line into `util::filecache_find` (local wrapper in sync.rs) | transprep | todo |
 | conflict.rs `pkg_diff` onto `deps::list_diff`; deps_graph test reuses the trans_prep world generator | transprep | todo |
 | `Handle` owns dload `DownloadState`/`Settings`/cachedirs; `filecache_*` into util | dload | with the callbacks unit |
 | `alpm_db_update` (be_sync download + validate) | dload | done |
-| drop `SyncCallbacks` and the `replace_callbacks` swap in sync.rs for `callback.rs` (progress bars, "is up to date", "failed to download") | dbupdate | with the frontend unit |
+| drop `SyncCallbacks` and the `replace_callbacks` swap in sync.rs for `callback.rs` (progress bars, "is up to date", "failed to download") | dbupdate | done |
+| `Question::SelectProvider` carries provider db names (today through `Lookup`); `Handle::replace_callbacks` has no frontend caller left | frontend | todo |
 | sandbox in `be_sync::downloader` (like `fetch_pkgurl`) | dbupdate | todo |
 | `umask(0022)` around `alpm_db_update` (rustix process) | dbupdate | todo |
 | one `logv(cb, ...)` helper (copies in hook.rs, deps.rs, trans.rs, util's `log_parts`) | integrate2 | in progress: `callbacks::logv`, used by db, be_local, be_sync |
