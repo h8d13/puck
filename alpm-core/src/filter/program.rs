@@ -5,9 +5,11 @@
 // thread feeds and reads non-blocking pipes like child_read. the program
 // is run by name through PATH: when it cannot be run, libarchive's vfork
 // child exits 254 (__archive_create_child), and the first read fails
-// with that status. stderr is the caller's
+// with that status. the vfork child shares the caller's memory, so
+// execvp's errno (ENOENT, EACCES) is left in the caller's errno: the
+// failure carries its kind. stderr is the caller's
 
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, ErrorKind};
 use std::os::unix::process::ExitStatusExt;
 use std::process::{
 	Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio,
@@ -17,7 +19,7 @@ use rustix::event::{PollFd, PollFlags, poll};
 use rustix::fs::{OFlags, fcntl_setfl};
 use rustix::io::Errno;
 
-use super::{Decode, Filter, text};
+use super::{Decode, Filter};
 
 const OUT_BUF_LEN: usize = 64 * 1024;
 
@@ -37,6 +39,8 @@ pub(super) struct Program {
 	open: bool,
 	// child_stop's sticky result, the error text if any
 	stopped: Option<Option<String>>,
+	// the program could not run: what execvp left in errno
+	exec_failed: Option<ErrorKind>,
 }
 
 impl Program {
@@ -57,18 +61,24 @@ impl Program {
 			stdout: None,
 			open: true,
 			stopped: None,
+			exec_failed: None,
 		};
-		if let Ok(mut child) = child {
-			p.stdin = child.stdin.take();
-			p.stdout = child.stdout.take();
-			p.child = Some(child);
-			// O_NONBLOCK alone, like the C's F_SETFL
-			if let Some(s) = &p.stdin {
-				let _ = fcntl_setfl(s, OFlags::NONBLOCK);
+		let mut child = match child {
+			Ok(c) => c,
+			Err(e) => {
+				p.exec_failed = Some(e.kind());
+				return Box::new(p);
 			}
-			if let Some(s) = &p.stdout {
-				let _ = fcntl_setfl(s, OFlags::NONBLOCK);
-			}
+		};
+		p.stdin = child.stdin.take();
+		p.stdout = child.stdout.take();
+		p.child = Some(child);
+		// O_NONBLOCK alone, like the C's F_SETFL
+		if let Some(s) = &p.stdin {
+			let _ = fcntl_setfl(s, OFlags::NONBLOCK);
+		}
+		if let Some(s) = &p.stdout {
+			let _ = fcntl_setfl(s, OFlags::NONBLOCK);
 		}
 		Box::new(p)
 	}
@@ -96,8 +106,9 @@ impl Program {
 			};
 			self.stopped = Some(exit_text(status));
 		}
+		let kind = self.exec_failed.unwrap_or(ErrorKind::Other);
 		match self.stopped.as_ref().and_then(|s| s.as_deref()) {
-			Some(t) => Err(text(t)),
+			Some(t) => Err(io::Error::new(kind, t)),
 			None => Ok(()),
 		}
 	}

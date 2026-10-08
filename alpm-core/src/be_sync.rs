@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::ffi::{OsStr, c_int};
 use std::fs;
-use std::io::{self, ErrorKind};
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -366,9 +366,14 @@ fn open_archive(
 	path: &[u8],
 	dbext: &[u8],
 ) -> Result<(tar::Reader, u64), Error> {
-	let archive = util::open_archive(path).map_err(|e| match e.kind() {
-		ErrorKind::NotFound => Error::NotFound,
-		_ => Error::Open(e),
+	// open(2)'s ENOENT only: a filter's program that cannot run fails
+	// with that kind too (filter/program.rs), the C's db open fails then
+	let enoent = Some(rustix::io::Errno::NOENT.raw_os_error());
+	let archive = util::open_archive(path).map_err(|e| {
+		match e.raw_os_error() == enoent {
+			true => Error::NotFound,
+			false => Error::Open(e),
+		}
 	})?;
 	let size = archive.meta.len();
 	let mut est = size / bytes_per_package(archive.code) + 1;

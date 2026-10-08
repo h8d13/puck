@@ -1039,7 +1039,7 @@ fn odd_archives() {
 	truncated.truncate(truncated.len() / 2);
 	let mut short_tar = good.clone();
 	short_tar.truncate(700);
-	let cases: Vec<(&str, Vec<u8>)> = vec![
+	let mut cases: Vec<(&str, Vec<u8>)> = vec![
 		("empty file", Vec::new()),
 		// refused at open (the first tar header): the db is invalid
 		("garbage", b"not an archive at all\n".repeat(40)),
@@ -1048,6 +1048,17 @@ fn odd_archives() {
 		("truncated tar", short_tar),
 		("no end blocks", good[..good.len() - 1024].to_vec()),
 	];
+	// filters with their program missing, filter magics before junk
+	for (label, magic) in [
+		("lzop", &b"\x89LZO\x00\r\n\x1a\n"[..]),
+		("lrzip", b"LRZI\x00\x06"),
+		("grzip", b"GRZipII\x00\x02\x04:)"),
+		("compress + junk", b"\x1f\x9d\x90\x00\xff"),
+		("lzip + junk", b"LZIP\x01\x0c\xff\xff"),
+		("lz4 + junk", b"\x04\x22\x4d\x18\x64\x40\xa7\xff"),
+	] {
+		cases.push((label, [magic, &good[..]].concat()));
+	}
 	for (label, bytes) in cases {
 		let fx = TempRoot::new("be-sync");
 		fs::write(fx.sync_file("t", ".db"), &bytes).unwrap();

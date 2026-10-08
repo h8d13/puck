@@ -553,6 +553,39 @@ fn open_and_prefix_failures() {
 	compare(&Case::new("prefix read-only", pkg), &ro);
 }
 
+// the magic of each filter libarchive's bidders take, then garbage, a
+// tar, or nothing: the filter's failure at open or on the first header;
+// lzop, lrzip and grzip need their program, which is not installed here
+const MAGICS: [&[u8]; 11] = [
+	b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03",
+	b"BZh91AY&SY",
+	b"\xfd7zXZ\x00",
+	b"\x28\xb5\x2f\xfd\x04\x58",
+	b"\x1f\x9d\x90",
+	b"\x5d\x00\x00\x80\x00\xff\xff\xff\xff\xff\xff\xff\xff",
+	b"LZIP\x01\x0c",
+	b"\x04\x22\x4d\x18\x64\x40\xa7",
+	b"\x89LZO\x00\r\n\x1a\n",
+	b"LRZI\x00\x06",
+	b"GRZipII\x00\x02\x04:)",
+];
+
+#[test]
+fn garbage_after_magic() {
+	let mut rng = Rng::new(0x9a4b_a9e0);
+	let pkg = tar(&package());
+	for m in MAGICS {
+		let junk: Vec<u8> =
+			(0..600).map(|_| rng.next_u64() as u8).collect();
+		for (what, rest) in
+			[("nothing", &[][..]), ("junk", &junk), ("tar", &pkg)]
+		{
+			let what = format!("{m:02x?} + {what}");
+			compare(&Case::new(&what, [m, rest].concat()), &none);
+		}
+	}
+}
+
 #[test]
 fn name_cases() {
 	let names = [

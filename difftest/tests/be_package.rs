@@ -2058,6 +2058,39 @@ fn compressed_cuts() {
 
 // lz4 and lzma written by the system tools when present (lz4's own
 // framing, xz's lzma_alone), not libarchive's writers
+// a filter's magic then garbage or a package, the program filters with
+// their program missing: the C and the port fail the same way
+#[test]
+fn garbage_after_magic() {
+	let fx = Fixture::new();
+	let h = fx.handle();
+	let path = fx.pkg("g.pkg.tar");
+	let pkg = ustar(&[
+		file(b".PKGINFO", PKGINFO.as_bytes()),
+		file(b"a", b"x"),
+	]);
+	let mut rng = Rng::new(0x9a4b_a9e1);
+	let magics: [&[u8]; 9] = [
+		b"\x1f\x9d\x90",
+		b"\x5d\x00\x00\x80\x00\xff\xff\xff\xff\xff\xff\xff\xff",
+		b"LZIP\x01\x0c",
+		b"\x04\x22\x4d\x18\x64\x40\xa7",
+		b"\x02\x21\x4c\x18",
+		b"\x89LZO\x00\r\n\x1a\n",
+		b"LRZI\x00\x06",
+		b"GRZipII\x00\x02\x04:)",
+		b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03",
+	];
+	for m in magics {
+		let junk: Vec<u8> =
+			(0..600).map(|_| rng.next_u64() as u8).collect();
+		for rest in [&junk[..], &pkg] {
+			fs::write(&path, [m, rest].concat()).unwrap();
+			pin(&h, &path, &format!("{m:02x?}"), ["same"; 2]);
+		}
+	}
+}
+
 #[test]
 fn fixed_other_compressions() {
 	let fx = Fixture::new();

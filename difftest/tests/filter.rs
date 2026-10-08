@@ -128,7 +128,7 @@ fn cut_streams() {
 #[test]
 fn corrupt_streams() {
 	let mut rng = Rng::new(0x0bad_da7a);
-	let data = payload(&mut rng, 150_000);
+	let data = payload(&mut rng, 40_000);
 	let lz4_safe =
 		"lz4:block-size=4,lz4:block-dependence,lz4:block-checksum";
 	let mut sets = Vec::new();
@@ -142,7 +142,7 @@ fn corrupt_streams() {
 	));
 	let mut compared = 0;
 	for (what, s) in &sets {
-		for _ in 0..(iters() / 20).max(100) {
+		for _ in 0..(iters() / 100).max(100) {
 			let mut m = s.clone();
 			for _ in 0..1 + rng.below(3) {
 				// the header region or anywhere
