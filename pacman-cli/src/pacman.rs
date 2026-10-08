@@ -15,7 +15,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 use alpm_core::PACKAGE_VERSION;
 use alpm_core::util::strerror;
-use pacman_common::util_common::mbasename;
+use pacman_common::util_common::{PATH_MAX, mbasename};
 
 use crate::conf::{
 	ConfError, Config, Host, LOG_DEBUG, LOG_ERROR, LOG_FUNCTION, Msg,
@@ -25,9 +25,6 @@ use crate::getopt::{Getopt, HasArg, LongOpt};
 
 // alpm_version() of the reference build (meson LIB_VERSION)
 pub const LIB_VERSION: &str = "16.0.1";
-
-// limits.h: --config and --logfile go through strndup(optarg, PATH_MAX)
-const PATH_MAX: usize = 4096;
 
 // conf.h operations, PM_OP_MAIN in conf
 pub const PM_OP_REMOVE: u16 = 2;

@@ -22,7 +22,7 @@ use std::path::Path;
 
 use alpm_core::util::{fnmatch, strerror};
 use pacman_common::ini::{Ini, parse_ini};
-use pacman_common::util_common::wordsplit;
+use pacman_common::util_common::{PATH_MAX, wordsplit};
 
 use crate::util::strreplace;
 
@@ -37,9 +37,6 @@ pub const HOOKDIR: &[u8] = b"/etc/pacman.d/hooks/";
 
 // alpm_capabilities() & ALPM_CAPABILITY_SIGNATURES
 pub const HAVE_SIGNATURES: bool = true;
-
-// PATH_MAX, the setdefaults snprintf buffer
-const PATH_MAX: usize = 4096;
 const MAX_RECURSION: i32 = 10;
 
 // alpm_loglevel_t

@@ -34,7 +34,7 @@ use alpm_core::package::{
 	compute_requiredby, pkg_compare_versions, pkg_should_ignore,
 };
 use alpm_core::util::{compute_md5sum, fnmatch, until_nul};
-use pacman_common::util_common::{mbasename, mdirname};
+use pacman_common::util_common::{PATH_MAX, mbasename, mdirname};
 
 use crate::check::{CheckEnv, check_pkg_fast, check_pkg_full};
 use crate::conf::{Config, LOG_ERROR, LOG_WARNING, cat};
@@ -44,9 +44,6 @@ use crate::package::{
 };
 use crate::pacman::{PKG_LOCALITY_FOREIGN, PKG_LOCALITY_NATIVE};
 use crate::util::{Output, SigResult, check_syncdbs, pm_printf};
-
-// limits.h, the rpath buffer of query_fileowner
-const PATH_MAX: usize = 4096;
 const LOCAL_PREFIX: &[u8] = b"local/";
 // fcntl.h on linux: the access(R_OK) probes open without blocking on a
 // fifo
