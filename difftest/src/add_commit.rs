@@ -624,9 +624,9 @@ pub fn rust_upgrade(fx: &TempRoot, c: &AcCase, logfile: &Path) -> AcResult {
 	let pkg = be_package::pkg_load(&pkgfile, true).unwrap();
 	cut_pkg(&pkgfile, c);
 	add::add_pkg(&mut h, pkg, None).unwrap();
-	let dbext = h.dbext().to_vec();
-	let db = h.localdb_mut().unwrap();
-	let old = db.load_pkg(&dbext, c.name.as_bytes(), INFRQ_ALL);
+	let dbs = h.dbs_mut();
+	let db = dbs.local.unwrap();
+	let old = db.load_pkg(dbs.dbext, dbs.cb, c.name.as_bytes(), INFRQ_ALL);
 	let old = old.map(Package::dup);
 	// the driver's share: the targets out of trans.add, the
 	// transaction stays on the handle for its flags

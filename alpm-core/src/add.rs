@@ -1350,9 +1350,9 @@ pub fn install_time(source_date_epoch: Option<&[u8]>, now: i64) -> i64 {
 
 // the installed package as the C finds it in the local cache
 fn in_local_cache(h: &mut Handle, name: &[u8]) -> bool {
-	let dbext = h.dbext().to_vec();
-	h.localdb_mut()
-		.is_some_and(|db| db.get_pkg(&dbext, name).is_ok())
+	let dbs = h.dbs_mut();
+	dbs.local
+		.is_some_and(|db| db.get_pkg(dbs.dbext, dbs.cb, name).is_ok())
 }
 
 // checkdbdir's log lines, which LocalDb::prepare does not make
@@ -1769,24 +1769,11 @@ pub fn commit_single_pkg(
 	ret
 }
 
-// _alpm_db_add_pkgincache on the local db with its log line
+// _alpm_db_add_pkgincache on the local db
 fn add_in_local_cache(h: &mut Handle, pkg: &Package) -> bool {
-	let loaded =
-		h.localdb().is_some_and(|db| db.loaded_pkgcache().is_some());
-	if !loaded {
-		return false;
-	}
-	let tree = h.localdb().map(|db| db.name().to_vec()).unwrap_or_default();
-	let msg = [
-		b"adding entry '",
-		opt_str(&pkg.name),
-		b"' in '",
-		&tree[..],
-		b"' cache\n",
-	];
-	log(h.callbacks(), Debug, &msg);
-	h.localdb_mut()
-		.is_some_and(|db| db.add_pkg_in_cache(pkg).is_ok())
+	let dbs = h.dbs_mut();
+	dbs.local
+		.is_some_and(|db| db.add_pkg_in_cache(dbs.cb, pkg).is_ok())
 }
 
 // the per-package step of _alpm_upgrade_packages: any failure of
