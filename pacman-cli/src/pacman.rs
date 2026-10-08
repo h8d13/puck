@@ -619,12 +619,23 @@ const USAGE_COMMON: &[&str] = &[
 	),
 ];
 
-// version()
-pub fn version(out: &mut Vec<u8>) {
+// version(): the C's banner when invoked as pacman (pactest, parity), puck's
+// own otherwise. puck is a port of pacman's code, so upstream's copyright
+// and licence lines stay in both
+pub fn version(out: &mut Vec<u8>, myname: &[u8]) {
+	let l1 = if myname == b"pacman" {
+		format!("Pacman v{PACKAGE_VERSION} - libalpm v{LIB_VERSION}")
+	} else {
+		format!(
+			"Puck v{} - Pacman v{PACKAGE_VERSION} port \
+			(libalpm v{LIB_VERSION})",
+			env!("CARGO_PKG_VERSION")
+		)
+	};
 	let text = format!(
 		concat!(
 			"\n",
-			" .--.                  Pacman v{} - libalpm v{}\n",
+			" .--.                  {}\n",
 			"/ _.-' .-.  .-.  .-.   Copyright (C) 2006-2025 Pacman ",
 			"Development Team\n",
 			"\\  '-. '-'  '-'  '-'   Copyright (C) 2002-2006 Judd Vinet\n",
@@ -635,7 +646,7 @@ pub fn version(out: &mut Vec<u8>) {
 			"License.\n",
 			"\n"
 		),
-		PACKAGE_VERSION, LIB_VERSION
+		l1
 	);
 	out.extend_from_slice(text.as_bytes());
 }
@@ -1258,7 +1269,8 @@ pub fn parseargs(
 		return Err(0);
 	}
 	if config.version != 0 {
-		version(&mut io.out);
+		let myname = argv.first().map_or(&b""[..], |a| mbasename(a));
+		version(&mut io.out, myname);
 		return Err(0);
 	}
 
