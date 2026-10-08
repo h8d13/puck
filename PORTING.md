@@ -275,8 +275,13 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `src/pacman/conf.c` (in the above) | 1468 | `pacman-cli::conf` (partial) | config model, parseconfigfile, setdefaults (include, siglevel, cleanmethod, usage, repeating options, $repo/$arch, sysroot), glob(3) subset: difftest on random config trees (return, stderr, whole config_t), glob vs libc; setup_libalpm, register_repo: difftest reading the handle back through every getter; XferCommand download pending |
 | `src/pacman/util.c` (in the above) | 1981 | `pacman-cli::util` (partial: all but trans_init/release, sync_syncdbs, tcflush) | display_targets + table engine, print_packages (--print-format), optdepends lists, select/multiselect/yesno prompts (stdin via fmemopen), rmrf: difftest; earlier helpers: | indentprint, strreplace, string_display, list_display(_linebreak), signature_display, humanize_size, arg_to_string, console cursor helpers: difftest fuzz; glibc mbstowcs: difftest; wcwidth via unicode-width, divergence per class counted, display difftests on agreeing characters |
 | `src/util/testpkg.c` | 103 | - | |
+| `src/pacman/pacman-conf.c` | 481 | - | the scripts read config values through it (pacman-key, makepkg) |
 
-Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
+Not ported, kept as upstream ships them: makepkg and libmakepkg,
+repo-add/repo-remove, pacman-key, pacman-db-upgrade, the wrapper (bash)
+and makepkg-template (Perl). They call `pacman` and `pacman-conf` as
+binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
+`pacman-key --init`/`--populate` and `repo-add` against the Rust binaries.
 
 ## Notes
 
