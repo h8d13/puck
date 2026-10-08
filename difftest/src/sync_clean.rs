@@ -23,8 +23,8 @@ use crate::callback::cb_log;
 use crate::cli_util::{config, init};
 use crate::cli_util2::{CIo, run};
 use crate::fixtures::{
-	Comp, LocalEntry, TarEntry, TempRoot, section, tar_dir, tar_file,
-	ustar, write_db,
+	Comp, LocalEntry, TarEntry, TempRoot, loose_sections, section, tar_dir,
+	tar_file, ustar, write_db,
 };
 use crate::handle::{ALPM, alpm_option_add_cachedir, alpm_option_set_logcb};
 use crate::sync_ro::{FrontHandle, pacman_sync};
@@ -42,37 +42,50 @@ fn one(s: &str) -> Vec<String> {
 	vec![s.to_string()]
 }
 
-fn local_desc(name: &str, version: &str) -> String {
+// -Sc reads name and version, the rest is loose
+fn local_desc(rng: &mut Rng, name: &str, version: &str) -> String {
+	let rest = loose_sections(
+		rng,
+		&[
+			("BASE", name),
+			("DESC", "installed"),
+			("URL", "https://example.org/"),
+			("ARCH", "x86_64"),
+			("BUILDDATE", "1700000000"),
+			("INSTALLDATE", "1700000001"),
+			("PACKAGER", "A B <a@b.org>"),
+			("SIZE", "1"),
+			("VALIDATION", "none"),
+		],
+	);
 	[
 		section("NAME", &one(name)),
 		section("VERSION", &one(version)),
-		section("BASE", &one(name)),
-		section("DESC", &one("installed")),
-		// alpm-db wants a URL (PORTING.md, ALPM divergences)
-		section("URL", &one("https://example.org/")),
-		section("ARCH", &one("x86_64")),
-		section("BUILDDATE", &one("1700000000")),
-		section("INSTALLDATE", &one("1700000001")),
-		section("PACKAGER", &one("A B <a@b.org>")),
-		section("SIZE", &one("1")),
-		section("VALIDATION", &one("none")),
+		rest,
 	]
 	.concat()
 }
 
-fn sync_desc(name: &str, version: &str) -> String {
+fn sync_desc(rng: &mut Rng, name: &str, version: &str) -> String {
 	let file = format!("{name}-{version}-x86_64.pkg.tar.zst");
+	let sum = "ab".repeat(32);
+	let rest = loose_sections(
+		rng,
+		&[
+			("BASE", name),
+			("CSIZE", "1"),
+			("ISIZE", "1"),
+			("SHA256SUM", &sum),
+			("ARCH", "x86_64"),
+			("BUILDDATE", "3"),
+			("PACKAGER", "A B <a@b.org>"),
+		],
+	);
 	[
 		section("FILENAME", &one(&file)),
 		section("NAME", &one(name)),
-		section("BASE", &one(name)),
 		section("VERSION", &one(version)),
-		section("CSIZE", &one("1")),
-		section("ISIZE", &one("1")),
-		section("SHA256SUM", &one(&"ab".repeat(32))),
-		section("ARCH", &one("x86_64")),
-		section("BUILDDATE", &one("3")),
-		section("PACKAGER", &one("A B <a@b.org>")),
+		rest,
 	]
 	.concat()
 }
@@ -92,11 +105,40 @@ pub fn package_bytes(name: &str, pkgver: &str) -> Vec<u8> {
 		"arch = x86_64".to_string(),
 	]
 	.join("\n") + "\n";
+	with_pkginfo(name, &info)
+}
+
+fn with_pkginfo(name: &str, info: &str) -> Vec<u8> {
 	ustar(&[
 		tar_file(".PKGINFO", info.as_bytes()),
 		tar_dir("usr/"),
 		tar_file(&format!("usr/{name}"), b"x"),
 	])
+}
+
+// a package whose .PKGINFO has name and version and odd lines in any
+// order: empty values, lines without " = ", unknown keys, comments
+fn loose_package(rng: &mut Rng, name: &str, pkgver: &str) -> Vec<u8> {
+	const ODD: [&str; 7] = [
+		"pkgdesc = ",
+		"pkgbase =",
+		"foo = bar",
+		"url=x",
+		"# pkgname = zz",
+		"size = abc",
+		"arch =  any ",
+	];
+	let mut lines =
+		vec![format!("pkgname = {name}"), format!("pkgver = {pkgver}")];
+	for l in ODD {
+		if rng.below(3) == 0 {
+			lines.push(l.to_string());
+		}
+	}
+	for i in (1..lines.len()).rev() {
+		lines.swap(i, rng.below(i + 1));
+	}
+	with_pkginfo(name, &(lines.join("\n") + "\n"))
 }
 
 // package_bytes compressed into path
@@ -160,9 +202,8 @@ impl CleanWorld {
 			self.note(format!("local {name} {version}"));
 			entries.push(LocalEntry {
 				dir: format!("{name}-{version}"),
-				desc: Some(
-					local_desc(name, version).into_bytes()
-				),
+				desc: Some(local_desc(rng, name, version)
+					.into_bytes()),
 				files: Some(Vec::new()),
 				install: false,
 			});
@@ -190,7 +231,7 @@ impl CleanWorld {
 					self.note(format!("{repo} {name} {v}"));
 					let dir = format!("{name}-{v}/");
 					tar.push(tar_dir(&dir));
-					let desc = sync_desc(name, v);
+					let desc = sync_desc(rng, name, v);
 					let f = format!("{dir}desc");
 					tar.push(tar_file(&f, desc.as_bytes()));
 				}
@@ -286,12 +327,11 @@ impl CleanWorld {
 		let file = format!("{name}-{version}-x86_64.pkg.tar{ext}");
 		let what = match rng.below(14) {
 			0..=4 => {
-				write_package(
-					&dir.join(&file),
-					name,
-					version,
-					comp,
-				);
+				let data = match rng.below(4) {
+					0 => loose_package(rng, name, version),
+					_ => package_bytes(name, version),
+				};
+				write_db(&dir.join(&file), comp, &data);
 				if rng.below(2) == 0 {
 					let sig = format!("{file}.sig");
 					fs::write(dir.join(sig), b"sig")

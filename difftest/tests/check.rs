@@ -1215,9 +1215,8 @@ fn segment(rng: &mut Rng) -> String {
 		if rng.below(12) == 0 {
 			s.push('é');
 		}
-		// "." and ".." are no names on disk, alpm-db refuses a
-		// whitespace-only backup path
-		if s != "." && s != ".." && !s.trim().is_empty() {
+		// "." and ".." are no names on disk
+		if s != "." && s != ".." {
 			return s;
 		}
 	}

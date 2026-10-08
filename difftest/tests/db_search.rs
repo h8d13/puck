@@ -8,13 +8,12 @@ use std::ffi::c_int;
 use std::fmt::Write as _;
 use std::fs;
 
-use alpm_core::be_local::{INFRQ_DESC, INFRQ_ERROR};
 use alpm_core::db::{DB_USAGE_ALL, DB_USAGE_SEARCH, Db};
 use alpm_core::error::Errno;
 use alpm_core::handle::Handle;
 use difftest::{
-	CSearch, LocalEntry, Rng, SearchWorld, TempRoot, iters, section,
-	tar_dir, tar_file, ustar,
+	CSearch, LocalEntry, Rng, SearchWorld, TempRoot, iters, loose_sections,
+	section, tar_dir, tar_file, ustar,
 };
 
 // one fixture per case, many needle lists on it
@@ -34,7 +33,6 @@ struct Pkg {
 
 const NAME_FIRST: &[u8] = b"abcxyz019";
 const NAME_REST: &[u8] = b"abcxyz019+-_";
-// no double, leading or trailing spaces: alpm-db normalizes them
 const WORDS: &[&str] = &[
 	"a", "ab", "abc", "Ab", "X", "xyz", "foo", "Foo", "BAR", "b+c", "x^y",
 	"a$b", "é", "É", "c++", "1.0", "(x)", "[y]", "q|r", "-z",
@@ -46,6 +44,23 @@ fn gen_name(rng: &mut Rng) -> String {
 	String::from_utf8(s).unwrap()
 }
 
+// words joined by runs of blanks, now and then blanks around or no
+// word at all: the readers keep the line as it is
+fn gen_desc(rng: &mut Rng) -> String {
+	const BLANKS: [&str; 5] = [" ", " ", "  ", "\t", " \t"];
+	let mut d = String::new();
+	for i in 0..rng.below(5) {
+		if i > 0 || rng.below(6) == 0 {
+			d += BLANKS[rng.below(BLANKS.len())];
+		}
+		d += WORDS[rng.below(WORDS.len())];
+	}
+	if rng.below(6) == 0 {
+		d += BLANKS[rng.below(BLANKS.len())];
+	}
+	d
+}
+
 fn gen_pkgs(rng: &mut Rng, max: usize) -> Vec<Pkg> {
 	let mut pkgs: Vec<Pkg> = Vec::new();
 	for _ in 0..rng.below(max + 1) {
@@ -53,13 +68,7 @@ fn gen_pkgs(rng: &mut Rng, max: usize) -> Vec<Pkg> {
 		if pkgs.iter().any(|p| p.name == name) {
 			continue;
 		}
-		let desc = (rng.below(5) != 0).then(|| {
-			let n = 1 + rng.below(4);
-			let w: Vec<&str> = (0..n)
-				.map(|_| WORDS[rng.below(WORDS.len())])
-				.collect();
-			w.join(" ")
-		});
+		let desc = (rng.below(5) != 0).then(|| gen_desc(rng));
 		let provides = (0..rng.below(3))
 			.map(|_| match rng.below(2) {
 				0 => gen_name(rng),
@@ -84,54 +93,72 @@ fn desc_section(p: &Pkg) -> String {
 	}
 }
 
-// alpm-db refuses a local desc without %DESC%, the C reads NULL
-fn local_desc(p: &Pkg) -> String {
-	let desc = p.desc.as_deref().unwrap_or("x");
+// the sections search reads, the others loose
+fn local_desc(rng: &mut Rng, p: &Pkg) -> String {
+	let rest = loose_sections(
+		rng,
+		&[
+			("BASE", &p.name),
+			("URL", "https://example.org/"),
+			("ARCH", "x86_64"),
+			("BUILDDATE", "1700000000"),
+			("INSTALLDATE", "1700000001"),
+			("PACKAGER", "A B <a@b.org>"),
+			("SIZE", "42"),
+			("VALIDATION", "pgp"),
+		],
+	);
 	format!(
-		"%NAME%\n{0}\n\n%VERSION%\n1-1\n\n%BASE%\n{0}\n\n%DESC%\n{1}\n\n\
-		%URL%\nhttps://example.org/\n\n%ARCH%\nx86_64\n\n\
-		%BUILDDATE%\n1700000000\n\n%INSTALLDATE%\n1700000001\n\n\
-		%PACKAGER%\nA B <a@b.org>\n\n%SIZE%\n42\n\n\
-		%VALIDATION%\npgp\n\n{2}{3}",
-		p.name,
-		desc,
-		section("GROUPS", &p.groups),
-		section("PROVIDES", &p.provides)
-	)
-}
-
-fn sync_desc(p: &Pkg) -> String {
-	format!(
-		"%FILENAME%\n{0}-1-1-any.pkg.tar.zst\n\n%NAME%\n{0}\n\n\
-		%BASE%\n{0}\n\n%VERSION%\n1-1\n\n{1}%CSIZE%\n1\n\n%ISIZE%\n2\n\n\
-		%SHA256SUM%\n{2}\n\n%ARCH%\nany\n\n%BUILDDATE%\n3\n\n\
-		%PACKAGER%\nA B <a@b.org>\n\n{3}{4}",
+		"%NAME%\n{0}\n\n%VERSION%\n1-1\n\n{1}{rest}{2}{3}",
 		p.name,
 		desc_section(p),
-		"ab".repeat(32),
 		section("GROUPS", &p.groups),
 		section("PROVIDES", &p.provides)
 	)
 }
 
-fn sync_db(pkgs: &[Pkg]) -> Vec<u8> {
+fn sync_desc(rng: &mut Rng, p: &Pkg) -> String {
+	let sum = "ab".repeat(32);
+	let rest = loose_sections(
+		rng,
+		&[
+			("BASE", &p.name),
+			("CSIZE", "1"),
+			("ISIZE", "2"),
+			("SHA256SUM", &sum),
+			("ARCH", "any"),
+			("BUILDDATE", "3"),
+			("PACKAGER", "A B <a@b.org>"),
+		],
+	);
+	format!(
+		"%FILENAME%\n{0}-1-1-any.pkg.tar.zst\n\n%NAME%\n{0}\n\n\
+		%VERSION%\n1-1\n\n{1}{rest}{2}{3}",
+		p.name,
+		desc_section(p),
+		section("GROUPS", &p.groups),
+		section("PROVIDES", &p.provides)
+	)
+}
+
+fn sync_db(rng: &mut Rng, pkgs: &[Pkg]) -> Vec<u8> {
 	let mut entries = Vec::new();
 	for p in pkgs {
 		let dir = format!("{}-1-1/", p.name);
 		entries.push(tar_dir(&dir));
-		let desc = sync_desc(p);
+		let desc = sync_desc(rng, p);
 		entries.push(tar_file(&format!("{dir}desc"), desc.as_bytes()));
 	}
 	ustar(&entries)
 }
 
-fn write_local(fx: &TempRoot, pkgs: &[Pkg]) {
+fn write_local(rng: &mut Rng, fx: &TempRoot, pkgs: &[Pkg]) {
 	fx.reset_local();
 	let entries: Vec<LocalEntry> = pkgs
 		.iter()
 		.map(|p| LocalEntry {
 			dir: format!("{}-1-1", p.name),
-			desc: Some(local_desc(p).into_bytes()),
+			desc: Some(local_desc(rng, p).into_bytes()),
 			files: None,
 			install: false,
 		})
@@ -201,9 +228,14 @@ struct Case {
 	log: String,
 }
 
-fn open_case(local: &[Pkg], sync: &[SyncSpec], log: String) -> Case {
+fn open_case(
+	rng: &mut Rng,
+	local: &[Pkg],
+	sync: &[SyncSpec],
+	log: String,
+) -> Case {
 	let fx = TempRoot::new("db-search");
-	write_local(&fx, local);
+	write_local(rng, &fx, local);
 	for (name, _, data) in sync {
 		if let Some(d) = data {
 			fs::write(fx.sync_file(name, ".db"), d).unwrap();
@@ -217,32 +249,6 @@ fn open_case(local: &[Pkg], sync: &[SyncSpec], log: String) -> Case {
 		r.register_syncdb(name.as_bytes(), 0)
 			.unwrap()
 			.set_usage(*usage);
-	}
-	// the generators stay inside what alpm-db/alpm-repo-db read
-	let dbext = r.dbext().to_vec();
-	let ldb = r.localdb_mut().unwrap();
-	for p in local {
-		let pkg = ldb.load_pkg(
-			&dbext,
-			&mut (),
-			p.name.as_bytes(),
-			INFRQ_DESC,
-		);
-		let level = pkg.map(|p| p.infolevel).unwrap_or(INFRQ_ERROR);
-		assert_eq!(level & INFRQ_ERROR, 0, "alpm-db refuses {p:?}");
-	}
-	for db in r.syncdbs_mut() {
-		let e = db.pkgcache(&dbext, &mut ()).err();
-		assert!(
-			matches!(
-				e,
-				None | Some(Errno::DbNotFound
-					| Errno::Libarchive
-					| Errno::DbInvalid | Errno::DbOpen)
-			),
-			"{:?} {e:?}",
-			db.name()
-		);
 	}
 	let names = local.iter().map(|p| p.name.clone()).collect();
 	Case {
@@ -305,17 +311,18 @@ fn fixed() {
 		pkg("alpha", Some("x^y marks"), &[], &["base", "devel"]),
 		pkg("x-y", Some("é accent"), &["xy"], &["kde"]),
 	];
+	let mut rng = Rng::new(0x5ea_f1d);
 	let sync = vec![
-		("core", DB_USAGE_ALL, Some(sync_db(&local[..3]))),
+		("core", DB_USAGE_ALL, Some(sync_db(&mut rng, &local[..3]))),
 		(
 			"nosearch",
 			DB_USAGE_ALL & !DB_USAGE_SEARCH,
-			Some(sync_db(&local)),
+			Some(sync_db(&mut rng, &local)),
 		),
 		("gone", DB_USAGE_ALL, None),
 		("broken", DB_USAGE_ALL, Some(b"not a tar".repeat(100))),
 	];
-	let mut case = open_case(&local, &sync, String::new());
+	let mut case = open_case(&mut rng, &local, &sync, String::new());
 	let fixed: &[(&str, &[&str])] = &[
 		("local", &["a+b"]),
 		("local", &["x^y"]),
@@ -380,12 +387,12 @@ fn fuzz() {
 						"{name} {usage} {pkgs:?}"
 					)
 					.unwrap();
-					Some(sync_db(&pkgs))
+					Some(sync_db(&mut rng, &pkgs))
 				}
 			};
 			sync.push((name, usage, data));
 		}
-		let mut case = open_case(&local, &sync, log);
+		let mut case = open_case(&mut rng, &local, &sync, log);
 		let names: Vec<String> = case.names.clone();
 		let names: Vec<&str> =
 			names.iter().map(String::as_str).collect();
