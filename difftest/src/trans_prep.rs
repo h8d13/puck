@@ -16,7 +16,7 @@
 // RET_ERR/GOTO_ERR and of db.c's cache loads. packages are named by name (and db index where the
 // C pointer says which db).
 use std::collections::VecDeque;
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CString, c_char, c_int, c_void};
 use std::fs;
 use std::path::Path;
 use std::ptr;
@@ -27,11 +27,13 @@ use pacman_cli::conf::Config;
 use crate::cli_util::config;
 use crate::cli_util2::{CIo, run};
 use crate::conflict::take_conflicts;
+use crate::deps_graph;
 use crate::deps_graph::{LOG_FUNCTION, take_misses};
 use crate::fixtures::{
 	Comp, LocalEntry, TarEntry, TempRoot, section, tar_dir, tar_file,
 	ustar, write_db,
 };
+use crate::handle::log_message;
 use crate::handle::{
 	_alpm_db_get_pkgcache_hash, ALPM, CDb, CHandleHead, CTrans,
 	alpm_db_get_groupcache, alpm_db_set_usage, alpm_errno,
@@ -47,7 +49,6 @@ use crate::handle::{
 use crate::package::{CPkg, field, list_data, with_strs};
 use crate::sync_ro::pacman_sync;
 use crate::{CList, Rng, alpm_list_add, alpm_list_free, c_free, cstr};
-use crate::{deps_graph, vsnprintf};
 
 // ---- fixture worlds ----
 
@@ -538,13 +539,8 @@ unsafe extern "C" fn log_cb(
 	// SAFETY: ctx is the Rec registered with the callback, no other
 	// reference to it is live while the C runs
 	let rec = unsafe { &mut *ctx.cast::<Rec>() };
-	let mut buf = [0 as c_char; 4096];
-	// SAFETY: fmt and args are the format and va_list of this call,
-	// used once; buf is writable for its length
-	let n = unsafe { vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args) };
-	assert!(n >= 0 && (n as usize) < buf.len(), "log message too long");
-	// SAFETY: vsnprintf nul-terminated buf
-	let msg = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_bytes().to_vec();
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
 	let errline = level == LOG_DEBUG
 		&& UNPORTED_DEBUG.iter().any(|p| msg.starts_with(p));
 	if rec.mute || level == LOG_FUNCTION || errline {

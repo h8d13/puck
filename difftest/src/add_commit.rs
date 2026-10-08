@@ -23,10 +23,12 @@ use alpm_core::handle::Handle;
 use alpm_core::package::Package;
 use alpm_core::{add, be_package, trans, util};
 
+use crate::cstr;
 use crate::fixtures::{
 	Comp, LocalEntry, Node, TarNode, TempRoot, snapshot, ustar_owned,
 	write_db,
 };
+use crate::handle::log_message;
 use crate::handle::{
 	ALPM, CDb, alpm_db_get_pkg, alpm_errno, alpm_get_localdb,
 	alpm_initialize, alpm_option_set_eventcb, alpm_option_set_logcb,
@@ -38,7 +40,6 @@ use crate::hook::strip_stamps;
 use crate::package::{_alpm_pkg_dup, CPkg, read_pkg, with_strs};
 use crate::trans_prep::alpm_add_pkg;
 use crate::util::c_umask;
-use crate::{cstr, vsnprintf};
 
 // ALPM_TRANS_FLAG_NOLOCK: no lock file under the fixture dbpath
 pub const AC_NOLOCK: c_int = 1 << 17;
@@ -422,15 +423,11 @@ unsafe extern "C" fn log_cb(
 	fmt: *const c_char,
 	args: *mut c_void,
 ) {
-	let mut buf = vec![0 as c_char; 16384];
-	// SAFETY: fmt and args are _alpm_log's printf pair, used once; buf
-	// is writable for its length. ctx is the boxed record list
-	let (n, recs) = unsafe {
-		let n = vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
-		(n, &mut *ctx.cast::<Vec<AcRec>>())
-	};
-	assert!(n >= 0 && (n as usize) < buf.len(), "log message cut");
-	recs.push(AcRec::Log(level, c_bytes(buf.as_ptr())));
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
+	// SAFETY: ctx is the boxed record list
+	let recs = unsafe { &mut *ctx.cast::<Vec<AcRec>>() };
+	recs.push(AcRec::Log(level, msg));
 }
 
 unsafe extern "C" fn event_cb(ctx: *mut c_void, event: *mut c_void) {

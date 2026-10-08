@@ -33,7 +33,7 @@ use crate::signing::{
 use crate::sync_ro::{
 	CRun, FrontHandle, gen_pkgs, pacman_sync, run_op, sync_tar,
 };
-use crate::{CList, Rng, alpm_list_add, alpm_list_free, cstr, vsnprintf};
+use crate::{CList, Rng, alpm_list_add, alpm_list_free, cstr};
 
 unsafe extern "C" {
 	fn alpm_db_update(
@@ -242,14 +242,10 @@ unsafe extern "C" fn log_cb(
 		4 => LogLevel::Debug,
 		_ => return,
 	};
-	let mut buf = vec![0 as c_char; 8192];
-	// SAFETY: fmt and args are the printf pair _alpm_log got, used once;
-	// buf is writable for its length. ctx is the boxed Ctx
-	let ctx = unsafe {
-		vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
-		&mut *ctx.cast::<Ctx>()
-	};
-	let msg = bytes(buf.as_ptr());
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
+	// SAFETY: ctx is the boxed Ctx
+	let ctx = unsafe { &mut *ctx.cast::<Ctx>() };
 	if kept(level, &msg) {
 		ctx.rec.logs.push((level, msg));
 	}

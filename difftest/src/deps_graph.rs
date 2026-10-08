@@ -9,12 +9,13 @@
 // the callbacks and the id mapping read package structs directly: the
 // alpm_pkg_get_* getters reset pm_errno.
 use std::collections::VecDeque;
-use std::ffi::{CStr, c_char, c_int, c_ulong, c_void};
+use std::ffi::{c_char, c_int, c_ulong, c_void};
 use std::ptr;
 
 use alpm_core::deps::{DepMissing, DepMod, Depend};
 use alpm_core::trans::{TRANS_FLAG_NODEPVERSION, TRANS_FLAG_NOLOCK};
 
+use crate::handle::log_message;
 use crate::handle::{
 	_alpm_db_get_pkgcache_hash, ALPM, CDb, alpm_db_set_usage, alpm_errno,
 	alpm_get_localdb, alpm_initialize, alpm_option_set_assumeinstalled,
@@ -26,7 +27,7 @@ use crate::handle::{
 use crate::package::{
 	_alpm_pkg_free, CPkg, field, list_data, read_pkg, with_strs,
 };
-use crate::{CList, alpm_list_add, alpm_list_free, cstr, opt_ptr, vsnprintf};
+use crate::{CList, alpm_list_add, alpm_list_free, cstr, opt_ptr};
 
 // alpm_question_type_t
 const QUESTION_INSTALL_IGNOREPKG: c_int = 1;
@@ -216,13 +217,8 @@ unsafe extern "C" fn log_cb(
 	fmt: *const c_char,
 	args: *mut c_void,
 ) {
-	let mut buf = [0 as c_char; 4096];
-	// SAFETY: fmt and args are the format and va_list of this
-	// _alpm_log call, used once; buf is writable for its length
-	let n = unsafe { vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args) };
-	assert!(n >= 0 && (n as usize) < buf.len(), "log message too long");
-	// SAFETY: vsnprintf nul-terminated buf
-	let msg = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_bytes().to_vec();
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
 	// SAFETY: ctx is the Recorder registered with the callback, no
 	// other reference to it is live while the C runs
 	let rec = unsafe { &mut *ctx.cast::<Recorder>() };

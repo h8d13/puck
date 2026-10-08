@@ -24,11 +24,11 @@ use std::sync::MutexGuard;
 use alpm_core::callbacks::{Callbacks, DownloadEvent, LogLevel};
 
 use crate::cstr;
+use crate::handle::log_message;
 use crate::handle::{
 	ALPM, alpm_initialize, alpm_option_set_dlcb, alpm_option_set_logcb,
 	alpm_release,
 };
-use crate::vsnprintf;
 
 unsafe extern "C" {
 	fn _alpm_sandbox_fs_restrict_writes_to(
@@ -150,23 +150,17 @@ fn bytes(p: *const c_char) -> Vec<u8> {
 	unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
 }
 
-// longest text the log callback keeps
-const LOG_BUF: usize = 1 << 16;
-
 unsafe extern "C" fn log_cb(
 	ctx: *mut c_void,
 	level: c_int,
 	fmt: *const c_char,
 	args: *mut c_void,
 ) {
-	let mut buf = vec![0 as c_char; LOG_BUF];
-	// SAFETY: fmt and args are the printf pair _alpm_log got, used once;
-	// buf is writable for its length. ctx is the CSandbox's boxed SbRecorder
-	let rec = unsafe {
-		vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
-		&mut *ctx.cast::<SbRecorder>()
-	};
-	rec.0.push(CbRec::Log(level, bytes(buf.as_ptr())));
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
+	// SAFETY: ctx is the CSandbox's boxed SbRecorder
+	let rec = unsafe { &mut *ctx.cast::<SbRecorder>() };
+	rec.0.push(CbRec::Log(level, msg));
 }
 
 unsafe extern "C" fn dl_cb(

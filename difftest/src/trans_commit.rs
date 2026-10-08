@@ -48,6 +48,7 @@ use crate::fixtures::{
 	Comp, LocalEntry, TarEntry, TarNode, TempRoot, section, tar_dir,
 	tar_file, ustar, ustar_owned, write_db,
 };
+use crate::handle::log_message;
 use crate::handle::{
 	_alpm_db_get_pkgcache_hash, ALPM, CDb, CHandleHead, alpm_db_add_server,
 	alpm_db_get_pkg, alpm_errno, alpm_get_localdb, alpm_initialize,
@@ -71,7 +72,7 @@ use crate::trans_prep::{
 	alpm_add_pkg, alpm_remove_pkg, alpm_sync_sysupgrade, alpm_trans_prepare,
 };
 use crate::util::c_umask;
-use crate::{CList, alpm_list_free, c_free, cstr, vsnprintf};
+use crate::{CList, alpm_list_free, c_free, cstr};
 
 unsafe extern "C" {
 	fn alpm_trans_commit(
@@ -644,15 +645,11 @@ unsafe extern "C" fn log_cb(
 	fmt: *const c_char,
 	args: *mut c_void,
 ) {
-	let mut buf = vec![0 as c_char; 16384];
-	// SAFETY: fmt and args are _alpm_log's printf pair, used once; buf
-	// is writable for its length. ctx is the boxed CRec
-	let (n, rec) = unsafe {
-		let n = vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
-		(n, &mut *ctx.cast::<CRec>())
-	};
-	assert!(n >= 0 && (n as usize) < buf.len(), "log message cut");
-	rec.recs.push(TcRec::Log(level, c_bytes(buf.as_ptr())));
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
+	// SAFETY: ctx is the boxed CRec
+	let rec = unsafe { &mut *ctx.cast::<CRec>() };
+	rec.recs.push(TcRec::Log(level, msg));
 }
 
 // alpm_event_package_operation_t, alpm_event_pkg_retrieve_t

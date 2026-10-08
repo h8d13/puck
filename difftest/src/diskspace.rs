@@ -13,6 +13,7 @@ use std::sync::Mutex;
 use alpm_core::diskspace::MountEntry;
 use alpm_core::package::Package;
 
+use crate::handle::log_message;
 use crate::handle::{
 	ALPM, CHandleHead, CTrans, alpm_db_get_pkg, alpm_db_get_pkgcache,
 	alpm_errno, alpm_get_localdb, alpm_initialize, alpm_option_get_root,
@@ -20,7 +21,7 @@ use crate::handle::{
 	alpm_option_set_progresscb, alpm_release,
 };
 use crate::package::{CPkg, CPkgBox, alpm_pkg_get_files, list_data, with_strs};
-use crate::{CFile, alpm_list_add, alpm_list_free, cstr, vsnprintf};
+use crate::{CFile, alpm_list_add, alpm_list_free, cstr};
 
 // struct mntent, mntent.h
 #[repr(C)]
@@ -72,13 +73,11 @@ unsafe extern "C" fn log_cb(
 	fmt: *const c_char,
 	args: *mut c_void,
 ) {
-	let mut buf = [0 as c_char; 8192];
-	// SAFETY: fmt and args come from _alpm_log, args consumed once
-	let n = unsafe { vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args) };
-	assert!(n >= 0 && (n as usize) < buf.len(), "log message cut");
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
 	// SAFETY: ctx is the events Vec of the CSpace running this call
 	let events = unsafe { &mut *ctx.cast::<Vec<CbEvent>>() };
-	events.push(CbEvent::Log(level, bytes(buf.as_ptr())));
+	events.push(CbEvent::Log(level, msg));
 }
 
 unsafe extern "C" fn progress_cb(

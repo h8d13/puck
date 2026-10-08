@@ -15,6 +15,7 @@ use alpm_core::conflict::{
 use alpm_core::deps::{DepMod, Depend};
 use alpm_core::package::Package;
 
+use crate::handle::log_message;
 use crate::handle::{
 	ALPM, CDb, alpm_db_get_pkgcache, alpm_get_localdb, alpm_initialize,
 	alpm_option_set_logcb, alpm_option_set_overwrite_files,
@@ -23,7 +24,7 @@ use crate::handle::{
 };
 use crate::package::{CPkg, CPkgBox, field, list_data, read_pkg};
 use crate::package::{read_strs, with_strs};
-use crate::{CList, alpm_list_add, alpm_list_free, cstr, vsnprintf};
+use crate::{CList, alpm_list_add, alpm_list_free, cstr};
 
 // alpm_depend_t, the reason of a conflict
 #[repr(C)]
@@ -119,15 +120,11 @@ unsafe extern "C" fn record_log(
 	if level != LogLevel::Debug as c_int {
 		return;
 	}
-	let mut buf = vec![0 as c_char; 16384];
-	// SAFETY: fmt and args are _alpm_log's printf pair, used once; buf
-	// is writable for its length. ctx is find_fileconflicts' FcRecs
-	let (n, recs) = unsafe {
-		let n = vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
-		(n, &mut *ctx.cast::<FcRecs>())
-	};
-	assert!(n >= 0 && (n as usize) < buf.len(), "log message cut");
-	recs.debug.push(field(buf.as_ptr()).expect("formatted"));
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
+	// SAFETY: ctx is find_fileconflicts' FcRecs
+	let recs = unsafe { &mut *ctx.cast::<FcRecs>() };
+	recs.debug.push(msg);
 }
 
 // alpm_cb_progress recording into the FcRecs behind ctx

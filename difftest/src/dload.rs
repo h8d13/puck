@@ -26,7 +26,7 @@ use time::OffsetDateTime;
 
 use crate::handle::*;
 use crate::{CFile, CList, TempRoot, alpm_list_add, alpm_list_free, c_free};
-use crate::{cstr, strdup, take, vsnprintf};
+use crate::{cstr, strdup, take};
 
 // CURL_ERROR_SIZE
 const CURL_ERROR_SIZE: usize = 256;
@@ -247,14 +247,11 @@ unsafe extern "C" fn log_cb(
 		2 => LogLevel::Warning,
 		_ => return,
 	};
-	let mut buf = vec![0 as c_char; 8192];
-	// SAFETY: fmt and args are the printf pair _alpm_log got, used once;
-	// buf is writable for its length. ctx is the boxed Ctx
-	let ctx = unsafe {
-		vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
-		&mut *ctx.cast::<Ctx>()
-	};
-	ctx.rec.logs.push((level, bytes(buf.as_ptr())));
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
+	// SAFETY: ctx is the boxed Ctx
+	let ctx = unsafe { &mut *ctx.cast::<Ctx>() };
+	ctx.rec.logs.push((level, msg));
 }
 
 unsafe extern "C" fn event_cb(ctx: *mut c_void, event: *mut c_void) {

@@ -24,6 +24,7 @@ use alpm_core::package::Package;
 use alpm_core::remove::{remove_pkg, remove_single_package};
 use alpm_core::trans::{TRANS_FLAG_NOLOCK, trans_init, trans_release};
 
+use crate::handle::log_message;
 use crate::handle::{
 	ALPM, CHandleHead, CTrans, alpm_db_get_pkg, alpm_db_get_pkgcache,
 	alpm_errno, alpm_get_localdb, alpm_initialize, alpm_option_get_root,
@@ -38,7 +39,7 @@ use crate::package::{
 	alpm_pkg_has_scriptlet, field, list_data, read_pkg, with_strs,
 };
 use crate::trans_prep::alpm_remove_pkg;
-use crate::{alpm_list_add, cstr, strdup, vsnprintf};
+use crate::{alpm_list_add, cstr, strdup};
 
 unsafe extern "C" {
 	fn _alpm_remove_single_package(
@@ -116,15 +117,10 @@ unsafe extern "C" fn log_cb(
 	fmt: *const c_char,
 	args: *mut c_void,
 ) {
-	let mut buf = vec![0 as c_char; 16384];
-	// SAFETY: fmt and args are _alpm_log's printf pair, used once; buf
-	// is writable for its length. ctx is the boxed CRec of the call
-	let (n, rec) = unsafe {
-		let n = vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
-		(n, &mut *ctx.cast::<CRec>())
-	};
-	assert!(n >= 0 && (n as usize) < buf.len(), "log message cut");
-	let msg = bytes(buf.as_ptr()).unwrap();
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
+	// SAFETY: ctx is the boxed CRec of the call
+	let rec = unsafe { &mut *ctx.cast::<CRec>() };
 	let errline =
 		level == LOG_DEBUG && msg.starts_with(b"returning error ");
 	if rec.mute || level == LOG_FUNCTION || errline {
