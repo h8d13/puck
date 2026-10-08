@@ -18,6 +18,7 @@ use alpm_compress::compression::{
 	ZstdThreads,
 };
 
+use crate::signing::random_sig;
 use crate::{Rng, c_filter_write};
 
 // the C binary of PACMAN_BUILD
@@ -30,10 +31,10 @@ pub fn c_pacman() -> PathBuf {
 	dir.join("pacman")
 }
 
-// target/<profile>/deps/cli_binary-<hash> -> target/<profile>/pacman
+// target/<profile>/deps/cli_binary-<hash> -> target/<profile>/puck
 pub fn rust_pacman() -> PathBuf {
 	let exe = std::env::current_exe().unwrap();
-	let bin = exe.parent().unwrap().parent().unwrap().join("pacman");
+	let bin = exe.parent().unwrap().parent().unwrap().join("puck");
 	assert!(
 		bin.exists(),
 		"{} missing: cargo build --release -p pacman-cli",
@@ -661,6 +662,14 @@ fn gen_pkg(rng: &mut Rng, name: &str) -> GenPkg {
 			word(rng, 1, 6)
 		);
 		desc.push_str(&section("URL", &one(url)));
+	}
+	// -Sii's keys: packets alpm_extract_keyid is defined on. its own
+	// rng, the worlds other tests draw stay as they were
+	let seed = name.bytes().chain(version.bytes());
+	let seed = seed.fold(0x5195, |h: u64, b| h.wrapping_mul(31) ^ b as u64);
+	if let (Some(sig), _) = random_sig(&mut Rng::new(seed)) {
+		let sig = String::from_utf8(sig).expect("base64 is ascii");
+		desc.push_str(&section("PGPSIG", &one(sig)));
 	}
 	GenPkg {
 		name: name.to_string(),

@@ -15,9 +15,12 @@ bindir=${1:-target/release}
 common=$(git rev-parse --path-format=absolute --git-common-dir)
 build=${PACMAN_BUILD:-$(dirname "$common")/pacman/build}
 tests=pacman/test
-for b in pacman vercmp; do
-	if [ ! -x "$bindir/$b" ]; then
-		echo "$bindir/$b missing (cargo build --release)" >&2
+# the port's binary is puck, the C build's pacman
+pac=$bindir/puck
+[ -x "$pac" ] || pac=$bindir/pacman
+for b in "$pac" "$bindir/vercmp"; do
+	if [ ! -x "$b" ]; then
+		echo "$b missing (cargo build --release)" >&2
 		exit 2
 	fi
 done
@@ -44,7 +47,7 @@ tap parseopts_test.sh "$tests/scripts/parseopts_test.sh" \
 tap makepkg-template_test.sh "$tests/scripts/makepkg-template_test.sh" \
 	"$build/scripts/makepkg-template"
 
-pt=$(scripts/pactest.sh "$bindir/pacman")
+pt=$(scripts/pactest.sh "$pac")
 echo "$pt"
 # "== ok N, expected fail X, fail F, unexpected pass U, total T"
 read -r ok xfail fail xpass < <(sed -n \

@@ -18,12 +18,12 @@ use alpm_core::package::{
 use alpm_core::util::hash_sdbm;
 use alpm_types::Md5Checksum;
 use difftest::{
-	CShown, PkgWorld, Rng, SYNC_DBS, c_print_groups, c_strftime_c, iters,
-	widths_agree,
+	CShown, PkgWorld, Rng, SYNC_DBS, c_print_groups, c_strftime_c,
+	encode_base64, iters, random_sig, sig_packet, utc_date, widths_agree,
 };
 use pacman_cli::package::{
 	FileProbe, PkgEnv, dump_pkg_backups, dump_pkg_files, dump_pkg_full,
-	dump_pkg_search, format_date_utc, print_groups, print_installed,
+	dump_pkg_search, print_groups, print_installed,
 };
 use pacman_cli::util::{ColStr, SigResult};
 
@@ -256,113 +256,6 @@ fn random_backup(rng: &mut Rng) -> Backup {
 	Backup { name, hash }
 }
 
-// standard base64 with padding, what %PGPSIG% holds
-fn base64(data: &[u8]) -> Vec<u8> {
-	const A: &[u8] =
-		b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-	let mut out = Vec::new();
-	for c in data.chunks(3) {
-		let b = [
-			c[0],
-			*c.get(1).unwrap_or(&0),
-			*c.get(2).unwrap_or(&0),
-		];
-		let n = u32::from(b[0]) << 16
-			| u32::from(b[1]) << 8
-			| u32::from(b[2]);
-		for i in 0..4 {
-			if i <= c.len() {
-				out.push(A[(n >> (18 - 6 * i) & 63) as usize]);
-			} else {
-				out.push(b'=');
-			}
-		}
-	}
-	out
-}
-
-// subpacket area: some creation times around at most one issuer
-fn subpackets(rng: &mut Rng, key: Option<[u8; 8]>) -> Vec<u8> {
-	let mut area = Vec::new();
-	let ctime = |area: &mut Vec<u8>, rng: &mut Rng| {
-		area.extend_from_slice(&[5, 2]);
-		area.extend_from_slice(&(rng.next_u64() as u32).to_be_bytes());
-	};
-	for _ in 0..rng.below(3) {
-		ctime(&mut area, rng);
-	}
-	if let Some(k) = key {
-		area.extend_from_slice(&[9, 16]);
-		area.extend_from_slice(&k);
-		for _ in 0..rng.below(2) {
-			ctime(&mut area, rng);
-		}
-	}
-	area
-}
-
-// one v4 binary-document signature packet in old or new format, and the
-// keyids alpm_extract_keyid finds in it (first issuer of each area)
-fn sig_packet(rng: &mut Rng) -> (Vec<u8>, Vec<Vec<u8>>) {
-	let mut keys = Vec::new();
-	let mut area = |rng: &mut Rng| {
-		let key = (rng.below(2) == 0).then(|| {
-			let k = rng.next_u64().to_be_bytes();
-			keys.push(k
-				.iter()
-				.map(|b| format!("{b:02X}"))
-				.collect());
-			k
-		});
-		subpackets(rng, key)
-	};
-	let (hashed, unhashed) = (area(rng), area(rng));
-	let mut body = vec![4, 0, 1, 8];
-	body.extend_from_slice(&(hashed.len() as u16).to_be_bytes());
-	body.extend_from_slice(&hashed);
-	body.extend_from_slice(&(unhashed.len() as u16).to_be_bytes());
-	body.extend_from_slice(&unhashed);
-	// hash prefix and an mpi-ish tail, long enough for 2-byte lengths
-	let tail = 2 + rng.below(220);
-	body.extend((0..tail).map(|_| rng.next_u64() as u8));
-	let n = body.len();
-	let mut pkt = match (rng.below(2), n < 192) {
-		(0, true) => vec![0xc2, n as u8],
-		(0, false) => {
-			let m = n - 192;
-			vec![0xc2, (m >> 8) as u8 + 192, m as u8]
-		}
-		(_, true) => vec![0x88, n as u8],
-		_ => vec![0x89, (n >> 8) as u8, n as u8],
-	};
-	pkt.extend_from_slice(&body);
-	(pkt, keys.into_iter().map(String::into_bytes).collect())
-}
-
-// %PGPSIG% and the keys the C extracts: packets, maybe followed by a
-// byte without the packet bit (the C stops there, keeping earlier
-// keys), or base64 that does not decode
-fn random_sig(rng: &mut Rng) -> (Option<Vec<u8>>, Vec<Vec<u8>>) {
-	match rng.below(5) {
-		0 => (None, Vec::new()),
-		1 => (Some(b"not*base64".to_vec()), Vec::new()),
-		_ => {
-			let (mut data, mut keys) = (Vec::new(), Vec::new());
-			for _ in 0..1 + rng.below(3) {
-				let (p, k) = sig_packet(rng);
-				data.extend(p);
-				keys.extend(k);
-			}
-			if rng.below(4) == 0 {
-				data.push(rng.below(0x80) as u8);
-				data.extend((0..rng.below(4))
-					.map(|_| rng.next_u64() as u8));
-			}
-			(Some(base64(&data)), keys)
-		}
-	}
-}
-
 // the package dump_pkg_full shows, with the keys of its signature
 fn random_pkg(rng: &mut Rng, fx: &Fx, extra: bool) -> (Package, Vec<Vec<u8>>) {
 	let origin = match rng.below(if extra { 3 } else { 4 }) {
@@ -477,6 +370,11 @@ impl PkgEnv for Env<'_> {
 		Some(SYNC_DBS[self.db].as_bytes().to_vec())
 	}
 
+	// the C side's TZ=UTC
+	fn format_date(&mut self, t: i64) -> Option<Vec<u8>> {
+		utc_date(t)
+	}
+
 	fn sig_keys(&mut self, _: &Package, _: &[u8]) -> Vec<Vec<u8>> {
 		self.keys.clone()
 	}
@@ -540,7 +438,7 @@ enum DateClass {
 
 #[track_caller]
 fn date_class(t: i64) -> DateClass {
-	let (c, r) = (c_strftime_c(t), format_date_utc(t));
+	let (c, r) = (c_strftime_c(t), utc_date(t));
 	let class = match (&c, &r) {
 		(Some(_), Some(_)) => DateClass::Same,
 		(Some(_), None) => DateClass::OnlyC,
@@ -586,10 +484,7 @@ fn date_fixed() {
 	for (t, want) in cases {
 		assert_eq!(date_class(t), want, "{t}");
 	}
-	assert_eq!(
-		format_date_utc(0).unwrap(),
-		b"Thu Jan  1 00:00:00 1970".to_vec()
-	);
+	assert_eq!(utc_date(0).unwrap(), b"Thu Jan  1 00:00:00 1970".to_vec());
 }
 
 // time's range and the localtime limits, found on the C, plus one past
@@ -760,7 +655,7 @@ fn full_fixed() {
 				(None, Vec::new())
 			} else {
 				let (p, k) = sig_packet(&mut rng);
-				(Some(base64(&p)), k)
+				(Some(encode_base64(&p)), k)
 			};
 			let pkg = Package {
 				filename: file.then(|| fx.pkgfile()),

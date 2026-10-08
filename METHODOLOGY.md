@@ -28,7 +28,8 @@ whoever writes it.
   cut with `util::until_nul` where the C sees a C string.
 - `ctype` in the C runs in the C locale: use the `is_ascii_*` predicates.
 - Platform-dependent C types keep their C alias (`c_char`, `c_ulong`).
-- NULL handling of exported functions belongs to a future C ABI layer:
+- NULL handling of exported functions belongs to a C ABI layer, if one is
+  ever built (PORTING.md "Later"):
   pin it in difftest, do not model it in the Rust API.
 - Where the C is undefined (out of bounds, uninitialized memory), the port
   does the safe thing and difftest must never feed the C that input.
@@ -70,6 +71,7 @@ follows the wider ALPM workspace, then parity:
 | landlock (`sandbox_fs.c`) | `landlock` crate | the Landlock maintainers' binding |
 | seccomp (`sandbox_syscalls.c`) | `libseccomp` crate | binding to the same C library pacman links |
 | lock file | `OpenOptions::create_new` | safe std (O_CREAT\|O_EXCL) |
+| local time (log stamps, PACMAN_DEBUG, `%c` dates) | `time` `local-offset`: `UtcOffset::local_offset_at`, glibc's `localtime_r` `tm_gmtoff` | precedent crate (ALPM's simplelog enables it); the offset is glibc's own, so TZ, `/etc/localtime`, POSIX rules and DST edges match by construction (tz-probe difftest). since time 0.3.37 it no longer refuses multithreaded processes; what is left is getenv(TZ) racing a setenv in another thread, which needs `unsafe` here. glibc reads TZ once per process for `localtime_r`, the C's `localtime` rereads it: same in a process that leaves its environment alone. a TZif reader was not taken: it would reimplement what glibc answers |
 | tar members, pax records, xattrs and ns times on extraction (libarchive's tar reader, archive_write_disk) | `alpm-core::tar` translated from libarchive 3.8.9; `rustix` `fs` for `fsetxattr`/`lsetxattr`, `futimens`/`utimensat`, `openat` O_PATH | the tar crate splits pax records on '\n' (binary xattr values lost), keeps a key's first record where libarchive keeps the last, has no pax sparse maps or ACL records and frames members its own way; `fs` is already enabled, no new feature, libc backend so fakeroot fakes the xattr calls |
 | signal handlers (`sighandler.c`) | `signal-hook` 0.4: self-pipe `Signals` read by a thread, `flag::register_conditional_default` | std/rustix have no safe handler API, no ALPM crate installs one; the established binding (its registry also backs tokio's signals). the handler only writes to the pipe or reads a flag, the C handler's work runs on the thread |
 | lz4 (libarchive's lz4 reader over liblz4) | `lz4_flex` block API (`safe-decode`), `twox-hash` xxhash32 | libarchive reads the frames itself (descriptor, skippable and legacy frames, checksums) and needs only LZ4_decompress_safe and _usingDict; `lz4` (the liblz4 binding) has no safe dictionary decode (linked blocks) and its frame decoder is LZ4F (no legacy frames, its own rules); lz4_flex's block API does both in safe Rust, its frame decoder is not used either |

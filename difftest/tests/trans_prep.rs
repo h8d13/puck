@@ -39,10 +39,10 @@ use alpm_core::{add, remove, sync, trans};
 use difftest::{
 	CTx, FrontOp, Rng, TP_GROUPS, TP_SYNC, TempRoot, TpAdd, TpAsk, TpCalls,
 	TpData, TpEvent, TpId, TpRet, TpSetup, TpView, TpWorld, UNPORTED_DEBUG,
-	c_front, gen_world, iters, tp_cachedir, tree_snapshot, write_world,
+	c_front, gen_world, iters, tp_cachedir, tree_snapshot, utc_date,
+	write_world,
 };
 use pacman_cli::conf::{ColStr, Config, LOG_ERROR, LOG_WARNING};
-use pacman_cli::package::format_date_utc;
 use pacman_cli::pacman::{PM_OP_REMOVE, PM_OP_SYNC, PM_OP_UPGRADE};
 use pacman_cli::util::{Output, Term, Ui};
 
@@ -169,9 +169,13 @@ impl Callbacks for Script {
 				)
 			}
 			Question::SelectProvider {
-				providers, depend, ..
+				providers,
+				dbs,
+				depend,
+				..
 			} => TpAsk::SelectProvider(
 				providers.iter().map(|p| name(p)).collect(),
+				dbs.iter().map(|d| d.to_vec()).collect(),
 				(*depend).clone(),
 			),
 			_ => unreachable!("not asked while preparing"),
@@ -981,7 +985,7 @@ fn rust_front(
 			term: &mut term,
 			cols,
 			out: &mut out,
-			format_date: &format_date_utc,
+			format_date: &utc_date,
 			explicit_adds: Vec::new(),
 			explicit_removes: Vec::new(),
 		};

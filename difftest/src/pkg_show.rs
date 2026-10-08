@@ -17,6 +17,7 @@ use std::sync::Once;
 
 use alpm_core::deps::dep_compute_string;
 use alpm_core::package::{Package, PkgFrom};
+use pacman_cli::package::format_date_at;
 use pacman_cli::util::ColStr;
 
 use crate::cli_util::{capture, config};
@@ -115,6 +116,18 @@ pub fn c_strftime_c(t: i64) -> Option<Vec<u8>> {
 		}
 	});
 	res
+}
+
+// TZ=UTC for the whole process, the port's localtime included (glibc
+// state). before a Rust side formats a date in-process
+pub fn tz_utc() {
+	c_strftime_c(0);
+}
+
+// the port's strftime("%c", localtime(&t)) under TZ=UTC, for Rust sides
+// compared against c_strftime_c
+pub fn utc_date(t: i64) -> Option<Vec<u8>> {
+	format_date_at(t, 0)
 }
 
 // dump_pkg_full passes localtime's result to strftime unchecked

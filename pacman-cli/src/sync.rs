@@ -37,6 +37,7 @@ use alpm_core::deps::{DepMissing, DepMod, dep_compute_string};
 use alpm_core::error::Errno;
 use alpm_core::handle::Handle;
 use alpm_core::package::{DbCaches, Package, pkg_find};
+use alpm_core::signing::{decode_signature, extract_keyid};
 use alpm_core::sync::{dbs_satisfier, find_group_pkgs, sync_sysupgrade};
 use alpm_core::trans::{
 	CommitData, CommitError, PrepareData, PrepareError, TransPkg,
@@ -128,11 +129,15 @@ impl PkgEnv for SyncEnv<'_> {
 		Some(self.this.name().to_vec())
 	}
 
-	// alpm_decode_signature, then alpm_extract_keyid on the packets.
-	// extract_keyid is not ported yet (signing.c), so no keys. the C
-	// lists none either where the base64 does not decode
-	fn sig_keys(&mut self, _: &Package, _: &[u8]) -> Vec<Vec<u8>> {
-		Vec::new()
+	// alpm_decode_signature, then alpm_extract_keyid on the packets:
+	// the keys before a format error, which it logs. base64 that does
+	// not decode is no data, so no keys
+	fn sig_keys(&mut self, pkg: &Package, b64: &[u8]) -> Vec<Vec<u8>> {
+		let sig = decode_signature(b64).unwrap_or_default();
+		let mut keys = Vec::new();
+		let cb = &mut *self.cb;
+		let _ = extract_keyid(cb, pkg.name_bytes(), &sig, &mut keys);
+		keys
 	}
 
 	// file packages only, -Si never shows one

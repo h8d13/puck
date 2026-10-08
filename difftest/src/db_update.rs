@@ -6,8 +6,8 @@
 // downloads, the import key answer and the sync dbs (name, siglevel,
 // servers, usage). CUpdate builds it on a C handle with recording
 // log/event/question/download callbacks, RUpdate on an alpm_core Handle
-// with an UpdRecorder. kept logs: all but FUNCTION ones, RET_ERR/
-// GOTO_ERR's (__FILE__/__LINE__) and dload's internal debug lines.
+// with an UpdRecorder. kept logs: all but function lines and the debug
+// lines carrying __FILE__/__LINE__.
 use std::cell::RefCell;
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::ptr;
@@ -46,33 +46,11 @@ unsafe extern "C" {
 const QUESTION_IMPORT_KEY: c_int = 1 << 6;
 const EVENT_DATABASE_MISSING: c_int = 27;
 
-// dload.c's internal debug lines, not ported yet (PORTING.md follow-up
-// "dload's internal debug lines"): the parts that tell them
-const DLOAD_DEBUG: [&[u8]; 10] = [
-	b": url is ",
-	b": maxsize ",
-	b": using time condition ",
-	b": tempfile found, attempting continuation from ",
-	b": no more servers to retry\n",
-	b": retrying from ",
-	b" returned result ",
-	b": response code ",
-	b": file met time condition\n",
-	b": opened tempfile for download: ",
-];
-
-fn dload_debug(msg: &[u8]) -> bool {
-	let has = |p: &[u8]| msg.windows(p.len()).any(|w| w == p);
-	msg.starts_with(b"curl_download_internal return code is ")
-		|| msg.starts_with(b"failed retrieving file '")
-		|| DLOAD_DEBUG.iter().any(|p| has(p))
-}
-
-// debug lines but RET_ERR/GOTO_ERR's and dload's internals
+// debug lines but RET_ERR/GOTO_ERR's (the C's file and line)
 fn kept(level: LogLevel, msg: &[u8]) -> bool {
 	match level {
 		LogLevel::Error | LogLevel::Warning => true,
-		LogLevel::Debug => !c_only(msg) && !dload_debug(msg),
+		LogLevel::Debug => !c_only(msg),
 		LogLevel::Function => false,
 	}
 }

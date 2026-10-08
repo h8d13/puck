@@ -34,6 +34,13 @@ STAMP = re.compile(rb"^\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d([+-]\d{4})?\]",
 INSTALLDATE = re.compile(rb"(%INSTALLDATE%\n)[^\n]*")
 QI_DATE = re.compile(rb"^(Install Date +:).*$", re.M)
 DLTMP = re.compile(r"^download-[A-Za-z0-9]{6}$")
+# libarchive's error texts after the path (its reader's words, an fd
+# number) cannot match the port's: cut like difftest's cut_archive_text
+ARCHIVE_TEXT = re.compile(rb"^((?:error: )?(?:could not open file "
+			  rb"|error while reading package )[^\n]*?: )[^\n]*$",
+			  re.M)
+# mkdtemp's random suffix of a sandbox download dir, named in -Sc output
+DLTMP_TEXT = re.compile(rb"download-[A-Za-z0-9]{6}")
 # generated with run-time stamps or inode numbers inside: the java
 # keystore of update-ca-trust (entry dates), ldconfig's aux-cache
 NONDET = {
@@ -49,8 +56,6 @@ TEXT_MAX = 65536
 def known(key):
 	if key.startswith("tree:xattr:"):
 		return "xattr unit: pax xattrs / file caps not applied"
-	if key == "log-offset":
-		return "output unit: pacman.log stamps in UTC"
 	return None
 
 
@@ -202,6 +207,10 @@ class Step:
 			r = read(os.path.join(self.sdir, "r", f)) or b""
 			c = QI_DATE.sub(rb"\1 <masked>", c)
 			r = QI_DATE.sub(rb"\1 <masked>", r)
+			c = ARCHIVE_TEXT.sub(rb"\1", c)
+			r = ARCHIVE_TEXT.sub(rb"\1", r)
+			c = DLTMP_TEXT.sub(b"download-XXXXXX", c)
+			r = DLTMP_TEXT.sub(b"download-XXXXXX", r)
 			if c == r:
 				continue
 			if f == "rc":

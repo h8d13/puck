@@ -25,7 +25,7 @@ use difftest::{
 	CRun, CUpdate, DbSpec, DbState, GpgFixture, Home, RUpdate, Reply, Req,
 	Rng, Server, TempRoot, UpdRecord, UpdSetup, c_pacman_files_refresh,
 	c_pacman_sync_refresh, front_handle, iters, sync_db, test_sandbox_for,
-	umask_lock,
+	umask_lock, unsandbox,
 };
 use pacman_cli::callback::Frontend;
 use pacman_cli::conf::{ColStr, Config};
@@ -311,7 +311,7 @@ impl Pair {
 		};
 		let (ret, errno, mut rec) = self.r.update(dbs, force);
 		if self.setup.is_some() {
-			rec.logs.retain(|(_, m)| !sandbox_only(m));
+			unsandbox(&mut rec.logs);
 		}
 		let (logs, rec) = norm(rec, &self.rfx, self.sorted);
 		let r = Outcome {
@@ -340,17 +340,6 @@ impl Pair {
 		}
 		c
 	}
-}
-
-// the debug lines of the Rust side's sandbox (sandboxuser, landlock,
-// seccomp): only it runs sandboxed, see Pair::sandboxed
-fn sandbox_only(msg: &[u8]) -> bool {
-	let heads: [&[u8]; 3] = [
-		b"option 'sandboxuser' = ",
-		b"filesystem access has been restricted to ",
-		b"successfully restricted ",
-	];
-	heads.iter().any(|h| msg.starts_with(h))
 }
 
 fn file(body: &[u8], mtime: i64) -> Reply {

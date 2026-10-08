@@ -24,6 +24,8 @@ const EVENT_DATABASE_MISSING: c_int = 27;
 
 unsafe extern "C" {
 	fn gmtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
+	// what log.c, util.c and package.c call: rereads TZ every time
+	fn localtime(t: *const i64) -> *mut Tm;
 }
 
 // what logcb and eventcb were given, in order
@@ -456,6 +458,24 @@ impl COpts {
 	}
 }
 
+// strftime(fmt, localtime(&secs)) and tm_gmtoff, None where localtime
+// fails. localtime's static buffer: callers keep to one thread (the
+// tz-probe binary)
+pub fn c_localtime(secs: i64, fmt: &CStr) -> Option<(Vec<u8>, i64)> {
+	let mut buf = [0 as c_char; 64];
+	// SAFETY: localtime's result is read before the next call; buf holds
+	// 64 bytes, strftime stays within it and returns the length
+	unsafe {
+		let tm = localtime(&secs);
+		if tm.is_null() {
+			return None;
+		}
+		let n = strftime(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), tm);
+		let s = std::slice::from_raw_parts(buf.as_ptr().cast(), n);
+		Some((s.to_vec(), (*tm).tm_gmtoff))
+	}
+}
+
 // strftime(fmt) of the broken-down time of secs + utcoff with tm_gmtoff
 // set to utcoff: what localtime gives in a zone of that offset
 pub fn c_strftime_at(secs: i64, utcoff: i32, fmt: &CStr) -> Vec<u8> {
@@ -475,4 +495,126 @@ pub fn c_strftime_at(secs: i64, utcoff: i32, fmt: &CStr) -> Vec<u8> {
 		);
 		std::slice::from_raw_parts(buf.as_ptr().cast(), n).to_vec()
 	}
+}
+
+// text with its clock readings cut out: alpm_logaction's leader
+// "[YYYY-MM-DDTHH:MM:SS+zzzz]" (anywhere: a line cut at a nul runs into
+// the next entry) keeps its zone as "[+zzzz]", PACMAN_DEBUG's
+// "[HH:MM:SS] " at a line start becomes "[] ". times holds what each
+// showed: the instant (unix seconds) of a leader, the second of the day
+// of a debug stamp
+#[derive(Clone, Debug)]
+pub struct Stamped {
+	pub text: Vec<u8>,
+	pub times: Vec<Shown>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Shown {
+	Instant(i64),
+	DaySecond(i64),
+}
+
+// C and Rust read the clock a run apart: equal within this many seconds
+pub const CLOCK_SLACK: i64 = 30;
+
+impl PartialEq for Stamped {
+	fn eq(&self, other: &Stamped) -> bool {
+		let close = |a: &Shown, b: &Shown| match (*a, *b) {
+			(Shown::Instant(a), Shown::Instant(b)) => {
+				(a - b).abs() <= CLOCK_SLACK
+			}
+			(Shown::DaySecond(a), Shown::DaySecond(b)) => {
+				let d = (a - b).rem_euclid(86_400);
+				d <= CLOCK_SLACK || 86_400 - d <= CLOCK_SLACK
+			}
+			_ => false,
+		};
+		self.text == other.text
+			&& self.times.len() == other.times.len()
+			&& self.times
+				.iter()
+				.zip(&other.times)
+				.all(|(a, b)| close(a, b))
+	}
+}
+
+impl Eq for Stamped {}
+
+fn digits(w: &[u8]) -> Option<i64> {
+	let ok = !w.is_empty() && w.iter().all(u8::is_ascii_digit);
+	ok.then(|| w.iter().fold(0, |n, &c| n * 10 + i64::from(c - b'0')))
+}
+
+// "[HH:MM:SS] " as its second of the day
+fn debug_stamp_at(w: &[u8]) -> Option<i64> {
+	let shape =
+		w.len() >= 11
+			&& w[0] == b'[' && w[3] == b':'
+			&& w[6] == b':' && w[9] == b']'
+			&& w[10] == b' ';
+	if !shape {
+		return None;
+	}
+	let (h, m, s) =
+		(digits(&w[1..3])?, digits(&w[4..6])?, digits(&w[7..9])?);
+	Some(h * 3600 + m * 60 + s)
+}
+
+// "[YYYY-MM-DDTHH:MM:SS+zzzz]" as its instant, and the zone part
+fn leader_at(w: &[u8]) -> Option<(i64, &[u8])> {
+	const SHAPE: &[u8] = b"[dddd-dd-ddTdd:dd:dd+dddd]";
+	let w = w.get(..SHAPE.len())?;
+	let fits = w.iter().zip(SHAPE).all(|(&c, &p)| match p {
+		b'd' => c.is_ascii_digit(),
+		b'+' => c == b'+' || c == b'-',
+		p => c == p,
+	});
+	if !fits {
+		return None;
+	}
+	let n = |a: usize, b: usize| digits(&w[a..b]).expect("shape");
+	let month = time::Month::try_from(n(6, 8) as u8).ok()?;
+	let date = time::Date::from_calendar_date(
+		n(1, 5) as i32,
+		month,
+		n(9, 11) as u8,
+	)
+	.ok()?;
+	let days = i64::from(date.to_julian_day()) - 2_440_588;
+	let local =
+		days * 86_400 + n(12, 14) * 3600 + n(15, 17) * 60 + n(18, 20);
+	let off = n(21, 23) * 3600 + n(23, 25) * 60;
+	let off = if w[20] == b'-' { -off } else { off };
+	Some((local - off, &w[20..25]))
+}
+
+pub fn stamped(s: &[u8]) -> Stamped {
+	let mut out = Stamped {
+		text: Vec::new(),
+		times: Vec::new(),
+	};
+	let mut i = 0;
+	while i < s.len() {
+		let line_start = i == 0 || s[i - 1] == b'\n';
+		if let Some(t) =
+			line_start.then(|| debug_stamp_at(&s[i..])).flatten()
+		{
+			out.text.extend_from_slice(b"[] ");
+			out.times.push(Shown::DaySecond(t));
+			i += 11;
+			continue;
+		}
+		if let Some((t, zone)) = leader_at(&s[i..]) {
+			out.text.extend_from_slice(
+				&[b"[", zone, b"]"].concat(),
+			);
+			out.times.push(Shown::Instant(t));
+			i += 26;
+			continue;
+		}
+		out.text.push(s[i]);
+		i += 1;
+	}
+	out
 }

@@ -15,15 +15,14 @@ use std::path::Path;
 
 use alpm_core::handle::Handle;
 use difftest::{
-	CleanWorld, Comp, Node, Rng, c_pacman_sync_clean, iters, snapshot,
-	umask_lock, write_package,
+	CleanWorld, Comp, Node, Rng, c_pacman_sync_clean, cut_archive_text,
+	iters, snapshot, umask_lock, utc_date, write_package,
 };
 use pacman_cli::callback::Frontend;
 use pacman_cli::conf::{
 	ColStr, Config, LOG_DEBUG, LOG_ERROR, LOG_WARNING, PM_CLEAN_KEEPCUR,
 	PM_CLEAN_KEEPINST,
 };
-use pacman_cli::package::format_date_utc;
 use pacman_cli::pacman::PM_OP_SYNC;
 use pacman_cli::sync::{Deferred, pacman_sync, sync_clean};
 use pacman_cli::util::{Output, Term, Ui};
@@ -80,7 +79,7 @@ fn rust_run(w: &CleanWorld, cfg: &Config, input: &[u8]) -> Run {
 			term: &mut term,
 			cols: 0,
 			out: &mut out,
-			format_date: &format_date_utc,
+			format_date: &utc_date,
 			explicit_adds: Vec::new(),
 			explicit_removes: Vec::new(),
 		};
@@ -133,17 +132,17 @@ fn unstamp(line: &str) -> &str {
 
 // sync.c's own debug lines, the rest of debug is libalpm's
 fn kept(line: &str) -> bool {
-	let libarchive = line.contains("could not open file ")
-		|| line.contains("error while reading package ");
-	if libarchive {
-		return false;
-	}
 	if !line.starts_with("debug: ") {
 		return true;
 	}
 	line.ends_with(", could not load as package\n")
 		|| line.ends_with(" found in local db\n")
 		|| line.ends_with(" found in sync db\n")
+}
+
+// libarchive's texts cut (cut_archive_text)
+fn lossy_cut(line: &str) -> String {
+	String::from_utf8_lossy(&cut_archive_text(line.as_bytes())).into_owned()
 }
 
 fn is_stamp(s: &str) -> bool {
@@ -193,6 +192,7 @@ fn norm(s: &[u8], dir: &str) -> String {
 		.split_inclusive('\n')
 		.map(unstamp)
 		.filter(|l| kept(l))
+		.map(lossy_cut)
 		.collect();
 	kept.replace("\0\n", "")
 }

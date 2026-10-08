@@ -8,9 +8,9 @@
 // Frontend's own copy, taken when it is installed. stdout and stderr
 // collect in an Output flushed to its sink where the C fflushes and at
 // the end of every callback; stdin, getcols and the clocks come from a
-// util::Term. what the C asks config->handle (the provider's db, the
-// local db cache and the transaction for optdepends) comes from a
-// Lookup, () until trans.c is ported.
+// util::Term. what the C asks config->handle comes with the callback
+// data: the providers' dbs, the local db cache and the transaction's add
+// list for optdepends.
 //
 // wide character handling follows util.rs: glibc's UTF-8 decoder, a
 // string that does not decode keeps its valid prefix (swprintf fails
@@ -21,8 +21,8 @@ use std::io::BufRead;
 use std::sync::atomic::Ordering;
 
 use alpm_core::callbacks::{
-	Callbacks, DownloadEvent, Event, HookWhen, LogLevel, PackageOperation,
-	Progress, Question,
+	Callbacks, DownloadEvent, Event, HookWhen, LogLevel, PackageOp,
+	PackageOperation, Progress, Question,
 };
 use alpm_core::conflict::Conflict;
 use alpm_core::deps::{Depend, dep_compute_string};
@@ -42,23 +42,6 @@ use crate::util::{
 
 // update speed for the fill_progress based functions
 const UPDATE_SPEED_MS: i64 = 200;
-
-// what the callbacks need from the handle besides the callback data
-pub trait Lookup {
-	// alpm_db_get_name(alpm_pkg_get_db(pkg)) of a provider, None for a
-	// package without db
-	fn db_name(&mut self, _pkg: &Package) -> Option<Vec<u8>> {
-		None
-	}
-
-	// make_optstring's lists: the local db cache and the transaction's
-	// add list
-	fn installed(&mut self) -> (Vec<Package>, Vec<Package>) {
-		(Vec::new(), Vec::new())
-	}
-}
-
-impl Lookup for () {}
 
 // struct pacman_progress_bar. the C's uint64_t times are i64 here, the
 // subtractions wrap the same
@@ -85,12 +68,11 @@ pub struct Multibar {
 }
 
 // the frontend callbacks, printing into out
-pub struct Frontend<R: BufRead, L: Lookup = ()> {
+pub struct Frontend<R: BufRead> {
 	pub config: Config,
 	pub term: Term<R>,
 	// stdout and stderr since the last flush, its sink set by the owner
 	pub out: Output,
-	pub lookup: L,
 	on_progress: bool,
 	// the delayed stderr lines, printed when the bar is done
 	output: Vec<Vec<u8>>,
@@ -183,19 +165,12 @@ fn spaces(n: i32) -> Vec<u8> {
 	vec![b' '; usize::try_from(n).unwrap_or(0)]
 }
 
-impl<R: BufRead> Frontend<R, ()> {
+impl<R: BufRead> Frontend<R> {
 	pub fn new(config: Config, term: Term<R>) -> Self {
-		Frontend::with_lookup(config, term, ())
-	}
-}
-
-impl<R: BufRead, L: Lookup> Frontend<R, L> {
-	pub fn with_lookup(config: Config, term: Term<R>, lookup: L) -> Self {
 		Frontend {
 			config,
 			term,
 			out: Output::default(),
-			lookup,
 			on_progress: false,
 			output: Vec::new(),
 			total_enabled: false,
@@ -647,11 +622,11 @@ impl<R: BufRead, L: Lookup> Frontend<R, L> {
 
 	// display_optdepends of a new package, display_new_optdepends of an
 	// upgrade (old Some)
-	fn show_optdepends(&mut self, old: Option<&Package>, new: &Package) {
-		let (local, pending) = self.lookup.installed();
-		let local: Vec<&Package> = local.iter().collect();
-		let pending: Vec<&Package> = pending.iter().collect();
-		let lists = (&local[..], &pending[..]);
+	fn show_optdepends(&mut self, old: Option<&Package>, e: &PackageOp) {
+		let Some(new) = e.newpkg else {
+			return;
+		};
+		let lists = (e.local, e.pending);
 		let cols = (self.term.cols)();
 		let (out, c) = (&mut self.out.stdout, &self.config.colstr);
 		match old {
@@ -735,25 +710,21 @@ impl<R: BufRead, L: Lookup> Frontend<R, L> {
 					[verb, &name(pkg), b"...\n"].concat();
 				self.print(&line);
 			}
-			Event::PackageOperationDone(e) => {
-				match (e.operation, e.oldpkg, e.newpkg) {
-					(
-						PackageOperation::Install,
-						_,
-						Some(new),
-					) => self.show_optdepends(None, new),
-					(
-						PackageOperation::Upgrade
-						| PackageOperation::Downgrade,
-						Some(old),
-						Some(new),
-					) => self.show_optdepends(
-						Some(old),
-						new,
-					),
-					_ => {}
+			Event::PackageOperationDone(e) => match e.operation {
+				PackageOperation::Install => {
+					self.show_optdepends(None, &e)
 				}
-			}
+				PackageOperation::Upgrade
+				| PackageOperation::Downgrade => {
+					if let Some(old) = e.oldpkg {
+						self.show_optdepends(
+							Some(old),
+							&e,
+						)
+					}
+				}
+				_ => {}
+			},
 			Event::IntegrityStart if !bar => {
 				self.print(b"checking package integrity...\n")
 			}
@@ -916,13 +887,13 @@ impl<R: BufRead, L: Lookup> Frontend<R, L> {
 				ask_remove_pkgs(out, config, term, packages)
 			}
 			Question::SelectProvider {
-				providers, depend, ..
+				providers,
+				dbs,
+				depend,
+				..
 			} => {
-				let dbs: Vec<Option<Vec<u8>>> = providers
-					.iter()
-					.map(|p| self.lookup.db_name(p))
-					.collect();
-				let p = (providers, &dbs[..]);
+				let p: (&[&Package], &[&[u8]]) =
+					(providers, dbs);
 				ask_provider(out, config, term, p, depend)
 			}
 			Question::CorruptedPkg {
@@ -1155,7 +1126,7 @@ fn ask_provider<R: BufRead>(
 	out: &mut Output,
 	config: &Config,
 	term: &mut Term<R>,
-	(providers, dbs): (&[&Package], &[Option<Vec<u8>>]),
+	(providers, dbs): (&[&Package], &[&[u8]]),
 	depend: &Depend,
 ) -> c_int {
 	let count = providers.len();
@@ -1171,13 +1142,13 @@ fn ask_provider<R: BufRead>(
 	let list: Vec<(Option<&[u8]>, &Package)> = dbs
 		.iter()
 		.zip(providers)
-		.map(|(d, &p)| (d.as_deref(), p))
+		.map(|(&d, &p)| (Some(d), p))
 		.collect();
 	select_display(&mut out.stdout, c, &list, (term.cols)());
 	select_question(out, config, term, count as c_int)
 }
 
-impl<R: BufRead, L: Lookup> Callbacks for Frontend<R, L> {
+impl<R: BufRead> Callbacks for Frontend<R> {
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {
 		self.cb_log(level, msg);
 		self.end_callback();

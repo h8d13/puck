@@ -8,7 +8,7 @@
 #   --keep   leave .tmp/twin for inspection (remove it with --clean)
 #   --clean  only remove .tmp/twin; its files belong to mapped subuids,
 #            so this runs inside the namespace too
-# needs target/release/pacman, the C build (PACMAN_BUILD, else read from
+# needs target/release/puck, the C build (PACMAN_BUILD, else read from
 # .cargo/config.toml, else pacman/build) and network for the mirrors
 # exit 0 only if every step is equal; summary in .tmp/twin-results.txt
 # TWIN_TIMEOUT (seconds, per pacman run) overrides the default 900
@@ -32,7 +32,7 @@ if [ -z "$build" ] && [ -f "$repo/.cargo/config.toml" ]; then
 fi
 build=${build:-$repo/pacman/build}
 CPAC=$build/pacman
-RPAC=$repo/target/release/pacman
+RPAC=$repo/target/release/puck
 # a tmpfs on /mnt, private to the namespace, holds every path pacman
 # sees: DownloadUser alpm must traverse them, and it cannot pass the 0700
 # home the worktree lives in

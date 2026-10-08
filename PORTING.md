@@ -88,11 +88,9 @@ Gate: `scripts/cli-parity.sh` between C `pacman` and the Rust binary with
 the same `--root`/`--dbpath`/`--config` on generated test roots and a
 read-only copy of a real system db; byte-identical stdout, stderr, exit.
 Now: `scripts/cli-parity-fixtures.sh` (-D runs under fakeroot with the
-written db compared), 615/615 equal; pacman-conf 554/554; testpkg
-binary 46/54 equal, 7 differing only in be_package's log lines, 1
-known (text file), testpkg module 494/550 + 56 log lines only (the
-mtree lines carry libarchive's texts; the tar reader's since the xattr
-unit);
+written db compared), 620/620 equal; pacman-conf 554/554; testpkg
+binary 53/54 equal, 1 known (text file), testpkg module 550/550
+(libarchive's texts cut after the path on both sides);
 pacman-conf drop-in 13/13. On pacman, every run compares with the C's
 GOTO_ERR lines (`got error <n> at <func> (<C file>: <line>)`) dropped
 wherever they occur, and only those: they carry the C's source position
@@ -204,12 +202,29 @@ the java keystore and ldconfig's aux-cache not compared (dates, inode
 numbers); `download-XXXXXX` names canonicalised. Runtime ~2-3 min warm
 (network bound), ~620 MiB per root.
 
-### 4. Drop-in
+### Later (low priority)
 
-libalpm C ABI (`alpm.h`) exported from the Rust library so existing
-front-ends (yay, paru via alpm.rs, pamac, pyalpm) keep working.
+Not needed for an English-locale replacement; noted so it is not lost.
 
-Gate: those front-ends' basic operations against the Rust libalpm.
+| Item | State |
+|---|---|
+| translations: pacman and libalpm messages through gettext (49 `po` languages); the port prints the English msgids | later |
+| libalpm C ABI (`alpm.h`, `libalpm.so.16` via a `cdylib`) for C/Go/Python/Vala front ends (pamac, pyalpm, yay; paru through alpm.rs): a distro-level choice, would sit as a thin unsafe crate on the public Rust API; needs stable package/db addresses, `#[repr(C)]` public structs, `alpm_list_t` ownership per function, a C shim for `va_list` log callbacks | later |
+| locale-dependent behaviour beyond C.UTF-8: regex collation ranges and `[=e=]`, `strcoll` sort of glob results, non-UTF-8 locales for display (`mbstowcs`/`wcwidth`), pax NFC composition | later |
+
+### 4. Public Rust API
+
+alpm-core as a library for Rust front ends, the counterpart of libalpm
+for Rust: a deliberate `pub` surface (today `pub` often means "difftest
+needs it"), docs and examples, semver, and shapes meant for callers
+rather than the frontend's internals (`dbs_mut` split borrows,
+`with_callbacks`, the `Callbacks` trait). Rust front ends (paru today goes
+through alpm.rs over the C library) could target it natively.
+
+Gate: the pacman binary and a small example front end (query, search,
+sync transaction) built only on the public API; `cargo doc` without
+private items; the difftests reach internals through a test-only feature,
+not through the public surface. State: todo.
 
 ## Owned readers (replacing ALPM parser patches)
 
@@ -344,7 +359,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `lib/libalpm/be_local.c` | 1232 | `alpm-core::be_local` (partial) | register/validate (ALPM_DB_VERSION, creation), populate (check_meta lines), local_db_read (safe_fgets lines, READ_* macros, every section, INFRQ levels, log lines): difftest on byte-generated dbs (any sections in any order, unknown/repeated keys, blank lines, CRLF, nul bytes, non-UTF-8, lines over 1023 bytes, odd relations/reasons/validations, cut files; every field, cache order and counts, every log line), version-file fuzz, 100 pinned odd inputs, /var/lib/pacman read-only; local_db_prepare/write/remove, set_reason: difftest `be_local_write` (written trees byte for byte, modes, rc); mtree (`_cache_mtree_*` through `alpm-core::mtree`): difftest `check`; changelog pending; mtree open failures logged with libarchive's file reader texts (difftest `query`) |
 | `lib/libalpm/be_sync.c` | 762 | `alpm-core::be_sync` (partial) | populate (tar walk past bad entries, load_pkg_for_entry, check_meta, validate_filename, error ranking), sync_db_read (`_alpm_archive_fgets` over libarchive's data blocks, READ_* macros, %FILES%, %DATA%, log lines), get_validation, db_path, sync_db_validate (missing file, signature, import retry) + `alpm-compress`: difftest on generated .db/.files in every filter (`fixtures::COMPS`) changed byte by byte (fields, cache order, table counts, pm_errno, log lines), block edges per filter, 54 pinned odd inputs, real sync db copies compared whole; alpm_db_update + get_sync_dir: difftest vs C on loopback mirrors with gpg-signed fixture dbs (sequences, edges, signatures, fuzz) |
 | `lib/libalpm/db.c` | 773 | `alpm-core::db` (partial) | register/unregister, servers (sanitize_url), usage, siglevel, get_valid, pkgcache/get_pkg, groupcache/get_group (load_grpcache order), add/remove pkg in cache, load_pkg (lazy loads in place), dbext read at load, db_path, db_cmp: difftest op-sequence fuzz (results, errno, db state each step); search (difftest fuzz), load_all/walk/find_satisfier; log lines (db.c, be_local populate/read, be_sync populate): the op fuzz compares every line of each op and of the release; update pending |
-| `lib/libalpm/log.c` | 112 | `alpm-core::log` | logaction (logfile, errno), leader format, syslog packet: difftest (stamps stripped), clock injectable, UTC default |
+| `lib/libalpm/log.c` | 112 | `alpm-core::log` | logaction (logfile, errno), leader format, syslog packet, local time (`local_offset`): difftest, stamps compared within `CLOCK_SLACK`, tz-probe against localtime(3) in 16 zones (DST edges by bisection), the binaries in 6 zones (`cli_binary` local_time) |
 | `lib/libalpm/handle.c` | 1017 | `alpm-core::handle` (all but trans) | options, lock, logfile, callbacks, keyring, dload state: difftest option fuzz, lock, logaction; earlier: | alpm_initialize path checks/normalisation, dbext, architectures, siglevels, ignore/noupgrade/noextract lists + match: difftest; callbacks, lock, cachedirs, hookdirs, gpgdir, logfile, sandbox, downloads pending |
 | `lib/libalpm/alpm.c` | 132 | - | |
 | `lib/libalpm/signing.c` | 1201 | `alpm-core::signing` | decode_signature, checksig (.sig and base64), check_pgp_helper, process_siglist, key_in_keychain, key_import (keyring/question part; WKD/keyserver failure only), pkg/db_check_pgp_signature, extract_keyid, every `_alpm_log` line (debug included, `_alpm_access`'s via `util::alpm_access`): difftest vs gpgme-backed C on throwaway keyrings (all status/validity pairs, bad/garbage/truncated/armored sigs), results, rc, pm_errno, questions, logs at every level; init_gpgme's lines (`signing_init`); gpg_strerror's table vs gpgme_strerror for every code; gpg argv vs gpgme's; extract_keyid fuzz |
@@ -490,7 +505,7 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   shares (`run` hands one to each): the commit sets it like
   sync_prepare_execute, sync_syncdbs' reset is a no-op in one run. After
   '-' targets the C reopens the tty on stdin; std cannot swap fd 0. Write
-  errors are dropped (the C dies of SIGPIPE). PACMAN_DEBUG stamps in UTC.
+  errors are dropped (the C dies of SIGPIPE). PACMAN_DEBUG stamps in local time.
 - `be_sync::db_update` takes positions in `syncdbs()`, returns
   `Ok(true)` (C 0), `Ok(false)` (1, all up to date) or `Err` (-1). After
   several failed validations the errno is the last failure's, where the
@@ -525,9 +540,9 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
 - `package.c` display: libalpm and system calls go through a `PkgEnv`
   trait (requiredby, satisfiers, db name, signatures, file probes, dates).
   Dates: the C uses `strftime("%c", localtime())` (LC_TIME, TZ); the port
-  ships `format_date_utc` (C.UTF-8 `%c`, TZ=UTC, None outside years
-  -9999..9999 where the C still formats) and other zones plug in
-  through `PkgEnv::format_date`. Titles are untranslated msgids. Where the
+  ships `format_date` (C.UTF-8 `%c` in the local zone, `format_date_at`
+  for a fixed offset; None outside years -9999..9999 where the C still
+  formats); in-process tests pin UTC through `PkgEnv::format_date`. Titles are untranslated msgids. Where the
   C crashes (md5 failure on a backup file, out-of-range dates) the port
   logs/prints "None" instead.
 - `compute_requiredby`/`optionalfor` take a `DbCaches` trait (lazy, one
@@ -802,25 +817,28 @@ Follow-ups raised by port units:
 | wire `HelperSandbox::for_handle` into `Handle::fetch_pkgurl` once `handle->user` (getuid) is ported | integrate | done: `Handle::user`, `SandboxFor` in `with_downloader` (fetch_pkgurl, sync commit downloads) |
 | dload difftest umask race (C umask(0) process-wide vs parallel tests) | integrate | done: `difftest::umask_lock()` |
 | rustix `process`/`termios` features: handle->user, getcols tty width, flush_term_input | handle, cliutil2 | done (`use-libc` backend for fakeroot, METHODOLOGY.md); pty difftest |
-| local time offset for log stamps (UTC today) | handle | todo |
+| local time offset for log stamps (UTC today) | handle | done: `log::local_offset` (time `local-offset`, METHODOLOGY.md) for pacman.log, syslog, PACMAN_DEBUG and `-Qi`/`-Si`/`%b` dates; %F's year unpadded like glibc; parse-time errors get their PACMAN_DEBUG stamp; difftests compare stamps (`stamped`) instead of stripping them, commits keep the zone (`strip_stamps`) |
 | shared helpers into util: `llstat`, `strerror`, `PATH_MAX` once; frontend `pm_printf`/`Output`/`check_syncdbs`/`getcols` | conflict, diskspace, query, sync | done |
 | `Handle` split borrow of local + sync caches (resolver and displays clone caches today) | deps, sync | done: -Si/-Sii and -Dk/-Dkk borrow in place (peak RSS on the real local + core/extra/vrch dbs: -Si 133 -> 88 MiB, -Sii 137 -> 89, -Dk 57 -> 36, -Dkk 124 -> 76; wall equal within noise); the resolver's `TransPkg`s stay owned copies by design (Notes) |
 | XferCommand via a sandbox helper exec mode (`alpm_sandbox_setup_child` from conf.c) | sandbox | done: `conf::XferCommand`, `sandbox::SandboxExec` |
 | conf difftest abort under long TMPDIR | sandbox, dbwrite reports | done: C one-byte heap overflow in `escape_chars` (UPSTREAM.md), fixture avoids it |
-| `alpm_extract_keyid` wired into -Sii/-Qii `sig_keys` | sync | todo (ported in signing) |
+| `alpm_extract_keyid` wired into -Sii/-Qii `sig_keys` | sync | done: `SyncEnv::sig_keys` (-Qii shows no keys in the C either); generated sync dbs carry `%PGPSIG%` (`random_sig`), sync_ro and cli_binary -Sii compare keys and the format error lines |
 | `Handle` owns `signing::Keyring` (gpgdir, known_keys) and implements `SigCallbacks`; `Db::register_sync` calls `be_sync::sync_db_validate` | signing | done |
 | query.rs's new_version copy onto `alpm_core::sync::sync_get_new_version` | query | done |
 | `pacman_sync` dispatches to `sync_trans` (needs a `Ui`) | transprep | done |
-| "found cached pkg" debug line into `util::filecache_find` (local wrapper in sync.rs) | transprep | todo |
+| "found cached pkg" debug line into `util::filecache_find` (local wrapper in sync.rs) | transprep | done (dload's lookups log it too); `filecache_setup`'s /tmp fallback logs its "option 'cachedir'" line |
 | conflict.rs `pkg_diff` onto `deps::list_diff`; deps_graph test reuses the trans_prep world generator | transprep | done: deps_graph runs on `gen_world`/`write_world` plus its odd depends and `>=` provisions |
 | trans_prep worlds with deps_graph's odd relations (`a>=`, `d: for d`, `c<=>1`, ...) in every relation list: `prepare_fuzz` aborts in the C (`free(): invalid pointer` at `alpm_trans_release` after a prepare with file targets), `frontend_fuzz` drops below its "nothing to do" floor. root-cause (C bug or difftest free path), then widen `tp_relation` | cruft | todo |
 | `Handle` owns dload `DownloadState`/`Settings`/cachedirs; `filecache_*` into util | dload | done (`Handle::dload_settings`, `util::filecache_*`) |
 | `alpm_db_update` (be_sync download + validate) | dload | done |
 | drop `SyncCallbacks` and the `replace_callbacks` swap in sync.rs for `callback.rs` (progress bars, "is up to date", "failed to download") | dbupdate | done |
-| `Question::SelectProvider` carries provider db names (today through `Lookup`); `Handle::replace_callbacks` has no frontend caller left | frontend | todo |
+| `Question::SelectProvider` carries provider db names (today through `Lookup`); `Handle::replace_callbacks` has no frontend caller left | frontend | done: `DbPkgs::name`, `SelectProvider::dbs`; `Lookup::db_name` and `replace_callbacks` removed, deps_graph/trans_prep compare the dbs |
 | sandbox in `be_sync::downloader` (like `fetch_pkgurl`) | dbupdate | done (`SyncParts::sandbox`) |
 | `umask(0022)` around `alpm_db_update` (rustix process) | dbupdate | done, and run_chroot's child umask |
-| be_package logs libarchive's open/read failures ("could not open file X: ..." for unknown formats and dirs, "error while reading package" for a cut first header, "could not parse package description file" for a cut `.PKGINFO`); `sync_clean` and difftest query filter them today | cleancache | todo |
+| be_package logs libarchive's open/read failures ("could not open file X: ..." for unknown formats and dirs, "error while reading package" for a cut first header, "could not parse package description file" for a cut `.PKGINFO`); `sync_clean` and difftest query filter them today | cleancache | done: header and data read failures log "error while reading package"; difftests cut libarchive's text after the path (`cut_archive_text`, twin-compare's `ARCHIVE_TEXT`) instead of dropping lines: sync_clean's filter and testpkg's log-only tallies gone, cli_binary's cache holds a non-package and a download dir |
+| `be_package::changelog` without callbacks: -Qpc missed "opening archive" | qk | done (cli_binary `-Qpc --debug`) |
+| optdepends' ` [installed]`/` [pending]` after install/upgrade: the binary's `Lookup for ()` had no lists | twin-root | done: `PackageOp::local`/`pending` (local cache, trans->add at DONE; the driver keeps satisfier copies of the targets in trans.add while it lends them out), `Lookup` removed |
+| `-Sp` of an installed sync package whose local entry has no files list: the C fails ("could not open file .../files", invalid package), the port prints | output (cli_binary local_time) | todo (query/lazy-load owner) |
 | one `logv(cb, ...)` helper (copies in hook.rs, deps.rs, trans.rs, util's `log_parts`) | integrate2 | done: `callbacks::logv` everywhere (hook, deps, trans, sync, add, remove, util, be_package, conflict, sandbox_fs copies gone) |
 | `-D` dispatch arm: `pacman_database(config, handle, targets, &mut o)` | m1close | done |
 | setup_libalpm's server adds through `Handle::dbs_mut()` (`Db::add_server` takes the callbacks) | m1close | done |
@@ -842,7 +860,7 @@ Follow-ups raised by port units:
 | xattrs and pax mtime/uid/gid on extraction | addcommit | done (xattr unit): `alpm-core::tar`, add.rs set_xattrs/times; difftest add_commit pax cases, fuzz_pax, fakeroot run (`security.capability`, ids; `DIFFTEST_CAP_PKGS` real packages) |
 | NFC composition of pax strings (libarchive `archive_string_normalize_C`, its Unicode 6.0 tables) and non-UTF-8 locales | xattr | todo: pinned (`pax_composed_divergence`, `under_c_locale`); makepkg writes such names with hdrcharset=BINARY, which skips the conversion |
 | one geteuid/getuid helper (add.rs `euid`, sandbox `System::uid` read /proc/self/status) or rustix `process` | addcommit | done: `util::getuid`/`geteuid` (dload's Umask reader stays: no getumask without setting it) |
-| dload's internal debug lines (url, maxsize, time condition, tempfile, curl result, response code), so `-Sy --debug` with the built-in downloader matches | process | todo (then drop db_update's `DLOAD_DEBUG` and trans_commit's quiet download window) |
+| dload's internal debug lines (url, maxsize, time condition, tempfile, curl result, response code), so `-Sy --debug` with the built-in downloader matches | process | done: every dload.c debug line, CURLcodes carried by `Code::Failed`, a client-side unmet time condition is response code 304 like curl; dload/db_update difftests keep debug lines (RET_ERR's left out), db_update's `DLOAD_DEBUG`, trans_commit's download quiet window and cli_binary's sandbox `--debug` skip dropped |
 | `_alpm_upgrade_packages` loop over trans.add, interrupted state, ldconfig | addcommit | with alpm_trans_commit |
 | test generators still limited to what alpm-db/alpm-repo-db/alpm-pkginfo accepted (db_search.rs, diskspace.rs, check.rs, be_local_write.rs, sync_clean.rs, be_package.rs "per the alpm-pkginfo spec"): widen to what the C reads, drop the comments | stale sweep | done: `fixtures::loose_sections` (sparse, empty, blank, unknown desc sections), files lists without parents/sorting, odd `.PKGINFO` lines, random packages read back by set_reason, odd deps_graph relations; cli_binary's empty files lists went with the -Qkk row above |
 

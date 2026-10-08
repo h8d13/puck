@@ -8,7 +8,7 @@
 # scripts against both pacman-conf (scripts/pacman-conf-dropin.sh)
 # usage: scripts/cli-parity-fixtures.sh   (from the repo root)
 set -e
-cargo build --release -p pacman-cli --bin pacman --bin pacman-conf
+cargo build --release -p pacman-cli --bin puck --bin puck-conf
 cargo build --release -p testpkg --bin testpkg
 # through the machine-wide test lock, like every test run
 scripts/cargo-test.sh -p difftest --test cli_binary --test pacman_conf \

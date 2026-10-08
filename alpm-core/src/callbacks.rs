@@ -117,12 +117,16 @@ pub enum Event<'e> {
 }
 
 // alpm_event_package_operation_t: no oldpkg on install, no newpkg on
-// remove
+// remove. local and pending are what the frontend's make_optstring
+// reads of the handle at an install's or upgrade's DONE: the local db
+// cache and the transaction's add list (empty otherwise)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PackageOp<'e> {
 	pub operation: PackageOperation,
 	pub oldpkg: Option<&'e Package>,
 	pub newpkg: Option<&'e Package>,
+	pub local: &'e [&'e Package],
+	pub pending: &'e [&'e Package],
 }
 
 // alpm_event_hook_run_t
@@ -212,10 +216,11 @@ pub enum Question<'q> {
 		packages: &'q [&'q Package],
 	},
 	// ALPM_QUESTION_SELECT_PROVIDER: position in providers, out of
-	// range picks none
+	// range picks none. dbs[i] is the name of providers[i]'s db
 	SelectProvider {
 		use_index: c_int,
 		providers: &'q [&'q Package],
+		dbs: &'q [&'q [u8]],
 		depend: &'q Depend,
 	},
 	// ALPM_QUESTION_IMPORT_KEY: nonzero imports
