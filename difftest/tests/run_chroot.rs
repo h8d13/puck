@@ -281,6 +281,18 @@ fn fc_fixed() {
 			run_chroot(&mut r.h, Some(cmd.as_bytes()), &args, None);
 		assert_eq!(cr, r.take(ok, 1), "{cmd} {script}");
 	}
+	// the child runs under umask(0022) whatever the process has (the
+	// fc_ tests run on one thread, nothing else sees the mask)
+	let old =
+		rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o077));
+	let argv = vec![b"/bin/sh".to_vec(), b"-c".to_vec(), b"umask".to_vec()];
+	let args: Vec<&[u8]> = argv.iter().map(|a| &a[..]).collect();
+	fix.reset();
+	let cr = c.run_chroot(Some(b"/bin/sh"), &argv, None);
+	let ok = run_chroot(&mut r.h, Some(b"/bin/sh"), &args, None);
+	rustix::process::umask(old);
+	assert!(cr.1.contains(&line("0022\n")), "{}", show(&cr));
+	assert_eq!(cr, r.take(ok, 1), "umask");
 	let term = Log(
 		1,
 		b"command terminated by signal 15: Terminated\n".to_vec(),
