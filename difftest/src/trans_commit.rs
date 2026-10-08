@@ -362,8 +362,6 @@ pub struct TcResult {
 
 const LOG_DEBUG: c_int = 4;
 const LOG_FUNCTION: c_int = 8;
-const EV_FILECONFLICTS_START: c_int = 3;
-const EV_FILECONFLICTS_DONE: c_int = 4;
 const EV_OP_START: c_int = 11;
 const EV_OP_DONE: c_int = 12;
 const EV_RETRIEVE_START: c_int = 21;
@@ -373,19 +371,17 @@ const Q_CORRUPTED: c_int = 1 << 3;
 // debug lines the port does not make: RET_ERR's and GOTO_ERR's
 const C_ONLY: [&[u8]; 2] = [b"returning error ", b"got error "];
 
-// the records compared: no FUNCTION lines, no debug lines of C_ONLY,
-// and no debug lines inside a download (dload's internals) or the file
-// conflict check (conflict.rs does not log; it also loads every local
-// file list where the C loads them as it goes)
+// the records compared: no FUNCTION lines (the lazy loads: the port
+// loads every local file list before the file conflict check, the C as
+// it goes), no debug lines of C_ONLY, and no debug lines inside a
+// download (dload's internals)
 pub fn kept(recs: Vec<TcRec>) -> Vec<TcRec> {
 	let mut quiet = false;
 	let mut out = Vec::new();
 	for r in recs {
 		match &r {
-			TcRec::Event(EV_FILECONFLICTS_START)
-			| TcRec::Retrieve(EV_RETRIEVE_START, ..) => quiet = true,
-			TcRec::Event(EV_FILECONFLICTS_DONE)
-			| TcRec::Retrieve(..) => quiet = false,
+			TcRec::Retrieve(EV_RETRIEVE_START, ..) => quiet = true,
+			TcRec::Retrieve(..) => quiet = false,
 			TcRec::Log(LOG_FUNCTION, _) => continue,
 			TcRec::Log(LOG_DEBUG, m)
 				if quiet || C_ONLY

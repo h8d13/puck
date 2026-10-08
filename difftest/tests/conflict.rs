@@ -3,8 +3,8 @@
 // by a C handle and by the Rust be_local reader (every entry loaded
 // INFRQ_ALL, as the C getters and _alpm_pkg_dup load them). targets are
 // Rust Packages pushed into the C through the package mirror. compared:
-// conflict lists (order, every field, the dup'ed packages), skip_remove
-// and the progress events.
+// conflict lists (order, every field, the dup'ed packages), skip_remove,
+// the progress events and the file check's debug lines.
 use std::ffi::c_int;
 use std::fmt::Write as _;
 use std::fs;
@@ -13,7 +13,7 @@ use std::path::Path;
 
 use alpm_core::backup::Backup;
 use alpm_core::be_local::{INFRQ_ALL, LocalDb};
-use alpm_core::callbacks::{Callbacks, Progress};
+use alpm_core::callbacks::{Callbacks, LogLevel, Progress};
 use alpm_core::conflict::{
 	Conflict, FileCheck, FileConflictType, FileConflicts, checkconflicts,
 	innerconflicts, outerconflicts,
@@ -23,9 +23,7 @@ use alpm_core::filelist::{File, FileList};
 use alpm_core::package::{Package, PkgFrom};
 use alpm_core::pkghash::PkgHash;
 use alpm_core::util::hash_sdbm;
-use difftest::{
-	CConflictHandle, LocalEntry, ProgressEvent, Rng, TempRoot, iters,
-};
+use difftest::{CConflictHandle, FcRecs, LocalEntry, Rng, TempRoot, iters};
 
 const NAMES: [&str; 6] = ["a", "b", "foo", "bar", "lib-x", "z9"];
 const VERSIONS: [&str; 4] = ["1.0-1", "1.5-2", "2:1.0-1", "1.0.1-1"];
@@ -357,9 +355,15 @@ impl Fix {
 }
 
 #[derive(Default)]
-struct Recorder(Vec<ProgressEvent>);
+struct Recorder(FcRecs);
 
 impl Callbacks for Recorder {
+	fn log(&mut self, level: LogLevel, msg: &[u8]) {
+		if level == LogLevel::Debug {
+			self.0.debug.push(msg.to_vec());
+		}
+	}
+
 	fn progress(
 		&mut self,
 		progress: Progress,
@@ -375,7 +379,7 @@ impl Callbacks for Recorder {
 			howmany,
 			current,
 		);
-		self.0.push(ev);
+		self.0.progress.push(ev);
 	}
 }
 
@@ -384,7 +388,7 @@ fn rust_files(
 	upgrade: &[&Package],
 	rem: &[&Package],
 	overwrite: &[Vec<u8>],
-) -> (FileConflicts, Vec<ProgressEvent>) {
+) -> (FileConflicts, FcRecs) {
 	let check = FileCheck {
 		root: &fix.root,
 		local: &fix.cache,

@@ -8,6 +8,7 @@ use std::ffi::{c_char, c_int, c_ulong, c_void};
 use std::ptr;
 use std::sync::MutexGuard;
 
+use alpm_core::callbacks::LogLevel;
 use alpm_core::conflict::{
 	Conflict, FileConflict, FileConflictType, FileConflicts,
 };
@@ -16,12 +17,13 @@ use alpm_core::package::Package;
 
 use crate::handle::{
 	ALPM, CDb, alpm_db_get_pkgcache, alpm_get_localdb, alpm_initialize,
-	alpm_option_set_overwrite_files, alpm_option_set_progresscb,
-	alpm_release, alpm_trans_init, alpm_trans_release,
+	alpm_option_set_logcb, alpm_option_set_overwrite_files,
+	alpm_option_set_progresscb, alpm_release, alpm_trans_init,
+	alpm_trans_release,
 };
 use crate::package::{CPkg, CPkgBox, field, list_data, read_pkg};
 use crate::package::{read_strs, with_strs};
-use crate::{CList, alpm_list_add, alpm_list_free, cstr};
+use crate::{CList, alpm_list_add, alpm_list_free, cstr, vsnprintf};
 
 // alpm_depend_t, the reason of a conflict
 #[repr(C)]
@@ -99,7 +101,36 @@ unsafe extern "C" {
 // one ALPM_PROGRESS_* callback: progress, pkg, percent, howmany, current
 pub type ProgressEvent = (c_int, Vec<u8>, c_int, usize, usize);
 
-// alpm_cb_progress recording into the Vec<ProgressEvent> behind ctx
+// what the file conflict check reports: progress, debug lines
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct FcRecs {
+	pub progress: Vec<ProgressEvent>,
+	pub debug: Vec<Vec<u8>>,
+}
+
+// alpm_cb_log keeping the ALPM_LOG_DEBUG lines in the FcRecs behind ctx
+// (the lazy loads' FUNCTION lines are the C's own)
+unsafe extern "C" fn record_log(
+	ctx: *mut c_void,
+	level: c_int,
+	fmt: *const c_char,
+	args: *mut c_void,
+) {
+	if level != LogLevel::Debug as c_int {
+		return;
+	}
+	let mut buf = vec![0 as c_char; 16384];
+	// SAFETY: fmt and args are _alpm_log's printf pair, used once; buf
+	// is writable for its length. ctx is find_fileconflicts' FcRecs
+	let (n, recs) = unsafe {
+		let n = vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
+		(n, &mut *ctx.cast::<FcRecs>())
+	};
+	assert!(n >= 0 && (n as usize) < buf.len(), "log message cut");
+	recs.debug.push(field(buf.as_ptr()).expect("formatted"));
+}
+
+// alpm_cb_progress recording into the FcRecs behind ctx
 unsafe extern "C" fn record(
 	ctx: *mut c_void,
 	progress: c_int,
@@ -108,10 +139,12 @@ unsafe extern "C" fn record(
 	howmany: usize,
 	current: usize,
 ) {
-	// SAFETY: ctx is the Vec find_fileconflicts set, alive for the call
-	let events = unsafe { &mut *ctx.cast::<Vec<ProgressEvent>>() };
+	// SAFETY: ctx is the FcRecs find_fileconflicts set, alive for the
+	// call
+	let recs = unsafe { &mut *ctx.cast::<FcRecs>() };
 	let pkg = field(pkg).expect("progress with a NULL package name");
-	events.push((progress, pkg, percent, howmany, current));
+	recs.progress
+		.push((progress, pkg, percent, howmany, current));
 }
 
 fn depmod_from_c(m: c_int) -> DepMod {
@@ -329,7 +362,7 @@ impl CConflictHandle {
 	}
 
 	// on a fresh NOLOCK transaction (skip_remove read from it) with the
-	// overwrite globs and a recording progress callback set.
+	// overwrite globs and recording progress and log callbacks set.
 	// C preconditions: names set, no empty file names, root + path
 	// below PATH_MAX where it exists on disk
 	pub fn find_fileconflicts(
@@ -337,7 +370,7 @@ impl CConflictHandle {
 		upgrade: &[&Package],
 		rem: &[&Package],
 		overwrite: &[Vec<u8>],
-	) -> (FileConflicts, Vec<ProgressEvent>) {
+	) -> (FileConflicts, FcRecs) {
 		let all = upgrade.iter().chain(rem);
 		assert!(all.clone().all(|p| p.name.is_some()), "NULL name");
 		assert!(
@@ -345,12 +378,12 @@ impl CConflictHandle {
 				.all(|f| !f.name.is_empty()),
 			"empty file name"
 		);
-		let mut events: Vec<ProgressEvent> = Vec::new();
+		let mut recs = FcRecs::default();
 		let mut c = CPkgs::new(self.h);
 		let (up, rm) = (c.list(upgrade), c.list(rem));
-		let ctx: *mut Vec<ProgressEvent> = &mut events;
+		let ctx: *mut FcRecs = &mut recs;
 		// SAFETY: h is live without a transaction; the globs are
-		// copied; ctx outlives the call, the callback is unset after
+		// copied; ctx outlives the call, the callbacks are unset after
 		let (list, skip) = unsafe {
 			assert_eq!(
 				alpm_trans_init(self.h, TRANS_FLAG_NOLOCK),
@@ -364,8 +397,14 @@ impl CConflictHandle {
 				Some(record),
 				ctx.cast(),
 			);
+			alpm_option_set_logcb(
+				self.h,
+				Some(record_log),
+				ctx.cast(),
+			);
 			let list =
 				_alpm_db_find_fileconflicts(self.h, up.0, rm.0);
+			alpm_option_set_logcb(self.h, None, ptr::null_mut());
 			alpm_option_set_progresscb(
 				self.h,
 				None,
@@ -382,7 +421,7 @@ impl CConflictHandle {
 				conflicts,
 				skip_remove: skip,
 			},
-			events,
+			recs,
 		)
 	}
 }

@@ -255,7 +255,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `lib/libalpm/dload.c` | 1474 | `alpm-core::dload` (partial) | _alpm_download (reqwest, fetchcb path), resume/mirrors/cache servers/server error counting/.sig/max size/time condition, alpm_fetch_pkgurl, download dir + filecache helpers: difftest vs C on scripted 127.0.0.1 HTTP servers and file://; sandbox child behind `Sandbox`: unit tests |
 | `lib/libalpm/deps.c` | 926 | `alpm-core::deps` (partial) | dep_from_string, dep_compute_string, depcmp_provides (+ static dep_vercmp through it), depcmp_literal, depcmp, find_satisfier, checkdeps, sortbydeps, resolvedep/resolvedeps, find_dbs_satisfier, recursedeps: difftest on fixture handles (local + 3 sync dbs, ignore, assumeinstalled, NODEPVERSION, usage), questions/logs compared |
 | `lib/libalpm/graph.c` | 38 | `alpm-core::graph` | via sortbydeps |
-| `lib/libalpm/conflict.c` | 686 | `alpm-core::conflict` | innerconflicts, outerconflicts, checkconflicts, db_find_fileconflicts (both checks, skip_remove, progress): difftest on fixture roots (files, dirs, symlinks) and local dbs, 2M fuzz |
+| `lib/libalpm/conflict.c` | 686 | `alpm-core::conflict` | innerconflicts, outerconflicts, checkconflicts, db_find_fileconflicts (both checks, skip_remove, progress, debug lines): difftest on fixture roots (files, dirs, symlinks) and local dbs, 2M fuzz |
 | `lib/libalpm/diskspace.c` | 514 | `alpm-core::diskspace` | check_diskspace, check_downloadspace (+ mount list, fsinfo, match, sizes, check_mountpoint): difftest on fixture roots and root "/" (every log/progress line, f_bavail pinned from the C trace); getmntent parser vs glibc |
 | `lib/libalpm/trans.c` | 452 | `alpm-core::trans` | alpm_trans_commit (state checks, hooks, log lines, events, remove/sync dispatch, interrupted, Committed): difftest `trans_commit`; model, init/release/interrupt/getters, prepare dispatch, check_arch, sort: difftest `trans_prep` op sequences vs C (2000 cases, results, data lists, logs, events, questions, trans afterwards); _alpm_runscriptlet + grep: difftest under fakechroot |
 | `lib/libalpm/sync.c` | 1360 | `alpm-core::sync` | `_alpm_sync_load` (download_files, check_keyring, check_validity, load_packages, prompt_to_delete), `_alpm_sync_check`, `_alpm_sync_commit`: difftest `trans_commit` vs C alpm_trans_commit on fixture worlds with a file:// mirror (installs, upgrades, cached, -U, DOWNLOADONLY, DBONLY, NODEPS, bad checksums, db/file mismatch, CORRUPTED_PKG yes/no, missing on the mirror, file conflicts, download space, replaces/conflicts removed; rc, pm_errno, data list, state, logs, events, questions, progress, download events, logfile, root, local db, cache), 2000-case fuzz; check_keyring and the signature branches not difftested (siglevel 0 worlds); get_new_version, sysupgrade (literal, replacers), find_group_pkgs, compute_download_size, `_alpm_sync_prepare`, dbs_satisfier: difftest `trans_prep` |
@@ -552,9 +552,9 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   as the C leaves it: check_validity's is the last validation's (each
   resets it), load_packages' the last failed load's, PkgInvalid without
   one. The local files are loaded whole before the file conflict check
-  (the C loads them as the check goes) and conflict.rs logs nothing, so
-  the difftest drops debug lines inside that check and inside downloads
-  (dload's internals). Hooks run with the transaction taken off the
+  (the C loads them as the check goes; only the FUNCTION lines move,
+  which the difftest drops). The difftest drops debug lines inside
+  downloads (dload's internals). Hooks run with the transaction taken off the
   handle. Signals are not caught, so nothing interrupts a commit from
   outside; `trans_interrupt` works as before.
 
@@ -604,7 +604,7 @@ Follow-ups raised by port units:
 | `-D` dispatch arm: `pacman_database(config, handle, targets, &mut o)` | m1close | done |
 | setup_libalpm's server adds through `Handle::dbs_mut()` (`Db::add_server` takes the callbacks) | m1close | done |
 | `multibar_move_completed_up` from the frontend (a Callbacks hook or a shared flag) | commit | todo |
-| conflict.rs debug lines ("searching for file conflicts", ...), then drop the difftest's quiet window | commit | in progress (hooksig unit) |
+| conflict.rs debug lines ("searching for file conflicts", ...), then drop the difftest's quiet window | commit | done |
 | commit difftest with hooks (fakechroot) and signed packages (check_keyring, PKG_INVALID_SIG, MISSING_SIG) | commit | in progress (hooksig unit) |
 | alpm-repo-db / alpm-pkginfo: accept pactest's minimal sync db entries and empty `.PKGINFO` values, the main pactest blockers | commit | in progress: owned readers (dbreaders, pkgreader units), not patches |
 | query: -Qk/-Qkk lazy loads per package like the C (-Qkk loads files up front), op stderr flushed per package so callback lines interleave; then drop cli_binary's empty files lists | m1close | todo |
