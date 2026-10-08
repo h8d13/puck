@@ -1,4 +1,4 @@
-// pacman_cli::sync against C pacman_sync for -Si/-Sii, -Sl, -Sg/-Sgg and
+// pacman_cli::sync against C pacman_sync for -Si/-Sii, -Sl, -Sg/-Sgg, -Ss and
 // the dispatch errors: generated worlds under /tmp (repos sharing names
 // with each other and the local db, broken and missing db files), the
 // same flags in both configs, a C handle and a Rust Handle over the same
@@ -136,7 +136,18 @@ fn target(rng: &mut Rng, w: &SyncWorld, pool: &[&str]) -> Vec<u8> {
 	t.into_bytes()
 }
 
+// -Ss needles: names, EREs, a bad one
+const SEARCH: [&str; 10] = [
+	"a", "^b", "pkg|lib", "[", "", ".*", "DESC", "g1", "x$", "\\(",
+];
+
 fn targets(rng: &mut Rng, w: &SyncWorld, pool: &[&str]) -> Vec<Vec<u8>> {
+	if pool == SEARCH {
+		let n = rng.below(3);
+		return (0..n)
+			.map(|_| SEARCH[rng.below(10)].as_bytes().to_vec())
+			.collect();
+	}
 	let n = match rng.below(4) {
 		0 => 0,
 		_ => 1 + rng.below(3),
@@ -145,7 +156,11 @@ fn targets(rng: &mut Rng, w: &SyncWorld, pool: &[&str]) -> Vec<Vec<u8>> {
 }
 
 fn op(rng: &mut Rng, cfg: &mut Config) -> &'static [&'static str] {
-	match rng.below(8) {
+	match rng.below(9) {
+		7 => {
+			cfg.op_s_search = 1;
+			&SEARCH
+		}
 		0..3 => {
 			cfg.op_s_info = 1 + rng.below(2) as u16;
 			&NAMES
@@ -184,9 +199,10 @@ fn edges() {
 	for t in edge {
 		let t: Vec<Vec<u8>> =
 			t.iter().map(|s| s.as_bytes().to_vec()).collect();
-		for setup in 0..6 {
+		for setup in 0..7 {
 			let mut cfg = Config::new();
 			match setup {
+				5 => cfg.op_s_search = 1,
 				0 => cfg.op_s_info = 1,
 				1 => cfg.op_s_info = 2,
 				2 => cfg.op_q_list = 1,
@@ -221,7 +237,6 @@ fn unported() {
 	};
 	assert_eq!(run(|c| c.op_s_clean = 1, &none), Err(Unported::Clean));
 	assert_eq!(run(|c| c.op_s_sync = 1, &none), Err(Unported::Refresh));
-	assert_eq!(run(|c| c.op_s_search = 1, &none), Err(Unported::Search));
 	assert_eq!(
 		run(|c| c.op_s_upgrade = 1, &none),
 		Err(Unported::Transaction)

@@ -1,6 +1,6 @@
 // port of the read-only part of src/pacman/sync.c: -Si/-Sii (sync_info),
-// -Sl (sync_list), -Sg/-Sgg (sync_group), the pacman_sync dispatch up to
-// them, and util.c's check_syncdbs they rely on
+// -Sl (sync_list), -Sg/-Sgg (sync_group), -Ss (sync_search), the
+// pacman_sync dispatch up to them, and util.c's check_syncdbs they rely on
 //
 // the C prints to stdout and through pm_printf to stderr, both go into an
 // Output. config is the C global, handle config->handle; cols is what
@@ -11,8 +11,8 @@
 //
 // not ported, returned as Unported where pacman_sync reaches them: -Sc
 // (trans_init takes the db lock, then interactive prompts and unlinks
-// in the cache dirs), -Sy (db download), -Ss (db search) and the
-// transaction of -S <targets>/-Su.
+// in the cache dirs), -Sy (db download) and the transaction of
+// -S <targets>/-Su.
 
 use alpm_core::be_sync::get_validation;
 use alpm_core::db::Db;
@@ -22,7 +22,9 @@ use alpm_core::package::{DbCaches, Package};
 use alpm_core::util::until_nul;
 
 use crate::conf::{Config, LOG_ERROR, cat};
-use crate::package::{FileProbe, PkgEnv, dump_pkg_full, print_installed};
+use crate::package::{
+	FileProbe, PkgEnv, dump_pkg_full, dump_pkg_search, print_installed,
+};
 use crate::util::{Output, SigResult, check_syncdbs, pm_printf};
 
 // a pacman_sync/pacman_files branch this port does not have yet
@@ -32,8 +34,6 @@ pub enum Unported {
 	Clean,
 	// -Sy/-Fy: sync_syncdbs
 	Refresh,
-	// -Ss: sync_search
-	Search,
 	// sync_trans: -S <targets>, -Su
 	Transaction,
 }
@@ -358,6 +358,54 @@ pub fn sync_list<S: AsRef<[u8]>>(
 	ret
 }
 
+// sync_search: dump_pkg_search with the installed marker on every sync
+// db, the whole cache without targets. 0 when any db showed something,
+// a bad regex stops at its db
+pub fn sync_search<S: AsRef<[u8]>>(
+	config: &Config,
+	handle: &mut Handle,
+	targets: &[S],
+	cols: u16,
+	out: &mut Output,
+) -> i32 {
+	let dbext = handle.dbext().to_vec();
+	let (local, syncs) = handle.dbs_mut();
+	let lcache = local.and_then(|l| l.pkgcache(&dbext).ok());
+	let find = |name: &[u8]| lcache.and_then(|c| c.find(name));
+	let mut found = 0;
+	for db in syncs.iter_mut() {
+		let name = db.name().to_vec();
+		let results: Vec<&Package> = if targets.is_empty() {
+			cache_list(db, &dbext)
+		} else {
+			match db.search(&dbext, targets) {
+				Ok(r) => r,
+				Err(e) => {
+					let why = e.strerror().as_bytes();
+					let msg = [
+						&b"search failed: "[..],
+						why,
+						b"\n",
+					];
+					error(out, config, &msg);
+					return 1;
+				}
+			}
+		};
+		let shown = dump_pkg_search(
+			&mut out.stdout,
+			&name,
+			&results,
+			Some(&find),
+			config.quiet != 0,
+			cols,
+			&config.colstr,
+		);
+		found += i32::from(shown);
+	}
+	i32::from(found == 0)
+}
+
 // pacman_sync: the read-only operations, Err for the branches not ported
 // (in the order the C reaches them). Ok is the C return value
 pub fn pacman_sync<S: AsRef<[u8]>>(
@@ -380,7 +428,7 @@ pub fn pacman_sync<S: AsRef<[u8]>>(
 		return Ok(1);
 	}
 	if config.op_s_search != 0 {
-		return Err(Unported::Search);
+		return Ok(sync_search(config, handle, targets, cols, out));
 	}
 	if config.group != 0 {
 		return Ok(sync_group(

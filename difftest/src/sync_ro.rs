@@ -307,14 +307,16 @@ pub(crate) fn run_op<S: AsRef<[u8]>>(
 	}
 }
 
-// pacman_sync reaches only -Sg, -Si, -Sl or the "no targets" error with
-// these flags: no -Sc (trans_init, cache dirs), -Sy (downloads), -Ss
-// (left to the search port) or sync_trans
+// pacman_sync reaches only -Ss, -Sg, -Si, -Sl or the "no targets" error
+// with these flags: no -Sc (trans_init, cache dirs), -Sy (downloads) or
+// sync_trans
 pub fn sync_read_only<S>(cfg: &Config, targets: &[S]) -> bool {
-	let op = cfg.group != 0 || cfg.op_s_info != 0 || cfg.op_q_list != 0;
+	let op = cfg.group != 0
+		|| cfg.op_s_info != 0
+		|| cfg.op_q_list != 0
+		|| cfg.op_s_search != 0;
 	cfg.op_s_clean == 0
 		&& cfg.op_s_sync == 0
-		&& cfg.op_s_search == 0
 		&& (op || (targets.is_empty() && cfg.op_s_upgrade == 0))
 }
 

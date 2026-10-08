@@ -85,10 +85,7 @@ fn dispatch() {
 		run(&mut h, |c| c.op_s_sync = 1, &[]).0,
 		Err(Unported::Refresh)
 	);
-	assert_eq!(
-		run(&mut h, |c| c.op_s_search = 1, &[]).0,
-		Err(Unported::Search)
-	);
+	assert!(run(&mut h, |c| c.op_s_search = 1, &[]).0.is_ok());
 	assert_eq!(run(&mut h, |_| {}, &["a"]).0, Err(Unported::Transaction));
 	assert_eq!(
 		run(&mut h, |c| c.op_s_upgrade = 1, &[]).0,
