@@ -54,13 +54,6 @@ fn s(b: &[u8]) -> &str {
 struct Installed;
 
 impl Lookup for Installed {
-	fn db_name(&mut self, pkg: &Package) -> Option<Vec<u8>> {
-		match pkg.name_bytes() {
-			b"a" | b"b" => Some(b"core".to_vec()),
-			_ => Some(b"extra".to_vec()),
-		}
-	}
-
 	// "x" is installed
 	fn installed(&mut self) -> (Vec<Package>, Vec<Package>) {
 		(vec![pkg("x", &[])], Vec::new())
@@ -107,6 +100,7 @@ fn provider_prompt() {
 	let mut q = Question::SelectProvider {
 		use_index: 0,
 		providers: &providers,
+		dbs: &[b"core", b"core", b"extra"],
 		depend: &dep,
 	};
 	f.question(&mut q);

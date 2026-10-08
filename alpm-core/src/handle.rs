@@ -347,15 +347,6 @@ impl Handle {
 		std::mem::replace(&mut self.trans, trans)
 	}
 
-	// set_callbacks giving the old set back, for a caller that swaps
-	// them for one call
-	pub fn replace_callbacks(
-		&mut self,
-		cb: Box<dyn Callbacks>,
-	) -> Box<dyn Callbacks> {
-		std::mem::replace(&mut self.cb, cb)
-	}
-
 	// what alpm_db_update works on at once, borrowed apart
 	pub(crate) fn sync_parts(&mut self) -> SyncParts<'_> {
 		let sandbox = (self.sandbox_for)(self);

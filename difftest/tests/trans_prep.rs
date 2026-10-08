@@ -169,9 +169,13 @@ impl Callbacks for Script {
 				)
 			}
 			Question::SelectProvider {
-				providers, depend, ..
+				providers,
+				dbs,
+				depend,
+				..
 			} => TpAsk::SelectProvider(
 				providers.iter().map(|p| name(p)).collect(),
+				dbs.iter().map(|d| d.to_vec()).collect(),
 				(*depend).clone(),
 			),
 			_ => unreachable!("not asked while preparing"),

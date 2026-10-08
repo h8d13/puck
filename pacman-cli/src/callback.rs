@@ -8,9 +8,9 @@
 // Frontend's own copy, taken when it is installed. stdout and stderr
 // collect in an Output flushed to its sink where the C fflushes and at
 // the end of every callback; stdin, getcols and the clocks come from a
-// util::Term. what the C asks config->handle (the provider's db, the
-// local db cache and the transaction for optdepends) comes from a
-// Lookup, () until trans.c is ported.
+// util::Term. what the C asks config->handle (the local db cache and
+// the transaction for optdepends) comes from a Lookup, () until trans.c
+// is ported.
 //
 // wide character handling follows util.rs: glibc's UTF-8 decoder, a
 // string that does not decode keeps its valid prefix (swprintf fails
@@ -45,12 +45,6 @@ const UPDATE_SPEED_MS: i64 = 200;
 
 // what the callbacks need from the handle besides the callback data
 pub trait Lookup {
-	// alpm_db_get_name(alpm_pkg_get_db(pkg)) of a provider, None for a
-	// package without db
-	fn db_name(&mut self, _pkg: &Package) -> Option<Vec<u8>> {
-		None
-	}
-
 	// make_optstring's lists: the local db cache and the transaction's
 	// add list
 	fn installed(&mut self) -> (Vec<Package>, Vec<Package>) {
@@ -916,13 +910,12 @@ impl<R: BufRead, L: Lookup> Frontend<R, L> {
 				ask_remove_pkgs(out, config, term, packages)
 			}
 			Question::SelectProvider {
-				providers, depend, ..
+				providers,
+				dbs,
+				depend,
+				..
 			} => {
-				let dbs: Vec<Option<Vec<u8>>> = providers
-					.iter()
-					.map(|p| self.lookup.db_name(p))
-					.collect();
-				let p = (providers, &dbs[..]);
+				let p = (&providers[..], &dbs[..]);
 				ask_provider(out, config, term, p, depend)
 			}
 			Question::CorruptedPkg {
@@ -1155,7 +1148,7 @@ fn ask_provider<R: BufRead>(
 	out: &mut Output,
 	config: &Config,
 	term: &mut Term<R>,
-	(providers, dbs): (&[&Package], &[Option<Vec<u8>>]),
+	(providers, dbs): (&[&Package], &[&[u8]]),
 	depend: &Depend,
 ) -> c_int {
 	let count = providers.len();
@@ -1171,7 +1164,7 @@ fn ask_provider<R: BufRead>(
 	let list: Vec<(Option<&[u8]>, &Package)> = dbs
 		.iter()
 		.zip(providers)
-		.map(|(d, &p)| (d.as_deref(), p))
+		.map(|(&d, &p)| (Some(d), p))
 		.collect();
 	select_display(&mut out.stdout, c, &list, (term.cols)());
 	select_question(out, config, term, count as c_int)

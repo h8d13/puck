@@ -212,10 +212,11 @@ pub enum Question<'q> {
 		packages: &'q [&'q Package],
 	},
 	// ALPM_QUESTION_SELECT_PROVIDER: position in providers, out of
-	// range picks none
+	// range picks none. dbs[i] is the name of providers[i]'s db
 	SelectProvider {
 		use_index: c_int,
 		providers: &'q [&'q Package],
+		dbs: &'q [&'q [u8]],
 		depend: &'q Depend,
 	},
 	// ALPM_QUESTION_IMPORT_KEY: nonzero imports

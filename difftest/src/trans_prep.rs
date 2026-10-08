@@ -34,15 +34,15 @@ use crate::fixtures::{
 };
 use crate::handle::{
 	_alpm_db_get_pkgcache_hash, ALPM, CDb, CHandleHead, CTrans,
-	alpm_db_get_groupcache, alpm_db_set_usage, alpm_errno,
-	alpm_get_localdb, alpm_initialize, alpm_option_add_cachedir,
-	alpm_option_set_architectures, alpm_option_set_default_siglevel,
-	alpm_option_set_eventcb, alpm_option_set_ignoregroups,
-	alpm_option_set_ignorepkgs, alpm_option_set_local_file_siglevel,
-	alpm_option_set_logcb, alpm_option_set_questioncb,
-	alpm_option_set_remote_file_siglevel, alpm_pkg_free, alpm_pkg_load,
-	alpm_register_syncdb, alpm_release, alpm_trans_init,
-	alpm_trans_release,
+	alpm_db_get_groupcache, alpm_db_get_name, alpm_db_set_usage,
+	alpm_errno, alpm_get_localdb, alpm_initialize,
+	alpm_option_add_cachedir, alpm_option_set_architectures,
+	alpm_option_set_default_siglevel, alpm_option_set_eventcb,
+	alpm_option_set_ignoregroups, alpm_option_set_ignorepkgs,
+	alpm_option_set_local_file_siglevel, alpm_option_set_logcb,
+	alpm_option_set_questioncb, alpm_option_set_remote_file_siglevel,
+	alpm_pkg_free, alpm_pkg_get_db, alpm_pkg_load, alpm_register_syncdb,
+	alpm_release, alpm_trans_init, alpm_trans_release,
 };
 use crate::package::{CPkg, field, list_data, with_strs};
 use crate::sync_ro::pacman_sync;
@@ -401,7 +401,8 @@ pub enum TpAsk {
 	Replace(Vec<u8>, Vec<u8>, Vec<u8>),
 	Conflict(Vec<u8>, Vec<u8>, Depend),
 	RemovePkgs(Vec<Vec<u8>>),
-	SelectProvider(Vec<Vec<u8>>, Depend),
+	// providers, their dbs
+	SelectProvider(Vec<Vec<u8>>, Vec<Vec<u8>>, Depend),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -615,7 +616,23 @@ unsafe extern "C" fn question_cb(ctx: *mut c_void, q: *mut c_void) {
 		Q_SELECT_PROVIDER => {
 			// SAFETY: as above
 			let q = unsafe { &*q.cast::<CQList>() };
-			TpAsk::SelectProvider(names(q.list), read_dep(q.depend))
+			let dbs = list_data(q.list)
+				.into_iter()
+				.map(|p| {
+					// SAFETY: a sync package, its db registered
+					let db = unsafe { alpm_pkg_get_db(p) };
+					// SAFETY: db is live, its name nul terminated
+					unsafe {
+						CStr::from_ptr(
+							alpm_db_get_name(db),
+						)
+					}
+					.to_bytes()
+					.to_vec()
+				})
+				.collect();
+			let names = names(q.list);
+			TpAsk::SelectProvider(names, dbs, read_dep(q.depend))
 		}
 		k => panic!("unexpected question {k}"),
 	};

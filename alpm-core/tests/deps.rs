@@ -246,6 +246,7 @@ mod resolve {
 			local: DbPkgs {
 				usage: DB_USAGE_ALL,
 				cache: local,
+				name: b"local",
 			},
 			sync,
 		}
@@ -347,6 +348,7 @@ mod resolve {
 		let dbs = [DbPkgs {
 			usage: DB_USAGE_ALL,
 			cache: &sync,
+			name: b"core",
 		}];
 		let e = env(&t.1, &local, &dbs);
 		let mut cb = Cb {
@@ -389,6 +391,7 @@ mod resolve {
 		let dbs = [DbPkgs {
 			usage: DB_USAGE_ALL,
 			cache: &sync,
+			name: b"core",
 		}];
 		let e = env(&t.1, &local, &dbs);
 		let localpkgs: Vec<&Package> = local.iter().collect();

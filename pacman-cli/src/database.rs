@@ -130,6 +130,7 @@ fn check_db_missing_deps(
 			local: DbPkgs {
 				usage: 0,
 				cache: local.unwrap_or(&empty),
+				name: b"local",
 			},
 			sync: &[],
 		};

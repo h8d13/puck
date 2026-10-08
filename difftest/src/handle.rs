@@ -170,6 +170,8 @@ unsafe extern "C" {
 	// db.c
 	pub(crate) fn alpm_db_unregister(db: *mut CDb) -> c_int;
 	pub(crate) fn alpm_db_get_name(db: *const CDb) -> *const c_char;
+	// package.c
+	pub(crate) fn alpm_pkg_get_db(pkg: *mut c_void) -> *mut CDb;
 	pub(crate) fn alpm_db_get_servers(db: *const CDb) -> *mut CList;
 	pub(crate) fn alpm_db_set_servers(
 		db: *mut CDb,

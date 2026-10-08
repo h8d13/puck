@@ -344,12 +344,22 @@ impl Callbacks for Script<'_> {
 			Question::SelectProvider {
 				use_index,
 				providers,
+				dbs,
 				depend,
 			} => {
-				let ids = providers
+				let ids: Vec<PkgId> = providers
 					.iter()
 					.map(|p| self.rs.id(p))
 					.collect();
+				// each provider names the db it was found in
+				let want: Vec<&[u8]> = ids
+					.iter()
+					.map(|id| match id.0 {
+						None => &b"local"[..],
+						Some(i) => SYNC[i].as_bytes(),
+					})
+					.collect();
+				assert_eq!(*dbs, &want[..], "provider dbs");
 				let a = Asked::SelectProvider(
 					ids,
 					(*depend).clone(),
@@ -435,7 +445,12 @@ impl Case<'_> {
 			self.rs.sync()
 				.into_iter()
 				.zip(&self.setup.usage)
-				.map(|(cache, &usage)| DbPkgs { usage, cache })
+				.zip(SYNC)
+				.map(|((cache, &usage), name)| DbPkgs {
+					usage,
+					cache,
+					name: name.as_bytes(),
+				})
 				.collect();
 		let env = DepsEnv {
 			handle: &self.rs.handle,
@@ -443,6 +458,7 @@ impl Case<'_> {
 			local: DbPkgs {
 				usage: self.setup.local_usage,
 				cache: self.rs.local(),
+				name: b"local",
 			},
 			sync: &dbs,
 		};

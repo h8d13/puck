@@ -11,7 +11,6 @@
 // CLOCK_MONOTONIC_COARSE (get_time_ms) reads a fake clock: clock_gettime
 // is interposed below, the other clocks go to the kernel. the Rust side
 // gets the same through its Term.
-use std::collections::VecDeque;
 use std::ffi::{CString, c_char, c_int, c_long, c_void};
 use std::io::Cursor;
 use std::ptr;
@@ -24,7 +23,7 @@ use alpm_core::callbacks::{
 use alpm_core::conflict::Conflict;
 use alpm_core::deps::Depend;
 use alpm_core::package::{Package, PkgFrom};
-use pacman_cli::callback::{Frontend, Lookup};
+use pacman_cli::callback::Frontend;
 use pacman_cli::conf::Config;
 use pacman_cli::util::{Output, Term};
 
@@ -126,17 +125,7 @@ fn cap_term() -> Term<Cursor<Vec<u8>>> {
 	}
 }
 
-// the db names alpm_pkg_get_db gives the providers of the next question
-#[derive(Default)]
-pub struct Dbs(VecDeque<Vec<u8>>);
-
-impl Lookup for Dbs {
-	fn db_name(&mut self, _pkg: &Package) -> Option<Vec<u8>> {
-		Some(self.0.pop_front().unwrap_or_default())
-	}
-}
-
-type World = Frontend<Cursor<Vec<u8>>, Dbs>;
+type World = Frontend<Cursor<Vec<u8>>>;
 
 static WORLD: Mutex<Option<World>> = Mutex::new(None);
 
@@ -147,8 +136,6 @@ pub struct CbSetup {
 	pub cols: u16,
 	pub now_ms: i64,
 	pub input: Vec<u8>,
-	// provider db names, in provider order
-	pub dbs: Vec<Vec<u8>>,
 }
 
 // one callback invocation
@@ -373,7 +360,7 @@ fn c_event(e: &Event<'_>, k: &mut Keep) -> *mut c_void {
 }
 
 // the alpm_question_t of q (answer at the second int)
-fn c_question(q: &Question<'_>, dbs: &[Vec<u8>], k: &mut Keep) -> *mut c_void {
+fn c_question(q: &Question<'_>, k: &mut Keep) -> *mut c_void {
 	let head = pair(q.kind(), q.answer());
 	let w = match *q {
 		Question::InstallIgnorepkg { pkg, .. } => {
@@ -408,16 +395,15 @@ fn c_question(q: &Question<'_>, dbs: &[Vec<u8>], k: &mut Keep) -> *mut c_void {
 			vec![head, ptr_word(k.list(items))]
 		}
 		Question::SelectProvider {
-			providers, depend, ..
+			providers,
+			dbs,
+			depend,
+			..
 		} => {
-			let none = Vec::new();
 			let items = providers
 				.iter()
-				.enumerate()
-				.map(|(i, p)| {
-					let db = dbs.get(i).unwrap_or(&none);
-					k.sync_pkg(p, db).cast()
-				})
+				.zip(dbs)
+				.map(|(p, db)| k.sync_pkg(p, db).cast())
 				.collect();
 			let l = k.list(items);
 			vec![head, ptr_word(l), ptr_word(k.dep(depend))]
@@ -554,7 +540,7 @@ unsafe fn set_config(c: &Config, colstr: &[CString; 10]) -> Fields {
 // the C callback for call, its data built in k
 //
 // SAFETY (caller): FRONTEND held, streams and config set up
-unsafe fn call_c(call: &Call<'_>, dbs: &[Vec<u8>], k: &mut Keep) -> c_int {
+unsafe fn call_c(call: &Call<'_>, k: &mut Keep) -> c_int {
 	let ctx = ptr::null_mut();
 	// SAFETY: every pointer handed over points into k, alive for the
 	// call; the C reads them only. for questions the answer is read
@@ -563,7 +549,7 @@ unsafe fn call_c(call: &Call<'_>, dbs: &[Vec<u8>], k: &mut Keep) -> c_int {
 		match call {
 			Call::Event(e) => cb_event(ctx, c_event(e, k)),
 			Call::Question(q) => {
-				let p = c_question(q, dbs, k);
+				let p = c_question(q, k);
 				cb_question(ctx, p);
 				return *p.cast::<c_int>().add(1);
 			}
@@ -641,7 +627,7 @@ pub fn cb_both(setup: &CbSetup, mut call: Call<'_>) -> (CbRun, CbRun) {
 	let _guard = FRONTEND.lock().unwrap_or_else(|e| e.into_inner());
 	let mut world = WORLD.lock().unwrap_or_else(|e| e.into_inner());
 	let w = world.get_or_insert_with(|| {
-		Frontend::with_lookup(Config::new(), cap_term(), Dbs::default())
+		Frontend::new(Config::new(), cap_term())
 	});
 	let cs = &setup.config.colstr;
 	let colstr = [
@@ -685,7 +671,7 @@ pub fn cb_both(setup: &CbSetup, mut call: Call<'_>) -> (CbRun, CbRun) {
 		stdout = out;
 		stderr = err;
 		stdin = inp;
-		let answer = call_c(&call, &setup.dbs, &mut k);
+		let answer = call_c(&call, &mut k);
 		fflush(out);
 		fflush(err);
 		stdout = real_out;
@@ -713,7 +699,6 @@ pub fn cb_both(setup: &CbSetup, mut call: Call<'_>) -> (CbRun, CbRun) {
 	w.config = setup.config.clone();
 	w.out = Output::default();
 	w.term.stdin = Cursor::new(setup.input.clone());
-	w.lookup = Dbs(setup.dbs.iter().cloned().collect());
 	let answer = call_rust(w, &mut call);
 	let out = std::mem::take(&mut w.out);
 	let r = CbRun {
