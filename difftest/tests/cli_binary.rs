@@ -3,10 +3,10 @@
 // same read-only command lines on generated fixture roots (local db,
 // sync .db and .files, a pacman.conf, every path option pointing into
 // the fixture), stdout, stderr and exit status compared byte for byte.
-// prints one line per command; every one must be equal but the --debug
-// lines known() explains. root-only commands (-Sy, -Fy, -D, -Sc) run
-// under fakeroot, the dbs they fetch or write and the cache dir compared
-// too.
+// prints one line per command; every one must be equal (has_goto_err
+// names the only lines dropped). root-only commands (-Sy, -Fy, -D, -Sc)
+// run under fakeroot, the dbs they fetch or write and the cache dir
+// compared too.
 // scripts/cli-parity-fixtures.sh runs it with the table shown
 use std::fs;
 use std::os::unix::process::CommandExt;
@@ -19,13 +19,31 @@ use difftest::{
 };
 
 // --debug in the world with the default SigLevel (Required, unsigned
-// dbs): the C logs the failed .sig lookup (util.c _alpm_access, signing.c
-// "sig path ... could not be opened", "missing required signature") and
-// GOTO_ERR's "got error ... (signing.c: <line>)"; the port's signing
-// logs errors and warnings only and never RET_ERR/GOTO_ERR lines
-// (PORTING.md)
-fn known(label: &str, siglevel: Option<&str>) -> bool {
-	siglevel.is_none() && label.contains("--debug")
+// dbs): GOTO_ERR in signing.c logs "got error <n> at <func> (<C file>:
+// <line>)", the C's source position, which the port does not log by
+// design (PORTING.md). those lines alone are dropped from the C's
+// stderr there, the rest of the run compares
+fn has_goto_err(siglevel: Option<&str>, cmd: &[String]) -> bool {
+	siglevel.is_none() && cmd.iter().any(|a| a == "--debug")
+}
+
+// a line holding "got error <digits> at "
+fn is_goto_err(line: &[u8]) -> bool {
+	let key = b"got error ";
+	let Some(i) = line.windows(key.len()).position(|w| w == key) else {
+		return false;
+	};
+	let rest = &line[i + key.len()..];
+	let n = rest.iter().take_while(|c| c.is_ascii_digit()).count();
+	n > 0 && rest[n..].starts_with(b" at ")
+}
+
+fn without_goto_err(err: &[u8]) -> Vec<u8> {
+	let lines = err.split_inclusive(|&c| c == b'\n');
+	lines.filter(|l| !is_goto_err(l))
+		.flatten()
+		.copied()
+		.collect()
 }
 
 // "[HH:MM:SS] " before stamped lines: both binaries read the clock
@@ -353,7 +371,10 @@ fn world(
 			})
 		};
 		restore();
-		let cr = run(&c, &args, dir, root);
+		let mut cr = run(&c, &args, dir, root);
+		if has_goto_err(siglevel, &cmd) {
+			cr.err = without_goto_err(&cr.err);
+		}
 		let synced_c = written();
 		restore();
 		let rr = run(&r, &args, dir, root);
@@ -504,7 +525,7 @@ fn parity() {
 		for (label, ok, diff) in world(w, level, true) {
 			total += 1;
 			equal += usize::from(ok);
-			if !ok && !known(&label, level) {
+			if !ok {
 				failures.push(format!(
 					"world {i}: {label}\n{}",
 					diff.unwrap_or_default()
