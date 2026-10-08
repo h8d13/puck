@@ -41,7 +41,8 @@ use crate::trans::{
 use crate::util::{
 	CALLER_PREFIX, Entry, PATH_MAX, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO,
 	S_IFLNK, S_IFMT, check_padding, cleanup_pathname, compute_md5sum,
-	enter, ldconfig, llstat, mkdir_mode, open_archive, strerror, until_nul,
+	enter, geteuid, ldconfig, llstat, mkdir_mode, open_archive, strerror,
+	until_nul,
 };
 
 use LogLevel::{Debug, Error, Warning};
@@ -201,22 +202,6 @@ fn os(path: &[u8]) -> &Path {
 
 fn errno(e: &io::Error) -> i32 {
 	e.raw_os_error().unwrap_or(0)
-}
-
-// geteuid() from /proc/self/status, like sandbox::System's getuid
-fn euid() -> u32 {
-	// "Uid:\t<real>\t<effective>\t<saved>\t<fs>"
-	let status = fs::read("/proc/self/status").unwrap_or_default();
-	status.split(|&c| c == b'\n')
-		.find_map(|l| l.strip_prefix(b"Uid:"))
-		.and_then(|l| {
-			let f = l
-				.split(|c| c.is_ascii_whitespace())
-				.filter(|f| !f.is_empty())
-				.nth(1)?;
-			std::str::from_utf8(f).ok()?.parse().ok()
-		})
-		.unwrap_or(u32::MAX)
 }
 
 fn now() -> i64 {
@@ -1590,7 +1575,7 @@ pub fn commit_single_pkg(
 	let disk_root = h.root().to_vec();
 	let disk = Disk {
 		root: &disk_root,
-		euid: euid(),
+		euid: geteuid(),
 		skip: meta.is_file().then(|| (meta.dev(), meta.ino())),
 		plain_len: plain.then_some(meta.len()),
 	};

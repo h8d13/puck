@@ -31,7 +31,9 @@ time = "0.3.47"
 unicode-width = "0.2"
 # system-level, see METHODOLOGY.md
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
-rustix = { version = "1.1", features = ["fs"] }
+# use-libc: ids and file calls through libc like the C's, so LD_PRELOAD
+# shims (fakeroot) see them as they see std's
+rustix = { version = "1.1", features = ["fs", "net", "process", "termios", "use-libc"] }
 landlock = "0.4"
 libseccomp = "0.4"
 

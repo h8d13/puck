@@ -47,8 +47,8 @@ use crate::sync::{Unported, pacman_sync, sync_trans};
 use crate::upgrade::pacman_upgrade;
 use crate::util::{
 	Output, Term, Ui, arg_to_string, console_cursor_hide,
-	console_cursor_show, debug_stamp, getcols, list_display, now_secs,
-	pm_printf,
+	console_cursor_show, debug_stamp, flush_term_input, getcols,
+	list_display, now_secs, pm_printf,
 };
 
 // alpm_version() of the reference build (meson LIB_VERSION)
@@ -1481,6 +1481,7 @@ pub fn std_term() -> Term<StdIn> {
 		stdin_tty: io::stdin().is_terminal(),
 		stdout_tty: io::stdout().is_terminal(),
 		cols: getcols,
+		flush_input: flush_term_input,
 		now_ms: monotonic_ms,
 		now_secs,
 	}

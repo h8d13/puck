@@ -15,3 +15,5 @@ alpm-compress.workspace = true
 alpm-db.workspace = true
 alpm-repo-db.workspace = true
 alpm-types.workspace = true
+# pty pairs for the terminal tests (getcols, flush_term_input)
+rustix = { workspace = true, features = ["pty"] }
