@@ -116,7 +116,7 @@ pub(crate) struct ConfigC {
 	pub(crate) chomp: u16,
 	pub(crate) verbosepkglists: u16,
 	parallel_downloads: c_uint,
-	cleanmethod: u16,
+	pub(crate) cleanmethod: u16,
 	pub(crate) holdpkg: *mut CList,
 	ignorepkg: *mut CList,
 	ignoregrp: *mut CList,
