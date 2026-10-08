@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # cargo test --release, one run at a time across the main checkout and all
-# unit worktrees: parallel suites (C-linked difftests, fuzz) exhaust memory
+# unit worktrees: parallel suites (C-linked difftests, fuzz) exhaust memory.
+# the per-process caps are test-runner.sh, set as runner in .cargo/config
 # usage: scripts/cargo-test.sh [cargo test args...]
 
 set -euo pipefail

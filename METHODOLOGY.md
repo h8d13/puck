@@ -115,6 +115,16 @@ order.
   `--shared`, the C reference build shared via `PACMAN_BUILD`, `TMPDIR`
   inside the worktree (`.cargo/config.toml`). Nothing goes to /tmp: tests
   use `std::env::temp_dir()`, logs go to `.tmp/`.
+- Several units share one machine. The worktree config caps cargo at
+  `jobs = 2` and `RUST_TEST_THREADS=2`, and runs every test binary under
+  `scripts/test-runner.sh` (4 GiB address space, 30 min; the main
+  checkout's `.cargo/config.toml` sets the same runner). With large swap
+  and no oomd, a runaway test never meets the OOM killer and freezes the
+  machine; capped, it aborts and fails. Run tests through
+  `scripts/cargo-test.sh`, which allows one suite at a time machine wide.
+- Mutation checks that can loop (a removed loop exit, a dropped push)
+  run under the same caps. `TEST_TIMEOUT=<s>` may be raised for long
+  fuzz runs (2M iterations); `TEST_MEM_KB` is never raised.
 - The unit commits on its branch; it is merged with `git merge`, then
   `scripts/unit-worktree.sh --remove <name>`.
 
@@ -122,12 +132,13 @@ order.
 
 - committed on the unit branch, the worktree's `.tmp/` emptied (corpora
   meant to be reused are named in the report)
-- `cargo test --release` green for the whole workspace
+- `scripts/cargo-test.sh` (cargo test --release) green for the whole
+  workspace
 - `scripts/check-separation.sh` passes (no test modules, C access or
   difftest in port crates)
 - `scripts/check-externs.py` passes (one declaration per C symbol in
   difftest; rustc only flags duplicates whose signatures differ)
-- `DIFFTEST_ITERS=2000000 cargo test --release -p difftest --test <cfile>`
+- `DIFFTEST_ITERS=2000000 scripts/cargo-test.sh -p difftest --test <cfile>`
 - mutation check done
 - `PORTING.md` row(s) and notes updated
 - upstream findings listed separately in the report, each with its

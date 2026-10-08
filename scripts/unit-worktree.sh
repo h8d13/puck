@@ -48,6 +48,10 @@ create() {
 		PACMAN_BUILD = "$root/pacman/build"
 		TMPDIR = "$wt/.tmp"
 		RUST_TEST_THREADS = "2"
+
+		# memory and time caps per test binary
+		[target.'cfg(all())']
+		runner = ["$root/scripts/test-runner.sh"]
 	EOF
 	echo "$wt (branch unit/$name from $from)"
 }
