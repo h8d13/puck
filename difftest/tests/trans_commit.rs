@@ -4,7 +4,8 @@
 // mirror or the cache, -U files, DOWNLOADONLY, DBONLY, packages that
 // fail the checksum or differ from their db entry (CORRUPTED_PKG yes and
 // no), a package missing from the mirror, file conflicts, no disk space,
-// replaced and conflicting packages removed by the sync commit. compared
+// replaced and conflicting packages removed by the sync commit; hooks
+// (fc_ tests, re-run under fakechroot(1) by under_fakechroot). compared
 // per case: prepare and commit rc/pm_errno, data list, trans state, the
 // kept records (difftest::kept), the logfile, the root, local db and
 // cache trees.
@@ -12,14 +13,15 @@ use std::collections::BTreeMap;
 use std::ffi::c_int;
 
 use difftest::{
-	Rng, TcCase, TcOp, TcPkg, TcRec, TcResult, TcWorld, TempRoot, c_commit,
-	iters, rust_commit, umask_lock,
+	HookRec, Rng, TcCase, TcHook, TcOp, TcPkg, TcRec, TcResult, TcWorld,
+	TempRoot, c_commit, iters, rust_commit, umask_lock,
 };
 
 const DOWNLOADONLY: c_int = 1 << 9;
 const DBONLY: c_int = 1 << 6;
 const NODEPS: c_int = 1;
 const NOSAVE: c_int = 1 << 2;
+const NOHOOKS: c_int = 1 << 7;
 
 fn pkg(name: &str, version: &str, files: &[&str]) -> TcPkg {
 	TcPkg {
@@ -83,6 +85,7 @@ fn case(world: TcWorld, op: TcOp) -> TcCase {
 		flags: 0,
 		checkspace: false,
 		answers: Vec::new(),
+		hooks: Vec::new(),
 	}
 }
 
@@ -301,6 +304,7 @@ fn gen_case(rng: &mut Rng) -> TcCase {
 		flags,
 		checkspace: rng.below(2) == 0,
 		answers,
+		hooks: Vec::new(),
 	}
 }
 
@@ -352,4 +356,327 @@ fn fuzz() {
 	] {
 		assert!(seen.contains_key(k), "never hit {k:?}: {seen:?}");
 	}
+}
+
+// ---- hooks, for real in a chroot of the root under fakechroot(1) ----
+
+const FC_CHILD: &str = "DIFFTEST_IN_FAKECHROOT";
+
+fn in_fakechroot() -> bool {
+	std::env::var_os(FC_CHILD).is_some()
+}
+
+// re-runs this binary's fc_ tests under fakechroot, capped in time like
+// the test binary itself
+#[test]
+fn under_fakechroot() {
+	if in_fakechroot() {
+		return;
+	}
+	let exe = std::env::current_exe().unwrap();
+	let out = std::process::Command::new("timeout")
+		.args(["1500", "fakechroot"])
+		.arg(exe)
+		.args(["fc_", "--test-threads=1"])
+		.env(FC_CHILD, "1")
+		.output()
+		.expect("timeout/fakechroot not found");
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	assert!(
+		out.status.success() && stdout.contains("3 passed"),
+		"fakechroot run: {}\n{stdout}\n{}",
+		out.status,
+		String::from_utf8_lossy(&out.stderr)
+	);
+}
+
+fn hook(dir: usize, name: &str, text: &str) -> TcHook {
+	TcHook {
+		dir,
+		name: name.into(),
+		text: text.into(),
+	}
+}
+
+// reads every target line (an early exit races the C's stdin feed)
+const READ_TARGETS: &str =
+	"/bin/sh -c 'while IFS= read -r l; do echo \"$0:$l\"; done'";
+
+// a hook of one trigger: operations, type, targets, then the action
+// lines
+fn trigger(ops: &[&str], ty: &str, targets: &[&str], action: &str) -> String {
+	let mut t = String::from("[Trigger]\n");
+	for op in ops {
+		t += &format!("Operation = {op}\n");
+	}
+	t += &format!("Type = {ty}\n");
+	for target in targets {
+		t += &format!("Target = {target}\n");
+	}
+	t + "[Action]\n" + action
+}
+
+// the fixed hook set over base_world: Package and Path triggers on
+// each operation, NeedsTargets, Exec with arguments, Depends before and
+// after the install, reused sections, a failing command, a hook masked
+// by the second dir, one writing into the root
+fn fixed_hooks() -> Vec<TcHook> {
+	let all = ["Install", "Upgrade", "Remove"];
+	let pkgs = trigger(
+		&["Install", "Upgrade"],
+		"Package",
+		&["*"],
+		&format!("Description = packages in\nWhen = PreTransaction\n\
+			NeedsTargets\nExec = {READ_TARGETS} pkg\n"),
+	);
+	let paths = trigger(
+		&all,
+		"Path",
+		&["usr/*", "!usr/a"],
+		&format!("When = PostTransaction\nNeedsTargets\n\
+			Exec = {READ_TARGETS} path\n"),
+	);
+	let args = trigger(
+		&["Remove"],
+		"Package",
+		&["b"],
+		"When = PreTransaction\nExec = /bin/sh -c \
+		'echo \"args:$0:$1:$2\"' zero \"one two\" three\n",
+	);
+	let dep = |when: &str, dep: &str| {
+		trigger(
+			&["Install"],
+			"Package",
+			&["c"],
+			&format!("When = {when}\nDepends = {dep}\n\
+				Exec = /bin/sh -c 'echo dep {when}'\n"),
+		)
+	};
+	let reused = "[Trigger]\nOperation = Upgrade\nType = Package\n\
+		Target = a\n[Action]\nWhen = PreTransaction\n\
+		Exec = /bin/sh -c 'echo first'\n[Trigger]\n\
+		Operation = Install\nType = Path\nTarget = usr/c\n\
+		[Action]\nWhen = PostTransaction\n\
+		Exec = /bin/sh -c 'echo reused'\n\
+		Description = reused sections\n";
+	let fail = |code: u8| {
+		trigger(
+			&all,
+			"Package",
+			&["*"],
+			&format!("When = PostTransaction\nExec = /bin/sh -c \
+				'echo oops >&2; exit {code}'\n"),
+		)
+	};
+	let write = trigger(
+		&["Install", "Upgrade"],
+		"Path",
+		&["usr/a2"],
+		"When = PostTransaction\n\
+		Exec = /bin/sh -c 'read -r l < /usr/a2; echo \"$l\" > /out'\n",
+	);
+	vec![
+		hook(0, "10-pkg.hook", &pkgs),
+		hook(0, "20-path.hook", &paths),
+		hook(1, "15-args.hook", &args),
+		hook(1, "30-dep.hook", &dep("PostTransaction", "c")),
+		hook(0, "31-dep-pre.hook", &dep("PreTransaction", "c>=1")),
+		hook(0, "40-reuse.hook", reused),
+		hook(0, "60-fail.hook", &fail(2)),
+		hook(1, "60-fail.hook", &fail(3)),
+		hook(1, "70-write.hook", &write),
+	]
+}
+
+// the hooks that ran, in order
+fn ran(r: &TcResult) -> Vec<String> {
+	r.recs.iter()
+		.filter_map(|x| match x {
+			TcRec::Hook(HookRec::RunStart(n, ..)) => {
+				Some(String::from_utf8_lossy(n).into_owned())
+			}
+			_ => None,
+		})
+		.collect()
+}
+
+fn hook_lines(r: &TcResult) -> Vec<String> {
+	r.recs.iter()
+		.filter_map(|x| match x {
+			TcRec::Hook(HookRec::Scriptlet(l)) => {
+				Some(String::from_utf8_lossy(l).into_owned())
+			}
+			_ => None,
+		})
+		.collect()
+}
+
+#[test]
+fn fc_hooks_fixed() {
+	if !in_fakechroot() {
+		return;
+	}
+	let fx = TempRoot::new("tcommit-fc-hooks");
+	let ops = [
+		sync(&["a", "c"]),
+		TcOp::Sysupgrade,
+		TcOp::Remove(vec!["b".into()]),
+		TcOp::Upgrade(vec![0]),
+	];
+	for op in ops {
+		for flags in [0, NOHOOKS, DBONLY] {
+			let mut c = case(base_world(), op.clone());
+			c.hooks = fixed_hooks();
+			c.flags = flags;
+			let r = compare(&fx, &c);
+			assert_eq!(commit_rc(&r), Some((0, 0)), "{}", show(&r));
+			assert_eq!(flags == NOHOOKS, ran(&r).is_empty());
+		}
+	}
+	// what ran for the install and upgrade, and what it printed
+	let mut c = case(base_world(), sync(&["a", "c"]));
+	c.hooks = fixed_hooks();
+	let r = compare(&fx, &c);
+	assert_eq!(
+		ran(&r),
+		[
+			"10-pkg.hook",
+			"31-dep-pre.hook",
+			"20-path.hook",
+			"30-dep.hook",
+			"40-reuse.hook",
+			"60-fail.hook",
+			"70-write.hook",
+		],
+		"{}",
+		show(&r)
+	);
+	let lines = hook_lines(&r);
+	let want = [
+		"pkg:a\n",
+		"pkg:c\n",
+		"path:usr/a2\n",
+		"dep PostTransaction\n",
+	];
+	for w in want {
+		assert!(lines.iter().any(|l| l == w), "{}", show(&r));
+	}
+	let out = std::fs::read(fx.dir().join("root/out")).unwrap();
+	assert_eq!(out, b"a-2.0-1:usr/a2\n");
+}
+
+#[test]
+fn fc_hooks_abort() {
+	if !in_fakechroot() {
+		return;
+	}
+	let fx = TempRoot::new("tcommit-fc-abort");
+	let abort = |when: &str| {
+		trigger(
+			&["Install", "Upgrade", "Remove"],
+			"Package",
+			&["*"],
+			&format!("When = {when}\nAbortOnFail\n\
+				Exec = /bin/sh -c 'echo abort; exit 1'\n"),
+		)
+	};
+	// a hook that does not parse fails every PreTransaction run
+	let bad = "[Trigger]\nOperation = Install\nType = Package\n\
+		Target = *\n[Bogus]\n[Action]\nWhen = PostTransaction\n\
+		Exec = /bin/sh -c 'echo never'\n";
+	for op in [sync(&["c"]), TcOp::Remove(vec!["b".into()])] {
+		let mut c = case(base_world(), op.clone());
+		c.hooks = vec![hook(1, "50-bad.hook", bad)];
+		let r = compare(&fx, &c);
+		assert_eq!(
+			commit_rc(&r).map(|x| x.0),
+			Some(-1),
+			"{}",
+			show(&r)
+		);
+		let mut c = case(base_world(), op);
+		c.hooks = vec![hook(
+			0,
+			"00-abort.hook",
+			&abort("PreTransaction"),
+		)];
+		let r = compare(&fx, &c);
+		assert_eq!(
+			commit_rc(&r).map(|x| x.0),
+			Some(-1),
+			"{}",
+			show(&r)
+		);
+		// a PostTransaction AbortOnFail only warns, the failure is
+		// ignored
+		c.hooks = vec![hook(
+			1,
+			"00-abort.hook",
+			&abort("PostTransaction"),
+		)];
+		let r = compare(&fx, &c);
+		assert_eq!(commit_rc(&r), Some((0, 0)), "{}", show(&r));
+	}
+}
+
+// random hook sets from the pieces above on random transactions
+#[test]
+fn fc_hooks_fuzz() {
+	if !in_fakechroot() {
+		return;
+	}
+	let fx = TempRoot::new("tcommit-fc-fuzz");
+	let mut rng = Rng::new(0x400c);
+	let names = ["10-a.hook", "20-b.hook", "z.hook"];
+	let pkg_targets = ["a", "b", "c", "d", "*", "!b"];
+	let path_targets = ["usr/*", "etc/*", "opt/*", "*", "!usr/x"];
+	let n = (iters() / 4000).max(40);
+	let (mut ran_total, mut seen) = (0, BTreeMap::new());
+	for _ in 0..n {
+		let mut c = gen_case(&mut rng);
+		for _ in 0..1 + rng.below(4) {
+			let ops: Vec<&str> = ["Install", "Upgrade", "Remove"]
+				.into_iter()
+				.filter(|_| rng.below(2) == 0)
+				.collect();
+			let ops = match ops.is_empty() {
+				true => vec!["Install"],
+				false => ops,
+			};
+			let ty = pick(&mut rng, &["Package", "Path"]);
+			let target = match ty {
+				"Package" => pick(&mut rng, &pkg_targets),
+				_ => pick(&mut rng, &path_targets),
+			};
+			let when = pick(
+				&mut rng,
+				&["PreTransaction", "PostTransaction"],
+			);
+			let mut action = format!("When = {when}\n");
+			if rng.below(4) == 0 {
+				action += "AbortOnFail\n";
+			}
+			if rng.below(5) == 0 {
+				let dep = pick(&mut rng, &["a", "c>=2", "d"]);
+				action += &format!("Depends = {dep}\n");
+			}
+			action += match rng.below(3) {
+				0 => {
+					"NeedsTargets\nExec = /bin/sh -c 'while \
+					IFS= read -r l; do echo \"t:$l\"; done'\n"
+				}
+				1 => "Exec = /bin/sh -c 'echo fail; exit 1'\n",
+				_ => "Exec = /bin/sh -c 'echo \"$0\"' ok\n",
+			};
+			let text = trigger(&ops, ty, &[target], &action);
+			let name = pick(&mut rng, &names);
+			c.hooks.push(hook(rng.below(2), name, &text));
+		}
+		let r = compare(&fx, &c);
+		ran_total += ran(&r).len();
+		mark(&r, &mut seen);
+	}
+	// gen_case commits packages in about a third of the cases
+	let msg = format!("{ran_total} hooks ran in {n} cases: {seen:?}");
+	assert!(ran_total > n / 4, "{msg}");
 }

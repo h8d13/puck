@@ -4,12 +4,15 @@
 // "core" whose packages sit on a file:// mirror (some already in the
 // cache dir), and package files for -U. a case is a transaction (sync
 // targets, sysupgrade, removals or package files) prepared and then
-// committed; the Rust side runs the same on an alpm_core Handle.
+// committed, with hooks from two hook dirs (they run in a chroot of the
+// root: fakechroot, a copy of /bin/sh); the Rust side runs the same on
+// an alpm_core Handle.
 //
 // recorded on both sides in call order: log lines, events (package
-// operations and retrieve sizes in detail), questions (scripted answers,
-// then the C default 0), progress and download init/completed. log
-// lines the port does not make are dropped on both sides (see kept).
+// operations, retrieve sizes, hook events and their output lines in
+// detail), questions (scripted answers, then the C default 0), progress
+// and download init/completed. log lines the port does not make are
+// dropped on both sides (see kept).
 // compared afterwards: prepare and commit rc/pm_errno, the commit's
 // data list, the logfile, the root, local db and cache trees.
 use std::cell::RefCell;
@@ -47,15 +50,15 @@ use crate::handle::{
 	alpm_db_get_pkg, alpm_errno, alpm_get_localdb, alpm_initialize,
 	alpm_option_add_cachedir, alpm_option_set_checkspace,
 	alpm_option_set_default_siglevel, alpm_option_set_dlcb,
-	alpm_option_set_eventcb, alpm_option_set_local_file_siglevel,
-	alpm_option_set_logcb, alpm_option_set_logfile,
-	alpm_option_set_progresscb, alpm_option_set_questioncb,
-	alpm_option_set_remote_file_siglevel, alpm_pkg_load,
-	alpm_register_syncdb, alpm_release, alpm_trans_init,
+	alpm_option_set_eventcb, alpm_option_set_hookdirs,
+	alpm_option_set_local_file_siglevel, alpm_option_set_logcb,
+	alpm_option_set_logfile, alpm_option_set_progresscb,
+	alpm_option_set_questioncb, alpm_option_set_remote_file_siglevel,
+	alpm_pkg_load, alpm_register_syncdb, alpm_release, alpm_trans_init,
 	alpm_trans_release,
 };
-use crate::hook::strip_stamps;
-use crate::package::{CPkg, list_data, read_pkg};
+use crate::hook::{HookRec, c_hook_rec, hook_rec, strip_stamps};
+use crate::package::{CPkg, list_data, read_pkg, with_strs};
 use crate::trans_prep::{
 	alpm_add_pkg, alpm_remove_pkg, alpm_sync_sysupgrade, alpm_trans_prepare,
 };
@@ -113,6 +116,14 @@ pub enum TcOp {
 	Upgrade(Vec<usize>),
 }
 
+// a hook file: hook dir 0 or 1, file name, text
+#[derive(Clone, Debug)]
+pub struct TcHook {
+	pub dir: usize,
+	pub name: String,
+	pub text: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct TcCase {
 	pub world: TcWorld,
@@ -121,6 +132,21 @@ pub struct TcCase {
 	pub checkspace: bool,
 	// question answers in order, 0 once used up
 	pub answers: Vec<c_int>,
+	// none: the default hook dir (root/usr/share/libalpm/hooks/, absent)
+	pub hooks: Vec<TcHook>,
+}
+
+// hook dir i of the fixture, with its '/'
+fn hookdir(fx: &TempRoot, i: usize) -> Vec<u8> {
+	tc_dir(fx, &format!("hooks{i}"))
+}
+
+// the hook dirs set on the handle, empty for the default
+fn tc_hookdirs(fx: &TempRoot, c: &TcCase) -> Vec<Vec<u8>> {
+	match c.hooks.is_empty() {
+		true => Vec::new(),
+		false => (0..2).map(|i| hookdir(fx, i)).collect(),
+	}
 }
 
 pub const TC_NOLOCK: c_int = 1 << 17;
@@ -241,10 +267,23 @@ fn fresh_dir(path: &Path) {
 	fs::create_dir_all(path).unwrap();
 }
 
-// the world under fx, everything rebuilt. the -U file paths in order
-pub fn tc_write(fx: &TempRoot, w: &TcWorld) -> Vec<Vec<u8>> {
+// the world and hooks under fx, everything rebuilt; with hooks a copy
+// of /bin/sh in the root. the -U file paths in order
+pub fn tc_write(fx: &TempRoot, c: &TcCase) -> Vec<Vec<u8>> {
+	let w = &c.world;
 	let root = fx.dir().join("root");
 	fresh_dir(&root);
+	for i in 0..2 {
+		fresh_dir(&fx.dir().join(format!("hooks{i}")));
+	}
+	for hk in &c.hooks {
+		let dir = fx.dir().join(format!("hooks{}", hk.dir));
+		fs::write(dir.join(&hk.name), &hk.text).unwrap();
+	}
+	if !c.hooks.is_empty() {
+		fs::create_dir_all(root.join("bin")).unwrap();
+		fs::copy("/bin/sh", root.join("bin/sh")).unwrap();
+	}
 	for p in &w.local {
 		for f in &p.files {
 			let path = root.join(f);
@@ -330,6 +369,8 @@ pub enum TcRec {
 	Progress(c_int, Vec<u8>, c_int, usize, usize),
 	// filename, init (optional) or completed (result)
 	Download(Vec<u8>, Result<bool, c_int>),
+	// hook events and scriptlet/hook output lines
+	Hook(HookRec),
 }
 
 // a file conflict: target, type, file, ctarget
@@ -486,6 +527,11 @@ unsafe extern "C" fn event_cb(ctx: *mut c_void, event: *mut c_void) {
 	// SAFETY: every event starts with its type; ctx is the CRec
 	let (rec, kind) =
 		unsafe { (&mut *ctx.cast::<CRec>(), *event.cast::<c_int>()) };
+	// SAFETY: a live event
+	if let Some(h) = unsafe { c_hook_rec(event) } {
+		rec.recs.push(TcRec::Hook(h));
+		return;
+	}
 	// SAFETY: the casts follow kind
 	let r = unsafe {
 		match kind {
@@ -616,7 +662,8 @@ fn c_data(errno: c_int, data: *mut CList) -> TcData {
 // the case on a C handle, the world rebuilt first. the caller holds
 // umask_lock
 pub fn c_commit(fx: &TempRoot, c: &TcCase) -> TcResult {
-	let paths = tc_write(fx, &c.world);
+	let paths = tc_write(fx, c);
+	let hookdirs = tc_hookdirs(fx, c);
 	let logfile = fx.dir().join("log");
 	let _ = fs::remove_file(&logfile);
 	let (root, dbpath) = (cstr(&fx.root()), cstr(&fx.dbpath()));
@@ -645,6 +692,11 @@ pub fn c_commit(fx: &TempRoot, c: &TcCase) -> TcResult {
 		alpm_option_set_local_file_siglevel(h, 0);
 		alpm_option_set_remote_file_siglevel(h, 0);
 		alpm_option_set_checkspace(h, c_int::from(c.checkspace));
+		if !hookdirs.is_empty() {
+			with_strs(&hookdirs, |l| {
+				alpm_option_set_hookdirs(h, l)
+			});
+		}
 		let core = cstr(b"core");
 		let db = alpm_register_syncdb(h, core.as_ptr(), 0);
 		assert!(!db.is_null());
@@ -784,6 +836,10 @@ impl Callbacks for RustRec {
 	}
 
 	fn event(&mut self, event: &Event<'_>) {
+		if let Some(h) = hook_rec(event) {
+			self.recs.borrow_mut().push(TcRec::Hook(h));
+			return;
+		}
 		let r = match event {
 			Event::PackageOperationStart(op)
 			| Event::PackageOperationDone(op) => TcRec::Op(
@@ -877,13 +933,17 @@ fn state_num(s: TransState) -> c_int {
 // the case on an alpm_core Handle, the world rebuilt first. the caller
 // holds umask_lock
 pub fn rust_commit(fx: &TempRoot, c: &TcCase) -> TcResult {
-	let paths = tc_write(fx, &c.world);
+	let paths = tc_write(fx, c);
+	let hookdirs = tc_hookdirs(fx, c);
 	let logfile = fx.dir().join("log");
 	let _ = fs::remove_file(&logfile);
 	let mut h = Handle::initialize(&fx.root(), &fx.dbpath()).unwrap();
 	h.set_logfile(logfile.as_os_str().as_bytes());
 	h.add_cachedir(&tc_dir(fx, "cache"));
 	h.set_checkspace(c_int::from(c.checkspace));
+	if !hookdirs.is_empty() {
+		h.set_hookdirs(&hookdirs);
+	}
 	let server = [b"file://", &fx.path("mirror")[..]].concat();
 	{
 		let db = h.register_syncdb(b"core", 0).unwrap();
