@@ -8,48 +8,9 @@
 use std::ffi::CStr;
 
 use alpm_core::log::{LogTime, leader, local_offset, syslog_message};
-use difftest::{Rng, c_localtime};
+use difftest::{Rng, c_localtime, zone_transitions};
 use pacman_cli::package::format_date;
 use pacman_cli::util::debug_stamp;
-
-const DAY: i64 = 86_400;
-// 1890-01-01 and 2100-01-01
-const SCAN: (i64, i64) = (-2_524_521_600, 4_102_444_800);
-
-fn gmtoff(t: i64) -> i64 {
-	c_localtime(t, c"")
-		.expect("localtime in the scanned years")
-		.1
-}
-
-// the first second of [lo, hi] with hi's offset, lo's differing
-fn bisect(mut lo: i64, mut hi: i64) -> i64 {
-	let want = gmtoff(hi);
-	while hi - lo > 1 {
-		let mid = lo + (hi - lo) / 2;
-		match gmtoff(mid) == want {
-			true => hi = mid,
-			false => lo = mid,
-		}
-	}
-	hi
-}
-
-fn transitions() -> Vec<i64> {
-	let mut out = Vec::new();
-	let mut t = SCAN.0;
-	let mut prev = gmtoff(t);
-	while t < SCAN.1 {
-		let next = t + DAY;
-		let off = gmtoff(next);
-		if off != prev {
-			out.push(bisect(t, next));
-			prev = off;
-		}
-		t = next;
-	}
-	out
-}
 
 fn c_fmt(t: i64, fmt: &CStr) -> Option<Vec<u8>> {
 	c_localtime(t, fmt).map(|(s, _)| s)
@@ -89,7 +50,7 @@ fn compare(t: i64) -> Vec<String> {
 
 fn main() {
 	let mut instants = Vec::new();
-	let edges = transitions();
+	let edges = zone_transitions();
 	for &t in &edges {
 		instants.extend([t - 1, t, t + 1]);
 	}

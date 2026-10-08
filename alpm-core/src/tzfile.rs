@@ -22,7 +22,8 @@
 // - the C caches each rule's change per year and starts unparsed rules
 //   at year 0, so a process whose first lookup falls in year 0 sees a
 //   change at second 0; the port always computes it
-// - leap seconds move tm_sec, not the zone: their records are skipped
+// - leap seconds (right/ zones) are leap_correct and leap_hit, which the
+//   C applies to the broken-down time (strftime::Tm::local)
 
 use std::ffi::OsStr;
 use std::fs::File;
@@ -45,6 +46,10 @@ pub struct Local {
 	pub zone: Vec<u8>,
 	// tm_gmtoff
 	pub gmtoff: i64,
+	// seconds the leap second records take off the local time, and the
+	// leap seconds t sits on (tm_sec 60 and on)
+	pub leap_correct: i64,
+	pub leap_hit: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,6 +181,8 @@ impl Posix {
 			isdst,
 			zone: r.name.clone(),
 			gmtoff: i64::from(r.offset),
+			leap_correct: 0,
+			leap_hit: 0,
 		})
 	}
 }
@@ -482,6 +489,8 @@ struct TzFile {
 	type_idxs: Vec<u8>,
 	types: Vec<TType>,
 	names: Vec<u8>,
+	// transition, correction
+	leaps: Vec<(i64, i64)>,
 	tzspec: Option<Vec<u8>>,
 	// rule_stdoff and rule_dstoff after the read
 	rule_stdoff: i64,
@@ -594,7 +603,19 @@ fn tzfile_read(
 		});
 	}
 	let names = read_n(&mut r, chars)?;
-	read_n(&mut r, num_leaps * (width + 4))?;
+	let raw = read_n(&mut r, num_leaps * (width + 4))?;
+	let leaps = raw
+		.chunks_exact(width + 4)
+		.map(|b| {
+			let at = match width {
+				4 => i64::from(be32(b) as i32),
+				_ => i64::from_be_bytes(
+					b[..8].try_into().unwrap(),
+				),
+			};
+			(at, i64::from(be32(&b[width..]) as i32))
+		})
+		.collect();
 	for t in types.iter_mut().take(num_isstd) {
 		t.isstd = read_n(&mut r, 1)?[0] != 0;
 	}
@@ -633,6 +654,7 @@ fn tzfile_read(
 		type_idxs,
 		types,
 		names,
+		leaps,
 		tzspec,
 		rule_stdoff: stdoff,
 		rule_dstoff: dstoff,
@@ -650,11 +672,35 @@ impl TzFile {
 			isdst: t.isdst,
 			zone: self.name(t.idx),
 			gmtoff: i64::from(t.offset),
+			leap_correct: 0,
+			leap_hit: 0,
 		}
 	}
 
-	// __tzfile_compute for localtime
+	// __tzfile_compute for localtime, the zone then the leap seconds
 	fn local(&self, t: i64) -> Option<Local> {
+		let mut l = self.zone_at(t)?;
+		let Some(i) = self.leaps.iter().rposition(|&(at, _)| t >= at)
+		else {
+			return Some(l);
+		};
+		l.leap_correct = self.leaps[i].1;
+		let before = if i == 0 { 0 } else { self.leaps[i - 1].1 };
+		if t == self.leaps[i].0 && self.leaps[i].1 > before {
+			l.leap_hit = 1;
+			let mut i = i;
+			while i > 0
+				&& self.leaps[i].0 == self.leaps[i - 1].0 + 1
+				&& self.leaps[i].1 == self.leaps[i - 1].1 + 1
+			{
+				l.leap_hit += 1;
+				i -= 1;
+			}
+		}
+		Some(l)
+	}
+
+	fn zone_at(&self, t: i64) -> Option<Local> {
 		let n = self.transitions.len();
 		if n == 0 || t < self.transitions[0] {
 			// the first standard type, or the first of all
@@ -784,15 +830,15 @@ impl Zone {
 		}
 	}
 
-	// localtime(&t)'s tm_isdst, tm_zone, tm_gmtoff; None where the C's
-	// localtime fails (tm_year past int)
+	// localtime(&t)'s zone fields. a file zone checks only the local
+	// year (past its footer a UTC year out of int falls back on the
+	// last transition), a rule zone the UTC year first
 	pub fn local(&self, t: i64) -> Option<Local> {
-		utc_year(t)?;
 		let l = match &self.0 {
 			Kind::File(f) => f.local(t),
 			Kind::Posix(p) => p.local(t),
 		}?;
-		utc_year(t.checked_add(l.gmtoff)?)?;
+		utc_year(t.checked_add(l.gmtoff - l.leap_correct)?)?;
 		Some(l)
 	}
 }

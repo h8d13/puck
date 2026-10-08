@@ -16,8 +16,8 @@ use std::process::{Command, Stdio};
 
 use difftest::{
 	Comp, DbFile, LocalEntry, Rng, Stamped, SyncWorld, c_pacman,
-	cut_archive_text, rust_pacman, section, snapshot, stamped, write_db,
-	write_package,
+	cut_archive_text, localedef, rust_pacman, section, snapshot, stamped,
+	write_db, write_package,
 };
 
 // GOTO_ERR logs "got error <n> at <func> (<C file>: <line>)" with
@@ -51,18 +51,21 @@ struct Run {
 	err: Stamped,
 }
 
+// the environment besides PATH and COLUMNS: zone and locale
+const UTC_C_UTF8: &[(&str, &str)] = &[("TZ", "UTC"), ("LC_ALL", "C.UTF-8")];
+
 // fake root: fakeroot runs bin as uid 0, for the root-only refreshes
 fn run(bin: &Path, args: &[String], cwd: &Path, root: bool) -> Run {
-	run_in(bin, args, cwd, (root, Some("UTC")), <[u8]>::to_vec)
+	run_in(bin, args, cwd, (root, UTC_C_UTF8), <[u8]>::to_vec)
 }
 
-// run as (fake) root or not, in the zone tz (None: no TZ, so
-// /etc/localtime); norm applies to both streams before stamps are read
+// run as (fake) root or not, with env (no TZ: /etc/localtime); norm
+// applies to both streams before stamps are read
 fn run_in(
 	bin: &Path,
 	args: &[String],
 	cwd: &Path,
-	(root, tz): (bool, Option<&str>),
+	(root, env): (bool, &[(&str, &str)]),
 	norm: fn(&[u8]) -> Vec<u8>,
 ) -> Run {
 	let mut cmd = match root {
@@ -78,11 +81,8 @@ fn run_in(
 		}
 	};
 	cmd.args(args).current_dir(cwd).env_clear();
-	if let Some(tz) = tz {
-		cmd.env("TZ", tz);
-	}
+	cmd.envs(env.iter().copied());
 	let o = cmd
-		.env("LC_ALL", "C.UTF-8")
 		.env("COLUMNS", "80")
 		.env("PATH", "/usr/bin:/bin")
 		.stdin(Stdio::null())
@@ -432,7 +432,7 @@ fn world(
 			})
 		};
 		restore();
-		let utc = (root, Some("UTC"));
+		let utc = (root, UTC_C_UTF8);
 		let cr = run_in(&c, &args, dir, utc, without_goto_err);
 		let synced_c = written();
 		restore();
@@ -660,11 +660,13 @@ fn local_time() {
 			let side = |bin: &Path| {
 				restore_sync(dir);
 				let _ = fs::remove_file(&log);
+				let mut env = vec![("LC_ALL", "C.UTF-8")];
+				env.extend(tz.map(|tz| ("TZ", tz)));
 				let run = run_in(
 					bin,
 					&args,
 					dir,
-					(root, tz),
+					(root, &env),
 					<[u8]>::to_vec,
 				);
 				let text = fs::read(&log).unwrap_or_default();
@@ -686,6 +688,108 @@ fn local_time() {
 		}
 	}
 	restore_sync(dir);
+	assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+// the locales pacman's output follows (setlocale(LC_ALL, "")): -Qi/-Si
+// dates (LC_TIME, %Z of the zone) and sizes (LC_NUMERIC), %b of
+// --print-format. built with localedef for LOCPATH, en_US from the
+// host's locale archive; LC_MESSAGES=C keeps the C's titles
+// untranslated (gettext is not ported). ta_IN's %c does not fit the
+// C's 50 bytes, ps_AF's decimal point is two bytes, a missing locale
+// leaves "C"
+#[test]
+fn locales() {
+	let mut rng = Rng::new(0x10c);
+	let w = loop {
+		let w = SyncWorld::generate(&mut rng, "cli-locale");
+		let valid = !w.repos.is_empty()
+			&& w.dbs.iter().all(
+				|d| matches!(d, DbFile::Valid(p) if !p.is_empty()),
+			);
+		if valid {
+			break w;
+		}
+	};
+	owner_pkg(&w);
+	let paths = setup(&w, Some("Never"));
+	let dir = w.fx.dir();
+	let locpath = dir.join("locales");
+	fs::create_dir_all(&locpath).unwrap();
+	let built = [
+		("de_DE.UTF-8", "de_DE"),
+		("ja_JP.UTF-8", "ja_JP"),
+		("ta_IN.UTF-8", "ta_IN"),
+		("ps_AF.UTF-8", "ps_AF"),
+		("en_GB.UTF-8", "en_GB"),
+		("fa_IR.UTF-8", "fa_IR"),
+	];
+	for (name, input) in built {
+		localedef(&locpath, name, input, "UTF-8");
+	}
+	let cache = dir.join("cache.orig/foreign-1.0-1-any.pkg.tar.gz");
+	let foreign = cache.display().to_string();
+	let cmds: [&[&str]; 4] = [
+		&["-Qi", "owner"],
+		&["-Qii"],
+		&["-Si"],
+		&["-Up", "--print-format", "%n %b", &foreign],
+	];
+	let lp = locpath.display().to_string();
+	let mut envs: Vec<Vec<(&str, &str)>> = built
+		.iter()
+		.zip([
+			"Europe/Brussels",
+			"Asia/Tokyo",
+			"Asia/Kolkata",
+			"Asia/Kabul",
+			"Europe/London",
+			"Asia/Tehran",
+		])
+		.map(|((name, _), tz)| {
+			vec![
+				("LOCPATH", lp.as_str()),
+				("LANG", *name),
+				("TZ", tz),
+			]
+		})
+		.collect();
+	envs.push(vec![("LANG", "en_US.UTF-8"), ("TZ", "Europe/Brussels")]);
+	envs.push(vec![
+		("LANG", "C"),
+		("LC_TIME", "en_US.UTF-8"),
+		("LC_NUMERIC", "de_DE.UTF-8"),
+		("LOCPATH", lp.as_str()),
+	]);
+	envs.push(vec![("LANG", "xx_YY.UTF-8")]);
+	let (c, r) = (c_pacman(), rust_pacman());
+	let mut failures = Vec::new();
+	for env in &mut envs {
+		env.push(("LC_MESSAGES", "C"));
+		for cmd in cmds {
+			let mut args: Vec<String> =
+				cmd.iter().map(|s| s.to_string()).collect();
+			args.extend(paths.iter().cloned());
+			let side = |bin: &Path| {
+				run_in(
+					bin,
+					&args,
+					dir,
+					(false, env),
+					<[u8]>::to_vec,
+				)
+			};
+			let (cs, rs) = (side(&c), side(&r));
+			let label = format!("{env:?} {}", cmd.join(" "));
+			let mark = if cs == rs { "equal" } else { "DIFF" };
+			println!("{mark:5}  {label}");
+			if cs != rs {
+				failures.push(format!(
+					"{label}\n{cs:?}\n{rs:?}"
+				));
+			}
+		}
+	}
 	assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -868,7 +972,7 @@ fn xfercommand() {
 				let _ = fs::remove_dir_all(dir.join("cache"));
 				fs::create_dir(dir.join("cache")).unwrap();
 				let _ = fs::remove_file(dir.join("xfer.log"));
-				let utc = (true, Some("UTC"));
+				let utc = (true, UTC_C_UTF8);
 				let run = run_in(
 					bin, &args, &dir, utc, xfer_norm,
 				);

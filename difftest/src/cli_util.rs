@@ -47,7 +47,10 @@ struct SigList {
 unsafe extern "C" {
 	pub(crate) static mut config: *mut ConfigC;
 	pub(crate) fn config_new() -> *mut ConfigC;
-	fn setlocale(category: c_int, locale: *const c_char) -> *mut c_char;
+	pub(crate) fn setlocale(
+		category: c_int,
+		locale: *const c_char,
+	) -> *mut c_char;
 	// wchar_t is a 32-bit int, passed and stored as u32 here
 	fn wcwidth(c: u32) -> c_int;
 	fn mbstowcs(dst: *mut u32, src: *const c_char, n: usize) -> usize;

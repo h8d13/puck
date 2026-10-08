@@ -640,8 +640,9 @@ fn stamp_format() {
 // the zones local time is checked in: no TZ (/etc/localtime), empty
 // (UTC), DST both ways and at :30, offsets at :30/:45, Chatham's +1345,
 // Casablanca's Ramadan shifts, Lord Howe's 30 min DST, POSIX rule and
-// offset strings, a file path and an unknown name (UTC to glibc)
-const ZONES: [Option<&str>; 16] = [
+// offset strings, DST names without rules (posixrules' transitions), a
+// file path and an unknown name (UTC to glibc)
+const ZONES: [Option<&str>; 18] = [
 	None,
 	Some(""),
 	Some("UTC"),
@@ -656,6 +657,8 @@ const ZONES: [Option<&str>; 16] = [
 	Some("Australia/Lord_Howe"),
 	Some("EST5EDT,M3.2.0,M11.1.0"),
 	Some("<+0330>-3:30"),
+	Some("AAA3BBB"),
+	Some("CET-1CEST"),
 	Some("/usr/share/zoneinfo/Asia/Tokyo"),
 	Some("Nowhere/Zone"),
 ];

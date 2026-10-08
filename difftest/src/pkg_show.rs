@@ -51,7 +51,7 @@ pub(crate) struct Tm {
 
 unsafe extern "C" {
 	fn tzset();
-	fn localtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
+	pub(crate) fn localtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
 	pub(crate) fn strftime(
 		s: *mut c_char,
 		max: usize,

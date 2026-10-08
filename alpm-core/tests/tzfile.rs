@@ -27,6 +27,8 @@ fn local(isdst: bool, zone: &str, gmtoff: i64) -> Option<Local> {
 		isdst,
 		zone: zone.as_bytes().to_vec(),
 		gmtoff,
+		leap_correct: 0,
+		leap_hit: 0,
 	})
 }
 

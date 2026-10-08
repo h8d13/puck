@@ -112,6 +112,7 @@ pub const ERA_D_T_FMT: usize = 48;
 pub const ERA_T_FMT: usize = 49;
 const TIME_ERA_NUM_ENTRIES: usize = 50;
 const TIME_ERA_ENTRIES: usize = 51;
+const TIME_CODESET: usize = 110;
 pub const ALTMON_1: usize = 111;
 pub const ABALTMON_1: usize = 135;
 const TIME_ITEMS: usize = 159;
@@ -891,6 +892,7 @@ impl LcTime {
 		items[D_FMT] = b"%m/%d/%y".to_vec();
 		items[T_FMT] = b"%H:%M:%S".to_vec();
 		items[T_FMT_AMPM] = b"%I:%M:%S %p".to_vec();
+		items[TIME_CODESET] = b"ANSI_X3.4-1968".to_vec();
 		LcTime {
 			items,
 			alt_digits: Vec::new(),
@@ -1015,6 +1017,21 @@ impl Locale {
 		}
 	}
 
+	// "C.UTF-8" built in: what the port is before localize, the locale
+	// difftest's C side sets for the frontend
+	pub fn c_utf8() -> Locale {
+		let mut l = Locale::c();
+		l.codeset = b"UTF-8".to_vec();
+		l.time.items[TIME_CODESET] = b"UTF-8".to_vec();
+		l
+	}
+
+	// the C locale's charset, ANSI_X3.4-1968: mbrtowc refuses bytes
+	// past 0x7f
+	pub fn is_ascii(&self) -> bool {
+		self.codeset == b"ANSI_X3.4-1968"
+	}
+
 	// setlocale(LC_ALL, "") with this environment: None where glibc
 	// fails and the process stays in "C"
 	pub fn from_env(
@@ -1104,12 +1121,12 @@ fn process_env(name: &str) -> Option<Vec<u8>> {
 	std::env::var_os(name).map(|v| v.into_encoded_bytes())
 }
 
-// the global locale: "C" until localize, like a process before
-// setlocale
+// the global locale: C.UTF-8 until localize (the port's library
+// default), then the environment's or "C" where setlocale fails
 pub fn current() -> &'static Locale {
 	CURRENT.get_or_init(|| {
 		if !LOCALIZED.load(Ordering::Relaxed) {
-			return Locale::c();
+			return Locale::c_utf8();
 		}
 		Locale::from_env(&process_env).unwrap_or_else(Locale::c)
 	})

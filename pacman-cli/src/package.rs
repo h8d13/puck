@@ -185,7 +185,7 @@ impl Titles {
 // where localtime fails
 pub fn format_date(t: i64) -> Option<Vec<u8>> {
 	let l = tzfile::current().local(t)?;
-	let tm = Tm::at(t, l.gmtoff, l.isdst, &l.zone)?;
+	let tm = Tm::local(t, &l)?;
 	Some(
 		strftime(50, b"%c", &tm, setlocale::current())
 			.unwrap_or_default(),

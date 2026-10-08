@@ -11,8 +11,9 @@
 //   caller knows what its buffer held
 // - a subformat (%c, %x, %EY, ...) is measured first like the C's, so it
 //   goes in whole or not at all
-// - %s is mktime(tm): tm comes from localtime here, so it is the second
-//   tm was made from
+// - %s is mktime(tm), here the second tm was made from: glibc's mktime
+//   gives another second for some historic transitions (Europe/Paris in
+//   1944); pacman never formats %s
 // - %Z with an empty tm_zone takes tzname after tzset() in the C; the
 //   names a zone gives come from the same data, the port keeps it empty
 
@@ -21,6 +22,7 @@ use crate::setlocale::{
 	ERA_D_FMT, ERA_D_T_FMT, ERA_T_FMT, Era, Locale, MON_1, PM_STR, T_FMT,
 	T_FMT_AMPM, era_date_le,
 };
+use crate::tzfile::Local;
 use crate::util::until_nul;
 
 // struct tm as localtime fills it, and the second it came from (%s)
@@ -81,6 +83,18 @@ impl Tm {
 			zone: zone.to_vec(),
 			t,
 		})
+	}
+}
+
+impl Tm {
+	// localtime's tm: the zone's offset less the leap second correction,
+	// tm_sec past 59 on a leap second
+	pub fn local(t: i64, l: &Local) -> Option<Tm> {
+		let off = l.gmtoff.checked_sub(l.leap_correct)?;
+		let mut tm = Tm::at(t, off, l.isdst, &l.zone)?;
+		tm.gmtoff = l.gmtoff;
+		tm.sec += l.leap_hit;
+		Some(tm)
 	}
 }
 
@@ -229,7 +243,6 @@ fn internal(
 			f += 1;
 			continue;
 		}
-		let start = f;
 		let mut s = plain;
 		let mut change_case = false;
 		loop {
@@ -292,7 +305,12 @@ fn internal(
 				case_up(&mut s, change_case);
 				Act::Bytes(name(DAY_1, wday))
 			}
-			Some(b'b' | b'h') if modifier != b'E' => {
+			// '#' upper-cases %b even when E makes it a bad format
+			Some(b'b' | b'h') if modifier == b'E' => {
+				case_up(&mut s, change_case);
+				Act::Bad
+			}
+			Some(b'b' | b'h') => {
 				case_up(&mut s, change_case);
 				match modifier {
 					b'O' => Act::Bytes(name(
@@ -550,9 +568,14 @@ fn internal(
 				}
 			}
 			Act::Bad => {
-				// the format from its '%' up to here; a '%' at the
-				// end of the format is that '%' and its flags
+				// back to the nearest '%': the conversion's own, or
+				// the conversion character when that is a '%'. at
+				// the end of the format the '%' and its flags
 				let end = if c.is_none() { f } else { f + 1 };
+				let start = fmt[..end]
+					.iter()
+					.rposition(|&b| b == b'%')
+					.unwrap_or(0);
 				out.cpy(&s, &fmt[start..end], loc)?;
 				f = end;
 				continue;
