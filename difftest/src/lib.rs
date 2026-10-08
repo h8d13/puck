@@ -1,9 +1,11 @@
 // safe wrappers over the C reference, so tests compare like with like.
 // one module per C source file, shared helpers here.
 use std::ffi::{CStr, CString, c_char, c_void};
+use std::sync::{Mutex, MutexGuard};
 
 mod backup;
 mod be_local;
+mod be_local_write;
 mod be_package;
 mod be_sync;
 mod check;
@@ -43,6 +45,7 @@ mod version;
 
 pub use backup::*;
 pub use be_local::*;
+pub use be_local_write::*;
 pub use be_package::*;
 pub use be_sync::*;
 pub use check::*;
@@ -78,6 +81,19 @@ pub use sync_ro::*;
 pub use util::*;
 pub use util_common::*;
 pub use version::*;
+
+// the umask is process wide: C that sets it (dload's _getumask,
+// umask(0) in _alpm_makepath_mode and _alpm_local_db_prepare,
+// umask(0022) in _alpm_unpack and _alpm_local_db_write) changes the
+// modes of files every other thread creates meanwhile, port and fixtures
+// alike. a case running such C, or comparing modes of files created next
+// to it, holds this lock for both sides. taken before a C handle (the
+// ALPM lock), never while holding one
+static UMASK: Mutex<()> = Mutex::new(());
+
+pub fn umask_lock() -> MutexGuard<'static, ()> {
+	UMASK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 // libc FILE, opaque. one declaration for every module, rustc flags
 // clashing extern signatures across modules
