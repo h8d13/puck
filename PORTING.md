@@ -74,7 +74,7 @@ already downloaded sync dbs.
 | local db reader (`be_local.c`, owned desc/files reader) | done (reading side) |
 | sync db reader (`be_sync.c`, owned desc/files reader, `alpm-compress`) | done (reading side) |
 | pacman.conf (`conf.c`) | done (parsing, `setup_libalpm`, `register_repo`, XferCommand) |
-| db layer and cache (`db.c`), minimal handle (`handle.c`) | done (no search, update, signatures) |
+| db layer and cache (`db.c`), handle (`handle.c`) | done (search, update, signature validation through the handle's keyring) |
 | POSIX ERE for `-Ss`/`-Qs` (glibc regcomp/regexec, C.UTF-8) | done |
 | `-Qk`/`-Qkk` (`check.c`) + local mtree reading (`alpm-core::mtree`, libarchive's reader) | done |
 | argument parsing (`pacman.c` parseargs, glibc getopt_long) | done |
@@ -94,24 +94,28 @@ known (text file), testpkg module 486/550 + 64 log lines only (the
 mtree lines now carry libarchive's texts);
 pacman-conf drop-in 13/13. On pacman: the two left are `--debug` in the
 default-SigLevel world (signing debug lines, GOTO_ERR's C file:line).
+**Gate met** except those two: GOTO_ERR/RET_ERR lines carry the C's
+source file and line and are not logged by design; the signing debug
+lines are a follow-up.
 
 ### 2. Sync databases (`-Sy`)
 
 | Part | State |
 |---|---|
 | downloads (`dload.c`): parallel, resume, mirrors, sandbox user | done (`reqwest`, sandbox helper wired into the Handle) |
-| signature verification (`signing.c`) | done (`gpg` over `--status-fd`, argv checked against gpgme's); Handle/db wiring pending |
+| signature verification (`signing.c`) | done (`gpg` over `--status-fd`, argv checked against gpgme's; the Handle owns the keyring, sync dbs and packages validate through it) |
 | db update/validation (`be_sync.c` writing side) | done (`alpm_db_update`, `-Sy`/`-Syy`/`-Fy` with progress bars, sandboxed) |
 
 Gate: pactest sync/download tests against the Rust binary. `-Sy`/`-Syy`/
 `-Fy` parity runs (fakeroot, `file://` mirror, fetched dbs compared) are
-in the milestone 1 gate and equal.
+in the milestone 1 gate and equal. **Gate met**: every sync/download
+pactest passes within the milestone 3 suite (master f46c525).
 
 ### 3. Transactions (`-S`, `-U`, `-R`)
 
 | Part | State |
 |---|---|
-| package files (`be_package.c`: `.PKGINFO` and `.MTREE` readers owned, `alpm-compress`) | partial (no signatures) |
+| package files (`be_package.c`: `.PKGINFO` and `.MTREE` readers owned, `alpm-compress`) | done (signatures: `.sig` and base64, every level) |
 | deps resolution (`deps.c` rest + `graph.c`), `conflict.c`, `diskspace.c` | done |
 | `hook.c`, scriptlets (`_alpm_runscriptlet`), `_alpm_run_chroot`, `_alpm_ldconfig` | done (on unified callbacks, take `&mut Handle`) |
 | transaction prepare phase (`trans.c` model, `alpm_add/remove_pkg`, sysupgrade, sync/remove prepare, frontend prepare) | done |
@@ -127,7 +131,8 @@ script tests): meson's 338 ok / 6 expected fail, reproduced by
 18b884f) -> 337 (soft interrupt handler; unchanged by the owned mtree
 reader) -> 338 ok / 6 xfail / 0 fail / 0 unexpected pass (dload
 redirects without connection reuse), vercmptest and the script tests
-included.
+included. **Gate met** on master f46c525: `scripts/upstream-suite.sh
+target/release` exits 0.
 
 ### 4. Drop-in
 
@@ -680,7 +685,7 @@ Follow-ups raised by port units:
 | XferCommand via a sandbox helper exec mode (`alpm_sandbox_setup_child` from conf.c) | sandbox | done: `conf::XferCommand`, `sandbox::SandboxExec` |
 | conf difftest abort under long TMPDIR | sandbox, dbwrite reports | done: C one-byte heap overflow in `escape_chars` (UPSTREAM.md), fixture avoids it |
 | `alpm_extract_keyid` wired into -Sii/-Qii `sig_keys` | sync | todo (ported in signing) |
-| `Handle` owns `signing::Keyring` (gpgdir, known_keys) and implements `SigCallbacks`; `Db::register_sync` calls `be_sync::sync_db_validate` | signing | with the callbacks unit |
+| `Handle` owns `signing::Keyring` (gpgdir, known_keys) and implements `SigCallbacks`; `Db::register_sync` calls `be_sync::sync_db_validate` | signing | done |
 | query.rs's new_version copy onto `alpm_core::sync::sync_get_new_version` | query | todo (ported in transprep) |
 | `pacman_sync` dispatches to `sync_trans` (needs a `Ui`), re-export `TRANS_FLAG_*` in pacman.rs | transprep | done |
 | "found cached pkg" debug line into `util::filecache_find` (local wrapper in sync.rs) | transprep | todo |
