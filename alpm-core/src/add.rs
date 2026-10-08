@@ -41,8 +41,8 @@ use crate::trans::{
 use crate::util::{
 	CALLER_PREFIX, PATH_MAX, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK,
 	S_IFMT, archive_io_err, check_padding, cleanup_pathname,
-	compute_md5sum, enter, llstat, mkdir_mode, open_archive, strerror,
-	until_nul,
+	compute_md5sum, enter, ldconfig, llstat, mkdir_mode, open_archive,
+	strerror, until_nul,
 };
 
 use LogLevel::{Debug, Error, Warning};
@@ -155,7 +155,7 @@ pub fn add_pkg(
 // the per-package commit of add.c: extract_db_file, extract_single_file,
 // try_rename, perform_extraction, get_install_time, commit_single_pkg
 // and the per-package step of _alpm_upgrade_packages. the driver over
-// trans.add (interrupted state, ldconfig) comes with alpm_trans_commit.
+// trans.add (interrupted state, ldconfig) is upgrade_packages at the end.
 // an upgrade removes the old package through remove.rs first.
 //
 // perform_extraction's archive_write_disk is translated below (Writer)
@@ -1787,4 +1787,42 @@ pub fn upgrade_package(
 ) -> Result<(), Errno> {
 	commit_single_pkg(h, t, pkg_current, pkg_count)
 		.map_err(|_| Errno::TransAbort)
+}
+
+// _alpm_upgrade_packages: each target of trans.add through
+// upgrade_package, in order, until the transaction is interrupted. the
+// targets are lent out of the transaction meanwhile (flags and
+// skip_remove stay readable). a failure interrupts the transaction and
+// skips ldconfig; Err is ALPM_ERR_TRANS_ABORT
+pub(crate) fn upgrade_packages(h: &mut Handle) -> Result<(), Errno> {
+	let trans = h.trans_mut().ok_or(Errno::TransNull)?;
+	let mut add = std::mem::take(&mut trans.add);
+	let pkg_count = add.len();
+	let (mut ret, mut run_ldconfig) = (Ok(()), true);
+	for (i, t) in add.iter_mut().enumerate() {
+		if trans_state(h) == Some(TransState::Interrupted) {
+			// the C returns here, before ldconfig
+			run_ldconfig = false;
+			break;
+		}
+		if upgrade_package(h, t, i + 1, pkg_count).is_err() {
+			if let Some(trans) = h.trans_mut() {
+				trans.state = TransState::Interrupted;
+			}
+			// running ldconfig now could possibly screw the system
+			run_ldconfig = false;
+			ret = Err(Errno::TransAbort);
+		}
+	}
+	if let Some(trans) = h.trans_mut() {
+		trans.add = add;
+	}
+	if run_ldconfig && pkg_count > 0 {
+		ldconfig(h);
+	}
+	ret
+}
+
+fn trans_state(h: &Handle) -> Option<TransState> {
+	h.trans().map(|t| t.state)
 }

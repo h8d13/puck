@@ -2,14 +2,15 @@
 // Handle::trans), alpm_trans_init/prepare/interrupt/release and the
 // getters, _alpm_runscriptlet with its grep helper.
 //
-// alpm_trans_commit is not here: a prepared transaction (STATE_PREPARED,
-// add/remove sorted, download sizes and oldpkgs set) waits in the Handle
-// for the commit port (_alpm_sync_load/_alpm_sync_check/_alpm_sync_commit,
-// _alpm_remove_packages, hooks). the C's trans->add holds pointers into
+// alpm_trans_commit runs a prepared transaction (STATE_PREPARED,
+// add/remove sorted, download sizes and oldpkgs set) through sync.rs
+// (load, check, commit) or remove.rs, between the transaction hooks.
+// the C's trans->add holds pointers into
 // the sync caches and mutates them (reason, removes, oldpkg,
 // download_size); here every target is an owned TransPkg copy, so the
-// caches stay as loaded. pm_errno comes back as Err, the data list of
-// alpm_trans_prepare as PrepareData.
+// caches stay as loaded; the commit replaces sync targets by their
+// loaded package files like the C. pm_errno comes back as Err, the data
+// lists of alpm_trans_prepare/commit as PrepareData/CommitData.
 
 use std::collections::hash_map::RandomState;
 use std::ffi::c_int;
@@ -24,17 +25,18 @@ use pacman_common::util_common::safe_fgets;
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
 use crate::be_local::{INFRQ_ALL, INFRQ_DESC};
-use crate::callbacks::{Callbacks, LogLevel};
-use crate::conflict::Conflict;
+use crate::callbacks::{Callbacks, Event, HookWhen, LogLevel};
+use crate::conflict::{Conflict, FileConflict};
 use crate::db::{DB_USAGE_INSTALL, DB_USAGE_UPGRADE};
 use crate::deps::{DbPkgs, DepMissing, DepsEnv, sortbydeps};
 use crate::error::Errno;
 use crate::handle::Handle;
+use crate::hook::{AddTarget, Targets, hook_run};
 use crate::package::Package;
 use crate::pkghash::PkgHash;
 use crate::util::{
-	PATH_MAX, SCRIPTLET_SHELL, copyfile, makepath_mode, run_chroot,
-	strerror, unpack_single, until_nul,
+	CALLER_PREFIX, PATH_MAX, SCRIPTLET_SHELL, copyfile, makepath_mode,
+	run_chroot, strerror, unpack_single, until_nul,
 };
 use crate::{remove, sync};
 
@@ -97,7 +99,7 @@ fn mkdtemp(template: &[u8]) -> Option<Vec<u8>> {
 }
 
 // "is not readable" debug line of _alpm_access with a NULL dir
-fn readable(path: &[u8], cb: &mut dyn Callbacks) -> bool {
+pub(crate) fn readable(path: &[u8], cb: &mut dyn Callbacks) -> bool {
 	let flags = AtFlags::SYMLINK_NOFOLLOW;
 	let Err(e) = accessat(CWD, os(path), Access::READ_OK, flags) else {
 		return true;
@@ -328,6 +330,35 @@ impl PrepareError {
 impl From<Errno> for PrepareError {
 	fn from(errno: Errno) -> Self {
 		PrepareError::new(errno, PrepareData::None)
+	}
+}
+
+// the data list of a failed alpm_trans_commit
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum CommitData {
+	#[default]
+	None,
+	// the file conflict check (ALPM_ERR_FILE_CONFLICTS)
+	FileConflicts(Vec<FileConflict>),
+	// filenames of cached packages that failed to load or differ from
+	// their db entry. the C keeps them whatever pm_errno ends up as
+	Invalid(Vec<Vec<u8>>),
+}
+
+// a failed alpm_trans_commit: pm_errno as the C leaves it (Ok where it
+// fails without one) and *data
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitError {
+	pub errno: Errno,
+	pub data: CommitData,
+}
+
+impl From<Errno> for CommitError {
+	fn from(errno: Errno) -> Self {
+		CommitError {
+			errno,
+			data: CommitData::None,
+		}
 	}
 }
 
@@ -608,5 +639,98 @@ fn prepare(h: &mut Handle, trans: &mut Trans) -> Result<(), PrepareError> {
 		with_view(h, |v, cb| sort_targets(v, cb, trans));
 	}
 	trans.state = TransState::Prepared;
+	Ok(())
+}
+
+// the transaction's targets for hook.rs: trans.add with their oldpkgs,
+// trans.remove. the transaction leaves the handle for the run
+fn run_hooks(h: &mut Handle, when: HookWhen) -> bool {
+	let trans = h.set_trans(None).expect("committing");
+	let add: Vec<AddTarget> = trans
+		.add
+		.iter()
+		.map(|t| AddTarget {
+			pkg: &t.pkg,
+			oldpkg: t.oldpkg.as_ref(),
+		})
+		.collect();
+	let remove: Vec<&Package> = trans.remove.iter().collect();
+	let targets = Targets {
+		add: &add,
+		remove: &remove,
+	};
+	let ok = hook_run(h, &targets, when);
+	h.set_trans(Some(trans));
+	ok
+}
+
+fn set_state(h: &mut Handle, state: TransState) {
+	h.trans_mut().expect("committing").state = state;
+}
+
+fn logaction(h: &mut Handle, msg: &[u8]) {
+	// alpm_logaction's result is not checked
+	let _ = h.logaction(CALLER_PREFIX, msg);
+}
+
+// alpm_trans_commit: a prepared transaction that holds the lock. with
+// targets: loaded (downloads, keyring, validation; DOWNLOADONLY stops
+// there) and checked (file conflicts, disk space). then the
+// PreTransaction hooks, the removal or the sync commit, and unless
+// interrupted the PostTransaction hooks. the state ends Committed after
+// a commit that ran, interrupted or not
+pub fn trans_commit(h: &mut Handle) -> Result<(), CommitError> {
+	let trans = h.trans().ok_or(Errno::TransNull)?;
+	if trans.state != TransState::Prepared {
+		return Err(Errno::TransNotPrepared.into());
+	}
+	if trans.flags & TRANS_FLAG_NOLOCK != 0 {
+		return Err(Errno::TransNotLocked.into());
+	}
+	// nothing to do, nothing to complain about
+	if trans.add.is_empty() && trans.remove.is_empty() {
+		return Ok(());
+	}
+	let (flags, sync) = (trans.flags, !trans.add.is_empty());
+
+	if sync {
+		sync::sync_load(h)?;
+		if flags & TRANS_FLAG_DOWNLOADONLY != 0 {
+			return Ok(());
+		}
+		sync::sync_check(h)?;
+	}
+	let hooks = flags & TRANS_FLAG_NOHOOKS == 0;
+	if hooks && !run_hooks(h, HookWhen::PreTransaction) {
+		return Err(Errno::TransHookFailed.into());
+	}
+
+	set_state(h, TransState::Committing);
+	logaction(h, b"transaction started\n");
+	h.callbacks().event(&Event::TransactionStart);
+	let r = match sync {
+		false => {
+			remove::remove_packages(h, true);
+			Ok(())
+		}
+		true => sync::sync_commit(h),
+	};
+	if let Err(e) = r {
+		logaction(h, b"transaction failed\n");
+		return Err(e.into());
+	}
+
+	if h.trans()
+		.is_some_and(|t| t.state == TransState::Interrupted)
+	{
+		logaction(h, b"transaction interrupted\n");
+	} else {
+		h.callbacks().event(&Event::TransactionDone);
+		logaction(h, b"transaction completed\n");
+		if hooks {
+			run_hooks(h, HookWhen::PostTransaction);
+		}
+	}
+	set_state(h, TransState::Committed);
 	Ok(())
 }

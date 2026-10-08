@@ -560,14 +560,14 @@ impl Handle {
 		&self.download
 	}
 
-	// alpm_fetch_pkgurl with the remote file siglevel, the handle's
-	// callbacks and fetchcb. no sandbox child yet (sandbox.c)
-	pub fn fetch_pkgurl<U: AsRef<[u8]>>(
+	// f with a Downloader on the handle's download settings, state,
+	// callbacks and fetchcb, next to the cachedirs. no sandbox child
+	// yet (sandbox.c)
+	pub(crate) fn with_downloader<R>(
 		&mut self,
-		urls: &[U],
-	) -> Result<Vec<Vec<u8>>, Errno> {
+		f: impl FnOnce(&mut Downloader, &mut Vec<Vec<u8>>) -> R,
+	) -> R {
 		let settings = self.dload_settings();
-		let siglevel = self.remote_file_siglevel();
 		let mut dl = Downloader {
 			settings: &settings,
 			state: &mut self.download,
@@ -575,7 +575,18 @@ impl Handle {
 			fetch: self.fetch.as_deref_mut().map(|f| f as _),
 			sandbox: None,
 		};
-		dl.fetch_pkgurl(&mut self.cachedirs, siglevel, urls)
+		f(&mut dl, &mut self.cachedirs)
+	}
+
+	// alpm_fetch_pkgurl with the remote file siglevel
+	pub fn fetch_pkgurl<U: AsRef<[u8]>>(
+		&mut self,
+		urls: &[U],
+	) -> Result<Vec<Vec<u8>>, Errno> {
+		let siglevel = self.remote_file_siglevel();
+		self.with_downloader(|dl, cachedirs| {
+			dl.fetch_pkgurl(cachedirs, siglevel, urls)
+		})
 	}
 
 	// alpm_option_get_overwrite_files and friends, like noupgrade
