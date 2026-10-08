@@ -32,6 +32,7 @@ use crate::callbacks::{Callbacks, LogLevel};
 use crate::deps::dep_from_string;
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
+use crate::filter::Filter;
 use crate::mtree;
 use crate::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
@@ -146,7 +147,7 @@ fn open_err(e: io::Error) -> Error {
 fn open_archive(
 	cb: &mut dyn Callbacks,
 	path: &[u8],
-) -> Result<(tar::Archive<util::Filter>, i64, u64), Error> {
+) -> Result<(tar::Archive<Filter>, i64, u64), Error> {
 	log(cb, LogLevel::Debug, &[b"opening archive ", path, b"\n"]);
 	let archive = util::open_archive(path).map_err(|e| {
 		let text = util::strerror(&e);

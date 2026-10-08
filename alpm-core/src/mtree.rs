@@ -15,15 +15,15 @@
 // texts are kept where pacman logs them.
 
 use std::fs;
-use std::io::{self, Cursor, Read};
+use std::io::{self, Read};
 use std::str::FromStr;
 
-use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
 use alpm_types::{Md5Checksum, Sha256Checksum};
 
+use crate::filter::{self, Filter};
 use crate::util::{
-	Filter, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG,
-	Source, archive_io_err, c_path, until_nul,
+	S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, c_path,
+	until_nul,
 };
 
 // readline's limit in read_mtree, next_line's in detect_form
@@ -1034,83 +1034,15 @@ pub fn read(data: &[u8]) -> Result<Vec<Entry>, Error> {
 // the data through the filter: what the open reads fails it, after that
 // a failed read is the end of the data to readline (__archive_read_ahead
 // gives NULL, UPSTREAM.md)
-fn read_filtered<R: Source>(
-	mut filter: Filter<R>,
-) -> Result<Vec<Entry>, Error> {
-	filter.open().map_err(Error::Open)?;
+fn read_filtered(mut filter: Filter) -> Result<Vec<Entry>, Error> {
 	let mut data = Vec::new();
 	let _ = filter.read_to_end(&mut data);
 	read(&data)
 }
 
-// archive_read_support_filter_all's bidders for the filters alpm-compress
-// has, on all of the data: gzip walks its header (peek_at_header: deflate,
-// no reserved flags, extra field, name and comment ended, header crc),
-// bzip2 needs a block or end-of-stream magic, zstd 8 bytes (skippable
-// frames first are not modelled). data no bidder takes is read as it is
-fn bid_filter(d: &[u8]) -> DecompressionSettings {
-	let gzip = || {
-		if d.len() < 10 || !d.starts_with(b"\x1f\x8b\x08") {
-			return false;
-		}
-		let flags = d[3];
-		if flags & 0xe0 != 0 {
-			return false;
-		}
-		let mut len = 10;
-		if flags & 4 != 0 {
-			if d.len() < 12 {
-				return false;
-			}
-			len += usize::from(u16::from_le_bytes([d[10], d[11]]))
-				+ 2;
-		}
-		// file name, then comment: nul-terminated within the data
-		for bit in [8, 16] {
-			if flags & bit == 0 {
-				continue;
-			}
-			loop {
-				len += 1;
-				if d.len() < len {
-					return false;
-				}
-				if d[len - 1] == 0 {
-					break;
-				}
-			}
-		}
-		flags & 2 == 0 || d.len() >= len + 2
-	};
-	let bzip2 = || {
-		d.len() >= 14
-			&& d.starts_with(b"BZh")
-			&& (b'1'..=b'9').contains(&d[3])
-			&& (d[4..10] == *b"\x31\x41\x59\x26\x53\x59"
-				|| d[4..10] == *b"\x17\x72\x45\x38\x50\x90")
-	};
-	if gzip() {
-		DecompressionSettings::Gzip
-	} else if bzip2() {
-		DecompressionSettings::Bzip2
-	} else if d.starts_with(b"\xfd7zXZ\x00") {
-		DecompressionSettings::Xz
-	} else if d.len() >= 8 && d.starts_with(b"\x28\xb5\x2f\xfd") {
-		DecompressionSettings::Zstd
-	} else {
-		DecompressionSettings::None
-	}
-}
-
 // archive_read_open_memory on .MTREE data (build_filelist_from_mtree)
 pub fn read_memory(data: Vec<u8>) -> Result<Vec<Entry>, Error> {
-	let settings = bid_filter(&data);
-	let decoder = CompressionDecoder::from_reader(
-		Cursor::new(data),
-		settings.clone(),
-	)
-	.map_err(|e| Error::Open(archive_io_err(e)))?;
-	read_filtered(Filter::new(decoder, &settings))
+	read_filtered(filter::open_memory(data).map_err(Error::Open)?)
 }
 
 // archive_read_open_filename on a local db mtree file: read whole, the

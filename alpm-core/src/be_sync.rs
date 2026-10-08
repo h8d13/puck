@@ -20,7 +20,6 @@ use std::io::{self, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use alpm_compress::decompression::DecompressionSettings;
 use rustix::fs::{Access, Mode};
 use rustix::process::umask;
 
@@ -32,6 +31,7 @@ use crate::dload::{
 };
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
+use crate::filter::{Code, Filter};
 use crate::handle::{Handle, SyncParts};
 use crate::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
@@ -43,7 +43,7 @@ use crate::signing::{
 	SIG_DATABASE_UNKNOWN_OK, check_pgp_helper, process_siglist,
 };
 use crate::util::{
-	self, ArchiveFgets, DataBlocks, Entry, Filter, PATH_MAX, alpm_access,
+	self, ArchiveFgets, DataBlocks, Entry, PATH_MAX, alpm_access,
 	get_fullpath, hash_sdbm, makepath, parsedate, splitname, strtoofft,
 	until_nul,
 };
@@ -347,15 +347,16 @@ pub fn get_validation(pkg: &Package) -> c_int {
 	if v == 0 { PKG_VALIDATION_NONE } else { v }
 }
 
-// estimate_package_count's bytes per package for the filter libarchive
-// detects. zstd has no case there and takes the default
-fn bytes_per_package(settings: &DecompressionSettings) -> u64 {
-	match settings {
-		DecompressionSettings::Gzip => 464,
-		DecompressionSettings::Bzip2 => 394,
-		DecompressionSettings::Xz => 400,
-		DecompressionSettings::Zstd => 500,
-		DecompressionSettings::None => 3015,
+// estimate_package_count's bytes per package for the top filter
+// libarchive picked (archive_filter_code(a, 0)); lzip, lz4, zstd and the
+// program filters have no case there and take the default
+fn bytes_per_package(code: Code) -> u64 {
+	match code {
+		Code::None => 3015,
+		Code::Gzip | Code::Compress => 464,
+		Code::Bzip2 => 394,
+		Code::Lzma | Code::Xz => 400,
+		_ => 500,
 	}
 }
 
@@ -370,7 +371,7 @@ fn open_archive(
 		_ => Error::Open(e),
 	})?;
 	let size = archive.meta.len();
-	let mut est = size / bytes_per_package(&archive.settings) + 1;
+	let mut est = size / bytes_per_package(archive.code) + 1;
 	// files dbs are about four times larger on average
 	if dbext == b".files" {
 		est /= 4;

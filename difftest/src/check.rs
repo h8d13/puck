@@ -47,7 +47,7 @@ unsafe extern "C" {
 		archive: *mut c_void,
 	) -> c_int;
 
-	fn archive_error_string(a: *mut c_void) -> *const c_char;
+	pub(crate) fn archive_error_string(a: *mut c_void) -> *const c_char;
 	fn archive_entry_pathname(e: *mut c_void) -> *const c_char;
 	fn archive_entry_filetype(e: *mut c_void) -> u32;
 	fn archive_entry_perm(e: *mut c_void) -> u32;
