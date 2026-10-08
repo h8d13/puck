@@ -509,6 +509,14 @@ declarations. No existing MR found for it.
 - `_cache_mtree_next` turns ARCHIVE_WARN into -1, so `-Qkk` stops silently
   at the first warning and prints totals as if complete (be_local.c:296-
   309). **packager**
+- libarchive's mtree `readline` returns 0 (end of data) whenever
+  `__archive_read_ahead` gives NULL, a failed filter included; its
+  `bytes_read < 0` check after that is dead
+  (archive_read_support_format_mtree.c, libarchive 3.8.9). A gzip'd
+  local mtree cut past the open's read-ahead (128 KiB of text) reads as
+  a shorter complete one: `-Qkk` checks part of the files and reports
+  success. **env** (pacman writes the file; disk full or a crash cuts
+  it), libarchive bug
 - NoExtract for `.INSTALL`/`.CHANGELOG` is matched at `filepath + rootlen`
   of a dbpath-based path: wrong string, and uninitialized bytes when that
   path is shorter than root (check.c:34, 351). **local**
@@ -683,6 +691,13 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
 - libarchive reads a directory entry's data (type '5', or a regular
   entry ending in '/') as the next header, ending extraction quietly with
   success. **packager**
+- `_alpm_unpack` and the add.c extraction loops stop at any header
+  result other than ARCHIVE_OK, ARCHIVE_FATAL included (util.c:367,
+  add.c:550/564): a compressed package cut where a header lies in the
+  failed 64/128 KiB filter block extracts the entries before it and
+  returns success. **none**: pacman loads every package in full first
+  (`-U`, sync), and that walk fails on any cut with LIBARCHIVE; only a
+  file changing between load and commit gets here (**env**)
 
 ## add.c commit minor
 
@@ -981,3 +996,16 @@ pacman's formats. Same practice labels, judged against real databases.
 - alpm-compress gzip uses `GzDecoder`, reads only the first member
   (libarchive and gzip read all; `MultiGzDecoder` would match).
   **packager**
+- alpm-compress decoders are not lenient on cut streams: gzip, bzip2,
+  xz and zstd return UnexpectedEof at every cut point of a stream
+  (flate2 1.1.10 `zio::read`/`read_into`, liblzma 0.4.8 "premature eof",
+  bzip2 0.6.1, zstd "incomplete frame"). The parity gap was libarchive
+  handing data on in whole filter blocks, handled in the port
+  (`util::Filter`). **none**
+- alpm-compress `TarballReader` only wraps a `CompressionDecoder` (built
+  from a `File`): a tarball cannot be read through another `Read` layer
+  or from memory, so the port uses the tar crate directly. **api**
+- alpm-compress bzip2 uses `BzDecoder::new`, single stream (bzip2 0.6.1
+  `multi: false`); libarchive reads concatenated streams (pbzip2
+  output). From source, not exercised. **packager** (makepkg's
+  `COMPRESSBZ2` set to a parallel bzip2)

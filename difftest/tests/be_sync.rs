@@ -994,6 +994,7 @@ fn odd_archives() {
 	// two gzip members, the first without the tar end blocks
 	let mut two = gz(&good[..good.len() - 1024]);
 	two.extend(gz(&bar));
+	// a short stream, see compressed_cuts
 	let mut truncated = gz(&good);
 	truncated.truncate(truncated.len() / 2);
 	let mut short_tar = good.clone();
@@ -1003,7 +1004,7 @@ fn odd_archives() {
 		// refused at open (the first tar header): the db is invalid
 		("garbage", b"not an archive at all\n".repeat(40), Same),
 		("two gzip members", two, Same),
-		("truncated gzip", truncated, Diverge),
+		("truncated gzip", truncated, Same),
 		("truncated tar", short_tar, Same),
 		("no end blocks", good[..good.len() - 1024].to_vec(), Same),
 	];
@@ -1023,6 +1024,77 @@ fn odd_archives() {
 			);
 		}
 	}
+}
+
+// a db over several of libarchive's 64/128 KiB filter blocks: a desc per
+// package, then an unknown entry both skip, sized to put the next header
+// at or across a block boundary or at random, its data random so the
+// compressed stream grows with it
+fn big_db() -> Vec<TarEntry> {
+	const BLOCK: usize = 64 * 1024;
+	let mut rng = Rng::new(0xb16d_b5ed);
+	let mut entries = Vec::new();
+	let mut off: usize = 0;
+	for i in 0.. {
+		if off > 1300 * 1024 {
+			break;
+		}
+		let name = format!("p{i:03}");
+		let d = desc(&name, "1-1");
+		entries.push(tar_file(
+			&format!("{name}-1-1/desc"),
+			d.as_bytes(),
+		));
+		off += 512 + d.len().next_multiple_of(512) + 512;
+		let next = (off + 512 + 20000).next_multiple_of(BLOCK);
+		let len = match i % 4 {
+			0 => next - off,
+			1 => next - off - 256,
+			_ => rng.below(9000),
+		};
+		let pad: Vec<u8> =
+			(0..len).map(|_| rng.next_u64() as u8).collect();
+		entries.push(tar_file(&format!("{name}-1-1/pad"), &pad));
+		off += len.next_multiple_of(512);
+	}
+	entries
+}
+
+// a compressed db cut short, at the start, evenly spread, at random and in
+// the stream's tail: libarchive fails the filter block the stream ends
+// in. inside the first one the open fails, later the walk meets it in a
+// header or the data of a desc (both LIBARCHIVE or invalid entries, the
+// cache dropped)
+#[test]
+fn compressed_cuts() {
+	let tar = ustar(&big_db());
+	let mut rng = Rng::new(0x0c07_5eed);
+	let mut errnos = std::collections::BTreeSet::new();
+	for comp in [Comp::Gzip, Comp::Bzip2, Comp::Xz, Comp::Zstd] {
+		let fx = TempRoot::new("be-sync");
+		let p = fx.sync_file("t", ".db");
+		write_db(&p, comp, &tar);
+		let data = fs::read(&p).unwrap();
+		let len = data.len();
+		let mut cuts: Vec<usize> = vec![1, 2, 10, 100];
+		cuts.extend((1..48).map(|i| len * i / 48));
+		cuts.extend((0..16).map(|_| rng.below(len)));
+		cuts.extend([1, 4, 8, 9, 12, 20, 64].map(|d| len - d));
+		for n in cuts {
+			fs::write(&p, &data[..n]).unwrap();
+			let c = load_c(&fx, "t", ".db");
+			let r = load_rust(&fx, "t", ".db");
+			let what = format!("{comp:?} cut at {n}/{len}");
+			assert_same(&c, &r, &|| what.clone());
+			assert_eq!(
+				validity(&fx, "t"),
+				c_validity(&fx, "t"),
+				"{what}"
+			);
+			errnos.insert(c.err());
+		}
+	}
+	assert!(errnos.len() >= 2, "{errnos:?}");
 }
 
 // a db registered on a handle after its cache load failed or not:
