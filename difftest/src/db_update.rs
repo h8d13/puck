@@ -24,15 +24,13 @@ use pacman_cli::conf::Config;
 use crate::callback::{cb_download, cb_event, cb_log};
 use crate::cli_util::init;
 use crate::files_op::pacman_files;
-use crate::fixtures::TempRoot;
+use crate::fixtures::{TempRoot, gen_pkgs, sync_tar};
 use crate::handle::*;
 use crate::package::{CPkg, list_data, read_pkg};
 use crate::signing::{
 	GPGME_PROTOCOL_OPENPGP, gpgme_check_version, gpgme_set_engine_info,
 };
-use crate::sync_ro::{
-	CRun, FrontHandle, gen_pkgs, pacman_sync, run_op, sync_tar,
-};
+use crate::sync_ro::{CRun, FrontHandle, pacman_sync, run_op};
 use crate::{CList, Rng, alpm_list_add, alpm_list_free, cstr};
 
 unsafe extern "C" {

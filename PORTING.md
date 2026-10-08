@@ -713,7 +713,7 @@ Follow-ups raised by port units:
 | signing debug lines (`_alpm_access` "is not readable", "sig path ... could not be opened", "missing required signature") | m1close | todo (trans_commit difftest filters them: `SIGNING_DEBUG`, `sig_unreadable`; drop those once ported) |
 | difftest C log callbacks (deps_graph, dload, diskspace, db_update) onto `handle::record_log` | m1close | done: every alpm_cb_log (also add_commit, conflict, handle_opts, hook, remove_commit, sandbox, signing, trans_commit, trans_prep, util) formats through `handle::log_message`; util's copy is `record_log` |
 | `DepsEnv` without `&Handle` (assumeinstalled, ignore lists), so checkdeps logs without swapping the callbacks | m1close | done: `DepsOpts` (`Handle::deps_opts`, `DbsMut::opts`); `with_callbacks` stays for the `View` planning steps, the sync loads and the frontend's package loads |
-| difftest: `read_deps` pub(crate) (drops conflict's `CDepend`), `SyncWorld` into fixtures.rs | conflict, sync | todo |
+| difftest: `read_deps` pub(crate) (drops conflict's `CDepend`), `SyncWorld` into fixtures.rs | conflict, sync | done: one `CDepend`/`read_dep` in package.rs (conflict, deps, deps_graph, trans_prep copies gone); `SyncWorld` and its generators in fixtures.rs, `c_handle` stays in sync_ro |
 | be_sync: a non-archive db must fail at open (DB_OPEN, db invalid) like libarchive, not LIBARCHIVE | query | done |
 | `%DATA%` in repo dbs, gzip multi-member, `Packager` default, backup `(null)` | db readers | ALPM side, see `UPSTREAM.md` |
 | xattrs and pax mtime/uid/gid on extraction: alpm-compress `TarballEntry` needs a `raw_mut` (pax_extensions takes `&mut`) | addcommit | todo |
