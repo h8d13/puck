@@ -663,6 +663,7 @@ Follow-ups raised by port units:
 | conflict.rs debug lines ("searching for file conflicts", ...), then drop the difftest's quiet window | commit | done |
 | commit difftest with hooks (fakechroot) and signed packages (check_keyring, PKG_INVALID_SIG, MISSING_SIG) | commit | done (no port divergence found) |
 | pactest's minimal sync db entries and empty `.PKGINFO` values, the main pactest blockers | commit | done (owned readers: `.PKGINFO`, db entries) |
+| trans_commit `signed_keyring` diverged in 4 runs in a row (one window): the port asked no import question for a key missing from the keyring, then failed validation with PKG_INVALID_SIG (C: "required key missing", pm_errno 0). not reproduced in 21 later runs. `key_in_keychain` maps any gpg spawn/wait error to None, which check_keyring takes as "not missing" without a trace; log gpg's stderr there to catch it | hooksig | todo |
 | query: -Qk/-Qkk lazy loads per package like the C (-Qkk loads files up front), op stderr flushed per package so callback lines interleave; then drop cli_binary's empty files lists | m1close | todo |
 | signing debug lines (`_alpm_access` "is not readable", "sig path ... could not be opened", "missing required signature") | m1close | todo (trans_commit difftest filters them: `SIGNING_DEBUG`, `sig_unreadable`; drop those once ported) |
 | difftest C log callbacks (deps_graph, dload, diskspace, db_update) onto `handle::record_log` | m1close | todo |
