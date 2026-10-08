@@ -1,23 +1,13 @@
 // C side of lib/libalpm/deps.c, dependency strings, provides matching
 // and satisfiers in package lists
-use std::ffi::{CStr, CString, c_char, c_int, c_ulong};
+use std::ffi::{CString, c_char, c_int, c_ulong};
 use std::ptr;
 
-use crate::package::{CPkg, CPkgBox};
+use crate::package::{CDepend, CPkg, CPkgBox, read_dep};
 use crate::{CList, alpm_list_add, alpm_list_free, cstr, opt_ptr, take};
 
-use alpm_core::deps::{DepMod, Depend};
+use alpm_core::deps::Depend;
 use alpm_core::package::Package;
-
-// alpm_depend_t, alpm.h
-#[repr(C)]
-struct CDepend {
-	name: *mut c_char,
-	version: *mut c_char,
-	desc: *mut c_char,
-	name_hash: c_ulong,
-	depmod: c_int,
-}
 
 // alpm_list_t, alpm_list.h
 unsafe extern "C" {
@@ -36,24 +26,6 @@ unsafe extern "C" {
 	) -> *mut CPkg;
 }
 
-fn depmod_from_c(m: c_int) -> DepMod {
-	match m {
-		1 => DepMod::Any,
-		2 => DepMod::Eq,
-		3 => DepMod::Ge,
-		4 => DepMod::Le,
-		5 => DepMod::Gt,
-		6 => DepMod::Lt,
-		_ => panic!("C returned unknown alpm_depmod_t {m}"),
-	}
-}
-
-// copies a C string field out, NULL is None
-fn field(p: *const c_char) -> Option<Vec<u8>> {
-	// SAFETY: p is NULL or a nul-terminated string owned by the struct
-	(!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_bytes().to_vec())
-}
-
 // None where the C returns NULL (NULL input or allocation failure)
 fn c_dep_from_ptr(s: *const c_char) -> Option<Depend> {
 	// SAFETY: s is NULL or a valid C string, result is NULL or a struct
@@ -62,15 +34,8 @@ fn c_dep_from_ptr(s: *const c_char) -> Option<Depend> {
 	if d.is_null() {
 		return None;
 	}
-	// SAFETY: d is non-NULL and fully initialized by alpm_dep_from_string
-	let c = unsafe { &*d };
-	let dep = Depend {
-		name: field(c.name).expect("C name is NULL"),
-		version: field(c.version),
-		desc: field(c.desc),
-		name_hash: c.name_hash,
-		depmod: depmod_from_c(c.depmod),
-	};
+	// d is non-NULL and fully initialized by alpm_dep_from_string
+	let dep = read_dep(d);
 	// SAFETY: d came from alpm_dep_from_string, not used afterwards
 	unsafe { alpm_dep_free(d) };
 	Some(dep)

@@ -9,13 +9,13 @@ use std::fmt::Write as _;
 use std::fs;
 
 use alpm_core::handle::Handle;
+use alpm_core::trans::{TRANS_FLAG_ALLDEPS, TRANS_FLAG_ALLEXPLICIT};
 use difftest::{
 	CRun, FrontHandle, LocalEntry, Node, Rng, SyncWorld, TempRoot,
 	c_pacman_database, iters, section, snapshot, umask_lock,
 };
 use pacman_cli::conf::{ColStr, Config, LOG_ERROR, LOG_WARNING};
 use pacman_cli::database::pacman_database;
-use pacman_cli::pacman::{TRANS_FLAG_ALLDEPS, TRANS_FLAG_ALLEXPLICIT};
 use pacman_cli::util::Output;
 
 // two fixtures and two handles per case

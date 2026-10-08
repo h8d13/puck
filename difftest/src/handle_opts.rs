@@ -17,7 +17,7 @@ use crate::handle::*;
 use crate::package::{CDepend, field, read_deps, read_strs};
 use crate::pkg_show::{Tm, strftime};
 use crate::util_common::{errno, set_errno};
-use crate::{CList, alpm_list_add, alpm_list_free, cstr, opt_ptr, vsnprintf};
+use crate::{CList, alpm_list_add, alpm_list_free, cstr, opt_ptr};
 
 // ALPM_EVENT_DATABASE_MISSING
 const EVENT_DATABASE_MISSING: c_int = 27;
@@ -48,15 +48,11 @@ unsafe extern "C" fn log_cb(
 	fmt: *const c_char,
 	args: *mut c_void,
 ) {
-	let mut buf = vec![0 as c_char; 8192];
-	// SAFETY: fmt and args are the printf pair _alpm_log got, used once;
-	// buf is writable for its length. ctx is the COpts's boxed record
-	unsafe {
-		vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
-		let rec = &*ctx.cast::<RefCell<OptsRecord>>();
-		let msg = CStr::from_ptr(buf.as_ptr()).to_bytes().to_vec();
-		rec.borrow_mut().logs.push((level, msg));
-	}
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
+	// SAFETY: ctx is the COpts's boxed record
+	let rec = unsafe { &*ctx.cast::<RefCell<OptsRecord>>() };
+	rec.borrow_mut().logs.push((level, msg));
 }
 
 unsafe extern "C" fn event_cb(ctx: *mut c_void, event: *mut c_void) {

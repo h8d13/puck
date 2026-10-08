@@ -2,6 +2,7 @@
 use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void};
 use std::ptr;
 
+use crate::handle::record_log;
 use crate::{CList, alpm_list_add, alpm_list_free, c_free, cstr, take};
 
 // alpm_list_t, alpm_list.h
@@ -241,25 +242,6 @@ unsafe extern "C" {
 	) -> c_int;
 }
 
-unsafe extern "C" fn unpack_log_cb(
-	ctx: *mut c_void,
-	level: c_int,
-	fmt: *const c_char,
-	args: *mut c_void,
-) {
-	let mut buf = [0 as c_char; 8192];
-	// SAFETY: fmt and args come from _alpm_log, args consumed once
-	let n = unsafe {
-		crate::vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args)
-	};
-	assert!(n >= 0 && (n as usize) < buf.len(), "log message cut");
-	// SAFETY: vsnprintf wrote a nul-terminated string into buf
-	let msg = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }.to_bytes();
-	// SAFETY: ctx is the logs Vec of the c_unpack running this call
-	let logs = unsafe { &mut *ctx.cast::<Vec<(c_int, Vec<u8>)>>() };
-	logs.push((level, msg.to_vec()));
-}
-
 pub fn c_unpack(
 	root: &[u8],
 	dbpath: &[u8],
@@ -275,7 +257,7 @@ pub fn c_unpack(
 	unsafe {
 		crate::handle::alpm_option_set_logcb(
 			h.raw(),
-			Some(unpack_log_cb),
+			Some(record_log),
 			ctx.cast(),
 		)
 	};

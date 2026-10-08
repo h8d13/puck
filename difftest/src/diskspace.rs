@@ -6,21 +6,24 @@
 // both sides see the same mounts; callers keep fixtures on /tmp. the
 // transaction is set by hand: trans->add holds mirror packages,
 // trans->remove the handle's own local cache entries.
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
 use std::sync::Mutex;
 
 use alpm_core::diskspace::MountEntry;
 use alpm_core::package::Package;
 
+use crate::handle::log_message;
 use crate::handle::{
 	ALPM, CHandleHead, CTrans, alpm_db_get_pkg, alpm_db_get_pkgcache,
 	alpm_errno, alpm_get_localdb, alpm_initialize, alpm_option_get_root,
 	alpm_option_set_logcb, alpm_option_set_noextracts,
 	alpm_option_set_progresscb, alpm_release,
 };
-use crate::package::{CPkg, CPkgBox, alpm_pkg_get_files, list_data, with_strs};
-use crate::{CFile, alpm_list_add, alpm_list_free, cstr, vsnprintf};
+use crate::package::{
+	CPkg, CPkgBox, alpm_pkg_get_files, list_data, text, with_strs,
+};
+use crate::{CFile, alpm_list_add, alpm_list_free, cstr};
 
 // struct mntent, mntent.h
 #[repr(C)]
@@ -60,25 +63,17 @@ pub enum CbEvent {
 	Progress(c_int, Vec<u8>, c_int, usize, usize),
 }
 
-fn bytes(p: *const c_char) -> Vec<u8> {
-	assert!(!p.is_null());
-	// SAFETY: nul-terminated string owned by the C for this call
-	unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
-}
-
 unsafe extern "C" fn log_cb(
 	ctx: *mut c_void,
 	level: c_int,
 	fmt: *const c_char,
 	args: *mut c_void,
 ) {
-	let mut buf = [0 as c_char; 8192];
-	// SAFETY: fmt and args come from _alpm_log, args consumed once
-	let n = unsafe { vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args) };
-	assert!(n >= 0 && (n as usize) < buf.len(), "log message cut");
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
 	// SAFETY: ctx is the events Vec of the CSpace running this call
 	let events = unsafe { &mut *ctx.cast::<Vec<CbEvent>>() };
-	events.push(CbEvent::Log(level, bytes(buf.as_ptr())));
+	events.push(CbEvent::Log(level, msg));
 }
 
 unsafe extern "C" fn progress_cb(
@@ -93,7 +88,7 @@ unsafe extern "C" fn progress_cb(
 	let events = unsafe { &mut *ctx.cast::<Vec<CbEvent>>() };
 	events.push(CbEvent::Progress(
 		kind,
-		bytes(pkg),
+		text(pkg),
 		percent,
 		howmany,
 		current,
@@ -280,10 +275,10 @@ pub fn c_getmntent(path: &[u8]) -> Vec<MountEntry> {
 		// SAFETY: e points to getmntent's static entry
 		let e = unsafe { &*e };
 		out.push(MountEntry {
-			fsname: bytes(e.mnt_fsname),
-			dir: bytes(e.mnt_dir),
-			kind: bytes(e.mnt_type),
-			opts: bytes(e.mnt_opts),
+			fsname: text(e.mnt_fsname),
+			dir: text(e.mnt_dir),
+			kind: text(e.mnt_type),
+			opts: text(e.mnt_opts),
 		});
 	}
 	// SAFETY: f came from setmntent, closed once

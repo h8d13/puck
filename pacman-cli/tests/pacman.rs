@@ -5,11 +5,13 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use alpm_core::trans::*;
 use pacman_cli::conf::{
 	ColStr, Config, LOG_DEBUG, LOG_ERROR, LOG_FUNCTION, LOG_WARNING,
 	PM_COLOR_OFF, PM_COLOR_ON, PM_OP_MAIN,
 };
 use pacman_cli::pacman::*;
+use pacman_cli::util::needs_root;
 
 struct Dir(PathBuf);
 

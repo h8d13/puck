@@ -338,6 +338,16 @@ pub(crate) fn field(p: *const c_char) -> Option<Vec<u8>> {
 	(!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_bytes().to_vec())
 }
 
+// a C string the C never passes as NULL, copied out
+pub(crate) fn text(p: *const c_char) -> Vec<u8> {
+	field(p).expect("C string is NULL")
+}
+
+// a C string copied out, NULL as empty
+pub(crate) fn text_or_empty(p: *const c_char) -> Vec<u8> {
+	field(p).unwrap_or_default()
+}
+
 // the data pointers of a list, nodes stay owned by the C
 pub(crate) fn list_data(head: *const CList) -> Vec<*mut c_void> {
 	let mut out = Vec::new();
@@ -380,14 +390,21 @@ fn depmod_from_c(m: c_int) -> DepMod {
 	}
 }
 
-pub(crate) fn read_deps(head: *const CList) -> Vec<Depend> {
-	read_list(head, |d: &CDepend| Depend {
-		name: field(d.name).unwrap(),
+// an alpm_depend_t copied out
+pub(crate) fn read_dep(d: *const CDepend) -> Depend {
+	// SAFETY: d is a live alpm_depend_t owned by the C
+	let d = unsafe { &*d };
+	Depend {
+		name: field(d.name).expect("C depend without a name"),
 		version: field(d.version),
 		desc: field(d.desc),
 		name_hash: d.name_hash,
 		depmod: depmod_from_c(d.depmod),
-	})
+	}
+}
+
+pub(crate) fn read_deps(head: *const CList) -> Vec<Depend> {
+	read_list(head, |d: &CDepend| read_dep(d))
 }
 
 fn read_backup(head: *const CList) -> Vec<Backup> {

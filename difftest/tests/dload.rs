@@ -14,11 +14,13 @@ use std::process::Command;
 use std::time::Duration;
 
 use alpm_core::callbacks::{DownloadEvent, LogLevel};
-use alpm_core::dload::{DownloadState, Downloader, Payload, Settings};
+use alpm_core::dload::{
+	DownloadState, Downloader, Payload, Settings, getdate_capped,
+};
 use difftest::{
 	CDload, Fetcher, Record, Recorder, Reply, Req, Rng, Server, Style,
-	TempRoot, closed_port, iters, payload_layout_ok, test_helper,
-	umask_lock,
+	TempRoot, c_getdate, closed_port, iters, payload_layout_ok,
+	test_helper, umask_lock,
 };
 
 const T0: i64 = 1_000_000_000;
@@ -2575,4 +2577,165 @@ fn download_fuzz() {
 	}
 	eprintln!("fuzz coverage {seen:?} of {n}");
 	assert!(seen.iter().all(|&k| k >= n / 50), "coverage {seen:?}");
+}
+
+const WDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const WEEKDAYS: [&str; 7] = [
+	"Monday",
+	"Tuesday",
+	"Wednesday",
+	"Thursday",
+	"Friday",
+	"Saturday",
+	"Sunday",
+];
+const MONS: [&str; 12] = [
+	"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
+	"Nov", "Dec",
+];
+
+// mostly in range, now and then one past it (day 0/32, hour 24, ...)
+fn field(rng: &mut Rng, lo: u64, hi: u64) -> u64 {
+	match rng.below(12) {
+		0 => hi + 1 + rng.below(3) as u64,
+		1 => lo.saturating_sub(1),
+		_ => lo + rng.below((hi - lo + 1) as usize) as u64,
+	}
+}
+
+fn year(rng: &mut Rng) -> String {
+	match rng.below(10) {
+		0 => format!("{:02}", rng.below(100)),
+		1 => pick(rng, &["1582", "1583", "1600", "9999", "10000"])
+			.to_string(),
+		_ => (1950 + rng.below(150)).to_string(),
+	}
+}
+
+// parsedate's zone names, lowercase ones and words it refuses
+const ZONES: [&str; 50] = [
+	"GMT", "UT", "UTC", "WET", "BST", "WAT", "AST", "ADT", "EST", "EDT",
+	"CST", "CDT", "MST", "MDT", "PST", "PDT", "YST", "YDT", "HST", "HDT",
+	"CAT", "AHST", "NT", "IDLW", "CET", "MET", "MEWT", "MEST", "CEST",
+	"MESZ", "FWT", "FST", "EET", "WAST", "WADT", "CCT", "JST", "EAST",
+	"EADT", "GST", "NZT", "NZST", "NZDT", "IDLE", "utc", "edt", "j", "J",
+	"XYZ", "GMTX",
+];
+
+fn zone(rng: &mut Rng) -> String {
+	match rng.below(8) {
+		0 => pick(rng, &ZONES).to_string(),
+		// the military letters
+		4 => char::from(b'A' + rng.below(26) as u8).to_string(),
+		1 => format!("+{:02}{:02}", rng.below(16), rng.below(100)),
+		2 => format!("-{:02}{:02}", rng.below(16), rng.below(100)),
+		3 => String::new(),
+		_ => "GMT".to_string(),
+	}
+}
+
+// pieces parsedate sorts into parts, joined by odd separators
+const PIECES: [&str; 22] = [
+	"Sun",
+	"Sunday",
+	"sund",
+	"Nov",
+	"November",
+	"nov",
+	"06",
+	"6",
+	"32",
+	"1994",
+	"94",
+	"70",
+	"71",
+	"19941106",
+	"19941300",
+	"8:49",
+	"08:49:37",
+	"8:49:60",
+	"24:00",
+	"+0100",
+	"-1400",
+	"123456789",
+];
+
+fn free_date(rng: &mut Rng) -> String {
+	let mut s = String::new();
+	for _ in 0..rng.below(9) {
+		s += pick(rng, &[" ", ", ", "-", "/", "", "  ", "\t"]);
+		match rng.below(5) {
+			0 => s += &zone(rng),
+			_ => s += pick(rng, &PIECES),
+		}
+	}
+	s
+}
+
+fn pick<T: Copy>(rng: &mut Rng, items: &[T]) -> T {
+	items[rng.below(items.len())]
+}
+
+// Last-Modified in the forms servers send: RFC 1123, RFC 850, asctime
+fn http_date_text(rng: &mut Rng) -> String {
+	let (d, mon) = (field(rng, 1, 31), pick(rng, &MONS));
+	let (h, m, s) =
+		(field(rng, 0, 23), field(rng, 0, 59), field(rng, 0, 59));
+	let mon = match rng.below(8) {
+		0 => mon.to_uppercase(),
+		1 => mon.to_lowercase(),
+		_ => mon.to_string(),
+	};
+	match rng.below(4) {
+		3 => free_date(rng),
+		0 => format!(
+			"{}, {d:02} {mon} {} {h:02}:{m:02}:{s:02} {}",
+			pick(rng, &WDAYS),
+			year(rng),
+			zone(rng)
+		),
+		1 => format!(
+			"{}, {d:02}-{mon}-{} {h:02}:{m:02}:{s:02} {}",
+			pick(rng, &WEEKDAYS),
+			year(rng),
+			zone(rng)
+		),
+		_ => format!(
+			"{} {mon} {d:>2} {h:02}:{m:02}:{s:02} {}",
+			pick(rng, &WDAYS),
+			year(rng)
+		),
+	}
+}
+
+#[test]
+fn http_dates() {
+	let pinned: [&[u8]; 6] = [
+		b"Sun, 06 Nov 1994 08:49:37 GMT",
+		b"Sunday, 06-Nov-94 08:49:37 GMT",
+		b"Sun Nov  6 08:49:37 1994",
+		b"Thu, 01 Jan 1970 00:00:00 GMT",
+		b"Wed, 31 Dec 1969 23:59:59 GMT",
+		b"Mon, 30 Feb 2015 10:00:00 GMT",
+	];
+	for s in pinned {
+		let what = String::from_utf8_lossy(s);
+		assert_eq!(getdate_capped(s), c_getdate(s), "{what}");
+	}
+	let mut rng = Rng::new(0xda7e);
+	let n = iters();
+	let mut bad = Vec::new();
+	let mut parsed = 0;
+	for _ in 0..n {
+		let s = http_date_text(&mut rng);
+		let (c, r) =
+			(c_getdate(s.as_bytes()), getdate_capped(s.as_bytes()));
+		parsed += usize::from(c != -1);
+		if c != r && bad.len() < 20 {
+			bad.push((s, c, r));
+		}
+	}
+	assert!(bad.is_empty(), "{bad:#?}");
+	// out-of-range fields and free piece sequences leave a third parsed
+	assert!(parsed >= n / 4, "{parsed} of {n} parsed");
 }

@@ -328,6 +328,34 @@ unsafe extern "C" {
 // the _alpm_log calls of a handle: alpm_loglevel_t and message
 pub type CLogs = Vec<(c_int, Vec<u8>)>;
 
+// the message of one _alpm_log call, for every alpm_cb_log here
+//
+// # Safety
+// fmt and args are the format and va_list the callback got, each call
+// uses them once
+pub(crate) unsafe fn log_message(
+	fmt: *const c_char,
+	args: *mut c_void,
+) -> Vec<u8> {
+	// sync db lines reach 512 KiB (be_sync's unknown key line); one
+	// buffer per thread, a fuzz logs millions of lines
+	thread_local! {
+		static BUF: std::cell::RefCell<Vec<c_char>> =
+			std::cell::RefCell::new(vec![0; 1 << 20]);
+	}
+	BUF.with_borrow_mut(|buf| {
+		// SAFETY: the caller's fmt/args pair, used once; buf is
+		// writable for its length
+		let n = unsafe {
+			crate::vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args)
+		};
+		assert!(n >= 0 && (n as usize) < buf.len(), "log message cut");
+		// SAFETY: vsnprintf nul-terminated buf
+		let msg = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+		msg.to_bytes().to_vec()
+	})
+}
+
 // alpm_cb_log appending to the CLogs at ctx
 pub(crate) unsafe extern "C" fn record_log(
 	ctx: *mut c_void,
@@ -335,20 +363,12 @@ pub(crate) unsafe extern "C" fn record_log(
 	fmt: *const c_char,
 	args: *mut c_void,
 ) {
-	// sync db lines reach 512 KiB (be_sync's unknown key line)
-	let mut buf = vec![0 as c_char; 1 << 20];
-	// SAFETY: fmt and args are the format and va_list of this
-	// _alpm_log call, used once; buf is writable for its length
-	let n = unsafe {
-		crate::vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args)
-	};
-	assert!(n >= 0 && (n as usize) < buf.len(), "log message too long");
-	// SAFETY: vsnprintf nul-terminated buf
-	let msg = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
 	// SAFETY: ctx is the CLogs registered with the callback, no other
 	// reference to it is live while the C runs
 	let logs = unsafe { &mut *ctx.cast::<CLogs>() };
-	logs.push((level, msg.to_bytes().to_vec()));
+	logs.push((level, msg));
 }
 
 // question callback and assumeinstalled (deps_graph)

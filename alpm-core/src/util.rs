@@ -25,7 +25,7 @@ use rustix::fs::{
 	Access, AtFlags, CWD, FileType, Mode, accessat, makedev, mknodat,
 };
 
-use crate::callbacks::{Callbacks, Event, LogLevel};
+use crate::callbacks::{Callbacks, Event, LogLevel, logv};
 use crate::error::Errno;
 use crate::handle::Handle;
 use crate::tar;
@@ -707,16 +707,6 @@ const CHROOT: &str = "/usr/bin/chroot";
 
 const LINE_MAX: usize = 2048;
 
-// _alpm_log, messages are formatted msgids
-fn log_parts(cb: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
-	cb.log(level, &parts.concat());
-}
-
-// _alpm_log through the handle's logcb
-fn logv(h: &mut Handle, level: LogLevel, parts: &[&[u8]]) {
-	log_parts(h.callbacks(), level, parts);
-}
-
 // _alpm_chroot_process_output: the line goes out as a C string, so a nul
 // cuts it (and its '\n'). alpm_logaction's result is not checked
 fn process_output(h: &mut Handle, line: &[u8]) {
@@ -918,7 +908,7 @@ fn read_output(h: &mut Handle, mut from: UnixStream, out: &mut Output) {
 			Err(e) => {
 				out.finish(h);
 				logv(
-					h,
+					h.callbacks(),
 					LogLevel::Error,
 					&[
 						b"unable to read from pipe (",
@@ -973,7 +963,7 @@ fn report_status(
 	};
 	let msg = format!("command terminated by signal {sig}: ");
 	logv(
-		h,
+		h.callbacks(),
 		LogLevel::Error,
 		&[msg.as_bytes(), &strsignal(sig), b"\n"],
 	);
@@ -998,7 +988,7 @@ pub fn run_chroot(
 	// chdir(2) of the C parent
 	if let Err(e) = enter(root) {
 		logv(
-			h,
+			h.callbacks(),
 			LogLevel::Error,
 			&[
 				b"could not change directory to ",
@@ -1012,7 +1002,7 @@ pub fn run_chroot(
 	}
 	let shown = cmd.map_or(&b"(null)"[..], until_nul);
 	logv(
-		h,
+		h.callbacks(),
 		LogLevel::Debug,
 		&[b"executing \"", shown, b"\" under chroot \"", root, b"\"\n"],
 	);
@@ -1034,7 +1024,7 @@ pub fn run_chroot(
 		Ok(p) => p,
 		Err(e) => {
 			logv(
-				h,
+				h.callbacks(),
 				LogLevel::Error,
 				&[
 					b"could not create pipe (",
@@ -1052,7 +1042,7 @@ pub fn run_chroot(
 	let rest = match stdin.map(|data| prefill(&mut to, data)) {
 		Some(Err(e)) => {
 			logv(
-				h,
+				h.callbacks(),
 				LogLevel::Error,
 				&[
 					b"unable to write to pipe (",
@@ -1091,7 +1081,7 @@ pub fn run_chroot(
 		}
 		Err(e) => {
 			logv(
-				h,
+				h.callbacks(),
 				LogLevel::Error,
 				&[
 					b"could not fork a new process (",
@@ -1114,7 +1104,7 @@ pub fn run_chroot(
 	});
 	if let Err(e) = write_err {
 		logv(
-			h,
+			h.callbacks(),
 			LogLevel::Error,
 			&[b"unable to write to pipe (", &strerror(&e), b")\n"],
 		);
@@ -1129,7 +1119,7 @@ pub fn run_chroot(
 					continue;
 				}
 				Err(e) => {
-					logv(h, LogLevel::Error, &[
+					logv(h.callbacks(), LogLevel::Error, &[
 					b"call to waitpid failed (",
 					&strerror(&e),
 					b")\n",
@@ -2074,7 +2064,7 @@ pub fn unpack<L: AsRef<[u8]>>(
 	breakfirst: bool,
 ) -> Result<(), UnpackError> {
 	let (path, prefix) = (until_nul(path), until_nul(prefix));
-	log_parts(cb, LogLevel::Debug, &[b"opening archive ", path, b"\n"]);
+	logv(cb, LogLevel::Debug, &[b"opening archive ", path, b"\n"]);
 	let open_failed = |cb: &mut dyn Callbacks, e: io::Error| {
 		let msg: [&[u8]; 5] = [
 			b"could not open file ",
@@ -2083,7 +2073,7 @@ pub fn unpack<L: AsRef<[u8]>>(
 			&strerror(&e),
 			b"\n",
 		];
-		log_parts(cb, LogLevel::Error, &msg);
+		logv(cb, LogLevel::Error, &msg);
 		UnpackError::Open(e)
 	};
 	let archive = open_archive(path).map_err(|e| open_failed(cb, e))?;
@@ -2097,7 +2087,7 @@ pub fn unpack<L: AsRef<[u8]>>(
 			&strerror(&e),
 			b")\n",
 		];
-		log_parts(cb, LogLevel::Error, &msg);
+		logv(cb, LogLevel::Error, &msg);
 		return Err(UnpackError::Prefix(e));
 	}
 	let disk = Disk {
@@ -2115,7 +2105,7 @@ pub fn unpack<L: AsRef<[u8]>>(
 				})?;
 				continue;
 			}
-			log_parts(
+			logv(
 				cb,
 				LogLevel::Debug,
 				&[b"extracting: ", &name, b"\n"],
@@ -2131,7 +2121,7 @@ pub fn unpack<L: AsRef<[u8]>>(
 					&strerror(&e),
 					b")\n",
 				];
-				log_parts(cb, LogLevel::Warning, &msg);
+				logv(cb, LogLevel::Warning, &msg);
 			}
 			Err(Failure::Read(e)) => {
 				let msg: [&[u8]; 5] = [
@@ -2141,7 +2131,7 @@ pub fn unpack<L: AsRef<[u8]>>(
 					&strerror(&e),
 					b")\n",
 				];
-				log_parts(cb, LogLevel::Error, &msg);
+				logv(cb, LogLevel::Error, &msg);
 				return Err(UnpackError::Read(name, e));
 			}
 		}

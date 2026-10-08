@@ -11,7 +11,7 @@
 // cache names; log lines the port does not make are dropped on the C side
 // (ALPM_LOG_FUNCTION of the db backend, RET_ERR's debug line).
 use std::cell::RefCell;
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::fs;
 use std::path::Path;
 use std::ptr;
@@ -24,6 +24,7 @@ use alpm_core::package::Package;
 use alpm_core::remove::{remove_pkg, remove_single_package};
 use alpm_core::trans::{TRANS_FLAG_NOLOCK, trans_init, trans_release};
 
+use crate::handle::log_message;
 use crate::handle::{
 	ALPM, CHandleHead, CTrans, alpm_db_get_pkg, alpm_db_get_pkgcache,
 	alpm_errno, alpm_get_localdb, alpm_initialize, alpm_option_get_root,
@@ -38,7 +39,7 @@ use crate::package::{
 	alpm_pkg_has_scriptlet, field, list_data, read_pkg, with_strs,
 };
 use crate::trans_prep::alpm_remove_pkg;
-use crate::{alpm_list_add, cstr, strdup, vsnprintf};
+use crate::{alpm_list_add, cstr, strdup};
 
 unsafe extern "C" {
 	fn _alpm_remove_single_package(
@@ -94,11 +95,6 @@ const EVENT_OP_DONE: c_int = 12;
 const EVENT_SCRIPTLET_INFO: c_int = 17;
 const EVENT_PACSAVE_CREATED: c_int = 33;
 
-fn bytes(p: *const c_char) -> Option<Vec<u8>> {
-	// SAFETY: NULL or a nul-terminated string alive for the callback
-	(!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_bytes().to_vec())
-}
-
 fn pkg_name(p: *const CPkg) -> Option<Vec<u8>> {
 	(!p.is_null()).then(|| read_pkg(p).name.expect("package without name"))
 }
@@ -116,15 +112,10 @@ unsafe extern "C" fn log_cb(
 	fmt: *const c_char,
 	args: *mut c_void,
 ) {
-	let mut buf = vec![0 as c_char; 16384];
-	// SAFETY: fmt and args are _alpm_log's printf pair, used once; buf
-	// is writable for its length. ctx is the boxed CRec of the call
-	let (n, rec) = unsafe {
-		let n = vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args);
-		(n, &mut *ctx.cast::<CRec>())
-	};
-	assert!(n >= 0 && (n as usize) < buf.len(), "log message cut");
-	let msg = bytes(buf.as_ptr()).unwrap();
+	// SAFETY: fmt and args are the pair this callback got
+	let msg = unsafe { log_message(fmt, args) };
+	// SAFETY: ctx is the boxed CRec of the call
+	let rec = unsafe { &mut *ctx.cast::<CRec>() };
 	let errline =
 		level == LOG_DEBUG && msg.starts_with(b"returning error ");
 	if rec.mute || level == LOG_FUNCTION || errline {
@@ -177,11 +168,11 @@ unsafe extern "C" fn event_cb(ctx: *mut c_void, event: *mut c_void) {
 			EVENT_PACSAVE_CREATED => {
 				let e = &*event.cast::<CEvPacsave>();
 				let old = pkg_name(e.oldpkg).unwrap();
-				RmRec::Pacsave(old, bytes(e.file).unwrap())
+				RmRec::Pacsave(old, field(e.file).unwrap())
 			}
 			EVENT_SCRIPTLET_INFO => {
 				let e = &*event.cast::<CEvLine>();
-				RmRec::Scriptlet(bytes(e.line).unwrap())
+				RmRec::Scriptlet(field(e.line).unwrap())
 			}
 			k => panic!("unexpected event {k}"),
 		}

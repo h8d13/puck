@@ -28,7 +28,7 @@ use rustix::fs::Access;
 
 use crate::backup::Backup;
 use crate::be_local::{INFRQ_BASE, INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET};
-use crate::callbacks::{Callbacks, LogLevel};
+use crate::callbacks::{Callbacks, LogLevel, logv};
 use crate::deps::dep_from_string;
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
@@ -142,18 +142,14 @@ fn open_archive(
 	cb: &mut dyn Callbacks,
 	path: &[u8],
 ) -> Result<(tar::Reader, i64), Error> {
-	log(cb, LogLevel::Debug, &[b"opening archive ", path, b"\n"]);
+	logv(cb, LogLevel::Debug, &[b"opening archive ", path, b"\n"]);
 	let archive = util::open_archive(path).map_err(|e| {
 		let text = util::strerror(&e);
 		let msg = [b"could not open file ", path, b": ", &text, b"\n"];
-		log(cb, LogLevel::Error, &msg);
+		logv(cb, LogLevel::Error, &msg);
 		open_err(e)
 	})?;
 	Ok((archive.reader, archive.meta.len() as i64))
-}
-
-fn log(cb: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
-	cb.log(level, &parts.concat());
 }
 
 fn text(v: &impl Display) -> Vec<u8> {
@@ -180,7 +176,7 @@ fn parse_line(
 			&num,
 			b"\n",
 		];
-		log(cb, LogLevel::Debug, &msg);
+		logv(cb, LogLevel::Debug, &msg);
 		return Ok(());
 	};
 	let key = until_nul(&line[..i]);
@@ -223,14 +219,14 @@ fn parse_line(
 			let what =
 				[name, b": unknown key '", key, b"'"].concat();
 			let msg = [&what[..], b" in package description\n"];
-			log(cb, LogLevel::Warning, &msg);
+			logv(cb, LogLevel::Warning, &msg);
 			let msg = [
 				&what[..],
 				b" in description file line ",
 				&num,
 				b"\n",
 			];
-			log(cb, LogLevel::Debug, &msg);
+			logv(cb, LogLevel::Debug, &msg);
 		}
 	}
 	Ok(())
@@ -282,7 +278,7 @@ fn check_descfile(
 	} else {
 		return Ok(());
 	};
-	log(cb, LogLevel::Error, &[what, file, b"\n"]);
+	logv(cb, LogLevel::Error, &[what, file, b"\n"]);
 	Err(Reason::Version)
 }
 
@@ -325,7 +321,7 @@ fn filelist_from_mtree(
 ) -> Option<FileList> {
 	let head = b"error while reading mtree of package ";
 	let fail = |cb: &mut dyn Callbacks, text: &[u8]| {
-		log(cb, LogLevel::Debug, &[head, pkgfile, b": ", text, b"\n"]);
+		logv(cb, LogLevel::Debug, &[head, pkgfile, b": ", text, b"\n"]);
 	};
 	let data = util::content(entry).ok()?;
 	let entries = match mtree::read_memory(data) {
@@ -363,7 +359,7 @@ pub fn pkg_load_internal(
 	}
 	let (archive, size) = open_archive(cb, pkgfile)?;
 	let msg = [b"starting package load for ", pkgfile, b"\n"];
-	log(cb, LogLevel::Debug, &msg);
+	logv(cb, LogLevel::Debug, &msg);
 	let mut pkg = Package {
 		filename: Some(pkgfile.to_vec()),
 		size,
@@ -384,7 +380,7 @@ pub fn pkg_load_internal(
 					pkgfile,
 					b"\n",
 				];
-				log(cb, LogLevel::Error, &msg);
+				logv(cb, LogLevel::Error, &msg);
 				return Err(Error::Invalid(why));
 			}
 			check_descfile(cb, &pkg, pkgfile)
@@ -394,7 +390,7 @@ pub fn pkg_load_internal(
 		} else if full && name == b".MTREE" {
 			let msg = [b"found mtree for package ", pkgfile];
 			let msg = [&msg.concat()[..], b", getting file list\n"];
-			log(cb, LogLevel::Debug, &msg);
+			logv(cb, LogLevel::Debug, &msg);
 			let files = filelist_from_mtree(
 				cb, pkgfile, &mut pkg, &mut entry,
 			);
@@ -403,7 +399,7 @@ pub fn pkg_load_internal(
 					b"finished mtree reading for ",
 					pkgfile,
 				];
-				log(
+				logv(
 					cb,
 					LogLevel::Debug,
 					&[&msg.concat(), b"\n"],
@@ -428,7 +424,7 @@ pub fn pkg_load_internal(
 
 	if !config {
 		let msg = [b"missing package metadata in ", pkgfile, b"\n"];
-		log(cb, LogLevel::Error, &msg);
+		logv(cb, LogLevel::Error, &msg);
 		return Err(Error::Invalid(Reason::Missing));
 	}
 	pkg.origin = Some(PkgFrom::File(pkgfile.to_vec()));
@@ -438,7 +434,7 @@ pub fn pkg_load_internal(
 		// "checking for conflicts" needs the list sorted
 		if !pkg.files.files.is_empty() {
 			let msg = [b"sorting package filelist for ", pkgfile];
-			log(cb, LogLevel::Debug, &[&msg.concat(), b"\n"]);
+			logv(cb, LogLevel::Debug, &[&msg.concat(), b"\n"]);
 		}
 		pkg.files.sort();
 		pkg.infolevel |= INFRQ_FILES;
@@ -497,9 +493,9 @@ pub fn pkg_validate(
 	let expected = syncpkg.and_then(|p| p.sha256sum.as_deref());
 	if let Some(expected) = expected.filter(|_| !has_sig || b64.is_none()) {
 		let expected = until_nul(expected);
-		log(cb, LogLevel::Debug, &[b"sha256sum: ", expected, b"\n"]);
+		logv(cb, LogLevel::Debug, &[b"sha256sum: ", expected, b"\n"]);
 		let msg = [b"checking sha256sum for ", pkgfile, b"\n"];
-		log(cb, LogLevel::Debug, &msg);
+		logv(cb, LogLevel::Debug, &msg);
 		// _alpm_test_checksum: strcmp with the lowercase hex
 		if sha256_hex(pkgfile).as_deref() != Some(until_nul(expected)) {
 			return Err(Error::Checksum);
@@ -509,7 +505,7 @@ pub fn pkg_validate(
 	let mut siglist = None;
 	if wants_sig {
 		let data = b64.map_or(&b"<from .sig>"[..], until_nul);
-		log(cb, LogLevel::Debug, &[b"sig data: ", data, b"\n"]);
+		logv(cb, LogLevel::Debug, &[b"sig data: ", data, b"\n"]);
 		let optional = level & SIG_PACKAGE_OPTIONAL != 0;
 		if !has_sig && !optional {
 			return Err(Error::MissingSig);

@@ -23,7 +23,7 @@ use rustix::fs::{
 use crate::backup;
 use crate::be_local::{INFRQ_DESC, INFRQ_FILES, PrepareError, WriteError};
 use crate::callbacks::{
-	Event, LogLevel, PackageOp, PackageOperation, Progress,
+	Event, LogLevel, PackageOp, PackageOperation, Progress, logv,
 };
 use crate::error::Errno;
 use crate::handle::Handle;
@@ -34,8 +34,8 @@ use crate::remove::remove_single_package;
 use crate::trans::{
 	TRANS_FLAG_ALLDEPS, TRANS_FLAG_ALLEXPLICIT, TRANS_FLAG_DBONLY,
 	TRANS_FLAG_DOWNLOADONLY, TRANS_FLAG_NEEDED, TRANS_FLAG_NOSCRIPTLET,
-	TransPkg, TransState, interrupted, load_caches, log, opt_str,
-	runscriptlet, trans_in,
+	TransPkg, TransState, interrupted, load_caches, opt_str, runscriptlet,
+	trans_in,
 };
 use crate::util::{
 	CALLER_PREFIX, Entry, Object, PATH_MAX, S_IFDIR, S_IFMT,
@@ -63,7 +63,7 @@ pub fn add_pkg(
 	trans_in(h, TransState::Initialized)?;
 	let (name, ver) = (opt_str(&pkg.name).to_vec(), opt_str(&pkg.version));
 	let ver = ver.to_vec();
-	log(h.callbacks(), Debug, &[b"adding package '", &name, b"'\n"]);
+	logv(h.callbacks(), Debug, &[b"adding package '", &name, b"'\n"]);
 
 	let trans = h.trans().expect("checked above");
 	let add = trans.add.iter().map(|t| &t.pkg);
@@ -76,7 +76,7 @@ pub fn add_pkg(
 			return Err(Errno::TransDupTarget);
 		}
 		let msg = [b"skipping duplicate target: ", &name[..], b"\n"];
-		log(h.callbacks(), Debug, &msg);
+		logv(h.callbacks(), Debug, &msg);
 		return Ok(());
 	}
 	let flags = trans.flags;
@@ -100,7 +100,7 @@ pub fn add_pkg(
 					lver,
 					b" is up to date -- skipping\n",
 				];
-				log(cb, Warning, &msg);
+				logv(cb, Warning, &msg);
 				return Ok(());
 			}
 			if !downloadonly {
@@ -110,7 +110,7 @@ pub fn add_pkg(
 					lver,
 					b" is up to date -- reinstalling\n",
 				];
-				log(cb, Warning, &msg);
+				logv(cb, Warning, &msg);
 			}
 		} else if cmp.is_lt() && !downloadonly {
 			let msg = [
@@ -122,7 +122,7 @@ pub fn add_pkg(
 				&ver[..],
 				b")\n",
 			];
-			log(cb, Warning, &msg);
+			logv(cb, Warning, &msg);
 		}
 	}
 
@@ -133,7 +133,7 @@ pub fn add_pkg(
 		&ver[..],
 		b" to the transaction add list\n",
 	];
-	log(h.callbacks(), Debug, &msg);
+	logv(h.callbacks(), Debug, &msg);
 	let trans = h.trans_mut().expect("checked above");
 	// the C target is the cache entry itself: one a prepare dropped to
 	// unresolvable comes back with its removes and oldpkg
@@ -1028,10 +1028,10 @@ fn perform_extraction(
 	let text = [filename, b" (", &e.msg, b")\n"].concat();
 	if !e.fatal && e.errno != ENOSPC {
 		let msg = [&b"warning given when extracting "[..], &text];
-		log(h.callbacks(), Warning, &msg);
+		logv(h.callbacks(), Warning, &msg);
 		return false;
 	}
-	log(h.callbacks(), Error, &[b"could not extract ", &text]);
+	logv(h.callbacks(), Error, &[b"could not extract ", &text]);
 	logaction(h, &[b"error: could not extract ", &text]);
 	true
 }
@@ -1051,7 +1051,7 @@ fn try_rename(h: &mut Handle, src: &[u8], dest: &[u8]) -> bool {
 		b")\n",
 	]
 	.concat();
-	log(h.callbacks(), Error, &[&text]);
+	logv(h.callbacks(), Error, &[&text]);
 	logaction(h, &[b"error: ", &text]);
 	true
 }
@@ -1078,7 +1078,7 @@ fn extract_db_file(
 				entryname,
 				b"'\n",
 			];
-			log(h.callbacks(), Debug, &msg);
+			logv(h.callbacks(), Debug, &msg);
 			return false;
 		}
 	};
@@ -1131,7 +1131,7 @@ fn extract_single_file(
 			&entryname,
 			b"\n",
 		];
-		log(h.callbacks(), Warning, &msg);
+		logv(h.callbacks(), Warning, &msg);
 		return 0;
 	}
 	let root = h.root().to_vec();
@@ -1144,7 +1144,7 @@ fn extract_single_file(
 			&entryname,
 			b": path too long",
 		];
-		log(h.callbacks(), Error, &msg);
+		logv(h.callbacks(), Error, &msg);
 		return 1;
 	}
 	if h.match_noextract(&entryname) == Some(false) {
@@ -1154,7 +1154,7 @@ fn extract_single_file(
 			&filename,
 			b"\n",
 		];
-		log(h.callbacks(), Debug, &msg);
+		logv(h.callbacks(), Debug, &msg);
 		return 0;
 	}
 
@@ -1188,7 +1188,7 @@ fn extract_single_file(
 				];
 				let mut line = text.concat();
 				line.extend_from_slice(msg.as_bytes());
-				log(h.callbacks(), Warning, &[&line]);
+				logv(h.callbacks(), Warning, &[&line]);
 				let act = [
 					&b"warning: directory permissions \
 					   differ on "[..],
@@ -1203,7 +1203,7 @@ fn extract_single_file(
 				&filename[..],
 				b"\n",
 			];
-			log(h.callbacks(), Debug, &msg);
+			logv(h.callbacks(), Debug, &msg);
 			return 0;
 		}
 		// case 5: no file over a directory
@@ -1213,7 +1213,7 @@ fn extract_single_file(
 				&filename[..],
 				b"\n",
 			];
-			log(h.callbacks(), Error, &msg);
+			logv(h.callbacks(), Error, &msg);
 			return 1;
 		}
 		// case 4: a directory over a file
@@ -1223,7 +1223,7 @@ fn extract_single_file(
 				&filename[..],
 				b"\n",
 			];
-			log(h.callbacks(), Debug, &msg);
+			logv(h.callbacks(), Debug, &msg);
 		}
 		// case 3: a file over a file
 		Ok(_) => {
@@ -1248,7 +1248,7 @@ fn extract_single_file(
 				&filename[..],
 				b".pacnew: path too long",
 			];
-			log(h.callbacks(), Error, &msg);
+			logv(h.callbacks(), Error, &msg);
 			return 1;
 		}
 		filename = pacnew(&filename);
@@ -1259,7 +1259,7 @@ fn extract_single_file(
 	}
 
 	let msg = [b"extracting ", &filename[..], b"\n"];
-	log(h.callbacks(), Debug, &msg);
+	logv(h.callbacks(), Debug, &msg);
 	if perform_extraction(h, disk, entry, entrymode, &filename) {
 		return 1;
 	}
@@ -1293,10 +1293,10 @@ fn extract_single_file(
 		};
 		let cb = h.callbacks();
 		let null = |s: &Option<Vec<u8>>| opt_str(s).to_vec();
-		log(cb, Debug, &[b"checking hashes for ", origfile, b"\n"]);
-		log(cb, Debug, &[b"current:  ", &null(&hash_local), b"\n"]);
-		log(cb, Debug, &[b"new:      ", &null(&hash_pkg), b"\n"]);
-		log(cb, Debug, &[b"original: ", &null(&hash_orig), b"\n"]);
+		logv(cb, Debug, &[b"checking hashes for ", origfile, b"\n"]);
+		logv(cb, Debug, &[b"current:  ", &null(&hash_local), b"\n"]);
+		logv(cb, Debug, &[b"new:      ", &null(&hash_pkg), b"\n"]);
+		logv(cb, Debug, &[b"original: ", &null(&hash_orig), b"\n"]);
 		let same = |a: &Option<Vec<u8>>, b: &Option<Vec<u8>>| {
 			matches!((a, b), (Some(a), Some(b))
 				if until_nul(a) == until_nul(b))
@@ -1306,27 +1306,27 @@ fn extract_single_file(
 		if same(&hash_local, &hash_pkg) {
 			// local and new are the same, renamed anyway for the
 			// timestamps
-			log(cb, Debug, &install);
+			logv(cb, Debug, &install);
 			errors +=
 				usize::from(try_rename(h, &filename, origfile));
 		} else if same(&hash_orig, &hash_pkg) {
 			// the package did not change it: the local version
 			// stays, user changes included
 			let msg = b"action: leaving existing file in place\n";
-			log(cb, Debug, &[msg]);
+			logv(cb, Debug, &[msg]);
 			if isnewfile {
 				let _ = fs::remove_file(os(&filename));
 			}
 		} else if same(&hash_orig, &hash_local) {
 			// the user did not change it: updated
-			log(cb, Debug, &install);
+			logv(cb, Debug, &install);
 			errors +=
 				usize::from(try_rename(h, &filename, origfile));
 		} else {
 			// all three differ: the new one stays as .pacnew
 			let msg = b"action: keeping current file and \
 				installing new one with .pacnew ending\n";
-			log(cb, Debug, &[msg]);
+			logv(cb, Debug, &[msg]);
 			let event = Event::PacnewCreated {
 				from_noupgrade: false,
 				oldpkg,
@@ -1401,7 +1401,7 @@ fn log_checkdbdir(h: &mut Handle) {
 				&path[..],
 				b"' does not exist, creating it\n",
 			];
-			log(h.callbacks(), Debug, &msg);
+			logv(h.callbacks(), Debug, &msg);
 		}
 		Ok(m) if !m.is_dir() => {
 			let msg = [
@@ -1409,7 +1409,7 @@ fn log_checkdbdir(h: &mut Handle) {
 				&path[..],
 				b"\n",
 			];
-			log(h.callbacks(), Warning, &msg);
+			logv(h.callbacks(), Warning, &msg);
 		}
 		Ok(_) => {}
 	}
@@ -1432,7 +1432,7 @@ fn db_prepare(h: &mut Handle, pkg: &Package) -> bool {
 				&strerror(&e),
 				b"\n",
 			];
-			log(h.callbacks(), Error, &msg);
+			logv(h.callbacks(), Error, &msg);
 			false
 		}
 		Err(PrepareError::DbDir(_)) => false,
@@ -1455,7 +1455,7 @@ fn db_write(h: &mut Handle, pkg: &Package) -> bool {
 			kind,
 			b" information back to db\n",
 		];
-		log(h.callbacks(), Debug, &msg);
+		logv(h.callbacks(), Debug, &msg);
 		let Some(local) = h.localdb().and_then(|d| d.local()) else {
 			return false;
 		};
@@ -1470,7 +1470,7 @@ fn db_write(h: &mut Handle, pkg: &Package) -> bool {
 					&strerror(&e),
 					b"\n",
 				];
-				log(h.callbacks(), Error, &msg);
+				logv(h.callbacks(), Error, &msg);
 				return false;
 			}
 		}
@@ -1571,7 +1571,7 @@ pub fn commit_single_pkg(
 		(opt_str(&t.pkg.name).to_vec(), opt_str(&t.pkg.version));
 	let ver = ver.to_vec();
 	let msg = [log_msg, b" package ", &name[..], b"-", &ver[..], b"\n"];
-	log(h.callbacks(), Debug, &msg);
+	logv(h.callbacks(), Debug, &msg);
 	let pre: &[u8] = match upgrade {
 		true => b"pre_upgrade",
 		false => b"pre_install",
@@ -1605,7 +1605,7 @@ pub fn commit_single_pkg(
 	}
 
 	let msg = [b"opening archive ", &pkgfile[..], b"\n"];
-	log(h.callbacks(), Debug, &msg);
+	logv(h.callbacks(), Debug, &msg);
 	let open_failed = |h: &mut Handle, e: io::Error| {
 		let msg = [
 			b"could not open file ",
@@ -1614,7 +1614,7 @@ pub fn commit_single_pkg(
 			&strerror(&e),
 			b"\n",
 		];
-		log(h.callbacks(), Error, &msg);
+		logv(h.callbacks(), Error, &msg);
 		Errno::PkgOpen
 	};
 	let archive = match open_archive(&pkgfile) {
@@ -1639,7 +1639,7 @@ pub fn commit_single_pkg(
 			&strerror(&e),
 			b")\n",
 		];
-		log(h.callbacks(), Error, &msg);
+		logv(h.callbacks(), Error, &msg);
 		return Err(Errno::Ok);
 	}
 
@@ -1647,7 +1647,7 @@ pub fn commit_single_pkg(
 	// archive_read_next_header other than ARCHIVE_OK ends the loop
 	let entries = archive.reader.entries().map_while(Result::ok);
 	if flags & TRANS_FLAG_DBONLY != 0 {
-		log(h.callbacks(), Debug, &[b"extracting db files\n"]);
+		logv(h.callbacks(), Debug, &[b"extracting db files\n"]);
 		for mut entry in entries {
 			let entryname = entry.path_bytes().to_vec();
 			if entryname.first() != Some(&b'.') {
@@ -1658,7 +1658,7 @@ pub fn commit_single_pkg(
 			));
 		}
 	} else {
-		log(h.callbacks(), Debug, &[b"extracting files\n"]);
+		logv(h.callbacks(), Debug, &[b"extracting files\n"]);
 		// 0 once, the loop starts past it
 		h.callbacks().progress(
 			progress,
@@ -1699,7 +1699,7 @@ pub fn commit_single_pkg(
 			false => b"installing ",
 		};
 		let text = [b"problem occurred while ", what, &name[..], b"\n"];
-		log(h.callbacks(), Error, &text);
+		logv(h.callbacks(), Error, &text);
 		logaction(h, &[&b"error: "[..], &text.concat()]);
 	}
 
@@ -1707,9 +1707,9 @@ pub fn commit_single_pkg(
 	let sde = sde.as_ref().map(|s| s.as_bytes());
 	t.pkg.installdate = install_time(sde, now());
 
-	log(h.callbacks(), Debug, &[b"updating database\n"]);
+	logv(h.callbacks(), Debug, &[b"updating database\n"]);
 	let msg = [b"adding database entry '", &name[..], b"'\n"];
-	log(h.callbacks(), Debug, &msg);
+	logv(h.callbacks(), Debug, &msg);
 	if !db_write(h, &t.pkg) {
 		let text = [
 			b"could not update database entry ",
@@ -1718,7 +1718,7 @@ pub fn commit_single_pkg(
 			&ver[..],
 			b"\n",
 		];
-		log(h.callbacks(), Error, &text);
+		logv(h.callbacks(), Error, &text);
 		logaction(h, &[&b"error: "[..], &text.concat()]);
 		return Err(Errno::DbWrite);
 	}
@@ -1726,7 +1726,7 @@ pub fn commit_single_pkg(
 	if !add_in_local_cache(h, &t.pkg) {
 		let msg =
 			[b"could not add entry '", &name[..], b"' in cache\n"];
-		log(h.callbacks(), Error, &msg);
+		logv(h.callbacks(), Error, &msg);
 	}
 
 	h.callbacks()

@@ -13,6 +13,10 @@ libseccomp.workspace = true
 pacman-common = { path = "../pacman-common" }
 reqwest.workspace = true
 rustix.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tar.workspace = true
 
 [lints]
 workspace = true

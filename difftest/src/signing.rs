@@ -21,6 +21,7 @@ use alpm_core::package::Package;
 use alpm_core::signing::{PgpKey, SigResult, SigStatus, SigValidity};
 
 use crate::fixtures::{TempRoot, tar_file, ustar};
+use crate::handle::log_message;
 use crate::handle::{
 	_alpm_pkg_validate_internal, ALPM, CDb, alpm_db_get_valid,
 	alpm_db_unregister, alpm_errno, alpm_initialize, alpm_option_get_root,
@@ -29,7 +30,7 @@ use crate::handle::{
 	alpm_register_syncdb, alpm_release,
 };
 use crate::package::{CPkg, CPkgBox, field, read_pkg, take_strs};
-use crate::{CList, c_free, cstr, vsnprintf};
+use crate::{CList, c_free, cstr};
 
 // alpm_pgpkey_t
 #[repr(C)]
@@ -278,16 +279,12 @@ extern "C" fn logcb(
 	if level & LogLevel::Function as c_int != 0 {
 		return;
 	}
-	let mut buf = [0u8; 4096];
-	// SAFETY: fmt and ap are _alpm_log's format and va_list, used once;
-	// vsnprintf stays within buf and nul terminates
-	unsafe {
-		vsnprintf(buf.as_mut_ptr().cast(), buf.len(), fmt, ap);
-		let rec = &*ctx.cast::<RefCell<Recorder>>();
-		let msg = field(buf.as_ptr().cast()).unwrap();
-		if !c_only(&msg) {
-			rec.borrow_mut().events.logs.push((level, msg));
-		}
+	// SAFETY: fmt and ap are the pair this callback got
+	let msg = unsafe { log_message(fmt, ap) };
+	// SAFETY: ctx is the boxed RefCell<Recorder>
+	let rec = unsafe { &*ctx.cast::<RefCell<Recorder>>() };
+	if !c_only(&msg) {
+		rec.borrow_mut().events.logs.push((level, msg));
 	}
 }
 
