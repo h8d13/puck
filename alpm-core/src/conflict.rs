@@ -13,7 +13,6 @@
 // Callbacks, handle->progresscb in the C.
 
 use std::borrow::Borrow;
-use std::cmp::Ordering;
 use std::ffi::{OsStr, c_int};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
@@ -21,8 +20,8 @@ use std::os::unix::ffi::OsStrExt;
 use crate::backup::needbackup;
 use crate::be_local::INFRQ_ERROR;
 use crate::callbacks::{Callbacks, LogLevel, Progress, logv};
-use crate::deps::{Depend, dep_compute_string, depcmp};
-use crate::package::{Package, PkgFrom, has_name, pkg_cmp};
+use crate::deps::{Depend, dep_compute_string, depcmp, list_diff};
+use crate::package::{Package, PkgFrom, has_name};
 use crate::pkghash::PkgHash;
 use crate::util::{PATH_MAX, fnmatch_patterns, llstat, until_nul};
 
@@ -151,32 +150,6 @@ pub fn checkconflicts(
 	innerconflicts(packages, log)
 }
 
-// alpm_list_diff with _alpm_pkg_cmp: both sides msorted by name (stable),
-// then the lhs entries left after pairing each rhs entry with one lhs
-// entry of the same name
-fn pkg_diff<'a>(lhs: &[&'a Package], rhs: &[&Package]) -> Vec<&'a Package> {
-	let (mut l, mut r) = (lhs.to_vec(), rhs.to_vec());
-	l.sort_by(|a, b| pkg_cmp(a, b));
-	r.sort_by(|a, b| pkg_cmp(a, b));
-	let (mut i, mut j) = (0, 0);
-	let mut out = Vec::new();
-	while i < l.len() && j < r.len() {
-		match pkg_cmp(l[i], r[j]) {
-			Ordering::Less => {
-				out.push(l[i]);
-				i += 1;
-			}
-			Ordering::Greater => j += 1,
-			Ordering::Equal => {
-				i += 1;
-				j += 1;
-			}
-		}
-	}
-	out.extend(&l[i..]);
-	out
-}
-
 // _alpm_outerconflicts: targets against the local packages of other
 // names (sorted by name), then those against the targets with the local
 // package first
@@ -186,7 +159,7 @@ pub fn outerconflicts<P: Borrow<Package>>(
 	log: &mut dyn Callbacks,
 ) -> Vec<Conflict> {
 	let cache: Vec<&Package> = local.iter().map(Borrow::borrow).collect();
-	let dblist = pkg_diff(&cache, packages);
+	let dblist = list_diff(&cache, packages);
 	let mut baddeps = Vec::new();
 	logv(log, Debug, &[b"check targets vs db\n"]);
 	check_conflict(packages, &dblist, &mut baddeps, false, log);
@@ -407,7 +380,7 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 		}
 		let pkgs: Vec<&Package> =
 			dbpkg.into_iter().chain(rem.iter().copied()).collect();
-		if !pkg_diff(&owners, &pkgs).is_empty() {
+		if !list_diff(&owners, &pkgs).is_empty() {
 			return false;
 		}
 		let msg = b" belong to removed packages\n";
