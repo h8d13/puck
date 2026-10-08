@@ -15,15 +15,13 @@
 
 use std::ffi::{OsStr, c_int};
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
-use std::io::{self, BufReader, ErrorKind, Read, Seek, Write};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::io::{self, BufReader, ErrorKind, Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{
 	DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt,
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
-use alpm_mtree::libarchive::{self, Entry};
 use pacman_common::util_common::safe_fgets;
 
 use crate::backup::split_backup;
@@ -31,6 +29,7 @@ use crate::callbacks::{Callbacks, LogLevel, logv};
 use crate::deps::{dep_compute_string, dep_from_string};
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
+use crate::mtree;
 use crate::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
 	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, PkgReason, check_meta,
@@ -38,8 +37,8 @@ use crate::package::{
 };
 use crate::pkghash::PkgHash;
 use crate::util::{
-	Filter, hash_sdbm, makepath, mkdir_mode, parsedate, splitname,
-	strerror, strip_newline, strtoofft, until_nul,
+	hash_sdbm, makepath, mkdir_mode, parsedate, splitname, strerror,
+	strip_newline, strtoofft, until_nul,
 };
 
 // ALPM_LOCAL_DB_VERSION
@@ -638,90 +637,23 @@ fn read_files(pkg: &mut Package, f: &mut Lines) {
 
 // mtree: _cache_mtree_open/_cache_mtree_next
 //
-// the C opens "<pkgpath>mtree" with libarchive (every filter, mtree
-// format) and yields its entries one by one. here the filter is picked by
-// magic bytes (alpm-compress) and alpm-mtree's libarchive reader parses
-// the file whole, entries in file order like the C. data that reader
-// cannot parse fails whole, like libarchive (it reads the file at the
-// first header). an entry libarchive warns about ends the C's walk
-// (UPSTREAM.md), here it is kept, without the warned keyword
+// the C opens "<pkgpath>mtree" with libarchive's mtree reader
+// (crate::mtree) and yields its entries one by one. an entry libarchive
+// warns about ends the C's walk (UPSTREAM.md), here it is kept with its
+// warning
 
-pub use alpm_mtree::libarchive::EntryType as MtreeType;
+pub use crate::mtree::{Entry as MtreeEntry, EntryType as MtreeType};
 pub use alpm_types::{Md5Checksum, Sha256Checksum};
-
-// what check.c reads of an archive_entry
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MtreeEntry {
-	// archive_entry_pathname: decoded, with its "./" prefix
-	pub path: Vec<u8>,
-	pub kind: MtreeType,
-	// ~AE_IFMT & archive_entry_mode: the permission bits
-	pub mode: u32,
-	pub uid: i64,
-	pub gid: i64,
-	pub size: u64,
-	// archive_entry_mtime, 0 when unset
-	pub mtime: i64,
-	pub link: Option<Vec<u8>>,
-	pub sha256: Option<Sha256Checksum>,
-	pub md5: Option<Md5Checksum>,
-	// archive_read_next_header gave ARCHIVE_WARN for it: a keyword was
-	// not read, _cache_mtree_next returns -1
-	pub warned: bool,
-}
 
 #[derive(Debug)]
 pub enum MtreeError {
 	// access(F_OK) fails: "there is no mtree file for this package"
 	Missing,
-	// open, read, decompression or format detection failed: where the
-	// C's archive_read_open fails
-	Read(alpm_mtree::Error),
-	// a line libarchive cannot parse: no entries
-	Parse(alpm_mtree::Error),
-}
-
-fn into_bytes(p: PathBuf) -> Vec<u8> {
-	p.into_os_string().into_vec()
-}
-
-fn mtree_entry(e: Entry) -> MtreeEntry {
-	MtreeEntry {
-		path: into_bytes(e.path),
-		kind: e.entry_type,
-		mode: e.mode,
-		uid: e.uid,
-		gid: e.gid,
-		// the reader clamps a negative size to 0 like libarchive
-		size: u64::try_from(e.size).unwrap_or_default(),
-		mtime: e.time.map_or(0, |(seconds, _)| seconds),
-		link: e.link.map(into_bytes),
-		sha256: e.sha256_digest,
-		md5: e.md5_digest,
-		warned: !e.warnings.is_empty(),
-	}
-}
-
-// the alpm-mtree call: plain or gzip'd mtree data
-pub fn parse_mtree(r: impl Read) -> Result<Vec<MtreeEntry>, MtreeError> {
-	match libarchive::from_reader(r) {
-		Ok(entries) => {
-			Ok(entries.into_iter().map(mtree_entry).collect())
-		}
-		Err(
-			e @ (alpm_mtree::Error::Io { .. }
-			| alpm_mtree::Error::InvalidGzip(_)
-			| alpm_mtree::Error::NoMtreeData),
-		) => Err(MtreeError::Read(e)),
-		Err(e) => Err(MtreeError::Parse(e)),
-	}
-}
-
-fn read_err(context: &str, source: io::Error) -> MtreeError {
-	MtreeError::Read(alpm_mtree::Error::Io {
-		context: context.into(),
-		source,
-	})
+	// archive_read_open fails
+	Read(mtree::Error),
+	// the first archive_read_next_header fails: no entries, libarchive's
+	// text
+	Parse(Vec<u8>),
 }
 
 pub fn read_mtree(path: &[u8]) -> Result<Vec<MtreeEntry>, MtreeError> {
@@ -729,24 +661,10 @@ pub fn read_mtree(path: &[u8]) -> Result<Vec<MtreeEntry>, MtreeError> {
 	if fs::metadata(os(path)).is_err() {
 		return Err(MtreeError::Missing);
 	}
-	let mut file = File::open(os(path)).map_err(|e| read_err("open", e))?;
-	// the filter libarchive's bidding would pick
-	let mut magic = Vec::with_capacity(DecompressionSettings::MAGIC_LEN);
-	(&mut file)
-		.take(DecompressionSettings::MAGIC_LEN as u64)
-		.read_to_end(&mut magic)
-		.and_then(|_| file.rewind())
-		.map_err(|e| read_err("read", e))?;
-	let settings = DecompressionSettings::from_magic(&magic);
-	let decoder = CompressionDecoder::new(file, settings.clone())
-		.map_err(|e| read_err("decompress", io::Error::other(e)))?;
-	let mut filter = Filter::new(decoder, &settings);
-	filter.open().map_err(|e| read_err("read", e))?;
-	// after the open a failed read is the end of the data to
-	// libarchive's mtree readline (a NULL read_ahead returns 0)
-	let mut data = Vec::new();
-	let _ = filter.read_to_end(&mut data);
-	parse_mtree(&data[..])
+	mtree::read_file(path).map_err(|e| match e {
+		mtree::Error::Header(text) => MtreeError::Parse(text),
+		e => MtreeError::Read(e),
+	})
 }
 
 impl LocalDb {

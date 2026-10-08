@@ -16,8 +16,6 @@ rust-version = "1.95.0"
 members = [
     "alpm-types",
     "alpm-parsers",
-    "alpm-common",
-    "alpm-mtree",
     "alpm-compress",
 ]
 resolver = "3"

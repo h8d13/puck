@@ -121,7 +121,7 @@ fn entry(t: &Tmp, rel: &str, kind: MtreeType, content: &[u8]) -> MtreeEntry {
 		sha256: (kind == MtreeType::File)
 			.then(|| Sha256Checksum::calculate_from(content)),
 		md5: None,
-		warned: false,
+		warning: None,
 	}
 }
 

@@ -191,8 +191,7 @@ fn local_files(p: &Pkg) -> String {
 	s
 }
 
-// gzip'd mtree, entries sorted by path (alpm-mtree sorts, libarchive
-// keeps file order)
+// gzip'd mtree of the package's files
 fn mtree(p: &Pkg) -> Vec<u8> {
 	let mut s =
 		String::from("#mtree\n/set type=file uid=0 gid=0 mode=644\n");
