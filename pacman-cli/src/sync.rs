@@ -1,6 +1,7 @@
 // port of the read-only part of src/pacman/sync.c: -Si/-Sii (sync_info),
-// -Sl (sync_list), -Sg/-Sgg (sync_group), the pacman_sync dispatch up to
-// them, and util.c's check_syncdbs they rely on
+// -Sl (sync_list), -Sg/-Sgg (sync_group), -Sy/-Syy (util.c's
+// sync_syncdbs, shared with -Fy), the pacman_sync dispatch up to them,
+// and util.c's check_syncdbs they rely on
 //
 // the C prints to stdout and through pm_printf to stderr, both go into an
 // Output. config is the C global, handle config->handle; cols is what
@@ -9,19 +10,31 @@
 // local db and every sync db cache, which Handle only lends out one at a
 // time. messages are the untranslated msgids.
 //
+// what -Sy prints comes from the frontend callbacks (callback.c) during
+// alpm_db_update. callback.rs is not on this base: SyncCallbacks stands
+// in for the parts -Sy reaches and is swapped into the handle for the
+// call. it draws no progress bars, the display is --noprogressbar's (or
+// a pipe's) whatever the terminal.
+//
 // not ported, returned as Unported where pacman_sync reaches them: -Sc
 // (trans_init takes the db lock, then interactive prompts and unlinks
-// in the cache dirs), -Sy (db download), -Ss (db search) and the
-// transaction of -S <targets>/-Su.
+// in the cache dirs), -Ss (db search) and the transaction of
+// -S <targets>/-Su.
 
-use alpm_core::be_sync::get_validation;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use alpm_core::be_sync::{db_update, get_validation};
+use alpm_core::callbacks::{Callbacks, DownloadEvent, LogLevel};
 use alpm_core::db::Db;
 use alpm_core::error::Errno;
 use alpm_core::handle::Handle;
 use alpm_core::package::{DbCaches, Package};
 use alpm_core::util::until_nul;
 
-use crate::conf::{Config, LOG_ERROR, cat};
+use crate::conf::{
+	Config, LOG_DEBUG, LOG_ERROR, LOG_FUNCTION, LOG_WARNING, cat,
+};
 use crate::package::{FileProbe, PkgEnv, dump_pkg_full, print_installed};
 use crate::util::{Output, SigResult, check_syncdbs, pm_printf};
 
@@ -30,8 +43,6 @@ use crate::util::{Output, SigResult, check_syncdbs, pm_printf};
 pub enum Unported {
 	// -Sc/-Scc: sync_cleancache, sync_cleandb_all
 	Clean,
-	// -Sy/-Fy: sync_syncdbs
-	Refresh,
 	// -Ss: sync_search
 	Search,
 	// sync_trans: -S <targets>, -Su
@@ -373,8 +384,8 @@ pub fn pacman_sync<S: AsRef<[u8]>>(
 	if check_syncdbs(&mut out.stderr, config, handle, true, false) != 0 {
 		return Ok(1);
 	}
-	if config.op_s_sync != 0 {
-		return Err(Unported::Refresh);
+	if config.op_s_sync != 0 && !refresh(config, handle, out) {
+		return Ok(1);
 	}
 	if check_syncdbs(&mut out.stderr, config, handle, true, true) != 0 {
 		return Ok(1);
@@ -398,10 +409,111 @@ pub fn pacman_sync<S: AsRef<[u8]>>(
 		return Ok(sync_list(config, handle, targets, out));
 	}
 	if targets.is_empty() && config.op_s_upgrade == 0 {
-		// op_s_sync returned above
+		if config.op_s_sync != 0 {
+			return Ok(0);
+		}
 		let msg: &[u8] = b"no targets specified (use -h for help)\n";
 		error(out, config, &[msg]);
 		return Ok(1);
 	}
 	Err(Unported::Transaction)
+}
+
+// pm_vfprintf/pm_vasprintf to stderr: logmask filter, the level's prefix
+fn log_line(err: &mut Vec<u8>, config: &Config, level: u16, msg: &[u8]) {
+	let prefix: &[u8] = match level {
+		LOG_ERROR | LOG_WARNING => {
+			return pm_printf(err, config, level, msg);
+		}
+		LOG_DEBUG => b"debug: ",
+		LOG_FUNCTION => b"function: ",
+		_ => b"",
+	};
+	if config.logmask & level != 0 {
+		err.extend(cat(&[prefix, msg]));
+	}
+}
+
+// clean_filename: cut at the first ".pkg", else ".db", else ".files"
+fn clean_filename(name: &[u8]) -> &[u8] {
+	let find = |n: &[u8]| name.windows(n.len()).position(|w| w == n);
+	let cut = find(b".pkg")
+		.or_else(|| find(b".db"))
+		.or_else(|| find(b".files"));
+	&name[..cut.unwrap_or(name.len())]
+}
+
+// the callback.c handlers alpm_db_update reaches: cb_log, cb_download
+// without progress bars. cb_event prints nothing for it (the
+// DATABASE_MISSING warning is off under -y); cb_log's buffering between
+// DB_RETRIEVE_START and DONE/FAILED only orders stderr against stdout,
+// which go to separate buffers here
+struct SyncCallbacks {
+	config: Config,
+	out: Rc<RefCell<Output>>,
+}
+
+impl Callbacks for SyncCallbacks {
+	fn log(&mut self, level: LogLevel, msg: &[u8]) {
+		if msg.is_empty() {
+			return;
+		}
+		let err = &mut self.out.borrow_mut().stderr;
+		log_line(err, &self.config, level as u16, msg);
+	}
+
+	fn download(&mut self, filename: &[u8], event: DownloadEvent) {
+		// no progress for signature files
+		if filename.ends_with(b".sig") {
+			return;
+		}
+		if let DownloadEvent::Init { .. } = event {
+			let name = clean_filename(filename);
+			let line = cat(&[b" ", name, b" downloading...\n"]);
+			self.out.borrow_mut().stdout.extend(line);
+		}
+	}
+}
+
+// sync_syncdbs(level, every sync db): alpm_db_update, forced from -yy.
+// false (C 0) when it failed, after the error line
+pub fn sync_syncdbs(
+	config: &Config,
+	handle: &mut Handle,
+	level: u16,
+	out: &mut Output,
+) -> bool {
+	let shared = Rc::new(RefCell::new(std::mem::take(out)));
+	let cb = SyncCallbacks {
+		config: config.clone(),
+		out: shared.clone(),
+	};
+	let old = handle.replace_callbacks(Box::new(cb));
+	let dbs: Vec<usize> = (0..handle.syncdbs().len()).collect();
+	let ret = db_update(handle, &dbs, level >= 2);
+	drop(handle.replace_callbacks(old));
+	*out = shared.take();
+	if let Err(e) = ret {
+		let msg = [
+			b"failed to synchronize all databases (",
+			e.strerror().as_bytes(),
+			b")\n",
+		];
+		error(out, config, &msg);
+	}
+	ret.is_ok()
+}
+
+// the -Sy/-Fy block of pacman_sync and pacman_files: the header, the
+// logfile line, sync_syncdbs
+pub(crate) fn refresh(
+	config: &Config,
+	handle: &mut Handle,
+	out: &mut Output,
+) -> bool {
+	let c = &config.colstr;
+	let head: &[u8] = b"Synchronizing package databases...\n";
+	out.stdout.extend(cat(&[c.colon, head, c.nocolor]));
+	let _ = handle.logaction(b"PACMAN", b"synchronizing package lists\n");
+	sync_syncdbs(config, handle, config.op_s_sync, out)
 }

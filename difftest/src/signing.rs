@@ -70,7 +70,7 @@ struct CQuestionImportKey {
 }
 
 const QUESTION_IMPORT_KEY: c_int = 1 << 6;
-const GPGME_PROTOCOL_OPENPGP: c_int = 0;
+pub(crate) const GPGME_PROTOCOL_OPENPGP: c_int = 0;
 
 unsafe extern "C" {
 	fn alpm_decode_signature(
@@ -120,8 +120,8 @@ unsafe extern "C" {
 		uid: *const c_char,
 		fpr: *const c_char,
 	) -> c_int;
-	fn gpgme_check_version(req: *const c_char) -> *const c_char;
-	fn gpgme_set_engine_info(
+	pub(crate) fn gpgme_check_version(req: *const c_char) -> *const c_char;
+	pub(crate) fn gpgme_set_engine_info(
 		proto: c_int,
 		file_name: *const c_char,
 		home_dir: *const c_char,
@@ -999,6 +999,12 @@ impl GpgFixture {
 			gpg(&d, &["--check-trustdb"], None);
 		}
 		set_mode(&self.dir().join("ro/pubring.gpg"), 0o444);
+	}
+
+	// detached signature of data by the signer keys named, for files
+	// other tests serve
+	pub fn sign_file(&self, keys: &[&str], data: &Path) -> Vec<u8> {
+		self.sign(&self.signer_home(), keys, &[], data)
 	}
 
 	// detached signature of data by keys, extra options first

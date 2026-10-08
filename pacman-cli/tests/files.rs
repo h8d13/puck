@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use alpm_core::handle::Handle;
 use pacman_cli::conf::Config;
 use pacman_cli::files::*;
-use pacman_cli::sync::Unported;
 use pacman_cli::util::Output;
 
 // <tmp>/pacman-cli-files-<pid>-<name>/ with root/ and an empty
@@ -47,7 +46,7 @@ fn run(
 	h: &mut Handle,
 	set: fn(&mut Config),
 	targets: &[&str],
-) -> (Result<i32, Unported>, String, String) {
+) -> (i32, String, String) {
 	let mut cfg = Config::new();
 	set(&mut cfg);
 	let mut out = Output::default();
@@ -60,21 +59,26 @@ fn run(
 #[test]
 fn dispatch() {
 	let (_tmp, mut h) = Tmp::new("dispatch");
+	// -y on a repo without servers: alpm_db_update refuses it
+	let (r, o, e) = run(&mut h, |c| c.op_s_sync = 1, &[]);
+	assert_eq!(r, 1);
+	assert_eq!(o, ":: Synchronizing package databases...\n");
 	assert_eq!(
-		run(&mut h, |c| c.op_s_sync = 1, &[]).0,
-		Err(Unported::Refresh)
+		e,
+		"error: failed to synchronize all databases (no servers \
+		 configured for repository)\n"
 	);
 	let (r, _, e) = run(&mut h, |_| {}, &[]);
-	assert_eq!(r, Ok(1));
+	assert_eq!(r, 1);
 	assert_eq!(e, "error: no targets specified (use -h for help)\n");
 	// nothing to list, nothing to find: no message
 	assert_eq!(
 		run(&mut h, |c| c.op_q_list = 1, &[]),
-		(Ok(0), String::new(), String::new())
+		(0, String::new(), String::new())
 	);
 	assert_eq!(
 		run(&mut h, |_| {}, &["foo", "/usr/bin/foo"]),
-		(Ok(1), String::new(), String::new())
+		(1, String::new(), String::new())
 	);
 }
 
@@ -83,7 +87,7 @@ fn list_errors() {
 	let (_tmp, mut h) = Tmp::new("list");
 	let (r, o, e) =
 		run(&mut h, |c| c.op_q_list = 1, &["core/", "a", "nope/a", ""]);
-	assert_eq!((r, o.as_str()), (Ok(4), ""));
+	assert_eq!((r, o.as_str()), (4, ""));
 	assert_eq!(
 		e,
 		"error: invalid package: 'core/'\n\
@@ -99,7 +103,7 @@ fn bad_regex() {
 	// every target is compiled first, the leading '/' of paths dropped
 	let (r, _, e) =
 		run(&mut h, |c| c.op_f_regex = 1, &["(", "ok", "//usr/["]);
-	assert_eq!(r, Ok(1));
+	assert_eq!(r, 1);
 	assert_eq!(
 		e,
 		"error: invalid regular expression '('\n\
