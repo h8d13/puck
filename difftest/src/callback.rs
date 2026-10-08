@@ -29,13 +29,15 @@ use pacman_cli::conf::Config;
 use pacman_cli::util::{Output, Term};
 
 use crate::cli_util::{FRONTEND, config, init};
+use crate::cli_util2::stdin;
 use crate::conf::ColStrC;
 use crate::package::{CDepend, CPkg, CPkgBox};
 use crate::pkg_show::{c_strftime_c, columns_cache_reset};
+use crate::sandbox::syscall;
 use crate::util_common::fmemopen;
 use crate::{
-	CFile, CList, alpm_list_add, alpm_list_free, c_free, cstr, fclose,
-	fflush, open_memstream, stderr, stdout,
+	CList, alpm_list_add, alpm_list_free, c_free, cstr, fclose, fflush,
+	open_memstream, stderr, stdout,
 };
 
 const CLOCK_MONOTONIC_COARSE: c_int = 6;
@@ -51,11 +53,9 @@ pub struct Timespec {
 }
 
 unsafe extern "C" {
-	static mut stdin: *mut CFile;
-	fn syscall(num: c_long, ...) -> c_long;
-	fn cb_event(ctx: *mut c_void, event: *mut c_void);
-	fn cb_question(ctx: *mut c_void, question: *mut c_void);
-	fn cb_progress(
+	pub(crate) fn cb_event(ctx: *mut c_void, event: *mut c_void);
+	pub(crate) fn cb_question(ctx: *mut c_void, question: *mut c_void);
+	pub(crate) fn cb_progress(
 		ctx: *mut c_void,
 		event: c_int,
 		pkgname: *const c_char,
@@ -63,14 +63,14 @@ unsafe extern "C" {
 		howmany: usize,
 		current: usize,
 	);
-	fn cb_download(
+	pub(crate) fn cb_download(
 		ctx: *mut c_void,
 		filename: *const c_char,
 		event: c_int,
 		data: *mut c_void,
 	);
 	// va_list passed as a pointer: valid on x86_64 and aarch64
-	fn cb_log(
+	pub(crate) fn cb_log(
 		ctx: *mut c_void,
 		level: c_int,
 		fmt: *const c_char,

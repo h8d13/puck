@@ -42,7 +42,7 @@ use crate::{
 };
 
 unsafe extern "C" {
-	static mut stdin: *mut CFile;
+	pub(crate) static mut stdin: *mut CFile;
 
 	fn display_targets();
 	fn print_packages(packages: *const CList);

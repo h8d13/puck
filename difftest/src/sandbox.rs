@@ -65,7 +65,7 @@ unsafe extern "C" {
 	fn _alpm_log(handle: *mut c_void, flag: c_int, fmt: *const c_char, ...);
 
 	// libc
-	fn syscall(number: c_long, ...) -> c_long;
+	pub(crate) fn syscall(number: c_long, ...) -> c_long;
 	fn prctl(option: c_int, ...) -> c_int;
 	fn mkfifo(path: *const c_char, mode: c_uint) -> c_int;
 
