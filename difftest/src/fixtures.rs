@@ -30,10 +30,10 @@ pub fn c_pacman() -> PathBuf {
 	dir.join("pacman")
 }
 
-// target/<profile>/deps/cli_binary-<hash> -> target/<profile>/pacman
+// target/<profile>/deps/cli_binary-<hash> -> target/<profile>/puck
 pub fn rust_pacman() -> PathBuf {
 	let exe = std::env::current_exe().unwrap();
-	let bin = exe.parent().unwrap().parent().unwrap().join("pacman");
+	let bin = exe.parent().unwrap().parent().unwrap().join("puck");
 	assert!(
 		bin.exists(),
 		"{} missing: cargo build --release -p pacman-cli",

@@ -16,13 +16,16 @@ if [ ! -x "$bin" ]; then
 	exit 2
 fi
 shift
-bindir=$(cd "$(dirname "$bin")" && pwd)
-if [ "$(basename "$bin")" != pacman ]; then
-	echo "pactest looks for 'pacman' in the binary's directory" >&2
-	exit 2
-fi
 export TMPDIR=${TMPDIR:-$PWD/.tmp}
 mkdir -p "$TMPDIR"
+bindir=$(cd "$(dirname "$bin")" && pwd)
+# pactest runs "pacman" from --bindir: another name (puck) gets a pacman
+# symlink in a temp dir
+if [ "$(basename "$bin")" != pacman ]; then
+	shim=$(mktemp -d "$TMPDIR/pactest-bin.XXXXXX")
+	ln -s "$bindir/$(basename "$bin")" "$shim/pacman"
+	bindir=$shim
+fi
 suite=pacman/test/pacman
 tests=("$@")
 if [ ${#tests[@]} = 0 ]; then
@@ -45,7 +48,7 @@ ok=0 fail=0 xfailed=0 xpassed=0
 log=$(mktemp)
 # one dir per test, so a kept root is the only pactest-* inside
 roots=$(mktemp -d)
-trap 'rm -rf "$log" "$roots"' EXIT
+trap 'rm -rf "$log" "$roots" ${shim:+"$shim"}' EXIT
 for t in "${tests[@]}"; do
 	name=$(basename "$t")
 	TMPDIR=$roots RUNNING_UNDER_MESON=1 timeout "${PACTEST_TIMEOUT:-300}" \

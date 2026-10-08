@@ -15,8 +15,8 @@ use crate::conf::{
 };
 use crate::getopt::{Getopt, HasArg, LongOpt};
 use crate::pacman::Io;
+use pacman_common::util_common::mbasename;
 
-const MYNAME: &str = "pacman-conf";
 const MYVER: &str = "1.0.0";
 const SEP: u8 = b'\n';
 
@@ -62,10 +62,14 @@ struct Query {
 	out: Vec<u8>,
 }
 
-// usage(ret): stdout for --help, stderr otherwise
-fn usage(io: &mut Io, ret: i32) -> i32 {
+// usage(ret): stdout for --help, stderr otherwise. the C hardcodes
+// "pacman-conf"; the name comes from argv[0] here so the renamed binary
+// names itself (invoked as pacman-conf the text is the C's)
+fn usage(io: &mut Io, myname: &str, ret: i32) -> i32 {
 	let stream = if ret != 0 { &mut io.err } else { &mut io.out };
-	stream.extend_from_slice(USAGE.as_bytes());
+	let text = USAGE.replace("pacman-conf -", &format!("{myname} -"));
+	let text = text.replace("  pacman-conf ", &format!("  {myname} "));
+	stream.extend_from_slice(text.as_bytes());
 	ret
 }
 
@@ -77,6 +81,9 @@ fn parse_opts(
 	q: &mut Opts,
 	io: &mut Io,
 ) -> Result<usize, i32> {
+	let myname = argv.first().map_or_else(String::new, |a| {
+		String::from_utf8_lossy(mbasename(a)).into_owned()
+	});
 	let mut g = Getopt::new(io.posixly_correct);
 	let mut longind = 0;
 	loop {
@@ -99,13 +106,13 @@ fn parse_opts(
 			b'l' => q.repo_list = true,
 			b'r' => q.repo_name = Some(arg),
 			b'v' => q.verbose = true,
-			b'h' => return Err(usage(io, 0)),
+			b'h' => return Err(usage(io, &myname, 0)),
 			b'V' => {
-				let v = format!("{MYNAME} v{MYVER}\n");
+				let v = format!("{myname} v{MYVER}\n");
 				io.out.extend_from_slice(v.as_bytes());
 				return Err(0);
 			}
-			_ => return Err(usage(io, 1)),
+			_ => return Err(usage(io, &myname, 1)),
 		}
 	}
 	let parsed = config

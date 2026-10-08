@@ -6,7 +6,7 @@
 # call (inside run_pacman, behind sudo) runs as its one line. each run is
 # capped like the test runner: 4 GiB address space, 60 s
 # usage: scripts/pacman-conf-dropin.sh   (from the repo root, after
-#        cargo build --release -p pacman-cli --bin pacman-conf)
+#        cargo build --release -p pacman-cli --bin puck-conf)
 
 set -uo pipefail
 
@@ -16,7 +16,7 @@ if [ -z "${PACMAN_BUILD:-}" ] && [ -f .cargo/config.toml ]; then
 		.cargo/config.toml)
 fi
 build=${PACMAN_BUILD:-pacman/build}
-rust=target/release/pacman-conf
+rust=target/release/puck-conf
 for f in "$build/pacman-conf" "$build/pacman-key" \
 		"$build/pacman-db-upgrade" "$rust"; do
 	if [ ! -x "$f" ]; then
