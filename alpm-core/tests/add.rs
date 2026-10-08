@@ -1,5 +1,5 @@
-// get_install_time's SOURCE_DATE_EPOCH parse (strtoull base 10, whole
-// string, no ERANGE), compared against the C in difftest's sde_ children
+// get_install_time's SOURCE_DATE_EPOCH parse: strtoull base 10 over the
+// whole string, no ERANGE
 use alpm_core::add::install_time;
 
 #[test]

@@ -20,7 +20,7 @@ use rustix::fs::{
 	fchmod, futimens, makedev, mknodat, openat, utimensat,
 };
 
-use crate::backup::{self, Backup};
+use crate::backup;
 use crate::be_local::{INFRQ_DESC, INFRQ_FILES, PrepareError, WriteError};
 use crate::be_package::tar_mode_size;
 use crate::callbacks::{
@@ -1196,7 +1196,7 @@ fn extract_single_file(
 			if h.match_noupgrade(&entryname) == Some(false) {
 				notouch = true;
 			} else if let Some(old) = oldpkg
-				.and_then(|o| needbackup_of(&entryname, o))
+				.and_then(|o| backup::needbackup(&entryname, o))
 			{
 				hash_orig = old.hash.clone();
 				needbackup = true;
@@ -1311,11 +1311,6 @@ fn extract_single_file(
 		}
 	}
 	errors
-}
-
-// _alpm_needbackup on oldpkg, by the entry name
-fn needbackup_of<'p>(entryname: &[u8], pkg: &'p Package) -> Option<&'p Backup> {
-	backup::needbackup(entryname, pkg)
 }
 
 // get_install_time: SOURCE_DATE_EPOCH when strtoull(.., 10) reads all of
