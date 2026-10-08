@@ -67,7 +67,7 @@ struct Rec {
 }
 
 impl Callbacks for Rec {
-	// errors and warnings: the debug lines are the difftest's
+	// errors and warnings: the debug lines are compared against the C
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {
 		if level != LogLevel::Debug {
 			self.logs.push((
