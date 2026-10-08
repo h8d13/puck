@@ -44,8 +44,11 @@ impl Callbacks for Rec {
 	}
 }
 
+// the port logs be_sync's archive error with its own text, left out
+// like the C's
 fn take_rust_logs() -> Logs {
-	LOGS.with(|l| std::mem::take(&mut *l.borrow_mut()))
+	let logs = LOGS.with(|l| std::mem::take(&mut *l.borrow_mut()));
+	logs.into_iter().filter(modelled).collect()
 }
 
 // C lines the port does not log: RET_ERR/GOTO_ERR (C file and line),
@@ -167,6 +170,24 @@ fn sync_db(pkgs: &[Pkg]) -> Vec<u8> {
 	ustar(&entries)
 }
 
+// %NAME%, %VERSION% and the groups only, like pactest writes them
+fn sparse_db(pkgs: &[Pkg]) -> Vec<u8> {
+	let entries: Vec<TarEntry> = pkgs
+		.iter()
+		.map(|p| {
+			let desc = format!(
+				"%NAME%\n{}\n\n%VERSION%\n{}\n\n{}",
+				p.name,
+				p.version,
+				section("GROUPS", &p.groups)
+			);
+			let dir = format!("{}-{}", p.name, p.version);
+			tar_file(&format!("{dir}/desc"), desc.as_bytes())
+		})
+		.collect();
+	ustar(&entries)
+}
+
 const PKG_NAMES: [&str; 8] = ["a", "b", "foo", "bar", "baz", "x-y", "z9", "q"];
 const GROUPS: [&str; 4] = ["g1", "g2", "base", "kde"];
 const TREES: [&str; 9] = [
@@ -225,8 +246,31 @@ fn gen_sync_files(rng: &mut Rng, fx: &TempRoot, dbext: &str) -> String {
 	let mut log = String::new();
 	for tree in ["core", "extra", "multilib", "c", "d"] {
 		let file = format!("{tree}{dbext}");
-		match rng.below(6) {
+		match rng.below(10) {
 			0 => writeln!(log, "{file}: absent").unwrap(),
+			// pactest's entries: the sections a test sets only
+			3 => {
+				let pkgs = gen_pkgs(rng, 5);
+				write_sync(fx, &file, &sparse_db(&pkgs));
+				writeln!(log, "{file}: sparse {pkgs:?}")
+					.unwrap();
+			}
+			// an entry the reader refuses: the db goes invalid
+			4 => {
+				let pkgs = gen_pkgs(rng, 3);
+				let mut tar = sync_db(&pkgs);
+				let at = tar
+					.windows(10)
+					.position(|w| w == b"%PACKAGER%");
+				if let Some(at) = at {
+					tar[at..at + 10].copy_from_slice(
+						b"%DATA%\nx\n\n",
+					);
+				}
+				write_sync(fx, &file, &tar);
+				writeln!(log, "{file}: bad entry {pkgs:?}")
+					.unwrap();
+			}
 			1 => {
 				let mut tar = sync_db(&gen_pkgs(rng, 2));
 				tar.truncate(700);

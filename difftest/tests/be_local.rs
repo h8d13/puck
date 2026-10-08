@@ -237,7 +237,7 @@ fn text(rng: &mut Rng) -> Vec<u8> {
 }
 
 fn number(rng: &mut Rng) -> Vec<u8> {
-	let n = match rng.below(10) {
+	match rng.below(10) {
 		0 => pick(
 			rng,
 			&[b"", b"-1", b"+5", b" 7", b"7 ", b"x1", b"0x10"],
@@ -256,8 +256,7 @@ fn number(rng: &mut Rng) -> Vec<u8> {
 		)
 		.to_vec(),
 		_ => word(rng, DIGIT, 1, 10),
-	};
-	n
+	}
 }
 
 fn version(rng: &mut Rng) -> Vec<u8> {
