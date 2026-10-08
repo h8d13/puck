@@ -3,6 +3,7 @@
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::{Mutex, MutexGuard};
 
+mod add_commit;
 mod backup;
 mod be_local;
 mod be_local_write;
@@ -47,6 +48,7 @@ mod util;
 mod util_common;
 mod version;
 
+pub use add_commit::*;
 pub use backup::*;
 pub use be_local::*;
 pub use be_local_write::*;
