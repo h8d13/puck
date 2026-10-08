@@ -470,7 +470,7 @@ fn fixed_minimal() {
 #[test]
 fn real_packages() {
 	let dir = std::env::var_os("DIFFTEST_PKG_CORPUS").map_or_else(
-		|| std::env::temp_dir().join("ratman-pkgfile-corpus"),
+		|| std::env::temp_dir().join("puck-pkgfile-corpus"),
 		PathBuf::from,
 	);
 	let Ok(rd) = fs::read_dir(&dir) else {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# git worktree for one port unit: ../ratman-worktrees/<name>, branch unit/<name>
+# git worktree for one port unit: ../puck-worktrees/<name>, branch unit/<name>
 # usage: scripts/unit-worktree.sh <name>...          create (tree must be clean)
 #        scripts/unit-worktree.sh --from REF <name>... create from REF
 #        scripts/unit-worktree.sh --remove <name>... remove after merging
@@ -16,7 +16,7 @@ if [ ! -f Cargo.toml ] || [ ! -d pacman/build ]; then
 	exit 2
 fi
 root=$(pwd)
-base="$(dirname "$root")/ratman-worktrees"
+base="$(dirname "$root")/puck-worktrees"
 
 remove() {
 	local name=$1 wt="$base/$1"

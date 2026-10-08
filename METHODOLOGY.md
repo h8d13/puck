@@ -146,7 +146,7 @@ No real root, and nothing outside `.tmp/` is written.
 ## Unit workflow
 
 - `scripts/unit-worktree.sh <name>` (clean tree, so commit first) makes
-  `../ratman-worktrees/<name>` on branch `unit/<name>`: submodules cloned
+  `../puck-worktrees/<name>` on branch `unit/<name>`: submodules cloned
   `--shared`, the C reference build shared via `PACMAN_BUILD`, `TMPDIR`
   inside the worktree (`.cargo/config.toml`). Nothing goes to /tmp: tests
   use `std::env::temp_dir()`, logs go to `.tmp/`.
