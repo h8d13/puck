@@ -1611,8 +1611,8 @@ fn mtree_of(fx: &Fixture, text: &str) -> Entry {
 
 const MTREE_HEAD: &str = "#mtree\n/set type=file uid=0 gid=0 mode=644\n";
 
-// archive layouts: what libarchive's tar and mtree readers do that the
-// tar crate does not, and the walk rules both share
+// archive layouts: odd tar entries (type flags, directories and hard
+// links with data), .MTREE variants, and the walk rules
 #[test]
 fn fixed_archive() {
 	let fx = Fixture::new();
@@ -1632,7 +1632,7 @@ fn fixed_archive() {
 					Kind::Raw(b'5', b"abc".to_vec()),
 				),
 			],
-			["same", "c libarchive"],
+			["same", "same"],
 		),
 		(
 			"slash file no data",
@@ -1652,7 +1652,7 @@ fn fixed_archive() {
 					Kind::Raw(b'0', b"abc".to_vec()),
 				),
 			],
-			["same", "c libarchive"],
+			["same", "same"],
 		),
 		(
 			"type X",
@@ -1665,7 +1665,7 @@ fn fixed_archive() {
 				),
 				file(b"b", b"x"),
 			],
-			["c libarchive", "c libarchive"],
+			["same", "same"],
 		),
 		(
 			"type Z",
@@ -1691,7 +1691,7 @@ fn fixed_archive() {
 				),
 				file(b"b", b"x"),
 			],
-			["rust libarchive", "rust libarchive"],
+			["same", "same"],
 		),
 		(
 			"hardlink data",
@@ -1703,7 +1703,7 @@ fn fixed_archive() {
 					Kind::Raw(b'1', b"xyz".to_vec()),
 				),
 			],
-			["same", "c libarchive"],
+			["same", "same"],
 		),
 		(
 			"dot prefix",
