@@ -1235,13 +1235,13 @@ pub fn filecache_setup(
 // prefix and modes set by chmod, so process cwd and umask stay untouched
 
 // file type bits of mode_t
-const S_IFMT: u32 = 0o170000;
-const S_IFREG: u32 = 0o100000;
-const S_IFDIR: u32 = 0o040000;
-const S_IFLNK: u32 = 0o120000;
-const S_IFCHR: u32 = 0o020000;
-const S_IFBLK: u32 = 0o060000;
-const S_IFIFO: u32 = 0o010000;
+pub(crate) const S_IFMT: u32 = 0o170000;
+pub(crate) const S_IFREG: u32 = 0o100000;
+pub(crate) const S_IFDIR: u32 = 0o040000;
+pub(crate) const S_IFLNK: u32 = 0o120000;
+pub(crate) const S_IFCHR: u32 = 0o020000;
+pub(crate) const S_IFBLK: u32 = 0o060000;
+pub(crate) const S_IFIFO: u32 = 0o010000;
 
 // the umask _alpm_unpack extracts under
 const UNPACK_UMASK: u32 = 0o022;
@@ -1251,6 +1251,9 @@ const UNPACK_UMASK: u32 = 0o022;
 pub struct Archive {
 	pub reader: TarballReader<'static>,
 	pub meta: fs::Metadata,
+	// the reader's fd, dup'ed: its offset is how far the decoder read
+	// (archive_filter_bytes of the client)
+	pub raw: File,
 	// the filter picked, None: tar offsets are file offsets
 	pub settings: DecompressionSettings,
 }
@@ -1273,12 +1276,14 @@ pub fn open_archive(path: &[u8]) -> io::Result<Archive> {
 	let mut magic = Vec::with_capacity(len);
 	(&mut file).take(len as u64).read_to_end(&mut magic)?;
 	file.rewind()?;
+	let raw = file.try_clone()?;
 	let settings = DecompressionSettings::from_magic(&magic);
 	let decoder = CompressionDecoder::new(file, settings.clone())
 		.map_err(archive_io_err)?;
 	Ok(Archive {
 		reader: TarballReader::new(decoder),
 		meta,
+		raw,
 		settings,
 	})
 }
@@ -1334,7 +1339,7 @@ fn is_kind(r: &io::Result<impl Sized>, kinds: &[ErrorKind]) -> bool {
 // cleanup_pathname_fsobj without the SECURE flags: "./" and empty
 // components dropped, a trailing "." or '/' cut, ".." kept, a leading
 // '/' kept. "." or "/" when nothing is left, None for an empty name
-fn cleanup_pathname(name: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn cleanup_pathname(name: &[u8]) -> Option<Vec<u8>> {
 	if name.is_empty() {
 		return None;
 	}
@@ -1381,7 +1386,7 @@ fn wanted<L: AsRef<[u8]>>(list: &[L], name: &[u8]) -> bool {
 // last read, or the skip). the tar reader reads it with the next header,
 // so it is checked against the length of a plain archive; past a filter
 // a missing padding only shows at the next header
-fn check_padding(
+pub(crate) fn check_padding(
 	entry: &TarballEntry,
 	size: u64,
 	plain_len: Option<u64>,
@@ -1394,7 +1399,7 @@ fn check_padding(
 }
 
 // archive_read_data_skip
-fn skip_data(
+pub(crate) fn skip_data(
 	entry: &mut TarballEntry,
 	size: u64,
 	plain_len: Option<u64>,
@@ -1827,7 +1832,7 @@ pub fn unpack<L: AsRef<[u8]>>(
 
 // chdir(2): a directory the process may search, with the effective ids
 // like chdir
-fn enter(dir: &[u8]) -> io::Result<()> {
+pub(crate) fn enter(dir: &[u8]) -> io::Result<()> {
 	let path = c_path(dir);
 	if !fs::metadata(path)?.is_dir() {
 		return Err(rustix::io::Errno::NOTDIR.into());
