@@ -88,15 +88,15 @@ Gate: `scripts/cli-parity.sh` between C `pacman` and the Rust binary with
 the same `--root`/`--dbpath`/`--config` on generated test roots and a
 read-only copy of a real system db; byte-identical stdout, stderr, exit.
 Now: `scripts/cli-parity-fixtures.sh` (-D runs under fakeroot with the
-written db compared), 548/550 equal; pacman-conf 554/554; testpkg
+written db compared), 615/615 equal; pacman-conf 554/554; testpkg
 binary 45/54 equal, 8 differing only in be_package's log lines, 1
 known (text file), testpkg module 486/550 + 64 log lines only (the
 mtree lines now carry libarchive's texts);
-pacman-conf drop-in 13/13. On pacman: the two left are `--debug` in the
-default-SigLevel world (signing debug lines, GOTO_ERR's C file:line).
-**Gate met** except those two: GOTO_ERR/RET_ERR lines carry the C's
-source file and line and are not logged by design; the signing debug
-lines are a follow-up.
+pacman-conf drop-in 13/13. On pacman, every run compares with the C's
+GOTO_ERR lines (`got error <n> at <func> (<C file>: <line>)`) dropped
+wherever they occur, and only those: they carry the C's source position
+and are not logged by design (`is_goto_err` in `cli_binary.rs`).
+**Gate met.**
 
 ### 2. Sync databases (`-Sy`)
 
@@ -133,6 +133,75 @@ reader) -> 338 ok / 6 xfail / 0 fail / 0 unexpected pass (dload
 redirects without connection reuse), vercmptest and the script tests
 included. **Gate met** on master f46c525: `scripts/upstream-suite.sh
 target/release` exits 0.
+
+### 3b. Real-system equivalence (rootless)
+
+Twin roots, C vs Rust, real packages and mirrors in a user namespace
+(METHODOLOGY.md "Integration gates"). Covers what pactest and fakeroot
+do not: real package sets with hooks, scriptlets, capabilities and backup
+files, real HTTPS mirrors, a real keyring, landlock and DownloadUser.
+
+Gate: every step equal on `scripts/twin-root.sh`. State: harness done,
+gate not met (diffs below, all owned or reported).
+
+```
+cargo build --release -p pacman-cli
+scripts/twin-root.sh            # exit 0 only if every step is equal
+scripts/twin-root.sh --keep     # keep .tmp/twin (steps/NN-*/report.txt)
+scripts/twin-root.sh --clean    # remove a kept .tmp/twin
+```
+
+Setup (C only, then the Rust root starts as a copy): pacman-key keyring,
+`-Syy`/`-Fyy` of core and extra, a `-Sw` prefetch of every package the
+steps install (host cache hits skipped; the host cache itself is a read
+only CacheDir). Steps, the same argv and env on both sides
+(`LC_ALL=C`, `TZ=Europe/Berlin`); a diff carried from the step before
+is counted, not repeated:
+
+| Step | argv | Result (master 8ce1038) |
+|---|---|---|
+| sy | `-Sy` | log offset |
+| download | `-Sw -dd which less iana-etc`, empty cache only | no new diff |
+| base-filesystem | `-S filesystem` | no new diff |
+| base-core | `-S glibc bash coreutils pacman` (112 packages, systemd, hooks) | optdepend markers, newuidmap/newgidmap caps |
+| base-extra | `-S iputils less nano logrotate` | no new diff |
+| qi | `-Qi pacman iputils` | Build Date zone |
+| qii-backup / si | `-Qii nano`, `-Si iputils` | no new diff |
+| reinstall-backup | edited `etc/pacman.conf`, `-S pacman` (kept, no .pacnew) | no new diff |
+| local-install | `-U twin-backup-1-1` (unsigned local package) | no new diff |
+| pacnew | edited backup file, `-U twin-backup-2-1` | no new diff |
+| qii-pacnew | `-Qii twin-backup` | Build Date zone |
+| pacsave | `-R twin-backup` | no new diff |
+| downgrade | `-U` older `less` from the host cache | no new diff |
+| rns-nosave | edited `etc/logrotate.conf`, `-Rns logrotate` | no new diff |
+| qkk / dk | `-Qkk`, `-Dk` | no new diff |
+| sc | `-Sc`, answers y y n n y | error text for download dirs |
+| fy / f / fl | `-Fy`, `-F ping`, `-Fl iputils` | no new diff |
+
+Diffs, latest run:
+- pacman.log stamps: Rust UTC (+0000), C local (+0200); output unit.
+  Normalised, the logs are equal.
+- `security.capability` missing on usr/bin/newuidmap, newgidmap (shadow):
+  xattr unit.
+- optdepends after install/upgrade lack ` [installed]`/` [pending]`:
+  `pacman-cli/src/callback.rs` runs with `Lookup for ()`, whose
+  `installed()` (and `db_name()`, the provider list's repository
+  headers) is still the pre-trans.c stub. Repro: `-S gzip` on a root
+  with grep, C prints `grep: zegrep/... [installed]`. Needs the local
+  db and the transaction's add list reachable from the callbacks
+  (emitted in add.rs/remove.rs); open.
+- `-Qi`/`-Qii` Build Date in UTC, C in local time (`package.rs`
+  `format_date`): the log stamps' cause, no local zone; output unit.
+- `-Sc` on a leftover `download-XXXXXX` dir: C logs libarchive's
+  "Error reading fd 8", the port "Is a directory" (libarchive error
+  texts are the port's, `be_package.rs` `open_archive`).
+
+Harness choices: every pacman-visible path is under a tmpfs on /mnt
+private to the session (DownloadUser alpm cannot traverse the 0700
+home); a fixed etc/machine-id (systemd's scriptlet keeps it); content of
+the java keystore and ldconfig's aux-cache not compared (dates, inode
+numbers); `download-XXXXXX` names canonicalised. Runtime ~2-3 min warm
+(network bound), ~620 MiB per root.
 
 ### 4. Drop-in
 
@@ -263,13 +332,13 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `lib/libalpm/log.c` | 112 | - | |
 | `lib/libalpm/package.c` | 868 | `alpm-core::package` (partial) | data model (`Package`, `PkgFrom`, `PkgReason`), dup, pkg_cmp, compare_versions, find, compute_requiredby/optionalfor (`DbCaches`), should_ignore (fixture handles + mirror fuzz): difftest via `#[repr(C)]` mirror (offsets checked through the C getters); handle/db/archive parts pending |
 | `lib/libalpm/be_package.c` | 778 | `alpm-core::be_package` (partial) | pkg_load_internal (full and metadata-only walk, parse_descfile with _alpm_archive_fgets, .MTREE via `alpm-core::mtree` with archive fallback and its debug lines, file list, check_meta), pkg_load/pkg_validate at every level (.sig, base64 sig, sha256 skip), key import question, changelog, the C's load/validate log lines (not libarchive's texts): difftest on generated packages (gz/bz2/xz/zst/none, full on/off, every field + changelog + log lines + pm_errno), random-line `.PKGINFO` fuzz (every key, empty/blank values, separators, comments, duplicates, CRLF, nul/non-UTF-8 bytes, odd relations and numbers), nul bytes at data block ends, 512 KiB lines, ~140 pinned odd inputs all equal, fuzzed `.MTREE` text in every compression and cut `.MTREE` streams (lists, scriptlet, mtree log lines with libarchive's texts), real cached packages (`DIFFTEST_PKG_CORPUS`, 2559 files equal); gpgme/.sig pending |
-| `lib/libalpm/be_local.c` | 1232 | `alpm-core::be_local` (partial) | register/validate (ALPM_DB_VERSION, creation), populate (check_meta lines), local_db_read (safe_fgets lines, READ_* macros, every section, INFRQ levels, log lines): difftest on byte-generated dbs (any sections in any order, unknown/repeated keys, blank lines, CRLF, nul bytes, non-UTF-8, lines over 1023 bytes, odd relations/reasons/validations, cut files; every field, cache order and counts, every log line), version-file fuzz, 100 pinned odd inputs, /var/lib/pacman read-only; local_db_prepare/write/remove, set_reason: difftest `be_local_write` (written trees byte for byte, modes, rc); mtree (`_cache_mtree_*` through `alpm-core::mtree`): difftest `check`; changelog pending |
+| `lib/libalpm/be_local.c` | 1232 | `alpm-core::be_local` (partial) | register/validate (ALPM_DB_VERSION, creation), populate (check_meta lines), local_db_read (safe_fgets lines, READ_* macros, every section, INFRQ levels, log lines): difftest on byte-generated dbs (any sections in any order, unknown/repeated keys, blank lines, CRLF, nul bytes, non-UTF-8, lines over 1023 bytes, odd relations/reasons/validations, cut files; every field, cache order and counts, every log line), version-file fuzz, 100 pinned odd inputs, /var/lib/pacman read-only; local_db_prepare/write/remove, set_reason: difftest `be_local_write` (written trees byte for byte, modes, rc); mtree (`_cache_mtree_*` through `alpm-core::mtree`): difftest `check`; changelog pending; mtree open failures logged with libarchive's file reader texts (difftest `query`) |
 | `lib/libalpm/be_sync.c` | 762 | `alpm-core::be_sync` (partial) | populate (tar walk past bad entries, load_pkg_for_entry, check_meta, validate_filename, error ranking), sync_db_read (`_alpm_archive_fgets` over libarchive's data blocks, READ_* macros, %FILES%, %DATA%, log lines), get_validation, db_path, sync_db_validate (missing file, signature, import retry) + `alpm-compress`: difftest on generated .db/.files in gz/bz2/xz/zst/none changed byte by byte (fields, cache order, table counts, pm_errno, log lines), block edges per filter, 54 pinned odd inputs, real sync db copies compared whole; alpm_db_update + get_sync_dir: difftest vs C on loopback mirrors with gpg-signed fixture dbs (sequences, edges, signatures, fuzz) |
 | `lib/libalpm/db.c` | 773 | `alpm-core::db` (partial) | register/unregister, servers (sanitize_url), usage, siglevel, get_valid, pkgcache/get_pkg, groupcache/get_group (load_grpcache order), add/remove pkg in cache, load_pkg (lazy loads in place), dbext read at load, db_path, db_cmp: difftest op-sequence fuzz (results, errno, db state each step); search (difftest fuzz), load_all/walk/find_satisfier; log lines (db.c, be_local populate/read, be_sync populate): the op fuzz compares every line of each op and of the release; update pending |
 | `lib/libalpm/log.c` | 112 | `alpm-core::log` | logaction (logfile, errno), leader format, syslog packet, local time (`local_offset`): difftest, stamps compared within `CLOCK_SLACK`, tz-probe against localtime(3) in 16 zones (DST edges by bisection), the binaries in 6 zones (`cli_binary` local_time) |
 | `lib/libalpm/handle.c` | 1017 | `alpm-core::handle` (all but trans) | options, lock, logfile, callbacks, keyring, dload state: difftest option fuzz, lock, logaction; earlier: | alpm_initialize path checks/normalisation, dbext, architectures, siglevels, ignore/noupgrade/noextract lists + match: difftest; callbacks, lock, cachedirs, hookdirs, gpgdir, logfile, sandbox, downloads pending |
 | `lib/libalpm/alpm.c` | 132 | - | |
-| `lib/libalpm/signing.c` | 1201 | `alpm-core::signing` | decode_signature, checksig (.sig and base64), check_pgp_helper, process_siglist, key_in_keychain, key_import (keyring/question part; WKD/keyserver failure only), pkg/db_check_pgp_signature, extract_keyid: difftest vs gpgme-backed C on throwaway keyrings (all status/validity pairs, bad/garbage/truncated/armored sigs), results, rc, pm_errno, questions, logs; gpg argv vs gpgme's; extract_keyid fuzz |
+| `lib/libalpm/signing.c` | 1201 | `alpm-core::signing` | decode_signature, checksig (.sig and base64), check_pgp_helper, process_siglist, key_in_keychain, key_import (keyring/question part; WKD/keyserver failure only), pkg/db_check_pgp_signature, extract_keyid, every `_alpm_log` line (debug included, `_alpm_access`'s via `util::alpm_access`): difftest vs gpgme-backed C on throwaway keyrings (all status/validity pairs, bad/garbage/truncated/armored sigs), results, rc, pm_errno, questions, logs at every level; init_gpgme's lines (`signing_init`); gpg_strerror's table vs gpgme_strerror for every code; gpg argv vs gpgme's; extract_keyid fuzz |
 | `lib/libalpm/dload.c` | 1474 | `alpm-core::dload` (partial) | _alpm_download (reqwest, fetchcb path), resume/mirrors/cache servers/server error counting/.sig/max size/time condition, alpm_fetch_pkgurl, download dir + filecache helpers: difftest vs C on scripted 127.0.0.1 HTTP servers and file://; sandbox child behind `Sandbox`: fetch_pkgurl cases and db_update sequences sandboxed vs the C, the binaries under fakeroot with DownloadUser (`cli_binary` xfercommand) |
 | `lib/libalpm/deps.c` | 926 | `alpm-core::deps` (partial) | dep_from_string, dep_compute_string, depcmp_provides (+ static dep_vercmp through it), depcmp_literal, depcmp, find_satisfier, checkdeps, sortbydeps, resolvedep/resolvedeps, find_dbs_satisfier, recursedeps: difftest on fixture handles (local + 3 sync dbs, ignore, assumeinstalled, NODEPVERSION, usage), questions/logs compared |
 | `lib/libalpm/graph.c` | 38 | `alpm-core::graph` | via sortbydeps |
@@ -288,7 +357,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `src/pacman/sighandler.c` (in the above) | 146 | `pacman-cli::sighandler` (partial: no segv, winch handler) | soft_interrupt_handler, install/remove: difftest `sighandler` vs the C binary (SIGINT/SIGHUP before the handle, at a prepared transaction's prompt, from Pre/PostTransaction hooks, post_install, pre_remove; exit status, stdout, stderr, root tree, log) |
 | `src/pacman/callback.c` (in the above) | 1155 | `pacman-cli::callback` | cb_event, cb_question, cb_progress (ILoveCandy), cb_download (multibar, total bar), cb_log (delayed under bars): difftest lockstep vs C (every event x 16 configs, 11 questions x 12 configs x 27 inputs, progress/download fuzz, fake coarse clock) |
 | `src/pacman/check.c` (in the above) | 435 | `pacman-cli::check` | check_pkg_fast/full: difftest on fixture roots and dbs (all 22 message kinds); libarchive's mtree reader vs `alpm-core::mtree` (entries, stop, error text) per fixture, ~100 odd inputs, cut streams, fuzzed text (no signature, form D, nul, continuations, devices) and 804 real mtrees all equal |
-| `src/pacman/query.c` (in the above) | 521 | `pacman-cli::query` | every -Q mode, filter and message: difftest vs C pacman_query on fixture roots |
+| `src/pacman/query.c` (in the above) | 521 | `pacman-cli::query` | every -Q mode, filter and message: difftest vs C pacman_query on fixture roots, both with the frontend's log callback and stderr compared as one stream (op and libalpm lines in order, debug and function levels), desc/files/mtree missing or unreadable, empty/garbage/directory mtrees, -Qt load order on fresh worlds |
 | `src/pacman/deptest.c` (in the above) | 57 | `pacman-cli::deptest` | difftest vs C pacman_deptest |
 | `src/pacman/sync.c` (in the above) | 978 | `pacman-cli::sync` (partial) | sync_info, sync_list, sync_group, dispatch, check_syncdbs: difftest vs C pacman_sync (4 db states, warm caches); -Sy/-Syy: difftest vs C pacman_sync with the frontend callbacks (no bars); sync_trans/sync_prepare_execute: difftest `frontend_fuzz` (C never commits: --print or a declined question), the commit and its failure report through pactest; -Sc/-Scc (sync_cleancache, sync_cleandb_all, unlink_verbose under trans_init(0,0)): difftest `sync_clean` vs C pacman_sync with op_s_clean on seeded twin worlds (answers x -c/-cc/-ccc x CleanMethods x lock; rc, stdout, stderr, input read, tree with modes), PATH_MAX edges, cli_binary -Sc/-Scc under fakeroot |
 | `src/pacman/remove.c`, `upgrade.c` | 309 | `pacman-cli::{remove,upgrade}` | difftest `frontend_fuzz` vs C pacman_remove/pacman_upgrade (rc, stdout, stderr, input consumed); -U url fetch wired, untested (network) |
@@ -508,14 +577,28 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   per-unit traits until the callbacks unit lands; callers load packages
   first where the C lazy-loads. Mount table and statvfs go through
   `Mounts`.
-- `query`: lazy loads mirror the C per getter (filters first, display
-  after); `QueryEnv` carries `getcols()` and `PATH`; `-Qkk` loads files
-  up front. `sync`/`files` display copies of cache entries (one db
+- `query`: a shown local package reloads its cache entry where the C's
+  getter lazy-loads (`Shown`): reason, find_requiredby's order (each
+  entry's desc in list order, the target's own at its first depend not
+  matching it literally), -Qi's scriptlet/backup through `PkgEnv`,
+  files for -Ql/-Qk and -Qkk's first backup check through `CheckEnv`.
+  the op's Output is flushed before each load and per package/target:
+  the callbacks print at once like the C's unbuffered stderr, so the
+  op's lines and libalpm's keep the C's order (separate pipes: the
+  stdout/stderr interleave is not compared). `QueryEnv` carries
+  `getcols()` and `PATH`. `sync`/`files` display copies of cache entries (one db
   borrowed at a time).
 - `signing`: gpg(1) driven as gpgme's engine-gpg does (same binary,
   `--homedir`, status lines, colon listings); the signature goes over
-  stdin, the file by path after a first read; only error/warning logs go
-  through `SigCallbacks`. Divergences: the C's process-wide gpgme `init`
+  stdin, the file by path after a first read. gpgme's verify state
+  (status, timestamps, validity reason, calc_sig_summary) is kept for
+  the debug lines; gpg_strerror's texts come from libgpg-error's table
+  (`signing/err_codes.rs`, `scripts/gpg-err-codes.py`). Divergences: no
+  gpgme library, so "GPGME version:" says so; the engine file is the
+  `gpg` found in PATH (gpgme asks gpgconf); system-error codes print as
+  unassigned ones; a failed local key lookup (C -1) also logs gpg's
+  stderr, or why gpg could not run, at debug level (gpgme drops it);
+  the C's process-wide gpgme `init`
   (warning once per process, NOT_A_FILE leaking into later pm_errno) is
   per `Keyring`; a read error mid-file shows gpg's status, not gpgme's
   errno text; a key lookup failing partway returns Err instead of zeroed
@@ -633,10 +716,9 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   one. The local files are loaded whole before the file conflict check
   (the C loads them as the check goes; only the FUNCTION lines move,
   which the difftest drops). The difftest drops debug lines inside
-  downloads (dload's internals) and signing.c's own debug lines (the
-  signing debug-lines follow-up), `_alpm_gpgme_checksig`'s `.sig`
-  access line included. Hooks run with the transaction taken off the
-  handle. Another thread interrupts a commit through
+  downloads (dload's internals) and RET_ERR/GOTO_ERR's; init_gpgme runs
+  before recording on both sides (once per process in the C). Another
+  thread interrupts a commit through
   `Handle::interrupt()` (`Interrupt`): `set_state`/`trans_release`
   publish COMMITTING/INTERRUPTED, lock/unlock the held lock, and
   `trans::interrupted` sets a request into `trans.state` where the add
@@ -689,7 +771,7 @@ Follow-ups raised by port units:
 | conf difftest abort under long TMPDIR | sandbox, dbwrite reports | done: C one-byte heap overflow in `escape_chars` (UPSTREAM.md), fixture avoids it |
 | `alpm_extract_keyid` wired into -Sii/-Qii `sig_keys` | sync | done: `SyncEnv::sig_keys` (-Qii shows no keys in the C either); generated sync dbs carry `%PGPSIG%` (`random_sig`), sync_ro and cli_binary -Sii compare keys and the format error lines |
 | `Handle` owns `signing::Keyring` (gpgdir, known_keys) and implements `SigCallbacks`; `Db::register_sync` calls `be_sync::sync_db_validate` | signing | done |
-| query.rs's new_version copy onto `alpm_core::sync::sync_get_new_version` | query | todo (ported in transprep) |
+| query.rs's new_version copy onto `alpm_core::sync::sync_get_new_version` | query | done |
 | `pacman_sync` dispatches to `sync_trans` (needs a `Ui`), re-export `TRANS_FLAG_*` in pacman.rs | transprep | done |
 | "found cached pkg" debug line into `util::filecache_find` (local wrapper in sync.rs) | transprep | done (dload's lookups log it too); `filecache_setup`'s /tmp fallback logs its "option 'cachedir'" line |
 | conflict.rs `pkg_diff` onto `deps::list_diff`; deps_graph test reuses the trans_prep world generator | transprep | todo |
@@ -699,7 +781,7 @@ Follow-ups raised by port units:
 | `Question::SelectProvider` carries provider db names (today through `Lookup`); `Handle::replace_callbacks` has no frontend caller left | frontend | done: `DbPkgs::name`, `SelectProvider::dbs`; `Lookup::db_name` and `replace_callbacks` removed, deps_graph/trans_prep compare the dbs |
 | sandbox in `be_sync::downloader` (like `fetch_pkgurl`) | dbupdate | done (`SyncParts::sandbox`) |
 | `umask(0022)` around `alpm_db_update` (rustix process) | dbupdate | done, and run_chroot's child umask |
-| be_package logs libarchive's open/read failures ("could not open file X: ..." for unknown formats and dirs, "error while reading package" for a cut first header, "could not parse package description file" for a cut `.PKGINFO`); `sync_clean` filters them today | cleancache | todo |
+| be_package logs libarchive's open/read failures ("could not open file X: ..." for unknown formats and dirs, "error while reading package" for a cut first header, "could not parse package description file" for a cut `.PKGINFO`); `sync_clean` and difftest query filter them today | cleancache | todo |
 | one `logv(cb, ...)` helper (copies in hook.rs, deps.rs, trans.rs, util's `log_parts`) | integrate2 | in progress: `callbacks::logv`, used by db, be_local, be_sync |
 | `-D` dispatch arm: `pacman_database(config, handle, targets, &mut o)` | m1close | done |
 | setup_libalpm's server adds through `Handle::dbs_mut()` (`Db::add_server` takes the callbacks) | m1close | done |
@@ -707,9 +789,12 @@ Follow-ups raised by port units:
 | conflict.rs debug lines ("searching for file conflicts", ...), then drop the difftest's quiet window | commit | done |
 | commit difftest with hooks (fakechroot) and signed packages (check_keyring, PKG_INVALID_SIG, MISSING_SIG) | commit | done (no port divergence found) |
 | pactest's minimal sync db entries and empty `.PKGINFO` values, the main pactest blockers | commit | done (owned readers: `.PKGINFO`, db entries) |
-| trans_commit `signed_keyring` diverged in 4 runs in a row (one window): the port asked no import question for a key missing from the keyring, then failed validation with PKG_INVALID_SIG (C: "required key missing", pm_errno 0). not reproduced in 21 later runs. `key_in_keychain` maps any gpg spawn/wait error to None, which check_keyring takes as "not missing" without a trace; log gpg's stderr there to catch it | hooksig | todo |
-| query: -Qk/-Qkk lazy loads per package like the C (-Qkk loads files up front), op stderr flushed per package so callback lines interleave; then drop cli_binary's empty files lists | m1close | todo |
-| signing debug lines (`_alpm_access` "is not readable", "sig path ... could not be opened", "missing required signature") | m1close | todo (trans_commit difftest filters them: `SIGNING_DEBUG`, `sig_unreadable`; drop those once ported) |
+| trans_commit `signed_keyring` diverged in 4 runs in a row (one window): the port asked no import question for a key missing from the keyring, then failed validation with PKG_INVALID_SIG (C: "required key missing", pm_errno 0). not reproduced in 21 later runs. `key_in_keychain` maps any gpg spawn/wait error to None, which check_keyring takes as "not missing" without a trace | hooksig | instrumented, not reproduced: the -1 path logs the C's "gpg error: %s" and then gpg's stderr (or why gpg could not run) at debug, and trans_commit now compares debug lines, so a recurrence shows the branch taken (C "key lookup failed, unknown key" vs the port's line). 22/22 `signed_keyring` and 22/22 `signing_gpg` runs passed (sigdebug) |
+| query: -Qk/-Qkk lazy loads per package like the C (-Qkk loads files up front), op stderr flushed per package so callback lines interleave; then drop cli_binary's empty files lists | m1close | done: every -Q getter loads in place, flushed per load; cli_binary's empty lists gone |
+| -S/-Sp/-Sup/-Spdd load every local desc up front: an unreadable local desc logs "could not open file" where the C never reads it (`-Sp nope`, `-Sup`); cli_binary leaves unreadable descs to difftest query | qk | todo |
+| query's `check_signature` stub onto `signing::pkg_check_pgp_signature` (handle keyring and callbacks): -Qpi with a `.sig`, and checksig's debug lines once signing logs them | qk | done: results mapped onto util's `SigResult`, difftest query runs -Qpi with debug |
+| `be_package::changelog` takes the callbacks (-Qpc's "opening archive" debug line); difftest query runs -Qpc without debug | qk | todo |
+| signing debug lines (`_alpm_access` "is not readable", "sig path ... could not be opened", "missing required signature") | m1close | done: every signing.c line ported, trans_commit's `SIGNING_DEBUG`/`sig_unreadable` and db_update's positive debug list dropped, cli_binary's `known()` narrowed to the GOTO_ERR lines |
 | difftest C log callbacks (deps_graph, dload, diskspace, db_update) onto `handle::record_log` | m1close | todo |
 | `DepsEnv` without `&Handle` (assumeinstalled, ignore lists), so checkdeps logs without swapping the callbacks | m1close | todo |
 | difftest: `read_deps` pub(crate) (drops conflict's `CDepend`), `SyncWorld` into fixtures.rs | conflict, sync | todo |
@@ -717,9 +802,9 @@ Follow-ups raised by port units:
 | `%DATA%` in repo dbs, gzip multi-member, `Packager` default, backup `(null)` | db readers | ALPM side, see `UPSTREAM.md` |
 | xattrs and pax mtime/uid/gid on extraction: alpm-compress `TarballEntry` needs a `raw_mut` (pax_extensions takes `&mut`) | addcommit | todo |
 | one geteuid/getuid helper (add.rs `euid`, sandbox `System::uid` read /proc/self/status) or rustix `process` | addcommit | done: `util::getuid`/`geteuid` (dload's Umask reader stays: no getumask without setting it) |
-| dload's internal debug lines (url, maxsize, time condition, tempfile, curl result, response code), so `-Sy --debug` with the built-in downloader matches | process | done: every dload.c debug line, CURLcodes carried by `Code::Failed`, a client-side unmet time condition is response code 304 like curl; dload/db_update difftests keep debug lines (RET_ERR's and signing.c's left out), trans_commit's download quiet window and cli_binary's sandbox `--debug` skip dropped |
+| dload's internal debug lines (url, maxsize, time condition, tempfile, curl result, response code), so `-Sy --debug` with the built-in downloader matches | process | done: every dload.c debug line, CURLcodes carried by `Code::Failed`, a client-side unmet time condition is response code 304 like curl; dload/db_update difftests keep debug lines (RET_ERR's left out), db_update's `DLOAD_DEBUG`, trans_commit's download quiet window and cli_binary's sandbox `--debug` skip dropped |
 | `_alpm_upgrade_packages` loop over trans.add, interrupted state, ldconfig | addcommit | with alpm_trans_commit |
-| test generators still limited to what alpm-db/alpm-repo-db/alpm-pkginfo accepted (db_search.rs, diskspace.rs, check.rs, be_local_write.rs, sync_clean.rs, be_package.rs "per the alpm-pkginfo spec"): widen to what the C reads, drop the comments | stale sweep | done: `fixtures::loose_sections` (sparse, empty, blank, unknown desc sections), files lists without parents/sorting, odd `.PKGINFO` lines, random packages read back by set_reason, odd deps_graph relations; cli_binary's empty files lists stay with the -Qkk row above |
+| test generators still limited to what alpm-db/alpm-repo-db/alpm-pkginfo accepted (db_search.rs, diskspace.rs, check.rs, be_local_write.rs, sync_clean.rs, be_package.rs "per the alpm-pkginfo spec"): widen to what the C reads, drop the comments | stale sweep | done: `fixtures::loose_sections` (sparse, empty, blank, unknown desc sections), files lists without parents/sorting, odd `.PKGINFO` lines, random packages read back by set_reason, odd deps_graph relations; cli_binary's empty files lists went with the -Qkk row above |
 
 Divergences below are the remaining ones; the ALPM parser and type
 divergences left with the owned readers.

@@ -5,7 +5,7 @@
 // disabled, revoked, expired and unknown keys, expired, bad, garbage,
 // truncated, armored, missing and unreadable signatures. both sides run
 // the same gpg on the same keyring; results, return codes, pm_errno,
-// questions and error/warning logs are compared. no network: the
+// questions and logs are compared. no network: the
 // keyrings set disable-dirmngr, so WKD and keyserver lookups fail and
 // only that failure is compared.
 //
@@ -16,7 +16,6 @@ use std::ffi::c_int;
 use std::fs;
 
 use alpm_core::be_package::{pkg_load_level, pkg_validate};
-use alpm_core::be_sync::{db_path, sync_db_validate};
 use alpm_core::db::Db;
 use alpm_core::error::Errno;
 use alpm_core::package::Package;
@@ -24,7 +23,8 @@ use alpm_core::signing::*;
 use alpm_types::Sha256Checksum;
 use difftest::{
 	CSigHandle, FILES, GpgFixture, HOMES, Home, RecordingCallbacks, Rng,
-	SigCall, encode_base64, iters, keyid_input_defined, write_gpg_logger,
+	SigCall, c_gpgme_strerror, encode_base64, iters, keyid_input_defined,
+	write_gpg_logger,
 };
 
 // gpg calls are slow: one fuzz call per 1000 iterations
@@ -82,10 +82,14 @@ impl Bench {
 		let fx = GpgFixture::new(tag);
 		let home = fx.home(Home::Pgp);
 		let c = CSigHandle::new(&fx.root_dir(), &fx.db_dir(), &home);
+		// init_gpgme ran on the C side before recording (once per
+		// process there), so here too
+		let mut kr = Keyring::new(&home);
+		key_in_keychain(&mut kr, &mut (), b"init");
 		Bench {
 			fx,
 			c,
-			kr: Keyring::new(&home),
+			kr,
 			answer: false,
 		}
 	}
@@ -230,18 +234,17 @@ impl Bench {
 
 	fn register(&mut self, name: &str, level: c_int) -> c_int {
 		let c = self.c.register(name.as_bytes(), level);
-		let path = db_path(&self.fx.dbpath(), name.as_bytes(), b".db");
+		let dbpath = self.fx.dbpath();
 		let mut cb = self.cb();
 		let kr = &mut self.kr;
-		let r = sync_db_validate(
-			kr,
-			&mut cb,
-			&path,
-			name.as_bytes(),
-			level,
+		let n = name.as_bytes();
+		let db = Db::register_sync(
+			&dbpath, b".db", n, level, 0, kr, &mut cb,
 		);
-		let r = match r {
-			Ok(_) => rust(0, Errno::Ok, (), cb),
+		let valid = db.valid();
+		db.unregister(&mut cb);
+		let r = match valid {
+			Ok(()) => rust(0, Errno::Ok, (), cb),
 			Err(e) => rust(-1, e, (), cb),
 		};
 		assert_eq!(c, r, "register {name} level {level:#x}");
@@ -980,5 +983,15 @@ fn extract_keyid_fuzz_against_c() {
 	for k in [Kind::Keys, Kind::NoKeys, Kind::Format, Kind::Unsupported] {
 		let got = seen.get(&k).copied().unwrap_or(0);
 		assert!(got * 50 >= n, "{k:?}: {got} of {n}");
+	}
+}
+
+// the gpg_strerror table (signing/err_codes.rs) against libgpg-error
+// through gpgme, every code without GPG_ERR_SYSTEM_ERROR
+#[test]
+fn error_texts_against_c() {
+	for code in 0..0x8000 {
+		let (c, r) = (c_gpgme_strerror(code), gpg_strerror(code));
+		assert_eq!(lossy(&c), lossy(r), "code {code}");
 	}
 }

@@ -14,6 +14,7 @@
 // C) in the local zone (alpm_core::log::local_offset); PkgEnv::format_date
 // is where a fixed zone or another locale plugs in.
 
+use alpm_core::backup::Backup;
 use alpm_core::deps::{Depend, dep_compute_string, find_satisfier};
 use alpm_core::error::Errno;
 use alpm_core::log::local_offset;
@@ -73,6 +74,14 @@ pub trait PkgEnv: DbCaches {
 	// strftime("%c", localtime(&t)); None where localtime fails
 	fn format_date(&mut self, t: i64) -> Option<Vec<u8>> {
 		format_date(t)
+	}
+	// alpm_pkg_has_scriptlet: a local package lazy-loads it here
+	fn has_scriptlet(&mut self, pkg: &Package) -> bool {
+		pkg.scriptlet != 0
+	}
+	// alpm_pkg_get_backup: a local package lazy-loads its files here
+	fn backup(&mut self, pkg: &Package) -> Vec<Backup> {
+		pkg.backup.clone()
 	}
 }
 
@@ -373,8 +382,11 @@ pub fn dump_pkg_full(
 		s(out, T::InstallReason, reason);
 	}
 	if file || local {
-		let yes: &[u8] =
-			if pkg.scriptlet != 0 { b"Yes" } else { b"No" };
+		let yes: &[u8] = if env.has_scriptlet(pkg) {
+			b"Yes"
+		} else {
+			b"No"
+		};
 		s(out, T::InstallScript, yes);
 	}
 
@@ -474,7 +486,7 @@ fn backups(
 	let root = until_nul(&root);
 	let mut text = Vec::new();
 	// entries without a hash are not backup files to check
-	for b in &pkg.backup {
+	for b in &env.backup(pkg) {
 		let Some(hash) = &b.hash else {
 			continue;
 		};

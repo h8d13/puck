@@ -35,6 +35,7 @@ use alpm_core::callbacks::{
 use alpm_core::conflict::FileConflictType;
 use alpm_core::handle::Handle;
 use alpm_core::remove::remove_pkg;
+use alpm_core::signing::key_in_keychain;
 use alpm_core::sync::sync_sysupgrade;
 use alpm_core::trans::{
 	CommitData, TransState, trans_commit, trans_init, trans_prepare,
@@ -64,8 +65,8 @@ use crate::handle::{
 use crate::hook::{HookRec, c_hook_rec, hook_rec, strip_stamps};
 use crate::package::{CPkg, list_data, read_pkg, with_strs};
 use crate::signing::{
-	GPGME_PROTOCOL_OPENPGP, GpgFixture, encode_base64, gpgme_check_version,
-	gpgme_set_engine_info,
+	_alpm_key_in_keychain, GPGME_PROTOCOL_OPENPGP, GpgFixture, c_only,
+	encode_base64, gpgme_check_version, gpgme_set_engine_info,
 };
 use crate::trans_prep::{
 	alpm_add_pkg, alpm_remove_pkg, alpm_sync_sysupgrade, alpm_trans_prepare,
@@ -487,67 +488,15 @@ const EV_RETRIEVE_FAILED: c_int = 23;
 const Q_CORRUPTED: c_int = 1 << 3;
 const Q_IMPORT_KEY: c_int = 1 << 6;
 
-// debug lines the port does not make: RET_ERR's and GOTO_ERR's
-const C_ONLY: [&[u8]; 2] = [b"returning error ", b"got error "];
-
-// signing.c's debug lines (gpgme internals, key lookups, signature
-// details), not ported yet (PORTING.md follow-ups): their starts
-const SIGNING_DEBUG: [&[u8]; 24] = [
-	b"checking signature for ",
-	b"could not import key, 0 results\n",
-	b"exp_timestamp: ",
-	b"fingerprint: ",
-	b"gpg error: ",
-	b"GPGME engine info: ",
-	b"GPGME version: ",
-	b"importing key\n",
-	b"key \"",
-	b"key lookup ",
-	b"key: ",
-	b"looking up key ",
-	b"missing optional signature\n",
-	b"missing required signature\n",
-	b"no signatures returned\n",
-	b"signature check failed\n",
-	b"signature is ",
-	b"signature should never be trusted\n",
-	b"signature timestamp is greater than system time.\n",
-	b"Signature verification will fail!\n",
-	b"sig path ",
-	b"status: ",
-	b"summary: ",
-	b"validity: ",
-];
-
-pub(crate) fn signing_debug(m: &[u8]) -> bool {
-	let found = |m: &[u8]| {
-		m.starts_with(b"key ") && m.ends_with(b" found in cache\n")
-	};
-	SIGNING_DEBUG.iter().any(|p| m.starts_with(p))
-		|| m.starts_with(b"timestamp: ")
-		|| m.ends_with(b" signatures returned\n")
-		|| found(m)
-}
-
 // the records compared: no FUNCTION lines (the lazy loads: the port
 // loads every local file list before the file conflict check, the C as
-// it goes), no debug lines of C_ONLY or signing.c
+// it goes), no RET_ERR/GOTO_ERR lines (C only)
 pub fn kept(recs: Vec<TcRec>) -> Vec<TcRec> {
 	let mut out: Vec<TcRec> = Vec::new();
 	for r in recs {
-		let after_sig_data = matches!(
-			out.last(),
-			Some(TcRec::Log(LOG_DEBUG, m)) if m.starts_with(b"sig data: ")
-		);
 		match &r {
 			TcRec::Log(LOG_FUNCTION, _) => continue,
-			TcRec::Log(LOG_DEBUG, m)
-				if signing_debug(m)
-					|| (after_sig_data
-						&& sig_unreadable(m)) || C_ONLY
-					.iter()
-					.any(|p| m.starts_with(p)) =>
-			{
+			TcRec::Log(LOG_DEBUG, m) if c_only(m) => {
 				continue;
 			}
 			_ => {}
@@ -555,14 +504,6 @@ pub fn kept(recs: Vec<TcRec>) -> Vec<TcRec> {
 		out.push(r);
 	}
 	out
-}
-
-// _alpm_access's line for a .sig: right after be_package's "sig data:"
-// line it is _alpm_gpgme_checksig's (signing.c), the port's checksig
-// does not log it. be_package's own check of the same path comes before
-pub(crate) fn sig_unreadable(m: &[u8]) -> bool {
-	let key: &[u8] = b".sig\" is not readable: ";
-	m.windows(key.len()).any(|w| w == key)
 }
 
 // the free block counts of diskspace's partition lines: the disk the
@@ -865,6 +806,10 @@ pub fn c_commit(fx: &TempRoot, c: &TcCase) -> TcResult {
 			assert_eq!(alpm_option_set_gpgdir(h, dir.as_ptr()), 0);
 			let p = GPGME_PROTOCOL_OPENPGP;
 			gpgme_set_engine_info(p, ptr::null(), dir.as_ptr());
+			// init_gpgme (once per process) before the log
+			// callback, the Rust side does the same
+			let init = cstr(b"init");
+			_alpm_key_in_keychain(h, init.as_ptr());
 			level = sg.level;
 		}
 		let core = cstr(b"core");
@@ -1127,6 +1072,8 @@ pub fn rust_commit(fx: &TempRoot, c: &TcCase) -> TcResult {
 	let mut level = 0;
 	if let Some(sg) = &c.sign {
 		h.set_gpgdir(&sg.gpgdir);
+		// init_gpgme before recording, as on the C side
+		key_in_keychain(h.keyring_mut(), &mut (), b"init");
 		level = sg.level;
 	}
 	let server = [b"file://", &fx.path("mirror")[..]].concat();

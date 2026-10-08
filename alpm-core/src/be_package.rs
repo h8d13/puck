@@ -24,7 +24,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use alpm_types::Sha256Checksum;
-use rustix::fs::{Access, AtFlags, CWD, accessat};
+use rustix::fs::Access;
 
 use crate::backup::Backup;
 use crate::be_local::{INFRQ_BASE, INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET};
@@ -43,8 +43,8 @@ use crate::signing::{
 	key_import, key_in_keychain, sigpath,
 };
 use crate::util::{
-	self, ArchiveFgets, DataBlocks, Entry, hash_sdbm, parsedate, strtoofft,
-	until_nul,
+	self, ArchiveFgets, DataBlocks, Entry, alpm_access, hash_sdbm,
+	parsedate, strtoofft, until_nul,
 };
 
 // read_sigfile's limit, adopted from repo-add
@@ -519,19 +519,6 @@ fn sha256_hex(path: &[u8]) -> Option<Vec<u8>> {
 	Some(text(&sum))
 }
 
-// _alpm_access(NULL, path, R_OK) with its debug line
-fn access_read(cb: &mut dyn Callbacks, path: &[u8]) -> io::Result<()> {
-	let nofollow = AtFlags::SYMLINK_NOFOLLOW;
-	let Err(e) = accessat(CWD, path, Access::READ_OK, nofollow) else {
-		return Ok(());
-	};
-	let e: io::Error = e.into();
-	let text = util::strerror(&e);
-	let msg = [b"\"", path, b"\" is not readable: ", &text, b"\n"];
-	log(cb, LogLevel::Debug, &msg);
-	Err(e)
-}
-
 // a validation that passed: the validation bits (PKG_VALIDATION_NONE
 // when none) and the signature results when the check ran (sigdata)
 #[derive(Debug)]
@@ -555,12 +542,19 @@ pub fn pkg_validate(
 	if pkgfile.is_empty() {
 		return Err(Error::WrongArgs);
 	}
-	access_read(cb, pkgfile).map_err(open_err)?;
+	let readable = alpm_access(cb, None, pkgfile, Access::READ_OK);
+	readable.map_err(|e| open_err(e.into()))?;
 	let b64 = syncpkg.and_then(|p| p.base64_sig.as_deref());
 	let wants_sig = level & SIG_PACKAGE != 0;
 	let has_sig = wants_sig
 		&& (b64.is_some()
-			|| access_read(cb, &sigpath(pkgfile)).is_ok());
+			|| alpm_access(
+				cb,
+				None,
+				&sigpath(pkgfile),
+				Access::READ_OK,
+			)
+			.is_ok());
 	let mut validation = 0;
 	let expected = syncpkg.and_then(|p| p.sha256sum.as_deref());
 	if let Some(expected) = expected.filter(|_| !has_sig || b64.is_none()) {
@@ -680,7 +674,8 @@ pub fn pkg_load_level(
 	let filename = until_nul(filename);
 	// the C tests the .sig whatever the level
 	let sigfile = sigpath(filename);
-	if access_read(cb, &sigfile).is_ok() && level & SIG_PACKAGE != 0 {
+	let readable = alpm_access(cb, None, &sigfile, Access::READ_OK);
+	if readable.is_ok() && level & SIG_PACKAGE != 0 {
 		import_missing_keys(kr, cb, filename, &sigfile, full)?;
 	}
 	let validated = pkg_validate(kr, cb, filename, None, level)?;

@@ -668,6 +668,11 @@ declarations. No existing MR found for it.
   730-736). **real (rare)**; `.sig` over 16384 bytes refused **packager**
 - the package is fully loaded and freed once per unknown key
   (be_package.c:744-748). **real**, cost only
+- two debug lines report `gpg_err` after it was left at
+  GPG_ERR_NO_ERROR, "gpg error: Success": a keyserver import whose
+  result is not 0 (signing.c:424-425, the import's own code is not
+  shown) and a WKD lookup that found a key other than the wanted one
+  (signing.c:284-294). **none**, the debug text only
 - every helper failure, corrupt `.sig` included, reports PKG_INVALID_SIG
   (be_package.c:341). **real**, message only
 
@@ -793,6 +798,11 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
   **env**
 - PATH_MAX overflow in `sync_cleandb` prints and carries on with the
   truncated path (sync.c:86-90). **none** (port mirrors it)
+- `sync_cleancache` means to skip what does not load as a package at
+  debug level (sync.c:260-267), but `alpm_pkg_load` has already logged
+  "could not open file ...: Error reading fd N" (util.c:291) as an error
+  for every directory, e.g. the leftover `download-XXXXXX` dirs (`dload.c`
+  minor). **real**, cosmetic
 
 ## transaction prepare minor
 
@@ -854,6 +864,13 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
   1409, 1447), so each `-U <cached url>` leaves an empty dir in the
   cachedir; and a failing fetchcb returns through RET_ERR before the
   removal (dload.c:1284 vs 1294). **real**
+  The same for `-S`/`-Su` with every package already cached:
+  `download_files` makes the dir before `find_dl_candidates`, and with no
+  files `_alpm_download` never runs (sync.c:782-797); each such
+  transaction adds one empty dir to the first cachedir (twin-root: one
+  per install step). **real**
+  Seen on a real system: 58 leftover `download-*` dirs in
+  `/var/cache/pacman/pkg` (Arch default DownloadUser, C pacman 7.1).
 - sandboxed downloads count server errors in the forked child's copy of
   the handle (dload.c:920-1060): a mirror failing during `-Sy` is not
   remembered for the package downloads of the same `-Syu`, unlike

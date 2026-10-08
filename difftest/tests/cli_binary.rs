@@ -3,29 +3,43 @@
 // same read-only command lines on generated fixture roots (local db,
 // sync .db and .files, a pacman.conf, every path option pointing into
 // the fixture), stdout, stderr and exit status compared byte for byte.
-// prints one line per command; every one must be equal but the --debug
-// lines known() explains. root-only commands (-Sy, -Fy, -D, -Sc) run
-// under fakeroot, the dbs they fetch or write and the cache dir compared
-// too.
+// prints one line per command; every one must be equal (is_goto_err
+// names the only lines dropped). root-only commands (-Sy, -Fy, -D, -Sc)
+// run under fakeroot, the dbs they fetch or write and the cache dir
+// compared too.
 // scripts/cli-parity-fixtures.sh runs it with the table shown
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use difftest::{
 	Comp, DbFile, LocalEntry, Rng, Stamped, SyncWorld, c_pacman,
-	rust_pacman, section, snapshot, stamped, write_package,
+	rust_pacman, section, snapshot, stamped, write_db, write_package,
 };
 
-// --debug in the world with the default SigLevel (Required, unsigned
-// dbs): the C logs the failed .sig lookup (util.c _alpm_access, signing.c
-// "sig path ... could not be opened", "missing required signature") and
-// GOTO_ERR's "got error ... (signing.c: <line>)"; the port's signing
-// logs errors and warnings only and never RET_ERR/GOTO_ERR lines
-// (PORTING.md)
-fn known(label: &str, siglevel: Option<&str>) -> bool {
-	siglevel.is_none() && label.contains("--debug")
+// GOTO_ERR logs "got error <n> at <func> (<C file>: <line>)" with
+// --debug (signing.c with the default SigLevel, _cache_mtree_open on a
+// bad mtree), the C's source position, which the port does not log by
+// design (PORTING.md). those lines alone are dropped from the C's
+// stderr, in any run; the rest compares
+fn is_goto_err(line: &[u8]) -> bool {
+	let key = b"got error ";
+	let Some(i) = line.windows(key.len()).position(|w| w == key) else {
+		return false;
+	};
+	let rest = &line[i + key.len()..];
+	let n = rest.iter().take_while(|c| c.is_ascii_digit()).count();
+	n > 0 && rest[n..].starts_with(b" at ")
+}
+
+fn without_goto_err(err: &[u8]) -> Vec<u8> {
+	let lines = err.split_inclusive(|&c| c == b'\n');
+	lines.filter(|l| !is_goto_err(l))
+		.flatten()
+		.copied()
+		.collect()
 }
 
 // stderr's PACMAN_DEBUG stamps equal within the time between the runs
@@ -153,26 +167,12 @@ fn cache_files(w: &SyncWorld) {
 	copy_dir(&cache, &w.fx.dir().join("cache.orig"));
 }
 
-// an installed package owning real files under the root, for -Ql/-Qo/-Qk.
-// every generated local entry gets an empty files list like a real db: a
-// missing one logs "could not open file" from its lazy load, which query
-// does up front for -Qkk and prints apart from the op's buffered stderr
-// (PORTING.md follow-up)
-fn owner_pkg(w: &SyncWorld) {
-	for e in fs::read_dir(w.fx.local()).unwrap() {
-		let dir = e.unwrap().path();
-		if dir.is_dir() && !dir.join("files").exists() {
-			fs::write(dir.join("files"), "").unwrap();
-		}
-	}
-	let root = w.fx.dir().join("root");
-	fs::create_dir_all(root.join("usr/bin")).unwrap();
-	fs::write(root.join("usr/bin/owned"), "x").unwrap();
+fn local_desc(name: &str) -> Vec<u8> {
 	let one = |s: &str| vec![s.to_string()];
-	let desc = [
-		section("NAME", &one("owner")),
+	[
+		section("NAME", &one(name)),
 		section("VERSION", &one("1.0-1")),
-		section("BASE", &one("owner")),
+		section("BASE", &one(name)),
 		section("DESC", &one("owns files")),
 		section("ARCH", &one("x86_64")),
 		section("BUILDDATE", &one("1700000000")),
@@ -182,14 +182,65 @@ fn owner_pkg(w: &SyncWorld) {
 		section("REASON", &one("1")),
 		section("VALIDATION", &one("none")),
 	]
-	.concat();
+	.concat()
+	.into_bytes()
+}
+
+// an mtree with a missing file before an existing one: -Qkk warns, then
+// the backup check of the second loads the files list. the digest is
+// not the file's (one left out reads as a mismatch in the C only,
+// UPSTREAM.md)
+const MTREE: &str = concat!(
+	"#mtree\n/set type=file uid=0 gid=0 mode=644\n",
+	"./usr/bin/gone time=1.0 size=1\n",
+	"./usr/bin/owned time=1.0 size=1 sha256digest=",
+	"abababababababababababababababab",
+	"abababababababababababababababab\n",
+);
+
+fn unreadable(path: &Path) {
+	fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+}
+
+// an installed package owning real files under the root, for -Ql/-Qo/-Qk,
+// and entries the lazy loads fail on, logged between the op's lines: no
+// files list next to an mtree, an unreadable files list or mtree, an
+// empty mtree. the generated entries have no files list either. an
+// unreadable desc is left to difftest query: -S loads every local desc
+// up front (PORTING.md follow-up)
+fn owner_pkg(w: &SyncWorld) {
+	let root = w.fx.dir().join("root");
+	fs::create_dir_all(root.join("usr/bin")).unwrap();
+	fs::write(root.join("usr/bin/owned"), "x").unwrap();
 	let files = "%FILES%\nusr/\nusr/bin/\nusr/bin/owned\nusr/bin/gone\n\n";
-	w.fx.write_local(&[LocalEntry {
-		dir: "owner-1.0-1".to_string(),
-		desc: Some(desc.into_bytes()),
-		files: Some(files.as_bytes().to_vec()),
-		install: false,
-	}]);
+	let names = [
+		("owner", true),
+		("nofiles", false),
+		("badfiles", true),
+		("badmtree", true),
+		("emptymtree", true),
+	];
+	let entries: Vec<LocalEntry> = names
+		.iter()
+		.map(|&(name, has_files)| LocalEntry {
+			dir: format!("{name}-1.0-1"),
+			desc: Some(local_desc(name)),
+			files: has_files.then(|| files.as_bytes().to_vec()),
+			install: false,
+		})
+		.collect();
+	w.fx.write_local(&entries);
+	let dir = |name: &str| w.fx.local().join(format!("{name}-1.0-1"));
+	for name in ["nofiles", "badmtree"] {
+		write_db(
+			&dir(name).join("mtree"),
+			Comp::Gzip,
+			MTREE.as_bytes(),
+		);
+	}
+	fs::write(dir("emptymtree").join("mtree"), "").unwrap();
+	unreadable(&dir("badfiles").join("files"));
+	unreadable(&dir("badmtree").join("mtree"));
 }
 
 // the command lines of one world: (label, args before the path options)
@@ -315,6 +366,20 @@ fn commands(w: &SyncWorld) -> Vec<Vec<String>> {
 		vec!["-Q", "--color=always", "-i", "owner"],
 		vec!["-Ss", "--color=always", "a"],
 		vec!["-Q", "--debug"],
+		// the lazy loads' lines between the op's
+		vec!["-Qk", "--debug"],
+		vec!["-Qkk", "--debug"],
+		vec!["-Qkk", "--debug=2"],
+		vec!["-Qkk", "nofiles", "badmtree", "emptymtree"],
+		vec!["-Qi", "--debug"],
+		vec!["-Qii", "--debug=2"],
+		vec!["-Ql", "--debug=2"],
+		vec!["-Qck", "--debug"],
+		vec!["-Qo", &owned, "/nonexistent/file", "--debug"],
+		vec!["-Qt", "--debug=2", "owner"],
+		vec!["-Qu", "--debug"],
+		vec!["-Qg", "--debug=2"],
+		vec!["-Qs", "--debug", "o"],
 		vec!["-Si", "--debug", sync],
 	];
 	lines.into_iter()
@@ -358,7 +423,8 @@ fn world(
 			})
 		};
 		restore();
-		let cr = run(&c, &args, dir, root);
+		let utc = (root, Some("UTC"));
+		let cr = run_in(&c, &args, dir, utc, without_goto_err);
 		let synced_c = written();
 		restore();
 		let rr = run(&r, &args, dir, root);
@@ -424,11 +490,19 @@ fn copy_dir(from: &Path, to: &Path) {
 		let dest = to.join(e.file_name());
 		match e.file_type().unwrap().is_dir() {
 			true => copy_dir(&e.path(), &dest),
-			false => {
-				fs::copy(e.path(), dest).unwrap();
-			}
+			false => copy_file(&e.path(), &dest),
 		}
 	}
+}
+
+// fs::copy with the mode, unreadable fixture files (mode 000) included
+fn copy_file(from: &Path, to: &Path) {
+	let perm = fs::metadata(from).unwrap().permissions();
+	let readable = fs::Permissions::from_mode(0o600);
+	fs::set_permissions(from, readable).unwrap();
+	fs::copy(from, to).unwrap();
+	fs::set_permissions(from, perm.clone()).unwrap();
+	fs::set_permissions(to, perm).unwrap();
 }
 
 // db/local back to what the fixture wrote
@@ -509,7 +583,7 @@ fn parity() {
 		for (label, ok, diff) in world(w, level, true) {
 			total += 1;
 			equal += usize::from(ok);
-			if !ok && !known(&label, level) {
+			if !ok {
 				failures.push(format!(
 					"world {i}: {label}\n{}",
 					diff.unwrap_or_default()
@@ -552,12 +626,15 @@ fn local_time() {
 	owner_pkg(&w);
 	let paths = setup(&w, Some("Never"));
 	let dir = w.fx.dir();
-	let sync = w.pkg_names()[0];
+	// %b of a file package: -Sp of an installed sync package stops at
+	// its missing files list in the C, not in the port (reported)
+	let cache = dir.join("cache.orig/foreign-1.0-1-any.pkg.tar.gz");
+	let foreign = cache.display().to_string();
 	let cmds: [&[&str]; 7] = [
 		&["-Qi", "owner"],
 		&["-Qii"],
 		&["-Si"],
-		&["-Sp", "--print-format", "%n %b", sync],
+		&["-Up", "--print-format", "%n %b", &foreign],
 		&["-Q", "--debug"],
 		&["-Sy"],
 		&["-Sy", "--debug"],

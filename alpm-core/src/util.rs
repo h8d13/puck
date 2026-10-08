@@ -649,6 +649,34 @@ fn join_path(a: &[u8], b: &[u8]) -> Vec<u8> {
 	p
 }
 
+// _alpm_access: faccessat of dir and file joined (dir None is the C's
+// NULL), a last symlink not followed, a debug line per refused mode bit
+pub fn alpm_access(
+	cb: &mut dyn Callbacks,
+	dir: Option<&[u8]>,
+	file: &[u8],
+	mode: Access,
+) -> Result<(), rustix::io::Errno> {
+	let dir = until_nul(dir.unwrap_or_default());
+	let path = [dir, until_nul(file)].concat();
+	let flags = AtFlags::SYMLINK_NOFOLLOW;
+	let Err(e) = accessat(CWD, c_path(&path), mode, flags) else {
+		return Ok(());
+	};
+	let text = errno_text(e);
+	let refused: [(bool, &[u8]); 4] = [
+		(mode.contains(Access::READ_OK), b"\" is not readable: "),
+		(mode.contains(Access::WRITE_OK), b"\" is not writable: "),
+		(mode.contains(Access::EXEC_OK), b"\" is not executable: "),
+		(mode == Access::EXISTS, b"\" does not exist: "),
+	];
+	for (_, what) in refused.into_iter().filter(|r| r.0) {
+		let msg = [b"\"", &path[..], what, &text, b"\n"].concat();
+		cb.log(LogLevel::Debug, &msg);
+	}
+	Err(e)
+}
+
 // access(2), symlinks followed
 fn access(path: &[u8], mode: Access) -> Result<(), rustix::io::Errno> {
 	accessat(CWD, c_path(path), mode, AtFlags::empty())
@@ -1222,23 +1250,7 @@ pub fn filecache_setup(
 			skipping(cb, b"not a directory", dir);
 			continue;
 		}
-		// _alpm_access(dir, W_OK) with its debug line
-		let writable = rustix::fs::accessat(
-			rustix::fs::CWD,
-			c_path(dir),
-			rustix::fs::Access::WRITE_OK,
-			rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-		);
-		if let Err(e) = writable {
-			let e = strerror(&e.into());
-			let m = [
-				b"\"",
-				&dir[..],
-				b"\" is not writable: ",
-				&e,
-				b"\n",
-			];
-			cb.log(LogLevel::Debug, &m.concat());
+		if alpm_access(cb, None, dir, Access::WRITE_OK).is_err() {
 			skipping(cb, b"not writable", dir);
 			continue;
 		}

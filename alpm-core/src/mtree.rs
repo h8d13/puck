@@ -23,7 +23,7 @@ use alpm_types::{Md5Checksum, Sha256Checksum};
 
 use crate::util::{
 	Filter, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG,
-	Source, archive_io_err, c_path,
+	Source, archive_io_err, c_path, until_nul,
 };
 
 // readline's limit in read_mtree, next_line's in detect_form
@@ -82,9 +82,10 @@ pub struct Entry {
 // where archive_read_open or the first archive_read_next_header fails
 #[derive(Debug)]
 pub enum Error {
-	// the file cannot be opened, or the decoder fails inside what the
-	// open reads through the filter
+	// the decoder fails inside what the open reads through the filter
 	Open(io::Error),
+	// archive_read_open_filename's file reader fails: libarchive's text
+	File(Vec<u8>),
 	// choose_format: no bid, "Unrecognized archive format"
 	Format,
 	// read_mtree returned ARCHIVE_FATAL: libarchive's text
@@ -97,6 +98,7 @@ impl Error {
 	pub fn text(&self) -> Vec<u8> {
 		match self {
 			Error::Open(e) => e.to_string().into_bytes(),
+			Error::File(t) => t.clone(),
 			Error::Format => {
 				b"Unrecognized archive format".to_vec()
 			}
@@ -1113,7 +1115,16 @@ pub fn read_memory(data: Vec<u8>) -> Result<Vec<Entry>, Error> {
 
 // archive_read_open_filename on a local db mtree file: read whole, the
 // filter blocks then come from the data like with read_memory. a file
-// that cannot be read fails the open
+// that cannot be opened or read fails the open, with the texts of
+// libarchive's file reader
 pub fn read_file(path: &[u8]) -> Result<Vec<Entry>, Error> {
-	read_memory(fs::read(c_path(path)).map_err(Error::Open)?)
+	let path = until_nul(path);
+	let text =
+		|what: &[u8]| Error::File([what, b" '", path, b"'"].concat());
+	let mut f = fs::File::open(c_path(path))
+		.map_err(|_| text(b"Failed to open"))?;
+	let mut data = Vec::new();
+	f.read_to_end(&mut data)
+		.map_err(|_| text(b"Error reading"))?;
+	read_memory(data)
 }

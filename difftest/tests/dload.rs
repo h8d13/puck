@@ -79,6 +79,18 @@ fn norm_log(msg: &[u8], dir: &[u8]) -> Vec<u8> {
 			}
 		}
 	}
+	// a time condition on a file this run wrote without a server time:
+	// its write time, seconds apart between the sides (fixed server
+	// times stay compared)
+	let pre = ": using time condition ";
+	if let Some(i) = s.find(pre) {
+		let at = i + pre.len();
+		let num = s[at..].trim_end_matches('\n');
+		let now = alpm_core::log::now_secs();
+		if num.parse::<i64>().is_ok_and(|t| (now - t).abs() < 3600) {
+			s.replace_range(at..at + num.len(), "<now>");
+		}
+	}
 	s.into_bytes()
 }
 

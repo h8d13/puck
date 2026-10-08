@@ -18,6 +18,7 @@ use alpm_core::callbacks::{
 	Callbacks, DownloadEvent, Event, LogLevel, Question,
 };
 use alpm_core::handle::Handle;
+use alpm_core::signing::key_in_keychain;
 use pacman_cli::conf::Config;
 
 use crate::callback::{cb_download, cb_event, cb_log};
@@ -27,12 +28,12 @@ use crate::fixtures::TempRoot;
 use crate::handle::*;
 use crate::package::{CPkg, list_data, read_pkg};
 use crate::signing::{
-	GPGME_PROTOCOL_OPENPGP, gpgme_check_version, gpgme_set_engine_info,
+	_alpm_key_in_keychain, GPGME_PROTOCOL_OPENPGP, c_only,
+	gpgme_check_version, gpgme_set_engine_info,
 };
 use crate::sync_ro::{
 	CRun, FrontHandle, gen_pkgs, pacman_sync, run_op, sync_tar,
 };
-use crate::trans_commit::{sig_unreadable, signing_debug};
 use crate::{CList, Rng, alpm_list_add, alpm_list_free, cstr, vsnprintf};
 
 unsafe extern "C" {
@@ -47,17 +48,11 @@ unsafe extern "C" {
 const QUESTION_IMPORT_KEY: c_int = 1 << 6;
 const EVENT_DATABASE_MISSING: c_int = 27;
 
-// debug lines left out: RET_ERR/GOTO_ERR's carry the C's file and
-// line, signing.c's own (its _alpm_access of the .sig included) are not
-// ported yet (PORTING.md follow-up)
+// debug lines but RET_ERR/GOTO_ERR's (the C's file and line)
 fn kept(level: LogLevel, msg: &[u8]) -> bool {
 	match level {
 		LogLevel::Error | LogLevel::Warning => true,
-		LogLevel::Debug => {
-			!msg.starts_with(b"returning error ")
-				&& !msg.starts_with(b"got error ")
-				&& !signing_debug(msg) && !sig_unreadable(msg)
-		}
+		LogLevel::Debug => !c_only(msg),
 		LogLevel::Function => false,
 	}
 }
@@ -350,6 +345,13 @@ impl CUpdate {
 			}
 		}
 		u.engine();
+		if u.gpgdir.is_some() {
+			// init_gpgme now (once per process), its lines go
+			// with the setup's; the Rust side does the same
+			let init = cstr(b"init");
+			// SAFETY: live handle, valid string
+			unsafe { _alpm_key_in_keychain(u.h, init.as_ptr()) };
+		}
 		for d in &s.dbs {
 			u.register(d);
 		}
@@ -483,6 +485,7 @@ impl RUpdate {
 		h.set_default_siglevel(s.default_siglevel).unwrap();
 		if let Some(g) = &s.gpgdir {
 			h.set_gpgdir(g);
+			key_in_keychain(h.keyring_mut(), &mut (), b"init");
 		}
 		for d in &s.dbs {
 			h.register_syncdb(d.name.as_bytes(), d.siglevel)
