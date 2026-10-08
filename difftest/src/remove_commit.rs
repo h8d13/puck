@@ -11,7 +11,7 @@
 // cache names; log lines the port does not make are dropped on the C side
 // (ALPM_LOG_FUNCTION of the db backend, RET_ERR's debug line).
 use std::cell::RefCell;
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::fs;
 use std::path::Path;
 use std::ptr;
@@ -95,11 +95,6 @@ const EVENT_OP_DONE: c_int = 12;
 const EVENT_SCRIPTLET_INFO: c_int = 17;
 const EVENT_PACSAVE_CREATED: c_int = 33;
 
-fn bytes(p: *const c_char) -> Option<Vec<u8>> {
-	// SAFETY: NULL or a nul-terminated string alive for the callback
-	(!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_bytes().to_vec())
-}
-
 fn pkg_name(p: *const CPkg) -> Option<Vec<u8>> {
 	(!p.is_null()).then(|| read_pkg(p).name.expect("package without name"))
 }
@@ -173,11 +168,11 @@ unsafe extern "C" fn event_cb(ctx: *mut c_void, event: *mut c_void) {
 			EVENT_PACSAVE_CREATED => {
 				let e = &*event.cast::<CEvPacsave>();
 				let old = pkg_name(e.oldpkg).unwrap();
-				RmRec::Pacsave(old, bytes(e.file).unwrap())
+				RmRec::Pacsave(old, field(e.file).unwrap())
 			}
 			EVENT_SCRIPTLET_INFO => {
 				let e = &*event.cast::<CEvLine>();
-				RmRec::Scriptlet(bytes(e.line).unwrap())
+				RmRec::Scriptlet(field(e.line).unwrap())
 			}
 			k => panic!("unexpected event {k}"),
 		}

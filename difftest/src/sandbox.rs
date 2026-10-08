@@ -10,7 +10,7 @@
 //
 // restrictions are only ever applied in a child process spawned for one
 // probe run, never in the test harness itself.
-use std::ffi::{CStr, CString, c_char, c_int, c_long, c_uint, c_void};
+use std::ffi::{CString, c_char, c_int, c_long, c_uint, c_void};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek};
 use std::os::fd::AsRawFd;
@@ -29,6 +29,7 @@ use crate::handle::{
 	ALPM, alpm_initialize, alpm_option_set_dlcb, alpm_option_set_logcb,
 	alpm_release,
 };
+use crate::package::text;
 
 unsafe extern "C" {
 	fn _alpm_sandbox_fs_restrict_writes_to(
@@ -145,11 +146,6 @@ impl Callbacks for SbRecorder {
 	}
 }
 
-fn bytes(p: *const c_char) -> Vec<u8> {
-	// SAFETY: libalpm passes nul-terminated strings
-	unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
-}
-
 unsafe extern "C" fn log_cb(
 	ctx: *mut c_void,
 	level: c_int,
@@ -186,7 +182,7 @@ unsafe extern "C" fn dl_cb(
 	};
 	// SAFETY: ctx is the CSandbox's boxed SbRecorder
 	let rec = unsafe { &mut *ctx.cast::<SbRecorder>() };
-	rec.0.push(CbRec::Dl(bytes(filename), event, a, b));
+	rec.0.push(CbRec::Dl(text(filename), event, a, b));
 }
 
 // the alpm_download_event_*_t of kind: zeroed (padding included),

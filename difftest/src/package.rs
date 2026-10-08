@@ -338,6 +338,16 @@ pub(crate) fn field(p: *const c_char) -> Option<Vec<u8>> {
 	(!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_bytes().to_vec())
 }
 
+// a C string the C never passes as NULL, copied out
+pub(crate) fn text(p: *const c_char) -> Vec<u8> {
+	field(p).expect("C string is NULL")
+}
+
+// a C string copied out, NULL as empty
+pub(crate) fn text_or_empty(p: *const c_char) -> Vec<u8> {
+	field(p).unwrap_or_default()
+}
+
 // the data pointers of a list, nodes stay owned by the C
 pub(crate) fn list_data(head: *const CList) -> Vec<*mut c_void> {
 	let mut out = Vec::new();

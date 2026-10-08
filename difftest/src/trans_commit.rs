@@ -19,7 +19,7 @@
 // data list, the logfile, the root, local db and cache trees.
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
@@ -64,7 +64,7 @@ use crate::handle::{
 	alpm_trans_release,
 };
 use crate::hook::{HookRec, c_hook_rec, hook_rec, strip_stamps};
-use crate::package::{CPkg, list_data, read_pkg, with_strs};
+use crate::package::{CPkg, list_data, read_pkg, text, with_strs};
 use crate::signing::{
 	_alpm_key_in_keychain, GPGME_PROTOCOL_OPENPGP, GpgFixture, c_only,
 	encode_base64, gpgme_check_version, gpgme_set_engine_info,
@@ -569,11 +569,6 @@ struct CRec {
 	answers: VecDeque<c_int>,
 }
 
-fn c_bytes(p: *const c_char) -> Vec<u8> {
-	// SAFETY: a nul-terminated string alive for the callback
-	unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
-}
-
 fn c_name_ver(p: *mut CPkg) -> Option<Vec<u8>> {
 	(!p.is_null()).then(|| name_ver(&read_pkg(p)))
 }
@@ -663,14 +658,14 @@ unsafe extern "C" fn question_cb(ctx: *mut c_void, q: *mut c_void) {
 	let detail = (kind == Q_CORRUPTED).then(|| {
 		// SAFETY: a CORRUPTED_PKG question
 		let c = unsafe { &*q.cast::<CQCorrupted>() };
-		(c_bytes(c.filepath), c.reason)
+		(text(c.filepath), c.reason)
 	});
 	rec.recs.push(TcRec::Ask(kind, detail));
 	if kind == Q_IMPORT_KEY {
 		// SAFETY: an IMPORT_KEY question, uid may be NULL
 		let k = unsafe { &*q.cast::<CQImportKey>() };
-		let uid = (!k.uid.is_null()).then(|| c_bytes(k.uid));
-		rec.recs.push(TcRec::AskKey(uid, c_bytes(k.fingerprint)));
+		let uid = (!k.uid.is_null()).then(|| text(k.uid));
+		rec.recs.push(TcRec::AskKey(uid, text(k.fingerprint)));
 	}
 	let answer = rec.answers.pop_front().unwrap_or(0);
 	// SAFETY: the answer int follows the type in every question
@@ -687,7 +682,7 @@ unsafe extern "C" fn progress_cb(
 ) {
 	// SAFETY: ctx is the CRec
 	let rec = unsafe { &mut *ctx.cast::<CRec>() };
-	let r = TcRec::Progress(kind, c_bytes(pkg), percent, howmany, current);
+	let r = TcRec::Progress(kind, text(pkg), percent, howmany, current);
 	rec.recs.push(r);
 }
 
@@ -714,7 +709,7 @@ unsafe extern "C" fn dl_cb(
 		};
 		(&mut *ctx.cast::<CRec>(), r)
 	};
-	rec.recs.push(TcRec::Download(c_bytes(filename), r));
+	rec.recs.push(TcRec::Download(text(filename), r));
 }
 
 // the commit data list read out and freed: filenames or fileconflicts
@@ -730,10 +725,10 @@ fn c_data(errno: c_int, data: *mut CList) -> TcData {
 				// SAFETY: a live alpm_fileconflict_t of the list
 				let r = unsafe {
 					(
-						c_bytes((*c).target),
+						text((*c).target),
 						(*c).conflict_type,
-						c_bytes((*c).file),
-						c_bytes((*c).ctarget),
+						text((*c).file),
+						text((*c).ctarget),
 					)
 				};
 				// SAFETY: freed once, not used after
@@ -746,7 +741,7 @@ fn c_data(errno: c_int, data: *mut CList) -> TcData {
 		let list = items
 			.iter()
 			.map(|&p| {
-				let s = c_bytes(p.cast());
+				let s = text(p.cast());
 				c_free(p);
 				s
 			})

@@ -8,7 +8,7 @@
 // Callbacks, recording the same way, and a logfile of its own, so the
 // tests compare HookRec lists and logfile text directly.
 use std::cell::RefCell;
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CString, c_char, c_int, c_void};
 use std::fs;
 use std::path::PathBuf;
 use std::ptr;
@@ -28,7 +28,9 @@ use crate::handle::{
 	alpm_option_set_noextracts, alpm_release, alpm_trans_init,
 	alpm_trans_release,
 };
-use crate::package::{CPkgBox, alpm_pkg_get_provides, list_data, with_strs};
+use crate::package::{
+	CPkgBox, alpm_pkg_get_provides, field, list_data, with_strs,
+};
 use crate::{alpm_list_add, alpm_list_free, cstr};
 
 type IoCb = unsafe extern "C" fn(*mut c_void, isize, *mut c_void) -> isize;
@@ -201,11 +203,6 @@ const EVENT_HOOK_DONE: c_int = 35;
 const EVENT_HOOK_RUN_START: c_int = 36;
 const EVENT_HOOK_RUN_DONE: c_int = 37;
 
-fn bytes(p: *const c_char) -> Option<Vec<u8>> {
-	// SAFETY: NULL or a nul-terminated string alive for the callback
-	(!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_bytes().to_vec())
-}
-
 unsafe extern "C" fn log_cb(
 	ctx: *mut c_void,
 	level: c_int,
@@ -240,7 +237,7 @@ pub(crate) unsafe fn c_hook_rec(event: *mut c_void) -> Option<HookRec> {
 		match kind {
 			EVENT_SCRIPTLET_INFO => {
 				let e = &*event.cast::<CScriptletInfo>();
-				HookRec::Scriptlet(bytes(e.line).unwrap())
+				HookRec::Scriptlet(field(e.line).unwrap())
 			}
 			EVENT_HOOK_START | EVENT_HOOK_DONE => {
 				let e = &*event.cast::<CEventHook>();
@@ -253,8 +250,8 @@ pub(crate) unsafe fn c_hook_rec(event: *mut c_void) -> Option<HookRec> {
 			}
 			EVENT_HOOK_RUN_START | EVENT_HOOK_RUN_DONE => {
 				let e = &*event.cast::<CEventHookRun>();
-				let name = bytes(e.name).unwrap();
-				let desc = bytes(e.desc);
+				let name = field(e.name).unwrap();
+				let desc = field(e.desc);
 				match kind {
 					EVENT_HOOK_RUN_START => {
 						HookRec::RunStart(

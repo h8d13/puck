@@ -11,7 +11,7 @@
 // calloc'd struct dload_payload mirrors, released through
 // _alpm_dload_payload_reset.
 use std::collections::HashMap;
-use std::ffi::{CStr, c_char, c_int, c_long, c_void};
+use std::ffi::{c_char, c_int, c_long, c_void};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::ptr;
@@ -25,6 +25,7 @@ use alpm_core::dload::Payload;
 use time::OffsetDateTime;
 
 use crate::handle::*;
+use crate::package::text_or_empty;
 use crate::{CFile, CList, TempRoot, alpm_list_add, alpm_list_free, c_free};
 use crate::{cstr, strdup, take};
 
@@ -178,14 +179,6 @@ struct Ctx {
 	fetch: Option<Fetcher>,
 }
 
-fn bytes(p: *const c_char) -> Vec<u8> {
-	if p.is_null() {
-		return Vec::new();
-	}
-	// SAFETY: libalpm passes nul-terminated strings
-	unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
-}
-
 #[repr(C)]
 struct CCompleted {
 	total: i64,
@@ -233,7 +226,7 @@ unsafe extern "C" fn dl_cb(
 		};
 		(ctx, ev)
 	};
-	ctx.rec.downloads.push((bytes(filename), ev));
+	ctx.rec.downloads.push((text_or_empty(filename), ev));
 }
 
 unsafe extern "C" fn log_cb(
@@ -280,7 +273,7 @@ unsafe extern "C" fn fetch_cb(
 	// SAFETY: ctx is the boxed Ctx, fetch is set while this cb is
 	let ctx = unsafe { &mut *ctx.cast::<Ctx>() };
 	let f = ctx.fetch.as_mut().expect("fetchcb without a script");
-	f.fetch(&bytes(url), &bytes(localpath), force != 0)
+	f.fetch(&text_or_empty(url), &text_or_empty(localpath), force != 0)
 }
 
 pub struct CDload {
@@ -456,7 +449,7 @@ impl CDload {
 		while !i.is_null() {
 			// SAFETY: a live list node holding a C string
 			unsafe {
-				out.push(bytes((*i).data.cast()));
+				out.push(text_or_empty((*i).data.cast()));
 				i = (*i).next;
 			}
 		}
@@ -571,7 +564,7 @@ impl CDload {
 	// _alpm_filecache_setup and the logs it made
 	pub fn filecache_setup(&mut self) -> (Vec<u8>, Record) {
 		// SAFETY: h is live, the string stays owned by the handle
-		let r = bytes(unsafe { _alpm_filecache_setup(self.h) });
+		let r = text_or_empty(unsafe { _alpm_filecache_setup(self.h) });
 		(r, self.take_record())
 	}
 }

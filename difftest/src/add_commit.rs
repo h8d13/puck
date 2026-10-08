@@ -9,7 +9,7 @@
 // remove.c send, progress; the logfile text without stamps comes apart.
 // cases are built twice from one AcCase, once per side.
 use std::cell::RefCell;
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -37,7 +37,7 @@ use crate::handle::{
 	alpm_release, alpm_trans_init, alpm_trans_release,
 };
 use crate::hook::strip_stamps;
-use crate::package::{_alpm_pkg_dup, CPkg, read_pkg, with_strs};
+use crate::package::{_alpm_pkg_dup, CPkg, read_pkg, text, with_strs};
 use crate::trans_prep::alpm_add_pkg;
 use crate::util::c_umask;
 
@@ -404,11 +404,6 @@ const EV_SCRIPTLET: c_int = 17;
 const EV_PACNEW: c_int = 32;
 const EV_PACSAVE: c_int = 33;
 
-fn c_bytes(p: *const c_char) -> Vec<u8> {
-	// SAFETY: a nul-terminated string alive for the callback
-	unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
-}
-
 fn c_name(p: *mut CPkg) -> Option<Vec<u8>> {
 	(!p.is_null()).then(|| read_pkg(p).name_bytes().to_vec())
 }
@@ -454,19 +449,19 @@ unsafe extern "C" fn event_cb(ctx: *mut c_void, event: *mut c_void) {
 					e.from_noupgrade != 0,
 					c_name(e.oldpkg),
 					c_name(e.newpkg).unwrap(),
-					c_bytes(e.file),
+					text(e.file),
 				)
 			}
 			EV_PACSAVE => {
 				let e = &*event.cast::<CEvPacsave>();
 				AcRec::Pacsave(
 					c_name(e.oldpkg).unwrap(),
-					c_bytes(e.file),
+					text(e.file),
 				)
 			}
 			EV_SCRIPTLET => {
 				let e = &*event.cast::<CEvLine>();
-				AcRec::Scriptlet(c_bytes(e.line))
+				AcRec::Scriptlet(text(e.line))
 			}
 			k => AcRec::Event(k),
 		}
@@ -484,8 +479,7 @@ unsafe extern "C" fn progress_cb(
 ) {
 	// SAFETY: ctx is the boxed record list
 	let recs = unsafe { &mut *ctx.cast::<Vec<AcRec>>() };
-	let rec =
-		AcRec::Progress(kind, c_bytes(pkg), percent, howmany, current);
+	let rec = AcRec::Progress(kind, text(pkg), percent, howmany, current);
 	recs.push(rec);
 }
 
