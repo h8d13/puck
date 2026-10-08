@@ -24,10 +24,10 @@ use alpm_core::error::Errno;
 use alpm_core::handle::Handle;
 use alpm_core::package::{Package, PkgReason};
 use alpm_core::pkghash::PkgHash;
+use alpm_core::trans::{TRANS_FLAG_ALLDEPS, TRANS_FLAG_ALLEXPLICIT};
 use alpm_core::util::{strerror, until_nul};
 
 use crate::conf::{Config, LOG_ERROR};
-use crate::pacman::{TRANS_FLAG_ALLDEPS, TRANS_FLAG_ALLEXPLICIT};
 use crate::util::{Output, pm_printf, trans_init, trans_release};
 
 fn os(path: &[u8]) -> &Path {

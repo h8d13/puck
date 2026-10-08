@@ -18,6 +18,7 @@ use std::sync::MutexGuard;
 use alpm_core::callbacks::{Callbacks, Event, HookRun, HookWhen, LogLevel};
 use alpm_core::handle::Handle;
 use alpm_core::package::{DbCaches, Package};
+use alpm_core::trans::TRANS_FLAG_NOLOCK;
 
 use crate::handle::{
 	ALPM, CHandleHead, alpm_db_get_pkgcache, alpm_get_localdb,
@@ -28,9 +29,6 @@ use crate::handle::{
 };
 use crate::package::{CPkgBox, alpm_pkg_get_provides, list_data, with_strs};
 use crate::{alpm_list_add, alpm_list_free, cstr, vsnprintf};
-
-// ALPM_TRANS_FLAG_NOLOCK: no lock file under the fixture dbpath
-const TRANS_FLAG_NOLOCK: c_int = 1 << 17;
 
 type IoCb = unsafe extern "C" fn(*mut c_void, isize, *mut c_void) -> isize;
 

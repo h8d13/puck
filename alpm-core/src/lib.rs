@@ -34,3 +34,5 @@ pub mod version;
 
 // upstream release this port tracks, printed where C uses PACKAGE_VERSION
 pub const PACKAGE_VERSION: &str = "7.1.0";
+// alpm_version(): libalpm's meson LIB_VERSION of that release
+pub const LIB_VERSION: &str = "16.0.1";

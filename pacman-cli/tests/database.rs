@@ -5,9 +5,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use alpm_core::handle::Handle;
+use alpm_core::trans::TRANS_FLAG_ALLDEPS;
 use pacman_cli::conf::Config;
 use pacman_cli::database::pacman_database;
-use pacman_cli::pacman::TRANS_FLAG_ALLDEPS;
 use pacman_cli::util::Output;
 
 // <tmp>/pacman-cli-database-<pid>-<tag>/ with root/ and db/, removed on

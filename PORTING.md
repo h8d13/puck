@@ -500,9 +500,8 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   `Output{stdout,stderr}`.
 - `getopt` keeps glibc 2.44 semantics (optopt starts at 0, nextchar as an
   argv position). `parseargs` returns `Err(exit status)` where the C exits.
-  `LIB_VERSION` hard-coded from meson, should sit next to
-  `PACKAGE_VERSION`; `TRANS_FLAG_*` move to alpm-core with trans.c,
-  `needs_root` to util.rs.
+  `LIB_VERSION` (meson's) sits next to `PACKAGE_VERSION` in alpm-core;
+  `TRANS_FLAG_*` live in `alpm_core::trans` (alpm.h), not re-exported.
 - `conflict`, `diskspace`, `deps` take handle state as parameters
   (local `PkgHash`, root, overwrite, `DepsEnv`) and report through
   per-unit traits until the callbacks unit lands; callers load packages
@@ -674,7 +673,7 @@ Follow-ups raised by port units:
 | checksums (`alpm_compute_md5sum`/`sha256sum`, `_alpm_test_checksum`) via alpm-types `Checksum` | util rest | done |
 | fixture writer copied into `difftest/tests/deps_resolve.rs`, move to `fixtures.rs` | pkg follow-ups | done |
 | db search (`_alpm_db_search`) on the ported regex | db | done |
-| `LIB_VERSION` next to `PACKAGE_VERSION`, `needs_root` into util.rs, `TRANS_FLAG_*` with trans.c | args | todo |
+| `LIB_VERSION` next to `PACKAGE_VERSION`, `needs_root` into util.rs, `TRANS_FLAG_*` with trans.c | args | done: frontend and difftest import the flags from `alpm_core::trans` (alpm.h exposes them; no pacman.rs re-export, no difftest copies) |
 | one `check_meta` (be_sync, be_package, package), test ustar builders onto `fixtures::ustar` | be_package | done: `package::check_meta` (its log lines) for be_sync, be_local and be_package; difftest's be_package tars through `fixtures::ustar_nodes`, port tests through `tar::Builder` |
 | precedent cleanup: base64, time, unicode-width, drop split_backup/parse_xdata, ALPM vs C difftest for vercmp/relations | audit | done |
 | regex class/towupper tables -> std `char` methods, divergence counted like wcwidth | audit | done |
@@ -690,7 +689,7 @@ Follow-ups raised by port units:
 | `alpm_extract_keyid` wired into -Sii/-Qii `sig_keys` | sync | todo (ported in signing) |
 | `Handle` owns `signing::Keyring` (gpgdir, known_keys) and implements `SigCallbacks`; `Db::register_sync` calls `be_sync::sync_db_validate` | signing | done |
 | query.rs's new_version copy onto `alpm_core::sync::sync_get_new_version` | query | todo (ported in transprep) |
-| `pacman_sync` dispatches to `sync_trans` (needs a `Ui`), re-export `TRANS_FLAG_*` in pacman.rs | transprep | done |
+| `pacman_sync` dispatches to `sync_trans` (needs a `Ui`) | transprep | done |
 | "found cached pkg" debug line into `util::filecache_find` (local wrapper in sync.rs) | transprep | todo |
 | conflict.rs `pkg_diff` onto `deps::list_diff`; deps_graph test reuses the trans_prep world generator | transprep | done: deps_graph runs on `gen_world`/`write_world` plus its odd depends and `>=` provisions |
 | trans_prep worlds with deps_graph's odd relations (`a>=`, `d: for d`, `c<=>1`, ...) in every relation list: `prepare_fuzz` aborts in the C (`free(): invalid pointer` at `alpm_trans_release` after a prepare with file targets), `frontend_fuzz` drops below its "nothing to do" floor. root-cause (C bug or difftest free path), then widen `tp_relation` | cruft | todo |

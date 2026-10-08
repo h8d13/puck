@@ -13,6 +13,7 @@ use std::ffi::{CStr, c_char, c_int, c_ulong, c_void};
 use std::ptr;
 
 use alpm_core::deps::{DepMissing, DepMod, Depend};
+use alpm_core::trans::{TRANS_FLAG_NODEPVERSION, TRANS_FLAG_NOLOCK};
 
 use crate::handle::{
 	_alpm_db_get_pkgcache_hash, ALPM, CDb, alpm_db_set_usage, alpm_errno,
@@ -27,9 +28,6 @@ use crate::package::{
 };
 use crate::{CList, alpm_list_add, alpm_list_free, cstr, opt_ptr, vsnprintf};
 
-// alpm_trans_flag_t
-const TRANS_FLAG_NODEPVERSION: c_int = 1 << 3;
-const TRANS_FLAG_NOLOCK: c_int = 1 << 17;
 // alpm_question_type_t
 const QUESTION_INSTALL_IGNOREPKG: c_int = 1;
 const QUESTION_SELECT_PROVIDER: c_int = 1 << 5;
