@@ -1,5 +1,5 @@
-// unit tests for be_local's mtree reading (alpm-mtree mapped onto what
-// check.c reads)
+// unit tests for be_local's mtree reading (alpm-mtree's libarchive
+// reader mapped onto what check.c reads)
 use std::fs;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
@@ -47,60 +47,70 @@ impl Drop for Tmp {
 	}
 }
 
-fn gzip(path: &PathBuf, data: &[u8]) {
-	let settings = CompressionSettings::Gzip {
-		compression_level: GzipCompressionLevel::default(),
-	};
+fn compress(path: &PathBuf, data: &[u8], settings: &CompressionSettings) {
 	let f = fs::File::create(path).unwrap();
-	let mut enc = CompressionEncoder::new(f, &settings).unwrap();
+	let mut enc = CompressionEncoder::new(f, settings).unwrap();
 	enc.write_all(data).unwrap();
 	enc.finish().unwrap();
 }
 
+fn gzip(path: &PathBuf, data: &[u8]) {
+	let settings = CompressionSettings::Gzip {
+		compression_level: GzipCompressionLevel::default(),
+	};
+	compress(path, data, &settings);
+}
+
 #[test]
-fn entries_sorted_and_mapped() {
+fn entries_in_file_order_and_mapped() {
 	let e = parse_mtree(text().as_bytes()).unwrap();
 	let paths: Vec<&[u8]> = e.iter().map(|e| &e.path[..]).collect();
-	assert_eq!(paths, [&b"./a"[..], b"./b", b"./c d"]);
+	assert_eq!(paths, [&b"./b"[..], b"./a", b"./c d"]);
 
-	assert_eq!(e[0].kind, MtreeType::File);
+	assert_eq!(e[1].kind, MtreeType::File);
 	assert_eq!(
-		(e[0].mode, e[0].uid, e[0].size, e[0].mtime),
+		(e[1].mode, e[1].uid, e[1].size, e[1].mtime),
 		(0o644, 0, 1, 1)
 	);
-	assert_eq!(e[0].sha256.as_ref().unwrap().to_string(), SHA);
-	assert_eq!(e[0].md5.as_ref().unwrap().to_string(), MD5);
+	assert_eq!(e[1].sha256.as_ref().unwrap().to_string(), SHA);
+	assert_eq!(e[1].md5.as_ref().unwrap().to_string(), MD5);
 
-	assert_eq!(e[1].kind, MtreeType::Dir);
-	assert_eq!((e[1].mode, e[1].uid, e[1].size), (0o755, 1000, 0));
-	assert!(e[1].sha256.is_none() && e[1].link.is_none());
+	assert_eq!(e[0].kind, MtreeType::Dir);
+	assert_eq!((e[0].mode, e[0].uid, e[0].size), (0o755, 1000, 0));
+	assert!(e[0].sha256.is_none() && e[0].link.is_none());
 
 	assert_eq!(e[2].kind, MtreeType::Link);
 	assert_eq!(e[2].link.as_deref(), Some(&b"a b"[..]));
 	assert_eq!((e[2].mode, e[2].mtime), (0o777, 3));
+	assert!(e.iter().all(|e| !e.warned));
 }
 
 #[test]
-fn rejected_data() {
-	let bad = [
-		"#mtree\n./a type=fifo uid=0 gid=0 mode=644 time=1.0\n",
-		"#mtree\n./a type=file uid=0 gid=0 mode=644 time=1.0 size=1\n",
-		"#mtree\n./a type=dir uid=0 gid=0 mode=0 time=1.0\n",
-	];
-	for b in bad {
-		let r = parse_mtree(b.as_bytes());
-		assert!(matches!(r, Err(MtreeError::Parse(_))), "{b:?}: {r:?}");
-	}
+fn odd_data() {
+	// read like libarchive: missing keywords, special files
+	let e = parse_mtree(&b"#mtree\n./a type=fifo\n./b type=file\n"[..])
+		.unwrap();
+	assert_eq!(
+		(e[0].kind, e[0].mtime, e[1].sha256.is_none()),
+		(MtreeType::Fifo, 0, true)
+	);
+	// kept, with the warned keyword unread
+	let e = parse_mtree(&b"#mtree\n./a type=file mode=u+x\n"[..]).unwrap();
+	assert!(e[0].warned && e[0].mode == 0);
+	// lines libarchive cannot parse
 	let r = parse_mtree(&b"#mtree\n./\xff type=dir\n"[..]);
 	assert!(matches!(r, Err(MtreeError::Parse(_))), "{r:?}");
-	// gzip magic, broken stream
+	let r = parse_mtree(&b"#mtree\n/foo\n"[..]);
+	assert!(matches!(r, Err(MtreeError::Parse(_))), "{r:?}");
+	// gzip magic, broken stream; no mtree data
 	let r = parse_mtree(&[0x1f, 0x8b, 0, 1, 2, 3][..]);
 	assert!(matches!(r, Err(MtreeError::Read(_))), "{r:?}");
-	assert!(parse_mtree(&b""[..]).unwrap().is_empty());
+	let r = parse_mtree(&b""[..]);
+	assert!(matches!(r, Err(MtreeError::Read(_))), "{r:?}");
 }
 
 #[test]
-fn files_plain_gzip_missing() {
+fn files_compressed_missing() {
 	let t = Tmp::new("files");
 	let plain = t.0.join("plain");
 	fs::write(&plain, text()).unwrap();
@@ -110,6 +120,13 @@ fn files_plain_gzip_missing() {
 	let b = read_mtree(gz.as_os_str().as_bytes()).unwrap();
 	assert_eq!(a, b);
 	assert_eq!(a.len(), 3);
+	// any filter alpm-compress knows, picked by magic bytes
+	let xz = t.0.join("xz");
+	let settings = CompressionSettings::Xz {
+		compression_level: Default::default(),
+	};
+	compress(&xz, text().as_bytes(), &settings);
+	assert_eq!(read_mtree(xz.as_os_str().as_bytes()).unwrap(), a);
 	let none = t.0.join("none");
 	let r = read_mtree(none.as_os_str().as_bytes());
 	assert!(matches!(r, Err(MtreeError::Missing)), "{r:?}");

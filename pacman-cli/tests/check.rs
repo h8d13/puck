@@ -109,17 +109,18 @@ fn entry(t: &Tmp, rel: &str, kind: MtreeType, content: &[u8]) -> MtreeEntry {
 		kind,
 		mode: match kind {
 			MtreeType::Dir => 0o755,
-			MtreeType::File => 0o644,
 			MtreeType::Link => 0o777,
+			_ => 0o644,
 		},
-		uid: me.uid(),
-		gid: me.gid(),
+		uid: me.uid().into(),
+		gid: me.gid().into(),
 		size: content.len() as u64,
 		mtime: t.mtime(rel),
 		link: (kind == MtreeType::Link).then(|| b"target".to_vec()),
 		sha256: (kind == MtreeType::File)
 			.then(|| Sha256Checksum::calculate_from(content)),
 		md5: None,
+		warned: false,
 	}
 }
 

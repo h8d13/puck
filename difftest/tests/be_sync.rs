@@ -5,14 +5,16 @@
 // validation getter, the cache order and the table counts compared. odd
 // inputs the C accepts pin each divergence; copies of the real sync dbs
 // give counts
+use std::ffi::c_int;
 use std::fs;
 use std::path::PathBuf;
 
 use alpm_core::be_sync::{self, get_validation, populate};
+use alpm_core::handle::Handle;
 use alpm_core::package::Package;
 use difftest::{
-	COMPS, CSyncDb, Comp, Rng, TarEntry, TempRoot, c_sync_db_load, iters,
-	section, tar_dir, tar_file, ustar, write_db,
+	CHandle, COMPS, CSyncDb, Comp, Rng, TarEntry, TempRoot, c_sync_db_load,
+	iters, section, tar_dir, tar_file, ustar, write_db,
 };
 
 // one db per iteration, a C handle each: far slower than string fuzz
@@ -998,9 +1000,9 @@ fn odd_archives() {
 	short_tar.truncate(700);
 	let cases: Vec<(&str, Vec<u8>, Expect)> = vec![
 		("empty file", Vec::new(), Same),
-		// errno only: libarchive refuses at open, tar at the first header
-		("garbage", b"not an archive at all\n".repeat(40), Diverge),
-		("two gzip members", two, Diverge),
+		// refused at open (the first tar header): the db is invalid
+		("garbage", b"not an archive at all\n".repeat(40), Same),
+		("two gzip members", two, Same),
 		("truncated gzip", truncated, Diverge),
 		("truncated tar", short_tar, Same),
 		("no end blocks", good[..good.len() - 1024].to_vec(), Same),
@@ -1013,5 +1015,38 @@ fn odd_archives() {
 		let got = if c == r { Same } else { Diverge };
 		eprintln!("{label}: C {} / rust {}", brief(&c), brief(&r));
 		assert_eq!(got, expect, "{label}\nC {c:?}\nrust {r:?}");
+		if expect == Same {
+			assert_eq!(
+				validity(&fx, "t"),
+				c_validity(&fx, "t"),
+				"{label}"
+			);
+		}
 	}
+}
+
+// a db registered on a handle after its cache load failed or not:
+// pkgcache errno, then alpm_db_get_valid
+fn validity(fx: &TempRoot, tree: &str) -> (c_int, (c_int, c_int)) {
+	let mut h = Handle::initialize(&fx.path("root"), &fx.dbpath()).unwrap();
+	h.register_syncdb(tree.as_bytes(), 0).unwrap();
+	let ext = h.dbext().to_vec();
+	let db = h
+		.syncdbs_mut()
+		.iter_mut()
+		.find(|d| d.name() == tree.as_bytes())
+		.unwrap();
+	let e = db.pkgcache(&ext).err().map_or(0, |e| e as c_int);
+	let valid = match db.valid() {
+		Ok(()) => (0, 0),
+		Err(e) => (-1, e as c_int),
+	};
+	(e, valid)
+}
+
+fn c_validity(fx: &TempRoot, tree: &str) -> (c_int, (c_int, c_int)) {
+	let c = CHandle::new(&fx.path("root"), &fx.dbpath()).unwrap();
+	c.register_syncdb(tree.as_bytes(), 0);
+	let (_, e) = c.pkgcache(tree.as_bytes());
+	(e, c.valid(tree.as_bytes()))
 }

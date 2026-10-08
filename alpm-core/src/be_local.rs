@@ -16,16 +16,15 @@
 use std::ffi::{OsStr, c_int};
 use std::fmt::Display;
 use std::fs::{self, DirBuilder, File};
-use std::io::{self, ErrorKind, Read};
-use std::os::unix::ffi::OsStrExt;
+use std::io::{self, ErrorKind, Read, Seek};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
-use alpm_common::MetadataFile;
+use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
 use alpm_db::desc::{Section, parse_libalpm};
 use alpm_db::files::DbFiles;
-use alpm_mtree::Mtree;
-use alpm_mtree::mtree::v2::Path as MtreePath;
+use alpm_mtree::libarchive::{self, Entry};
 use alpm_types::{ExtraDataEntry, PackageInstallReason, PackageValidation};
 
 use crate::backup::Backup;
@@ -411,21 +410,15 @@ fn apply_files(pkg: &mut Package, files: &DbFiles) {
 // mtree: _cache_mtree_open/_cache_mtree_next
 //
 // the C opens "<pkgpath>mtree" with libarchive (every filter, mtree
-// format) and yields its entries one by one. here alpm-mtree reads the
-// file whole (plain or gzip, MetadataFile::from_reader): it sorts the
-// entries by path and rejects the whole file where libarchive warns or
-// fails on one entry (see PORTING.md for the divergences)
+// format) and yields its entries one by one. here the filter is picked by
+// magic bytes (alpm-compress) and alpm-mtree's libarchive reader parses
+// the file whole, entries in file order like the C. data that reader
+// cannot parse fails whole, like libarchive (it reads the file at the
+// first header). an entry libarchive warns about ends the C's walk
+// (UPSTREAM.md), here it is kept, without the warned keyword
 
+pub use alpm_mtree::libarchive::EntryType as MtreeType;
 pub use alpm_types::{Md5Checksum, Sha256Checksum};
-
-// archive_entry_filetype of the three types alpm-mtree knows (its
-// PathType has no PartialEq)
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MtreeType {
-	Dir,
-	File,
-	Link,
-}
 
 // what check.c reads of an archive_entry
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -435,88 +428,71 @@ pub struct MtreeEntry {
 	pub kind: MtreeType,
 	// ~AE_IFMT & archive_entry_mode: the permission bits
 	pub mode: u32,
-	pub uid: u32,
-	pub gid: u32,
-	// files only, 0 for the others like an unset archive_entry_size
+	pub uid: i64,
+	pub gid: i64,
 	pub size: u64,
+	// archive_entry_mtime, 0 when unset
 	pub mtime: i64,
-	// links only
 	pub link: Option<Vec<u8>>,
 	pub sha256: Option<Sha256Checksum>,
 	pub md5: Option<Md5Checksum>,
+	// archive_read_next_header gave ARCHIVE_WARN for it: a keyword was
+	// not read, _cache_mtree_next returns -1
+	pub warned: bool,
 }
 
 #[derive(Debug)]
 pub enum MtreeError {
 	// access(F_OK) fails: "there is no mtree file for this package"
 	Missing,
-	// open, read or gunzip failed: where the C's archive_read_open fails
+	// open, read, decompression or format detection failed: where the
+	// C's archive_read_open fails
 	Read(alpm_mtree::Error),
-	// alpm-mtree rejects the data (not UTF-8, syntax, missing keywords)
+	// a line libarchive cannot parse: no entries
 	Parse(alpm_mtree::Error),
 }
 
-fn bytes_of(p: &Path) -> Vec<u8> {
-	p.as_os_str().as_bytes().to_vec()
+fn into_bytes(p: PathBuf) -> Vec<u8> {
+	p.into_os_string().into_vec()
 }
 
-// alpm-mtree only stores 3-4 octal digits
-fn mode_bits(mode: &str) -> u32 {
-	u32::from_str_radix(mode, 8).unwrap_or_default()
-}
-
-fn mtree_entry(p: MtreePath) -> MtreeEntry {
-	match p {
-		MtreePath::Directory(d) => MtreeEntry {
-			path: bytes_of(&d.path),
-			kind: MtreeType::Dir,
-			mode: mode_bits(&d.mode),
-			uid: d.uid,
-			gid: d.gid,
-			size: 0,
-			mtime: d.time,
-			link: None,
-			sha256: None,
-			md5: None,
-		},
-		MtreePath::File(f) => MtreeEntry {
-			path: bytes_of(&f.path),
-			kind: MtreeType::File,
-			mode: mode_bits(&f.mode),
-			uid: f.uid,
-			gid: f.gid,
-			size: f.size,
-			mtime: f.time,
-			link: None,
-			sha256: Some(f.sha256_digest),
-			md5: f.md5_digest,
-		},
-		MtreePath::Link(l) => MtreeEntry {
-			path: bytes_of(&l.path),
-			kind: MtreeType::Link,
-			mode: mode_bits(&l.mode),
-			uid: l.uid,
-			gid: l.gid,
-			size: 0,
-			mtime: l.time,
-			link: Some(bytes_of(&l.link_path)),
-			sha256: None,
-			md5: None,
-		},
+fn mtree_entry(e: Entry) -> MtreeEntry {
+	MtreeEntry {
+		path: into_bytes(e.path),
+		kind: e.entry_type,
+		mode: e.mode,
+		uid: e.uid,
+		gid: e.gid,
+		// the reader clamps a negative size to 0 like libarchive
+		size: u64::try_from(e.size).unwrap_or_default(),
+		mtime: e.time.map_or(0, |(seconds, _)| seconds),
+		link: e.link.map(into_bytes),
+		sha256: e.sha256_digest,
+		md5: e.md5_digest,
+		warned: !e.warnings.is_empty(),
 	}
 }
 
 // the alpm-mtree call: plain or gzip'd mtree data
 pub fn parse_mtree(r: impl Read) -> Result<Vec<MtreeEntry>, MtreeError> {
-	let paths = match Mtree::from_reader(r) {
-		Ok(Mtree::V1(p) | Mtree::V2(p)) => p,
+	match libarchive::from_reader(r) {
+		Ok(entries) => {
+			Ok(entries.into_iter().map(mtree_entry).collect())
+		}
 		Err(
 			e @ (alpm_mtree::Error::Io { .. }
-			| alpm_mtree::Error::InvalidGzip(_)),
-		) => return Err(MtreeError::Read(e)),
-		Err(e) => return Err(MtreeError::Parse(e)),
-	};
-	Ok(paths.into_iter().map(mtree_entry).collect())
+			| alpm_mtree::Error::InvalidGzip(_)
+			| alpm_mtree::Error::NoMtreeData),
+		) => Err(MtreeError::Read(e)),
+		Err(e) => Err(MtreeError::Parse(e)),
+	}
+}
+
+fn read_err(context: &str, source: io::Error) -> MtreeError {
+	MtreeError::Read(alpm_mtree::Error::Io {
+		context: context.into(),
+		source,
+	})
 }
 
 pub fn read_mtree(path: &[u8]) -> Result<Vec<MtreeEntry>, MtreeError> {
@@ -524,13 +500,18 @@ pub fn read_mtree(path: &[u8]) -> Result<Vec<MtreeEntry>, MtreeError> {
 	if fs::metadata(os(path)).is_err() {
 		return Err(MtreeError::Missing);
 	}
-	let file = File::open(os(path)).map_err(|source| {
-		MtreeError::Read(alpm_mtree::Error::Io {
-			context: "open".into(),
-			source,
-		})
-	})?;
-	parse_mtree(file)
+	let mut file = File::open(os(path)).map_err(|e| read_err("open", e))?;
+	// the filter libarchive's bidding would pick
+	let mut magic = Vec::with_capacity(DecompressionSettings::MAGIC_LEN);
+	(&mut file)
+		.take(DecompressionSettings::MAGIC_LEN as u64)
+		.read_to_end(&mut magic)
+		.and_then(|_| file.rewind())
+		.map_err(|e| read_err("read", e))?;
+	let settings = DecompressionSettings::from_magic(&magic);
+	let decoder = CompressionDecoder::new(file, settings)
+		.map_err(|e| read_err("decompress", io::Error::other(e)))?;
+	parse_mtree(decoder)
 }
 
 impl LocalDb {

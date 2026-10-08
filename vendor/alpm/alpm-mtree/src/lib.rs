@@ -18,6 +18,8 @@ pub use file::{
 pub mod mtree;
 pub use mtree::{Mtree, v2::parse_mtree_v2};
 
+pub mod libarchive;
+
 /// Low-level parser for MTREE files. You'll likely want to use [`parse_mtree_v2`] instead.
 pub mod parser;
 /// MTREE files use a special non-ascii encoding for their paths.

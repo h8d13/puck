@@ -7,7 +7,7 @@ use std::{
 };
 
 use bzip2::bufread::BzDecoder;
-use flate2::bufread::GzDecoder;
+use flate2::bufread::MultiGzDecoder;
 use liblzma::bufread::XzDecoder;
 use zstd::Decoder;
 
@@ -15,14 +15,16 @@ use crate::{Error, decompression::DecompressionSettings};
 
 /// Decoder for decompression which supports multiple backends.
 ///
-/// Wraps [`BzDecoder`], [`GzDecoder`], [`XzDecoder`] and [`Decoder`]
+/// Wraps [`BzDecoder`], [`MultiGzDecoder`], [`XzDecoder`] and [`Decoder`]
 /// and provides a unified [`Read`] implementation across all of them.
 pub enum CompressionDecoder<'a> {
     /// The bzip2 decompression decoder.
     Bzip2(BzDecoder<BufReader<File>>),
 
     /// The gzip decompression decoder.
-    Gzip(GzDecoder<BufReader<File>>),
+    ///
+    /// Like `gzip` and libarchive, it reads all concatenated gzip members.
+    Gzip(MultiGzDecoder<BufReader<File>>),
 
     /// The xz decompression decoder.
     Xz(XzDecoder<BufReader<File>>),
@@ -47,7 +49,9 @@ impl CompressionDecoder<'_> {
     pub fn new(file: File, settings: DecompressionSettings) -> Result<Self, Error> {
         match settings {
             DecompressionSettings::Bzip2 => Ok(Self::Bzip2(BzDecoder::new(BufReader::new(file)))),
-            DecompressionSettings::Gzip => Ok(Self::Gzip(GzDecoder::new(BufReader::new(file)))),
+            DecompressionSettings::Gzip => {
+                Ok(Self::Gzip(MultiGzDecoder::new(BufReader::new(file))))
+            }
             DecompressionSettings::Xz => Ok(Self::Xz(XzDecoder::new(BufReader::new(file)))),
             DecompressionSettings::Zstd => Ok(Self::Zstd(
                 Decoder::new(file).map_err(Error::CreateZstandardDecoder)?,
@@ -157,6 +161,27 @@ mod tests {
 
         // Check data integrity
         assert_eq!(output, input_data);
+        Ok(())
+    }
+
+    /// Ensures that all members of multi-member gzip data are decompressed.
+    #[test]
+    fn test_compression_decoder_gzip_members() -> TestResult {
+        let settings = CompressionSettings::Gzip {
+            compression_level: GzipCompressionLevel::default(),
+        };
+        let mut file = tempfile()?;
+        for member in [b"alpm".as_slice(), b"4ever"] {
+            let mut encoder = CompressionEncoder::new(file.try_clone()?, &settings)?;
+            encoder.write_all(member)?;
+            encoder.finish()?;
+        }
+        file.rewind()?;
+
+        let mut decoder = CompressionDecoder::new(file, DecompressionSettings::Gzip)?;
+        let mut output = Vec::new();
+        decoder.read_to_end(&mut output)?;
+        assert_eq!(output, b"alpm4ever");
         Ok(())
     }
 

@@ -3,6 +3,8 @@
 pub mod package_info;
 pub use package_info::{PackageInfo, v1::PackageInfoV1, v2::PackageInfoV2};
 
+pub mod pacman;
+
 #[cfg(feature = "cli")]
 #[doc(hidden)]
 pub mod cli;

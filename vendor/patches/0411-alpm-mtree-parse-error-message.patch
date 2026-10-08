@@ -1,0 +1,29 @@
+diff -ruN '--exclude=VENDORED' a/alpm-mtree/src/error.rs b/alpm-mtree/src/error.rs
+--- a/alpm-mtree/src/error.rs
++++ b/alpm-mtree/src/error.rs
+@@ -75,7 +75,7 @@
+     NoMtreeData,
+ 
+     /// A parsing error that occurred during the winnow file parsing.
+-    #[error("{msg}", msg = t!("error-parse", { "error" => .0 }))]
++    #[error("{msg}", msg = t!("error-parse", { "source" => .0 }))]
+     Parse(String),
+ 
+     /// An error occurred during the interpretation phase of the language.
+diff -ruN '--exclude=VENDORED' a/alpm-mtree/src/libarchive.rs b/alpm-mtree/src/libarchive.rs
+--- a/alpm-mtree/src/libarchive.rs
++++ b/alpm-mtree/src/libarchive.rs
+@@ -844,6 +844,13 @@
+         Ok(())
+     }
+ 
++    /// Ensures that a parse error shows its line.
++    #[test]
++    fn parse_error_message() {
++        let error = parse(b"#mtree\n/foo\n").unwrap_err();
++        assert!(error.to_string().contains("Line 2"), "{error}");
++    }
++
+     /// Ensures that lines libarchive refuses fail.
+     #[rstest]
+     #[case::non_ascii("./a\u{e9} type=dir\n")]

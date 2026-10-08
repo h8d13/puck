@@ -608,7 +608,12 @@ parity"): epoch Ord 0101, one-sided pkgrel 0102, pkgrel text 0103, Url
 0104, Packager 0105, RelationOrSoname 0106, ExtraDataEntry 0107,
 OptionalDependency 0108, PackageDescription 0109, desc v2 detection 0201,
 blank lines 0202/0301, backups 0205, files blank line 0206, `%DATA%` 0303,
-`usr` == `usr/` 0305. Further notes from the patch work:
+`usr` == `usr/` 0305, mtree order/duplicates/defaults/types/keywords
+0401-0410, mtree gzip members 0403, pkginfo strictness 0501-0506, gzip
+members 0551, content sniffing 0552. Further notes from the patch work:
+
+- alpm-mtree `Error::Parse` display broken (`error-parse` wants `$source`,
+  code passes `error`), fixed in 0411. **api**
 
 - strict desc parsers allow one blank line between sections only,
   against the spec. **packager**

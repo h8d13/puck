@@ -168,19 +168,15 @@ pub fn get_validation(pkg: &Package) -> c_int {
 	if v == 0 { PKG_VALIDATION_NONE } else { v }
 }
 
-// filter libarchive would detect, with estimate_package_count's bytes
-// per package for it. zstd has no case there and takes the default
-fn sniff(magic: &[u8]) -> (DecompressionSettings, u64) {
-	if magic.starts_with(&[0x1f, 0x8b]) {
-		(DecompressionSettings::Gzip, 464)
-	} else if magic.starts_with(b"BZh") {
-		(DecompressionSettings::Bzip2, 394)
-	} else if magic.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0]) {
-		(DecompressionSettings::Xz, 400)
-	} else if magic.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
-		(DecompressionSettings::Zstd, 500)
-	} else {
-		(DecompressionSettings::None, 3015)
+// estimate_package_count's bytes per package for the filter libarchive
+// detects. zstd has no case there and takes the default
+fn bytes_per_package(settings: &DecompressionSettings) -> u64 {
+	match settings {
+		DecompressionSettings::Gzip => 464,
+		DecompressionSettings::Bzip2 => 394,
+		DecompressionSettings::Xz => 400,
+		DecompressionSettings::Zstd => 500,
+		DecompressionSettings::None => 3015,
 	}
 }
 
@@ -195,13 +191,14 @@ fn open_archive(
 		_ => Error::Open(e),
 	})?;
 	let size = file.metadata().map_err(Error::Open)?.len();
-	let mut magic = Vec::with_capacity(6);
+	let mut magic = Vec::with_capacity(DecompressionSettings::MAGIC_LEN);
 	(&mut file)
-		.take(6)
+		.take(DecompressionSettings::MAGIC_LEN as u64)
 		.read_to_end(&mut magic)
 		.map_err(Error::Open)?;
 	file.rewind().map_err(Error::Open)?;
-	let (settings, per_package) = sniff(&magic);
+	let settings = DecompressionSettings::from_magic(&magic);
+	let per_package = bytes_per_package(&settings);
 	let decoder = CompressionDecoder::new(file, settings)
 		.map_err(|e| Error::Open(io::Error::other(e)))?;
 	let mut est = size / per_package + 1;
@@ -458,9 +455,12 @@ pub fn populate(path: &[u8], dbext: &[u8]) -> Result<PkgHash<Package>, Error> {
 	let mut broken = None;
 	let entries =
 		archive.entries().map_err(|e| Error::Archive(io_err(e)))?;
-	for entry in entries {
+	for (i, entry) in entries.enumerate() {
 		let mut entry = match entry {
 			Ok(e) => e,
+			// libarchive picks the format while opening: a first header
+			// no reader takes is an open failure, like be_package
+			Err(e) if i == 0 => return Err(Error::Open(io_err(e))),
 			Err(e) => {
 				broken = Some(io_err(e));
 				break;

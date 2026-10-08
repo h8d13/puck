@@ -70,8 +70,12 @@ pub enum Error {
     #[error(transparent)]
     PathValidation(#[from] PathValidationErrors),
 
+    /// The data is too short to be read as ALPM-MTREE data by libarchive.
+    #[error("{msg}", msg = t!("error-no-mtree-data"))]
+    NoMtreeData,
+
     /// A parsing error that occurred during the winnow file parsing.
-    #[error("{msg}", msg = t!("error-parse", { "error" => .0 }))]
+    #[error("{msg}", msg = t!("error-parse", { "source" => .0 }))]
     Parse(String),
 
     /// An error occurred during the interpretation phase of the language.

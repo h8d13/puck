@@ -135,12 +135,13 @@ copied. State: todo until a patch lands, then the patch file name.
 | alpm-repo-db | unknown keys, duplicate sections, required sections, `%MD5SUM%` without `%PGPSIG%`, empty `%GROUPS%`, extra blank lines | no | 0301, 0302 (`parse_libalpm`) |
 | alpm-repo-db | `RepoFilesV1` dedup/sort as `PathBuf` (`usr` == `usr/`) | no | 0304, 0305 (`from_str_libalpm`) |
 | alpm-db, alpm-repo-db | backup line without a tab (pacman: NULL hash), `%FILES%` inside a sync desc entry | no | open: no ALPM representation / packager-only |
-| alpm-mtree | entries sorted by path instead of file order; duplicates not merged | 386/804 | in progress |
-| alpm-mtree | `mode` 3-4 digits (docs 3-5), required time/mode/uid/gid/sha256/link, char/block/fifo, unknown keywords, `size` on dirs/links, `\#`, `size=+5`, `/unset all`, v1 relative paths | rare (mode) | in progress |
-| alpm-mtree | `PathType` lacks `PartialEq`; gzip only through `MetadataFile` | api | in progress |
-| alpm-pkginfo | unknown keys (`basever`), `url = `, `pkgtype` must be first xdata, duplicate single keys, missing optional keys, leading-space lines | no | in progress |
-| alpm-compress | `GzDecoder` reads one member (libarchive: all) | no | in progress |
-| alpm-compress | no content sniffing (the port duplicates it in be_sync and be_package) | `.db` files have no extension | in progress |
+| alpm-mtree | entries sorted by path instead of file order; duplicates not merged | 386/804 | 0404, 0405 (`alpm_mtree::libarchive` reader) |
+| alpm-mtree | `mode` 3-4 digits (docs 3-5), required time/mode/uid/gid/sha256/link, char/block/fifo, unknown keywords, `size` on dirs/links, `\#`, `size=+5`, `/unset all`, v1 relative paths | rare (mode) | 0402, 0406-0410 |
+| alpm-mtree | `PathType` lacks `PartialEq`; gzip helper reads one member; `Error::Parse` display broken | api | 0401, 0403, 0411 |
+| alpm-pkginfo | unknown keys (`basever`), `url = `, `pkgtype` must be first xdata, duplicate single keys, missing optional keys, leading-space lines, xdata spaces, `size = +5`, text builddate | no | 0501-0506 (`PacmanPackageInfo`) |
+| alpm-compress | `GzDecoder` reads one member (libarchive: all) | no | 0551 |
+| alpm-compress | no content sniffing (the port duplicates it in be_sync and be_package) | `.db` files have no extension | 0552 (`from_magic`) |
+| alpm-compress | gzip-in-gzip, lz4, lzma archives; non-gzip `.MTREE` inside packages | no (makepkg writes gzip) | open |
 | all | non-UTF-8 text refused (pacman is byte based) | no | open: deep type change, decide after the units report |
 
 ## Precedent audit
@@ -161,7 +162,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | md5/sha256 | `md-5`, `sha2` | uses the crates |
 | `version::vercmp`, `deps::dep_from_string` | alpm-types versions/relations | kept: ALPM takes validated values only, pacman compares/parses arbitrary strings (CLI, `vercmp`, -T); ALPM vs C difftest done (`alpm_types_vs_c`) |
 | `pacman-common::ini` | alpm-parsers `custom_ini` | kept: `key=value` only, no sections/Include |
-| `be_sync` compression sniffing | `alpm-compress` | kept: ALPM picks by file extension, `.db` has none |
+| `be_sync` compression sniffing | `alpm-compress` | done: `from_magic` (patch 0552), shared by be_sync and be_package |
 | `util::fnmatch`, `regex`, getopt, conf glob | none (ALPM CLIs use clap, no getopt_long semantics) | kept |
 
 ## ALPM overlap
@@ -355,10 +356,12 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
   backrefs to repeated groups; approximated: backrefs + anchors without
   REG_NEWLINE, the non-NOSUB remove.c use, >2^20 instructions -> Space.
   Classes and towupper come from std `char` (the toolchain's Unicode).
-- `be_local` mtree via alpm-mtree: libarchive yields entries in file order
-  and stops at the first warning, alpm-mtree parses the whole file, sorts
-  by path and rejects it whole; `-Qkk` on a rejected mtree checks 0 files
-  (C: the entries before the bad line). Output goes into
+- `be_local`/`be_package` mtree via `alpm_mtree::libarchive` (patch 0404+):
+  file order, duplicates merged, libarchive defaults; any filter by
+  `from_magic`. An entry with a warning: the C walk stops there (UPSTREAM
+  bug), the port keeps checking; an mtree without sha256 is "information
+  not available" (C: mismatch on a zero digest). `url = ` is `None` here,
+  `""` in the C (both display None). Output goes into
   `Output{stdout,stderr}`.
 - `getopt` keeps glibc 2.44 semantics (optopt starts at 0, nextchar as an
   argv position). `parseargs` returns `Err(exit status)` where the C exits.
@@ -409,7 +412,7 @@ Follow-ups raised by port units:
 | fixture writer copied into `difftest/tests/deps_resolve.rs`, move to `fixtures.rs` | pkg follow-ups | done |
 | db search (`_alpm_db_search`) on the ported regex | db | done |
 | `LIB_VERSION` next to `PACKAGE_VERSION`, `needs_root` into util.rs, `TRANS_FLAG_*` with trans.c | args | todo |
-| one compression sniff for `be_sync` + `be_package`, one `check_meta` (be_sync, be_package, package), test ustar builders onto `fixtures::ustar` | be_package | todo |
+| one `check_meta` (be_sync, be_package, package), test ustar builders onto `fixtures::ustar` | be_package | todo (sniff done via 0552) |
 | precedent cleanup: base64, time, unicode-width, drop split_backup/parse_xdata, ALPM vs C difftest for vercmp/relations | audit | done |
 | regex class/towupper tables -> std `char` methods, divergence counted like wcwidth | audit | done |
 | handle callbacks + log.c: one `Log`/`Events`/`Progress`/`Questions` set in alpm-core (today per unit in deps, conflict, diskspace), wired into `Handle` with logcb/eventcb/progresscb/questioncb, overwrite_files, assumeinstalled, trans flags | deps, conflict, diskspace | todo |
@@ -421,7 +424,7 @@ Follow-ups raised by port units:
 | `Handle` owns dload `DownloadState`/`Settings`/cachedirs; `filecache_*` into util | dload | with the callbacks unit |
 | `alpm_db_update` (be_sync download + validate) | dload | after the callbacks unit |
 | difftest: `read_deps` pub(crate) (drops conflict's `CDepend`), `SyncWorld` into fixtures.rs | conflict, sync | todo |
-| be_sync: a non-archive db must fail at open (DB_OPEN, db invalid) like libarchive, not LIBARCHIVE | query | with the mtree/compress patch unit |
+| be_sync: a non-archive db must fail at open (DB_OPEN, db invalid) like libarchive, not LIBARCHIVE | query | done |
 | `%DATA%` in repo dbs, gzip multi-member, `Packager` default, backup `(null)` | db readers | ALPM side, see `UPSTREAM.md` |
 
 Divergences below are corrected in vendored ALPM where listed in "ALPM

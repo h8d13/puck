@@ -35,6 +35,8 @@ error-invalid-gzip = Error while unpacking gzip file:
 
 error-path-validation = One or more errors occurred during path validation.
 
+error-no-mtree-data = The data is too short for ALPM-MTREE data.
+
 error-parse = File parsing error:
   { $source }
 
@@ -109,3 +111,29 @@ error-unmatched-fs-paths =
 error-unmatched-mtree-paths =
   There are no matching file system paths for the following ALPM-MTREE paths:
   { $paths }
+
+libarchive-line-error = Line { $line_number }: { $reason }
+
+libarchive-line-too-long = the line is too long
+
+libarchive-non-printable = the line contains a non-printable character
+
+libarchive-unknown-command = unknown command
+
+libarchive-unset-value = /unset with a value
+
+libarchive-missing-keyword = the keyword { $key } is not set
+
+libarchive-missing-type = no type keyword
+
+libarchive-unknown-type = unknown file type "{ $value }"
+
+libarchive-unknown-keyword = unknown keyword { $key }
+
+libarchive-no-value = the keyword { $key } has no value
+
+libarchive-non-octal-mode = symbolic or non-octal mode "{ $value }"
+
+libarchive-bad-digest = invalid { $key } digest
+
+libarchive-bad-device = invalid device "{ $value }"

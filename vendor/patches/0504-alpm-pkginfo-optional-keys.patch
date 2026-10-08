@@ -1,0 +1,105 @@
+diff -ruN '--exclude=VENDORED' a/alpm-pkginfo/locales/en-US/main.ftl b/alpm-pkginfo/locales/en-US/main.ftl
+--- a/alpm-pkginfo/locales/en-US/main.ftl
++++ b/alpm-pkginfo/locales/en-US/main.ftl
+@@ -30,8 +30,6 @@
+ 
+ error-invalid-variant = Invalid variant ({ $error }).
+ 
+-error-missing-key = The key { $key } is not set.
+-
+ error-missing-extra-data = Extra data is missing.
+ 
+ error-unsupported-schema = Unsupported schema version: { $version }.
+diff -ruN '--exclude=VENDORED' a/alpm-pkginfo/src/error.rs b/alpm-pkginfo/src/error.rs
+--- a/alpm-pkginfo/src/error.rs
++++ b/alpm-pkginfo/src/error.rs
+@@ -58,10 +58,6 @@
+     #[error("{msg}", msg = t!("error-first-extra-data-not-pkgtype"))]
+     FirstExtraDataNotPkgType,
+ 
+-    /// A required key is not set.
+-    #[error("{msg}", msg = t!("error-missing-key", { "key" => .0 }))]
+-    MissingKey(String),
+-
+     /// An invalid enum variant
+     #[error("{msg}", msg = t!("error-invalid-variant", { "error" => .0.to_string() }))]
+     InvalidVariant(#[from] strum::ParseError),
+diff -ruN '--exclude=VENDORED' a/alpm-pkginfo/src/pacman.rs b/alpm-pkginfo/src/pacman.rs
+--- a/alpm-pkginfo/src/pacman.rs
++++ b/alpm-pkginfo/src/pacman.rs
+@@ -175,28 +175,6 @@
+         Ok(())
+     }
+ 
+-    /// Ensures that the keys the [PKGINFO] specification requires are set.
+-    ///
+-    /// [PKGINFO]: https://alpm.archlinux.page/specifications/PKGINFO.5.html
+-    fn ensure_required(&self) -> Result<(), Error> {
+-        for (key, set) in [
+-            ("pkgname", self.pkgname.is_some()),
+-            ("pkgbase", self.pkgbase.is_some()),
+-            ("pkgver", self.pkgver.is_some()),
+-            ("pkgdesc", self.pkgdesc.is_some()),
+-            ("url", self.url.is_some()),
+-            ("builddate", self.builddate.is_some()),
+-            ("packager", self.packager.is_some()),
+-            ("size", self.size.is_some()),
+-            ("arch", self.arch.is_some()),
+-        ] {
+-            if !set {
+-                return Err(Error::MissingKey(key.to_string()));
+-            }
+-        }
+-        Ok(())
+-    }
+-
+     /// Parses PKGINFO data like pacman's `parse_descfile`.
+     ///
+     /// Lines are `key = value`: the key ends at the first space, which must start ` = `, the
+@@ -231,10 +209,7 @@
+     ///
+     /// Returns an error if
+     /// - a value is not valid UTF-8 or cannot be parsed into its ALPM type,
+-    /// - an `xdata` value has no `=` or the first one is not `pkgtype`,
+-    /// - or a key the [PKGINFO] specification requires is not set.
+-    ///
+-    /// [PKGINFO]: https://alpm.archlinux.page/specifications/PKGINFO.5.html
++    /// - or an `xdata` value has no `=` or the first one is not `pkgtype`.
+     pub fn parse(data: &[u8]) -> Result<Self, Error> {
+         let mut pkginfo = Self::default();
+         for line in data.split(|&b| b == b'\n') {
+@@ -253,7 +228,6 @@
+             let value = String::from_utf8(value.to_vec())?;
+             pkginfo.read(&key, &value)?;
+         }
+-        pkginfo.ensure_required()?;
+         Ok(pkginfo)
+     }
+ }
+@@ -356,6 +330,18 @@
+         Ok(())
+     }
+ 
++    /// Ensures that keys may be missing, like pacman reads them.
++    #[test]
++    fn missing_keys() -> TestResult {
++        let pkginfo = PacmanPackageInfo::parse(b"pkgname = foo\n")?;
++        assert_eq!(
++            (pkginfo.url, pkginfo.size, pkginfo.arch),
++            (None, None, None)
++        );
++        assert_eq!(PacmanPackageInfo::parse(b"")?, PacmanPackageInfo::default());
++        Ok(())
++    }
++
+     /// Ensures that the last line of a single key wins.
+     #[test]
+     fn duplicate_keys() -> TestResult {
+@@ -388,7 +374,6 @@
+     ///
+     /// [PKGINFO]: https://alpm.archlinux.page/specifications/PKGINFO.5.html
+     #[rstest]
+-    #[case::missing_key(PKGINFO.replace("url = https://example.org/\n", ""))]
+     #[case::pkgtype_not_first(PKGINFO.replace("pkgtype=pkg", "a=b"))]
+     #[case::empty_url(PKGINFO.replace("url = https://example.org/", "url = "))]
+     fn refused(#[case] data: String) {
