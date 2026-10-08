@@ -512,6 +512,9 @@ pub fn c_uname_machine() -> Vec<u8> {
 
 // glob(pattern, GLOB_NOCHECK, NULL): the result paths, or Err(ret)
 pub fn c_glob(pattern: &[u8]) -> Result<Vec<Vec<u8>>, i32> {
+	// parseconfig globs under FRONTEND too: keep every C call in this
+	// binary serialized
+	let _guard = FRONTEND.lock().unwrap_or_else(|e| e.into_inner());
 	let p = cstr(pattern);
 	let mut g = GlobT {
 		gl_pathc: 0,
