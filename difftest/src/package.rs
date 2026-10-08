@@ -87,7 +87,7 @@ pub(crate) struct CPkg {
 	conflicts: *mut CList,
 	provides: *mut CList,
 	removes: *mut CList,
-	oldpkg: *mut CPkg,
+	pub(crate) oldpkg: *mut CPkg,
 	ops: *const c_void,
 	files: CFileList,
 	pub(crate) origin_data: *mut c_void,
@@ -137,7 +137,7 @@ unsafe extern "C" {
 	fn alpm_pkg_get_arch(pkg: *mut CPkg) -> *const c_char;
 	fn alpm_pkg_get_size(pkg: *mut CPkg) -> i64;
 	fn alpm_pkg_get_isize(pkg: *mut CPkg) -> i64;
-	fn alpm_pkg_get_reason(pkg: *mut CPkg) -> c_int;
+	pub(crate) fn alpm_pkg_get_reason(pkg: *mut CPkg) -> c_int;
 	pub(crate) fn alpm_pkg_get_validation(pkg: *mut CPkg) -> c_int;
 	fn alpm_pkg_get_licenses(pkg: *mut CPkg) -> *mut CList;
 	fn alpm_pkg_get_groups(pkg: *mut CPkg) -> *mut CList;
@@ -146,7 +146,7 @@ unsafe extern "C" {
 	fn alpm_pkg_get_checkdepends(pkg: *mut CPkg) -> *mut CList;
 	fn alpm_pkg_get_makedepends(pkg: *mut CPkg) -> *mut CList;
 	fn alpm_pkg_get_conflicts(pkg: *mut CPkg) -> *mut CList;
-	fn alpm_pkg_get_provides(pkg: *mut CPkg) -> *mut CList;
+	pub(crate) fn alpm_pkg_get_provides(pkg: *mut CPkg) -> *mut CList;
 	fn alpm_pkg_get_replaces(pkg: *mut CPkg) -> *mut CList;
 	pub(crate) fn alpm_pkg_get_files(pkg: *mut CPkg) -> *mut CFileList;
 	pub(crate) fn alpm_pkg_get_backup(pkg: *mut CPkg) -> *mut CList;

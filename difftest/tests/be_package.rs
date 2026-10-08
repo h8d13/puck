@@ -506,18 +506,21 @@ fn real_packages() {
 	let (mut same, mut diverged) = (0, Vec::new());
 	let mut paths: Vec<PathBuf> = rd.map(|e| e.unwrap().path()).collect();
 	paths.sort();
+	// url::Url adds the empty path's '/', alpm-types keeps the url as read
+	// (vendor/patches): counted, none expected
 	let mut url = 0;
 	for path in &paths {
 		for full in [false, true] {
-			let (mut c, r) =
+			let (c, r) =
 				(load_c(&h, path, full), load_rust(path, full));
-			// alpm-types Url adds the empty path's '/', see PORTING.md
-			if let (Ok((c, _)), Ok((r, _))) = (&mut c, &r)
-				&& c.url.as_ref()
-					.map(|u| [&u[..], b"/"].concat()) == r.url
-			{
-				c.url.clone_from(&r.url);
-				url += 1;
+			if let (Ok((c, _)), Ok((r, _))) = (&c, &r) {
+				let slash = c
+					.url
+					.as_ref()
+					.map(|u| [&u[..], b"/"].concat());
+				url += usize::from(
+					c.url != r.url && slash == r.url,
+				);
 			}
 			if c == r {
 				same += 1;
@@ -533,12 +536,13 @@ fn real_packages() {
 		}
 	}
 	eprintln!(
-		"real packages: {} files, {same} loads same ({url} after url \
-		normalisation), {} diverged",
+		"real packages: {} files, {same} loads same, {} diverged ({url} \
+		by url normalisation)",
 		paths.len(),
 		diverged.len()
 	);
 	assert!(diverged.is_empty());
+	assert_eq!(url, 0);
 }
 
 const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
@@ -570,18 +574,22 @@ fn full_version(rng: &mut Rng) -> String {
 		0 => format!("{}:", rng.below(30)),
 		_ => String::new(),
 	};
+	// a leading zero is kept as read
+	let zero = if rng.below(4) == 0 { "0" } else { "" };
 	let rel = match rng.below(4) {
-		0 => format!("{}.{}", 1 + rng.below(9), rng.below(9)),
-		_ => (1 + rng.below(20)).to_string(),
+		0 => format!("{zero}{}.{}", 1 + rng.below(9), rng.below(9)),
+		_ => format!("{zero}{}", 1 + rng.below(20)),
 	};
 	format!("{epoch}{}-{rel}", pkgver(rng))
 }
 
 // a relation alpm-types accepts: name, optionally an operator and a
-// version with optional epoch and pkgrel
+// version with optional epoch and pkgrel. names sometimes contain ".so",
+// which alpm-types tries as a soname first
 fn relation(rng: &mut Rng) -> String {
+	let so = if rng.below(8) == 0 { ".so" } else { "" };
 	let name = word(rng, b"abcxyz0189_+-", 1, 1).replace('-', "a")
-		+ &word(rng, LOWER, 0, 8);
+		+ so + &word(rng, LOWER, 0, 8);
 	if rng.below(2) == 0 {
 		return name;
 	}
@@ -597,10 +605,13 @@ fn optdepend(rng: &mut Rng) -> String {
 	let name = word(rng, LOWER, 1, 8);
 	match rng.below(2) {
 		0 => name,
+		// libalpm keeps the description after ": " as is
 		_ => format!(
-			"{name}: {} {}",
+			"{name}: {}{}{}{}",
+			pick(rng, &["", "", " "]),
 			word(rng, ALNUM, 1, 6),
-			word(rng, ALNUM, 1, 6)
+			pick(rng, &[" ", "  "]),
+			word(rng, ALNUM, 0, 6)
 		),
 	}
 }
@@ -613,8 +624,9 @@ fn soname(rng: &mut Rng) -> String {
 	}
 }
 
-// a .PKGINFO per the alpm-pkginfo spec, lines shuffled, comments and
-// blank lines in between. v2 when xdata carries a pkgtype
+// a .PKGINFO per the alpm-pkginfo spec, lines shuffled (xdata in any
+// order), comments and blank lines in between, now and then a key pacman
+// ignores or a single key missing
 fn gen_pkginfo(rng: &mut Rng, name: &str, version: &str) -> String {
 	let mut lines = vec![
 		format!("pkgname = {name}"),
@@ -627,23 +639,35 @@ fn gen_pkginfo(rng: &mut Rng, name: &str, version: &str) -> String {
 			}
 		),
 		format!("pkgver = {version}"),
+		// runs of blanks, urls url::Url normalizes and makepkg's
+		// default packager are kept as read
 		format!(
-			"pkgdesc = {} {}",
+			"pkgdesc = {}{}{}",
 			word(rng, ALNUM, 1, 8),
+			pick(rng, &[" ", " ", "  ", " \t"]),
 			word(rng, ALNUM, 1, 8)
 		),
-		format!(
-			"url = https://{}.org/{}",
-			word(rng, LOWER, 1, 6),
-			word(rng, LOWER, 0, 4)
-		),
+		match rng.below(4) {
+			0 => format!(
+				"url = HTTPS://{}.ORG",
+				word(rng, LOWER, 1, 6)
+			),
+			_ => format!(
+				"url = https://{}.org/{}",
+				word(rng, LOWER, 1, 6),
+				word(rng, LOWER, 0, 4)
+			),
+		},
 		format!("builddate = {}", rng.next_u64() % 4_000_000_000),
-		format!(
-			"packager = {} {} <{}@example.org>",
-			word(rng, LOWER, 1, 5),
-			word(rng, LOWER, 1, 5),
-			word(rng, LOWER, 1, 5)
-		),
+		match rng.below(6) {
+			0 => "packager = Unknown Packager".into(),
+			_ => format!(
+				"packager = {} {} <{}@example.org>",
+				word(rng, LOWER, 1, 5),
+				word(rng, LOWER, 1, 5),
+				word(rng, LOWER, 1, 5)
+			),
+		},
 		format!("size = {}", rng.next_u64() >> rng.below(64)),
 		format!(
 			"arch = {}",
@@ -741,16 +765,15 @@ fn gen_pkginfo(rng: &mut Rng, name: &str, version: &str) -> String {
 	for i in (1..lines.len()).rev() {
 		lines.swap(i, rng.below(i + 1));
 	}
-	// alpm-pkginfo wants pkgtype as the first xdata (spec), the C
-	// takes any order: pinned in fixed_divergences
-	let xd: Vec<usize> = (0..lines.len())
-		.filter(|&i| lines[i].starts_with("xdata = "))
-		.collect();
-	if let Some(t) = xd
-		.iter()
-		.position(|&i| lines[i].starts_with("xdata = pkgtype="))
-	{
-		lines.swap(xd[0], xd[t]);
+	// keys pacman ignores, or a single key it reads without
+	if rng.below(8) == 0 {
+		lines.push(pick(rng, &["basever = 1", "foo = bar"]).into());
+	}
+	if rng.below(8) == 0 {
+		let single =
+			["pkgdesc", "url", "builddate", "packager", "size"];
+		let key = format!("{} = ", pick(rng, &single));
+		lines.retain(|l| !l.starts_with(&key));
 	}
 	let mut out = String::new();
 	for l in lines {
@@ -807,6 +830,9 @@ fn mtree_line(e: &Entry) -> Option<String> {
 		Kind::Symlink(t) => {
 			format!("type=link mode=777 link={}", mtree_escape(t))
 		}
+		Kind::Char => "type=char mode=600".into(),
+		Kind::Block => "type=block mode=600".into(),
+		Kind::Fifo => "type=fifo mode=600".into(),
 		_ => return None,
 	};
 	Some(format!("{path} time=1700000000.0 {props}\n"))
@@ -880,12 +906,11 @@ fn gen_tree(rng: &mut Rng) -> Vec<Entry> {
 				entry(&name, mode, Kind::File(data))
 			}
 		};
-		// a path twice is merged by libarchive's mtree reader and
-		// kept twice by alpm-mtree: pinned in fixed_divergences
+		// now and then a path twice: one mtree entry, two in the tar
 		let key = |e: &Entry| {
 			e.name.strip_suffix(b"/").unwrap_or(&e.name).to_vec()
 		};
-		if out.iter().all(|o| key(o) != key(&e)) {
+		if rng.below(20) == 0 || out.iter().all(|o| key(o) != key(&e)) {
 			out.push(e);
 		}
 	}
@@ -1017,59 +1042,8 @@ fn fixed_pkginfo() {
 	non_utf8.insert(at + 3, 0xe9);
 	let cases: Vec<(&str, Vec<u8>, &str)> = vec![
 		// normalised values
-		(
-			"url without path",
-			w("url", "url = https://a.org"),
-			"fields url",
-		),
-		(
-			"url case",
-			w("url", "url = HTTPS://A.org/x?y#z"),
-			"fields url",
-		),
-		(
-			"desc whitespace",
-			w("pkgdesc", "pkgdesc = a  b \t c "),
-			"fields desc",
-		),
-		("size with '+'", w("size", "size = +5"), "fields isize"),
-		("xdata spaces", add("xdata = a = b "), "fields xdata"),
-		// alpm-pkginfo strictness
-		(
-			"pkgtype not first",
-			w("xdata", "xdata = a=b")
-				.into_iter()
-				.chain(b"xdata = pkgtype=pkg\n".iter().copied())
-				.collect(),
-			inv,
-		),
-		("xdata without pkgtype", w("xdata", "xdata = a=b"), inv),
-		("xdata empty value", add("xdata = a="), inv),
-		("unknown key", add("foo = bar"), inv),
-		("basever", add("basever = 1"), inv),
-		("pkgtype key", add("pkgtype = pkg"), inv),
-		("duplicate pkgdesc", add("pkgdesc = second"), inv),
-		("no url", drop("url"), inv),
-		("empty url", w("url", "url = "), inv),
-		("no packager", drop("packager"), inv),
-		(
-			"Unknown Packager",
-			w("packager", "packager = Unknown Packager"),
-			inv,
-		),
-		(
-			"packager without name",
-			w("packager", "packager = <a@b.c>"),
-			inv,
-		),
-		("no pkgdesc", drop("pkgdesc"), inv),
-		("no pkgbase", drop("pkgbase"), inv),
-		("no builddate", drop("builddate"), inv),
-		("no size", drop("size"), inv),
-		("no arch", drop("arch"), inv),
-		("builddate junk", w("builddate", "builddate = 5x"), inv),
-		("syntax error line", add("garbage"), inv),
-		("key=value", add("group=foo"), inv),
+		// an empty url: no url here, "" in the C (both display None)
+		("empty url", w("url", "url = "), "fields url"),
 		("trailing space", w("pkgname", "pkgname = foo "), inv),
 		("crlf", PKGINFO.replace('\n', "\r\n").into_bytes(), inv),
 		("non-utf8", non_utf8, inv),
@@ -1079,9 +1053,58 @@ fn fixed_pkginfo() {
 		("optdepend without space", add("optdepend = a:b"), inv),
 		("absolute backup", add("backup = /etc/foo"), inv),
 		("directory backup", add("backup = etc/foo/"), inv),
-		("indented key", add("  group = x"), "fields groups"),
-		// read alike
+		// read alike: parse_descfile's lines and numbers, unknown,
+		// repeated and missing keys, xdata in any order
+		("size with '+'", w("size", "size = +5"), "same"),
+		("xdata spaces", add("xdata = a = b "), "same"),
+		(
+			"pkgtype not first",
+			w("xdata", "xdata = a=b")
+				.into_iter()
+				.chain(b"xdata = pkgtype=pkg\n".iter().copied())
+				.collect(),
+			"same",
+		),
+		("xdata without pkgtype", w("xdata", "xdata = a=b"), "same"),
+		("xdata empty value", add("xdata = a="), "same"),
+		("unknown key", add("foo = bar"), "same"),
+		("basever", add("basever = 1"), "same"),
+		("pkgtype key", add("pkgtype = pkg"), "same"),
+		("duplicate pkgdesc", add("pkgdesc = second"), "same"),
+		("no url", drop("url"), "same"),
+		("no packager", drop("packager"), "same"),
+		("no pkgdesc", drop("pkgdesc"), "same"),
+		("no pkgbase", drop("pkgbase"), "same"),
+		("no builddate", drop("builddate"), "same"),
+		("no size", drop("size"), "same"),
+		("no arch", drop("arch"), "same"),
+		("builddate junk", w("builddate", "builddate = 5x"), "same"),
+		("syntax error line", add("garbage"), "same"),
+		("key=value", add("group=foo"), "same"),
+		("indented key", add("  group = x"), "same"),
 		("empty pkgdesc", w("pkgdesc", "pkgdesc = "), "same"),
+		// alpm-types keeps these as read (vendor/patches)
+		("url without path", w("url", "url = https://a.org"), "same"),
+		("url case", w("url", "url = HTTPS://A.org/x?y#z"), "same"),
+		(
+			"desc whitespace",
+			w("pkgdesc", "pkgdesc = a  b \t c "),
+			"same",
+		),
+		("xdata empty value", add("xdata = a="), "same"),
+		(
+			"Unknown Packager",
+			w("packager", "packager = Unknown Packager"),
+			"same",
+		),
+		(
+			"packager without name",
+			w("packager", "packager = <a@b.c>"),
+			"same",
+		),
+		("depend with .so", add("depend = foo.sound"), "same"),
+		("depend pkgrel zero", add("depend = a=1-01"), "same"),
+		("optdepend spaces", add("optdepend = a:  x  y "), "same"),
 		("no xdata", drop("xdata"), "same"),
 		("uppercase arch", w("arch", "arch = X86_64"), "same"),
 		("unknown arch", w("arch", "arch = foo"), "same"),
@@ -1124,11 +1147,24 @@ fn fixed_pkginfo() {
 			"same",
 		),
 	];
+	let mut wrong = Vec::new();
 	for (what, info, want) in cases {
 		let entries = [file(b".PKGINFO", &info), file(b"a", b"x")];
 		write_pkg(&path, Comp::None, &entries);
-		pin(&h, &path, what, [want; 2]);
+		for full in [false, true] {
+			let (c, r) = (
+				load_c(&h, &path, full),
+				load_rust(&path, full),
+			);
+			let got = observe(&c, &r);
+			if got != want {
+				wrong.push(format!(
+					"{what}, full {full}: {got}"
+				));
+			}
+		}
 	}
+	assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
 fn mtree_of(fx: &Fixture, text: &str) -> Entry {
@@ -1138,7 +1174,7 @@ fn mtree_of(fx: &Fixture, text: &str) -> Entry {
 const MTREE_HEAD: &str = "#mtree\n/set type=file uid=0 gid=0 mode=644\n";
 
 // archive layouts: what libarchive's tar and mtree readers do that the
-// tar crate and alpm-mtree do not, and the walk rules both share
+// tar crate does not, and the walk rules both share
 #[test]
 fn fixed_archive() {
 	let fx = Fixture::new();
@@ -1278,7 +1314,7 @@ fn fixed_archive() {
 				info.clone(),
 				file(b"a", b"abc"),
 			],
-			["same", "fields files"],
+			["same", "same"],
 		),
 		(
 			"mtree no uid",
@@ -1321,7 +1357,7 @@ fn fixed_archive() {
 				info.clone(),
 				file(b"a", b"abc"),
 			],
-			["same", "fields files"],
+			["same", "same"],
 		),
 		(
 			"mtree non-utf8",
@@ -1360,6 +1396,27 @@ fn fixed_archive() {
 			],
 			["same", "same"],
 		),
+		// gzip members read one after the other, like libarchive
+		(
+			"mtree gzip members",
+			vec![
+				file(
+					b".MTREE",
+					&[
+						gzip(
+							&fx,
+							MTREE_HEAD.as_bytes(),
+						),
+						gzip(&fx, f("a").as_bytes()),
+					]
+					.concat(),
+				),
+				info.clone(),
+				file(b"a", b"abc"),
+				file(b"b", b"abc"),
+			],
+			["same", "same"],
+		),
 		(
 			"mtree garbage",
 			vec![
@@ -1369,6 +1426,8 @@ fn fixed_archive() {
 			],
 			["same", "same"],
 		),
+		// the C marks the scriptlet from a .MTREE it then drops for
+		// the archive list (UPSTREAM.md), the port drops it whole
 		(
 			"mtree install",
 			vec![
@@ -1396,7 +1455,7 @@ fn fixed_archive() {
 				info.clone(),
 				file(b"a", b"abc"),
 			],
-			["same", "fields files"],
+			["same", "same"],
 		),
 		(
 			"mtree md5 only",
@@ -1425,7 +1484,7 @@ fn fixed_archive() {
 				info.clone(),
 				dir(b"d/"),
 			],
-			["same", "fields files"],
+			["same", "same"],
 		),
 		(
 			"mtree link size",
@@ -1439,7 +1498,7 @@ fn fixed_archive() {
 				info.clone(),
 				dir(b"d/"),
 			],
-			["same", "fields files"],
+			["same", "same"],
 		),
 		(
 			"mtree mode 4",
@@ -1537,8 +1596,7 @@ fn fixed_files() {
 	compress(&path, Comp::None, &tar[..tar.len() - 1024 - 512 - 512]);
 	pin(&h, &path, "plain tar without end blocks", ["same", "same"]);
 
-	// two gzip members: libarchive reads both, flate2's GzDecoder only
-	// the first (ALPM finding)
+	// two gzip members: read one after the other, like libarchive
 	let (a, b) = (fx.0.join("m1"), fx.0.join("m2"));
 	let split = 512 * 3;
 	compress(&a, Comp::Gzip, &tar[..split]);
@@ -1548,7 +1606,7 @@ fn fixed_files() {
 		[fs::read(&a).unwrap(), fs::read(&b).unwrap()].concat(),
 	)
 	.unwrap();
-	pin(&h, &path, "two gzip members", ["same", "fields files"]);
+	pin(&h, &path, "two gzip members", ["same", "same"]);
 
 	// gzip inside gzip: libarchive stacks filters, alpm-compress one
 	compress(&a, Comp::Gzip, &tar);

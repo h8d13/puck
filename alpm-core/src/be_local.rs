@@ -1,34 +1,36 @@
 // port of lib/libalpm/be_local.c, reading side: validate, populate and
 // local_db_read.
 //
-// the desc and files formats are parsed by the alpm-db crate, not by a
-// translation of the C line reader; its typed values are mapped onto the
-// pacman Package model (see PORTING.md for where the two disagree).
+// the desc and files formats are read by the alpm-db crate's
+// libalpm-compatible readers, not by a translation of the C line reader;
+// their typed values are mapped onto the pacman Package model (see
+// PORTING.md for where the two disagree).
 //
 // lazy loading keeps the C infolevel bits: read() loads the requested
 // sections once, a failed read marks the package INFRQ_ERROR and later
 // reads give up. logging (name/version mismatch, unknown keys,
 // _alpm_pkg_check_meta warnings) is not modelled, it never changes the
-// result. mtree reading is the last section. not ported: writing,
-// removal, prepare and changelog.
+// result. mtree reading and the writing side are the last sections. not
+// ported: changelog.
 
 use std::ffi::{OsStr, c_int};
 use std::fmt::Display;
-use std::fs::{self, DirBuilder, File};
-use std::io::{self, ErrorKind, Read};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
+use std::io::{self, ErrorKind, Read, Seek, Write};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::{
+	DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt,
+};
 use std::path::{Path, PathBuf};
 
-use alpm_common::MetadataFile;
-use alpm_db::desc::{DbDescFile, DbDescFileV1};
+use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
+use alpm_db::desc::{Section, parse_libalpm};
 use alpm_db::files::DbFiles;
-use alpm_mtree::Mtree;
-use alpm_mtree::mtree::v2::Path as MtreePath;
+use alpm_mtree::libarchive::{self, Entry};
 use alpm_types::{ExtraDataEntry, PackageInstallReason, PackageValidation};
 
 use crate::backup::Backup;
-use crate::deps::{Depend, dep_from_string};
+use crate::deps::{Depend, dep_compute_string, dep_from_string};
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
 use crate::package::{
@@ -36,7 +38,7 @@ use crate::package::{
 	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, PkgReason, PkgXData,
 };
 use crate::pkghash::PkgHash;
-use crate::util::{hash_sdbm, splitname};
+use crate::util::{hash_sdbm, makepath, mkdir_mode, splitname, until_nul};
 
 // ALPM_LOCAL_DB_VERSION
 pub const LOCAL_DB_VERSION: u64 = 9;
@@ -272,9 +274,8 @@ impl LocalDb {
 			let path = self.pkgpath(pkg, b"desc");
 			let s = fs::read_to_string(os(&path))
 				.map_err(ReadError::Io)?;
-			let desc = s
-				.parse::<DbDescFile>()
-				.map_err(ReadError::Desc)?;
+			let desc =
+				parse_libalpm(&s).map_err(ReadError::Desc)?;
 			apply_desc(pkg, desc);
 			pkg.infolevel |= INFRQ_DESC;
 		}
@@ -282,8 +283,7 @@ impl LocalDb {
 			let path = self.pkgpath(pkg, b"files");
 			let s = fs::read_to_string(os(&path))
 				.map_err(ReadError::Io)?;
-			let files = s
-				.parse::<DbFiles>()
+			let files = DbFiles::from_str_libalpm(&s)
 				.map_err(ReadError::Files)?;
 			apply_files(pkg, &files);
 			pkg.infolevel |= INFRQ_FILES;
@@ -327,49 +327,62 @@ fn validation_bits(v: &[PackageValidation]) -> c_int {
 	})
 }
 
-fn apply_desc(pkg: &mut Package, desc: DbDescFile) {
-	let (d, xdata): (DbDescFileV1, Vec<ExtraDataEntry>) = match desc {
-		DbDescFile::V1(d) => (d, Vec::new()),
-		DbDescFile::V2(d) => {
-			let xdata = d.xdata.clone().into();
-			(d.into(), xdata)
+// the C's per-key assignments: a repeated value overwrites, a repeated
+// list appends, a missing section leaves the field unset
+fn apply_desc(pkg: &mut Package, desc: Vec<Section>) {
+	for section in desc {
+		apply_section(pkg, section);
+	}
+}
+
+fn apply_section(pkg: &mut Package, section: Section) {
+	match section {
+		// only feed the C's mismatch log
+		Section::Name(_) | Section::Version(_) => {}
+		Section::Base(v) => pkg.base = Some(text(&v)),
+		// description and url as read, alpm-types normalizes Display
+		Section::Desc(v) => pkg.desc = Some(text(&v.as_original_str())),
+		// an empty value is alpm-db's None
+		Section::Url(v) => {
+			pkg.url = Some(v
+				.map(|u| text(&u.as_original_str()))
+				.unwrap_or_default())
 		}
-	};
-	// %NAME% and %VERSION% only feed the C's mismatch log
-	pkg.base = Some(text(&d.base));
-	pkg.desc = Some(text(&d.description));
-	// %URL% is required, an empty value is alpm-db's None
-	pkg.url = Some(d.url.as_ref().map(text).unwrap_or_default());
-	pkg.arch = Some(text(&d.arch));
-	pkg.builddate = d.builddate;
-	pkg.installdate = d.installdate;
-	pkg.packager = Some(text(&d.packager));
-	// _alpm_strtoofft casts the unsigned long long to off_t: values past
-	// i64::MAX wrap (gcc's implementation-defined conversion)
-	pkg.isize = d.size as i64;
-	pkg.groups = texts(&d.groups);
-	pkg.reason = match d.reason {
-		PackageInstallReason::Explicit => PkgReason::Explicit,
-		PackageInstallReason::Depend => PkgReason::Depend,
-	};
-	pkg.licenses = texts(&d.license);
-	pkg.validation = validation_bits(&d.validation);
-	pkg.replaces = deps(&d.replaces);
-	pkg.depends = deps(&d.depends);
-	pkg.optdepends = deps(&d.optdepends);
-	pkg.conflicts = deps(&d.conflicts);
-	pkg.provides = deps(&d.provides);
-	pkg.xdata = xdata
-		.iter()
-		.map(|x| PkgXData {
-			name: x.key().as_bytes().to_vec(),
-			value: x.value().as_bytes().to_vec(),
-		})
-		.collect();
+		Section::Arch(v) => pkg.arch = Some(text(&v)),
+		Section::BuildDate(v) => pkg.builddate = v,
+		Section::InstallDate(v) => pkg.installdate = v,
+		Section::Packager(v) => pkg.packager = Some(text(&v)),
+		// _alpm_strtoofft casts the unsigned long long to off_t: values
+		// past i64::MAX wrap (gcc's implementation-defined conversion)
+		Section::Size(v) => pkg.isize = v as i64,
+		Section::Groups(v) => pkg.groups.extend(texts(&v)),
+		Section::Reason(PackageInstallReason::Explicit) => {
+			pkg.reason = PkgReason::Explicit
+		}
+		Section::Reason(PackageInstallReason::Depend) => {
+			pkg.reason = PkgReason::Depend
+		}
+		Section::License(v) => pkg.licenses.extend(texts(&v)),
+		Section::Validation(v) => pkg.validation |= validation_bits(&v),
+		Section::Replaces(v) => pkg.replaces.extend(deps(&v)),
+		Section::Depends(v) => pkg.depends.extend(deps(&v)),
+		Section::OptDepends(v) => pkg.optdepends.extend(deps(&v)),
+		Section::Conflicts(v) => pkg.conflicts.extend(deps(&v)),
+		Section::Provides(v) => pkg.provides.extend(deps(&v)),
+		Section::MakeDepends(v) => pkg.makedepends.extend(deps(&v)),
+		Section::CheckDepends(v) => pkg.checkdepends.extend(deps(&v)),
+		Section::XData(v) => {
+			let v: Vec<ExtraDataEntry> = v.into();
+			pkg.xdata.extend(v.iter().map(|x| PkgXData {
+				name: x.key().as_bytes().to_vec(),
+				value: x.value().as_bytes().to_vec(),
+			}))
+		}
+	}
 }
 
 // the C sorts the file list after reading (_alpm_filelist_sort), backups
-// keep the order alpm-db returns
+// keep file order
 fn apply_files(pkg: &mut Package, files: &DbFiles) {
 	let paths: &[PathBuf] = files.as_ref();
 	pkg.files = FileList {
@@ -387,7 +400,11 @@ fn apply_files(pkg: &mut Package, files: &DbFiles) {
 		.iter()
 		.map(|b| Backup {
 			name: b.path.inner().as_os_str().as_bytes().to_vec(),
-			hash: Some(text(&b.md5)),
+			// None is the "(null)" the C wrote for a NULL hash
+			hash: Some(match &b.md5 {
+				Some(md5) => text(md5),
+				None => b"(null)".to_vec(),
+			}),
 		})
 		.collect();
 }
@@ -395,21 +412,15 @@ fn apply_files(pkg: &mut Package, files: &DbFiles) {
 // mtree: _cache_mtree_open/_cache_mtree_next
 //
 // the C opens "<pkgpath>mtree" with libarchive (every filter, mtree
-// format) and yields its entries one by one. here alpm-mtree reads the
-// file whole (plain or gzip, MetadataFile::from_reader): it sorts the
-// entries by path and rejects the whole file where libarchive warns or
-// fails on one entry (see PORTING.md for the divergences)
+// format) and yields its entries one by one. here the filter is picked by
+// magic bytes (alpm-compress) and alpm-mtree's libarchive reader parses
+// the file whole, entries in file order like the C. data that reader
+// cannot parse fails whole, like libarchive (it reads the file at the
+// first header). an entry libarchive warns about ends the C's walk
+// (UPSTREAM.md), here it is kept, without the warned keyword
 
+pub use alpm_mtree::libarchive::EntryType as MtreeType;
 pub use alpm_types::{Md5Checksum, Sha256Checksum};
-
-// archive_entry_filetype of the three types alpm-mtree knows (its
-// PathType has no PartialEq)
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MtreeType {
-	Dir,
-	File,
-	Link,
-}
 
 // what check.c reads of an archive_entry
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -419,88 +430,71 @@ pub struct MtreeEntry {
 	pub kind: MtreeType,
 	// ~AE_IFMT & archive_entry_mode: the permission bits
 	pub mode: u32,
-	pub uid: u32,
-	pub gid: u32,
-	// files only, 0 for the others like an unset archive_entry_size
+	pub uid: i64,
+	pub gid: i64,
 	pub size: u64,
+	// archive_entry_mtime, 0 when unset
 	pub mtime: i64,
-	// links only
 	pub link: Option<Vec<u8>>,
 	pub sha256: Option<Sha256Checksum>,
 	pub md5: Option<Md5Checksum>,
+	// archive_read_next_header gave ARCHIVE_WARN for it: a keyword was
+	// not read, _cache_mtree_next returns -1
+	pub warned: bool,
 }
 
 #[derive(Debug)]
 pub enum MtreeError {
 	// access(F_OK) fails: "there is no mtree file for this package"
 	Missing,
-	// open, read or gunzip failed: where the C's archive_read_open fails
+	// open, read, decompression or format detection failed: where the
+	// C's archive_read_open fails
 	Read(alpm_mtree::Error),
-	// alpm-mtree rejects the data (not UTF-8, syntax, missing keywords)
+	// a line libarchive cannot parse: no entries
 	Parse(alpm_mtree::Error),
 }
 
-fn bytes_of(p: &Path) -> Vec<u8> {
-	p.as_os_str().as_bytes().to_vec()
+fn into_bytes(p: PathBuf) -> Vec<u8> {
+	p.into_os_string().into_vec()
 }
 
-// alpm-mtree only stores 3-4 octal digits
-fn mode_bits(mode: &str) -> u32 {
-	u32::from_str_radix(mode, 8).unwrap_or_default()
-}
-
-fn mtree_entry(p: MtreePath) -> MtreeEntry {
-	match p {
-		MtreePath::Directory(d) => MtreeEntry {
-			path: bytes_of(&d.path),
-			kind: MtreeType::Dir,
-			mode: mode_bits(&d.mode),
-			uid: d.uid,
-			gid: d.gid,
-			size: 0,
-			mtime: d.time,
-			link: None,
-			sha256: None,
-			md5: None,
-		},
-		MtreePath::File(f) => MtreeEntry {
-			path: bytes_of(&f.path),
-			kind: MtreeType::File,
-			mode: mode_bits(&f.mode),
-			uid: f.uid,
-			gid: f.gid,
-			size: f.size,
-			mtime: f.time,
-			link: None,
-			sha256: Some(f.sha256_digest),
-			md5: f.md5_digest,
-		},
-		MtreePath::Link(l) => MtreeEntry {
-			path: bytes_of(&l.path),
-			kind: MtreeType::Link,
-			mode: mode_bits(&l.mode),
-			uid: l.uid,
-			gid: l.gid,
-			size: 0,
-			mtime: l.time,
-			link: Some(bytes_of(&l.link_path)),
-			sha256: None,
-			md5: None,
-		},
+fn mtree_entry(e: Entry) -> MtreeEntry {
+	MtreeEntry {
+		path: into_bytes(e.path),
+		kind: e.entry_type,
+		mode: e.mode,
+		uid: e.uid,
+		gid: e.gid,
+		// the reader clamps a negative size to 0 like libarchive
+		size: u64::try_from(e.size).unwrap_or_default(),
+		mtime: e.time.map_or(0, |(seconds, _)| seconds),
+		link: e.link.map(into_bytes),
+		sha256: e.sha256_digest,
+		md5: e.md5_digest,
+		warned: !e.warnings.is_empty(),
 	}
 }
 
 // the alpm-mtree call: plain or gzip'd mtree data
 pub fn parse_mtree(r: impl Read) -> Result<Vec<MtreeEntry>, MtreeError> {
-	let paths = match Mtree::from_reader(r) {
-		Ok(Mtree::V1(p) | Mtree::V2(p)) => p,
+	match libarchive::from_reader(r) {
+		Ok(entries) => {
+			Ok(entries.into_iter().map(mtree_entry).collect())
+		}
 		Err(
 			e @ (alpm_mtree::Error::Io { .. }
-			| alpm_mtree::Error::InvalidGzip(_)),
-		) => return Err(MtreeError::Read(e)),
-		Err(e) => return Err(MtreeError::Parse(e)),
-	};
-	Ok(paths.into_iter().map(mtree_entry).collect())
+			| alpm_mtree::Error::InvalidGzip(_)
+			| alpm_mtree::Error::NoMtreeData),
+		) => Err(MtreeError::Read(e)),
+		Err(e) => Err(MtreeError::Parse(e)),
+	}
+}
+
+fn read_err(context: &str, source: io::Error) -> MtreeError {
+	MtreeError::Read(alpm_mtree::Error::Io {
+		context: context.into(),
+		source,
+	})
 }
 
 pub fn read_mtree(path: &[u8]) -> Result<Vec<MtreeEntry>, MtreeError> {
@@ -508,13 +502,18 @@ pub fn read_mtree(path: &[u8]) -> Result<Vec<MtreeEntry>, MtreeError> {
 	if fs::metadata(os(path)).is_err() {
 		return Err(MtreeError::Missing);
 	}
-	let file = File::open(os(path)).map_err(|source| {
-		MtreeError::Read(alpm_mtree::Error::Io {
-			context: "open".into(),
-			source,
-		})
-	})?;
-	parse_mtree(file)
+	let mut file = File::open(os(path)).map_err(|e| read_err("open", e))?;
+	// the filter libarchive's bidding would pick
+	let mut magic = Vec::with_capacity(DecompressionSettings::MAGIC_LEN);
+	(&mut file)
+		.take(DecompressionSettings::MAGIC_LEN as u64)
+		.read_to_end(&mut magic)
+		.and_then(|_| file.rewind())
+		.map_err(|e| read_err("read", e))?;
+	let settings = DecompressionSettings::from_magic(&magic);
+	let decoder = CompressionDecoder::new(file, settings)
+		.map_err(|e| read_err("decompress", io::Error::other(e)))?;
+	parse_mtree(decoder)
 }
 
 impl LocalDb {
@@ -525,5 +524,271 @@ impl LocalDb {
 		pkg: &Package,
 	) -> Result<Vec<MtreeEntry>, MtreeError> {
 		read_mtree(&self.pkgpath(pkg, b"mtree"))
+	}
+}
+
+// writing side: _alpm_local_db_prepare, _alpm_local_db_write,
+// _alpm_local_db_remove and alpm_pkg_set_reason
+//
+// desc and files are written by a translation of the C writer, not by
+// alpm-db's Display: alpm-db writes validated values only, always writes
+// sections pacman leaves out and orders and sorts differently (see
+// PORTING.md). fields go through %s, so each is cut at its first nul. the
+// C sets the umask (0000 for prepare, 0022 for write) around its mkdir and
+// fopen; the port gives the same modes by chmod. logging is not modelled
+
+// why _alpm_local_db_prepare returned -1
+#[derive(Debug)]
+pub enum PrepareError {
+	// checkdbdir could not create the db dir or replace a non-directory
+	// with one: ALPM_ERR_SYSTEM
+	DbDir(io::Error),
+	// mkdir of the package dir failed (also when it exists), logged,
+	// pm_errno untouched
+	Mkdir(io::Error),
+}
+
+impl PrepareError {
+	// the pm_errno the C sets, None where it leaves it alone
+	pub fn errno(&self) -> Option<Errno> {
+		match self {
+			PrepareError::DbDir(_) => Some(Errno::System),
+			PrepareError::Mkdir(_) => None,
+		}
+	}
+}
+
+// why _alpm_local_db_write failed
+#[derive(Debug)]
+pub enum WriteError {
+	// desc or files could not be opened: -1, pm_errno untouched. a desc
+	// failure skips the files
+	Open(io::Error),
+	// writing failed (disk full). the C ignores fprintf/fclose results
+	// and returns 0 here
+	Write(io::Error),
+}
+
+// fopen(path, "w") under umask(0022): a new file gets 0644, an existing
+// one keeps its mode and is truncated
+fn create_0644(path: &[u8]) -> io::Result<File> {
+	let new = OpenOptions::new()
+		.write(true)
+		.create_new(true)
+		.mode(0o644)
+		.open(os(path));
+	match new {
+		Ok(f) => {
+			f.set_permissions(Permissions::from_mode(0o644))?;
+			Ok(f)
+		}
+		Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+			OpenOptions::new()
+				.write(true)
+				.create(true)
+				.truncate(true)
+				.mode(0o644)
+				.open(os(path))
+		}
+		Err(e) => Err(e),
+	}
+}
+
+// fputs of a C string
+fn put(out: &mut Vec<u8>, s: &[u8]) {
+	out.extend_from_slice(until_nul(s));
+}
+
+// "%KEY%\n<value>\n\n" for a set field
+fn single(out: &mut Vec<u8>, key: &[u8], value: Option<&[u8]>) {
+	if let Some(v) = value {
+		put(out, key);
+		out.push(b'\n');
+		put(out, v);
+		out.extend_from_slice(b"\n\n");
+	}
+}
+
+// a header, one line per value and a blank line, nothing for no values
+fn list<T>(
+	out: &mut Vec<u8>,
+	key: &[u8],
+	values: &[T],
+	line: impl Fn(&T) -> Vec<u8>,
+) {
+	if values.is_empty() {
+		return;
+	}
+	put(out, key);
+	out.push(b'\n');
+	for v in values {
+		out.extend_from_slice(&line(v));
+		out.push(b'\n');
+	}
+	out.push(b'\n');
+}
+
+// %jd and %u: only written when nonzero
+fn number(out: &mut Vec<u8>, key: &[u8], n: i64) {
+	if n != 0 {
+		single(out, key, Some(n.to_string().as_bytes()));
+	}
+}
+
+// the desc file, field for field in the C's order
+fn desc_text(pkg: &Package) -> Vec<u8> {
+	let mut out = Vec::new();
+	let name = pkg.name.as_deref().unwrap_or_default();
+	let version = pkg.version.as_deref().unwrap_or_default();
+	single(&mut out, b"%NAME%", Some(name));
+	single(&mut out, b"%VERSION%", Some(version));
+	single(&mut out, b"%BASE%", pkg.base.as_deref());
+	single(&mut out, b"%DESC%", pkg.desc.as_deref());
+	single(&mut out, b"%URL%", pkg.url.as_deref());
+	single(&mut out, b"%ARCH%", pkg.arch.as_deref());
+	number(&mut out, b"%BUILDDATE%", pkg.builddate);
+	number(&mut out, b"%INSTALLDATE%", pkg.installdate);
+	single(&mut out, b"%PACKAGER%", pkg.packager.as_deref());
+	// only the installed size, csize is irrelevant once installed
+	number(&mut out, b"%SIZE%", pkg.isize);
+	number(&mut out, b"%REASON%", pkg.reason as i64);
+	let text = |s: &Vec<u8>| until_nul(s).to_vec();
+	list(&mut out, b"%GROUPS%", &pkg.groups, text);
+	list(&mut out, b"%LICENSE%", &pkg.licenses, text);
+	if pkg.validation != 0 {
+		// the known bits in a fixed order, md5 is never written
+		let methods: Vec<&[u8]> = [
+			(PKG_VALIDATION_NONE, &b"none"[..]),
+			(PKG_VALIDATION_SHA256SUM, b"sha256"),
+			(PKG_VALIDATION_SIGNATURE, b"pgp"),
+		]
+		.into_iter()
+		.filter(|(bit, _)| pkg.validation & bit != 0)
+		.map(|(_, m)| m)
+		.collect();
+		out.extend_from_slice(b"%VALIDATION%\n");
+		for m in methods {
+			out.extend_from_slice(m);
+			out.push(b'\n');
+		}
+		out.push(b'\n');
+	}
+	// write_deps
+	for (key, deps) in [
+		(&b"%REPLACES%"[..], &pkg.replaces),
+		(b"%DEPENDS%", &pkg.depends),
+		(b"%OPTDEPENDS%", &pkg.optdepends),
+		(b"%CONFLICTS%", &pkg.conflicts),
+		(b"%PROVIDES%", &pkg.provides),
+	] {
+		list(&mut out, key, deps, dep_compute_string);
+	}
+	list(&mut out, b"%XDATA%", &pkg.xdata, |x| {
+		[until_nul(&x.name), b"=", until_nul(&x.value)].concat()
+	});
+	out
+}
+
+// the files file: %FILES% in list order, %BACKUP% with "<name>\t<hash>".
+// a NULL hash prints as glibc's "(null)"
+fn files_text(pkg: &Package) -> Vec<u8> {
+	let mut out = Vec::new();
+	list(&mut out, b"%FILES%", &pkg.files.files, |f| {
+		until_nul(&f.name).to_vec()
+	});
+	list(&mut out, b"%BACKUP%", &pkg.backup, |b| {
+		let hash = b.hash.as_deref().unwrap_or(b"(null)");
+		[until_nul(&b.name), b"\t", until_nul(hash)].concat()
+	});
+	out
+}
+
+fn write_file(path: &[u8], text: &[u8]) -> Result<(), WriteError> {
+	let mut f = create_0644(path).map_err(WriteError::Open)?;
+	f.write_all(text).map_err(WriteError::Write)
+}
+
+impl LocalDb {
+	// checkdbdir: a missing (or unstat-able) db dir is created, a
+	// non-directory in its place unlinked and replaced
+	fn checkdbdir(&self) -> io::Result<()> {
+		match fs::metadata(os(&self.path)) {
+			Ok(m) if m.is_dir() => return Ok(()),
+			Ok(_) => fs::remove_file(os(&self.path))?,
+			Err(_) => {}
+		}
+		makepath(&self.path)
+	}
+
+	// _alpm_local_db_prepare: the package directory, mode 0755 (umask
+	// 0000)
+	pub fn prepare(&self, pkg: &Package) -> Result<(), PrepareError> {
+		self.checkdbdir().map_err(PrepareError::DbDir)?;
+		let path = self.pkgpath(pkg, b"");
+		mkdir_mode(os(&path), 0o755).map_err(PrepareError::Mkdir)
+	}
+
+	// _alpm_local_db_write: desc for INFRQ_DESC, files for INFRQ_FILES.
+	// install and mtree are extracted by add.c, nothing to write
+	pub fn write(
+		&self,
+		pkg: &Package,
+		inforeq: c_int,
+	) -> Result<(), WriteError> {
+		if inforeq & INFRQ_DESC != 0 {
+			write_file(
+				&self.pkgpath(pkg, b"desc"),
+				&desc_text(pkg),
+			)?;
+		}
+		if inforeq & INFRQ_FILES != 0 {
+			write_file(
+				&self.pkgpath(pkg, b"files"),
+				&files_text(pkg),
+			)?;
+		}
+		Ok(())
+	}
+
+	// _alpm_local_db_remove: unlink every entry of the package dir (they
+	// are files), then rmdir it. failures do not stop the others; the
+	// first is returned. the C's PATH_MAX check is the kernel's
+	// ENAMETOOLONG on the joined name
+	pub fn remove(&self, pkg: &Package) -> io::Result<()> {
+		let path = self.pkgpath(pkg, b"");
+		let dir = fs::read_dir(os(&path))?;
+		let mut first = None;
+		for ent in entries(dir) {
+			// "<pkgpath>/<name>", pkgpath already ends in '/'
+			let name = ent.file_name();
+			let file = [&path[..], b"/", name.as_bytes()].concat();
+			if let Err(e) = fs::remove_file(os(&file)) {
+				first.get_or_insert(e);
+			}
+		}
+		if let Err(e) = fs::remove_dir(os(&path)) {
+			first.get_or_insert(e);
+		}
+		first.map_or(Ok(()), Err)
+	}
+
+	// alpm_pkg_set_reason on a package of this db (the C checks
+	// origin_data.db against handle->db_local, the caller does here).
+	// alpm_pkg_get_reason loads the desc first, a failed load compares
+	// what the package holds. the desc is rewritten only on a change
+	pub fn set_reason(
+		&self,
+		pkg: &mut Package,
+		reason: PkgReason,
+	) -> Result<(), Errno> {
+		if pkg.origin != Some(PkgFrom::LocalDb) {
+			return Err(Errno::WrongArgs);
+		}
+		let _ = self.read(pkg, INFRQ_DESC);
+		if pkg.reason == reason {
+			return Ok(());
+		}
+		pkg.reason = reason;
+		self.write(pkg, INFRQ_DESC).map_err(|_| Errno::DbWrite)
 	}
 }

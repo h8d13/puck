@@ -41,8 +41,8 @@ use rustix::fs::{AtFlags, CWD, Timespec, Timestamps};
 use crate::callbacks::{Callbacks, DownloadEvent, Event, Fetch, LogLevel};
 use crate::error::Errno;
 use crate::util::{
-	filecache_exists, filecache_find, filecache_setup, get_fullpath,
-	strerror, until_nul,
+	PATH_MAX, filecache_exists, filecache_find, filecache_setup,
+	get_fullpath, strerror, until_nul,
 };
 
 // ALPM_SIG_PACKAGE, ALPM_SIG_PACKAGE_OPTIONAL
@@ -55,7 +55,6 @@ pub const SIG_MAX_SIZE: i64 = 16 * 1024;
 const SERVER_ERROR_LIMIT: i32 = 3;
 // RFC1123 hostname buffer of curl_gethost, nul included
 const HOSTNAME_SIZE: usize = 256;
-const PATH_MAX: usize = 4096;
 // CURLOPT_CONNECTTIMEOUT, CURLOPT_LOW_SPEED_TIME, CURLOPT_MAXREDIRS
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LOW_SPEED_TIME: Duration = Duration::from_secs(10);
@@ -126,6 +125,22 @@ impl DownloadState {
 	pub fn server_errors(&self, host: &[u8]) -> Option<i32> {
 		let h = self.server_errors.iter().find(|(h, _)| h == host);
 		h.map(|(_, e)| *e)
+	}
+
+	// every host's error count in lookup order, and a state rebuilt from
+	// them: the sandbox helper gets a copy like the C's forked child
+	pub fn hosts(&self) -> &[(Vec<u8>, i32)] {
+		&self.server_errors
+	}
+
+	pub fn from_hosts(
+		hosts: Vec<(Vec<u8>, i32)>,
+		interrupted: bool,
+	) -> Self {
+		DownloadState {
+			server_errors: hosts,
+			interrupted,
+		}
 	}
 
 	// find_server_errors: the entry of the url's host, created on first

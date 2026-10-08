@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{self, IsTerminal, Read};
 use std::os::unix::ffi::OsStringExt;
 
-use pacman_cli::pacman::{Io, Process, StdTerm, run};
+use pacman_cli::pacman::{Io, Process, run, std_sink, std_term};
 
 // getuid() from /proc (safe std has no getuid)
 fn uid() -> u32 {
@@ -25,7 +25,10 @@ fn reopen_tty() -> Result<(), i32> {
 }
 
 fn main() {
-	// TODO(sandbox): `if let Some(c) = alpm_core::sandbox::helper_entry() { std::process::exit(c) }` once sandbox is merged
+	// the download helper child of the sandbox runs this binary
+	if let Some(c) = alpm_core::sandbox::helper_entry() {
+		std::process::exit(c)
+	}
 	let mut argv: Vec<Vec<u8>> =
 		std::env::args_os().map(OsStringExt::into_vec).collect();
 	// stdin is read only for a "-" target, prompts need it otherwise
@@ -46,6 +49,6 @@ fn main() {
 		debug_stamps: true,
 		..Io::default()
 	};
-	let ret = run(&mut argv, process, &mut io, StdTerm::default);
+	let ret = run(&mut argv, process, &mut io, std_term, Some(std_sink));
 	std::process::exit(ret);
 }

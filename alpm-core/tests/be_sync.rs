@@ -110,9 +110,9 @@ fn fields() {
 	assert_eq!(foo.origin, Some(PkgFrom::SyncDb));
 	assert_eq!(foo.size, 10);
 	assert_eq!(foo.builddate, 30);
-	// alpm-types normalizes these two
-	assert_eq!(foo.desc.as_deref(), Some(&b"a b"[..]));
-	assert_eq!(foo.url.as_deref(), Some(&b"https://example.org/"[..]));
+	// as read like the C, alpm-types only normalizes their Display
+	assert_eq!(foo.desc.as_deref(), Some(&b"a  b"[..]));
+	assert_eq!(foo.url.as_deref(), Some(&b"https://example.org"[..]));
 	assert_eq!(foo.depends[0].name, b"bar");
 	assert_eq!(foo.depends[1].name, b"libx.so");
 	let files: Vec<&[u8]> =
@@ -130,7 +130,7 @@ fn invalid_entries() {
 		let e = db.load().unwrap_err();
 		assert_eq!(e.errno(), Errno::DbInvalid, "{name}");
 	}
-	db.write(&tar(&[("foo-1-1/desc", "%FOO%\nx\n")]));
+	db.write(&tar(&[("foo-1-1/desc", "%CSIZE%\nx\n")]));
 	let e = db.load().unwrap_err();
 	assert!(matches!(
 		e,

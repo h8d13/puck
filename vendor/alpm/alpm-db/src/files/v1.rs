@@ -10,12 +10,23 @@ use alpm_types::{Md5Checksum, RelativeFilePath, RelativePath};
 use fluent_i18n::t;
 use winnow::{
     ascii::{line_ending, multispace0, newline, space0, till_line_ending},
-    combinator::{alt, cut_err, eof, not, opt, peek, repeat, separated_pair, terminated},
+    combinator::{
+        alt,
+        cut_err,
+        eof,
+        not,
+        opt,
+        peek,
+        preceded,
+        repeat,
+        separated_pair,
+        terminated,
+    },
     stream::AsChar,
     token::take_while,
 };
 
-use crate::files::Error;
+use crate::{files::Error, libalpm};
 
 /// The raw data section in [alpm-db-files] data.
 ///
@@ -108,19 +119,22 @@ pub struct BackupEntry {
     /// The path to the file that is backed up.
     pub path: RelativeFilePath,
     /// The optional MD5 checksum of the backed up file as stored in the package.
-    pub md5: Md5Checksum,
-}
-
-/// A path that should be tracked for backup together with its checksum.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
-struct RawBackupEntry {
-    /// The path to the file that is backed up.
-    pub path: RelativeFilePath,
-    /// The optional MD5 checksum of the backed up file as stored in the package.
+    ///
+    /// [`None`] stands for the `(null)` keyword (see [`BackupEntry::parser`]).
     pub md5: Option<Md5Checksum>,
 }
 
-impl AlpmParser for RawBackupEntry {
+impl Display for BackupEntry {
+    /// Writes the entry as a line of the `%BACKUP%` section, without the line ending.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.md5 {
+            Some(md5) => write!(f, "{}\t{md5}", self.path),
+            None => write!(f, "{}\t(null)", self.path),
+        }
+    }
+}
+
+impl AlpmParser for BackupEntry {
     /// Recognizes a single backup entry.
     ///
     /// Each entry consists of a relative path, a tab, and a 32 character hexadecimal MD5 digest.
@@ -133,6 +147,7 @@ impl AlpmParser for RawBackupEntry {
     /// Specifically, if a package is created from a [PKGBUILD] that tracks files in its `backup`
     /// array, which are not in the package, then pacman creates an invalid `%BACKUP%` entry upon
     /// installation of the package, instead of skipping the invalid entries.
+    /// Such entries are kept: pacman still treats the file as a backup file.
     ///
     /// [PKGBUILD]: https://man.archlinux.org/man/PKGBUILD.5
     /// [alpm-db-files]: https://alpm.archlinux.page/specifications/alpm-db-files.5.html
@@ -157,7 +172,7 @@ impl AlpmParser for RawBackupEntry {
                 Md5Checksum::parser.map(Some),
             )),
         )
-        .map(|(path, md5)| RawBackupEntry { path, md5 })
+        .map(|(path, md5)| BackupEntry { path, md5 })
         .layer("backup entry")
         .parse_next(input)
     }
@@ -192,22 +207,11 @@ impl BackupSection {
                 .layer("backup section header")
                 .parse_next(input)?;
 
-            let entries: Vec<RawBackupEntry> = repeat(
+            let entries: Vec<BackupEntry> = repeat(
                 0..,
-                terminated(RawBackupEntry::parser, alt((line_ending, eof))),
+                terminated(BackupEntry::parser, alt((line_ending, eof))),
             )
             .parse_next(input)?;
-
-            let entries = entries
-                .into_iter()
-                .filter_map(|backup| {
-                    let md5 = backup.md5?;
-                    Some(BackupEntry {
-                        path: backup.path,
-                        md5,
-                    })
-                })
-                .collect();
 
             Ok(Self(entries))
         };
@@ -400,10 +404,7 @@ impl DbFilesV1 {
         &self.backup
     }
 
-    fn try_from_parts(
-        mut paths: Vec<PathBuf>,
-        mut backup: Vec<BackupEntry>,
-    ) -> Result<Self, Error> {
+    fn try_from_parts(mut paths: Vec<PathBuf>, backup: Vec<BackupEntry>) -> Result<Self, Error> {
         paths.sort_unstable();
 
         let mut errors = FilesV1PathErrors::new();
@@ -440,7 +441,8 @@ impl DbFilesV1 {
         let mut backup_set: HashSet<RelativeFilePath> = HashSet::new();
 
         for entry in backup.iter() {
-            if !path_set.contains(entry.path.inner()) {
+            // A `(null)` entry stands for a backup path the package does not contain.
+            if entry.md5.is_some() && !path_set.contains(entry.path.inner()) {
                 backup_errors.add_not_in_files(entry.path.clone());
             }
 
@@ -451,7 +453,7 @@ impl DbFilesV1 {
 
         backup_errors.fail()?;
 
-        backup.sort_unstable_by(|a, b| a.path.inner().cmp(b.path.inner()));
+        // The backup entries keep their order, which is the one pacman writes.
 
         Ok(Self {
             files: paths,
@@ -513,7 +515,7 @@ impl Display for DbFilesV1 {
             writeln!(f, "{}", BackupSection::SECTION_KEYWORD)?;
 
             for entry in &self.backup {
-                writeln!(f, "{}\t{}", entry.path, entry.md5)?;
+                writeln!(f, "{entry}")?;
             }
         }
 
@@ -550,6 +552,80 @@ impl DbFilesV1 {
             files_section.paths(),
             backup_section.entries(),
         ))
+    }
+}
+
+impl DbFilesV1 {
+    /// Recognizes [alpm-db-files] data the way libalpm's `local_db_read` reads it.
+    ///
+    /// Lines are compared as they are and lines outside of a section are ignored. A section ends
+    /// at a blank line or at the end of the file. A later `%FILES%` section replaces an earlier
+    /// one, `%BACKUP%` sections are appended.
+    ///
+    /// [alpm-db-files]: https://alpm.archlinux.page/specifications/alpm-db-files.5.html
+    fn libalpm_parser<'a>(input: &mut Input<'a>) -> PResult<'a, (Vec<PathBuf>, Vec<BackupEntry>)> {
+        let mut paths = Vec::new();
+        let mut backup = Vec::new();
+        while !input.is_empty() {
+            match libalpm::line.parse_next(input)? {
+                FilesSection::SECTION_KEYWORD => {
+                    paths = repeat(
+                        0..,
+                        preceded(not(libalpm::end_of_block), libalpm::line.map(PathBuf::from)),
+                    )
+                    .parse_next(input)?;
+                }
+                BackupSection::SECTION_KEYWORD => {
+                    let entries: Vec<BackupEntry> = repeat(
+                        0..,
+                        preceded(
+                            not(libalpm::end_of_block),
+                            cut_err(terminated(BackupEntry::parser, alt(("\n", eof)))),
+                        ),
+                    )
+                    .parse_next(input)?;
+                    backup.extend(entries);
+                }
+                _ => {}
+            }
+        }
+        Ok((paths, backup))
+    }
+
+    /// Creates a new [`DbFilesV1`] from a string slice the way libalpm reads [alpm-db-files] data.
+    ///
+    /// This is meant for reading what pacman reads, e.g. files data that was edited by hand.
+    /// Lines are compared as they are (a header followed by `\r\n` is not a header) and lines
+    /// outside of a section are ignored. A section ends at a blank line or at the end of the file.
+    /// A later `%FILES%` section replaces an earlier one, `%BACKUP%` sections are appended.
+    ///
+    /// Paths are taken as they are and keep their order, like the backup entries. Unlike
+    /// [`Self::try_from`], absolute paths, paths without a parent, duplicate paths and backup
+    /// entries for paths that are not in the `%FILES%` section are accepted: libalpm reads them.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::path::PathBuf;
+    ///
+    /// use alpm_db::files::DbFilesV1;
+    ///
+    /// # fn main() -> Result<(), alpm_db::files::Error> {
+    /// let data = "\n%FILES%\nusr/\n\nusr/bin/\n";
+    /// let files = DbFilesV1::from_str_libalpm(data)?;
+    /// assert_eq!(files.as_ref(), vec![PathBuf::from("usr/")]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a backup entry cannot be parsed.
+    ///
+    /// [alpm-db-files]: https://alpm.archlinux.page/specifications/alpm-db-files.5.html
+    pub fn from_str_libalpm(s: &str) -> Result<Self, Error> {
+        let (files, backup) = Self::libalpm_parser.parse(Input::new(s))?;
+        Ok(Self { files, backup })
     }
 }
 
@@ -858,7 +934,7 @@ mod tests {
         ];
         let backup = vec![BackupEntry {
             path: RelativeFilePath::from_str("usr/bin/foo")?,
-            md5: Md5Checksum::from_str("d41d8cd98f00b204e9800998ecf8427e")?,
+            md5: Some(Md5Checksum::from_str("d41d8cd98f00b204e9800998ecf8427e")?),
         }];
 
         let files = DbFilesV1::try_from((paths, backup))?;
@@ -873,7 +949,7 @@ mod tests {
         vec![PathBuf::from("usr/")],
         vec![BackupEntry {
             path: RelativeFilePath::from_str("usr/bin/foo").unwrap(),
-            md5: Md5Checksum::from_str("d41d8cd98f00b204e9800998ecf8427e").unwrap(),
+            md5: Some(Md5Checksum::from_str("d41d8cd98f00b204e9800998ecf8427e").unwrap()),
         }],
         BackupV1Errors{
             not_in_files: HashSet::from_iter([RelativeFilePath::from_str("usr/bin/foo").unwrap()]),
@@ -889,11 +965,11 @@ mod tests {
         vec![
             BackupEntry {
                 path: RelativeFilePath::from_str("usr/bin/foo").unwrap(),
-                md5: Md5Checksum::from_str("d41d8cd98f00b204e9800998ecf8427e").unwrap(),
+                md5: Some(Md5Checksum::from_str("d41d8cd98f00b204e9800998ecf8427e").unwrap()),
             },
             BackupEntry {
                 path: RelativeFilePath::from_str("usr/bin/foo").unwrap(),
-                md5: Md5Checksum::from_str("d41d8cd98f00b204e9800998ecf8427e").unwrap(),
+                md5: Some(Md5Checksum::from_str("d41d8cd98f00b204e9800998ecf8427e").unwrap()),
             }
         ],
         BackupV1Errors{
@@ -932,8 +1008,43 @@ mod tests {
         }
     }
 
+    /// Ensures that the libalpm reader reads the paths libalpm reads.
+    #[rstest]
+    #[case::empty("", &[])]
+    #[case::blank_line_ends_section("%FILES%\nusr/\n\nusr/bin/\n", &["usr/"])]
+    #[case::lines_outside_sections("\nfoo\n%FOO%\nbar\n\n%FILES%\nusr/\n", &["usr/"])]
+    #[case::crlf("%FILES%\r\nusr/\r\n", &[])]
+    #[case::later_section_replaces("%FILES%\na\n\n%FILES%\nb\n", &["b"])]
+    #[case::header_in_section("%FILES%\na\n%BACKUP%\n", &["a", "%BACKUP%"])]
+    #[case::absolute("%FILES%\n/usr/\n", &["/usr/"])]
+    #[case::without_parent("%FILES%\nusr/bin/foo\n", &["usr/bin/foo"])]
+    #[case::duplicates("%FILES%\nusr/\nusr\nusr/\n", &["usr/", "usr", "usr/"])]
+    fn filesv1_from_str_libalpm_paths(#[case] data: &str, #[case] expected: &[&str]) -> TestResult {
+        let files = DbFilesV1::from_str_libalpm(data)?;
+        let expected: Vec<PathBuf> = expected.iter().map(PathBuf::from).collect();
+        assert_eq!(files.as_ref(), expected);
+        Ok(())
+    }
+
+    /// Ensures that the libalpm reader appends backup sections and fails on a broken entry.
     #[test]
-    fn filesv1_from_str_skips_null_backup_entries() -> TestResult {
+    fn filesv1_from_str_libalpm_backups() -> TestResult {
+        let data = "%FILES%\na\nb\n\n%BACKUP%\nb\t(null)\n\n%BACKUP%\na\t(null)\n";
+        let files = DbFilesV1::from_str_libalpm(data)?;
+        let paths: Vec<String> = files.backups().iter().map(|b| b.path.to_string()).collect();
+        assert_eq!(paths, ["b", "a"]);
+
+        // Backup entries need no %FILES% section.
+        let files = DbFilesV1::from_str_libalpm("%BACKUP%\netc/foo\t(null)\n")?;
+        assert_eq!(files.backups().len(), 1);
+
+        assert!(DbFilesV1::from_str_libalpm("%FILES%\na\n\n%BACKUP%\na\n").is_err());
+        Ok(())
+    }
+
+    /// Ensures that `(null)` backup entries are kept, in file order, and written back.
+    #[test]
+    fn filesv1_from_str_keeps_null_backup_entries() -> TestResult {
         let data = r#"%FILES%
 etc/
 etc/foo/
@@ -948,11 +1059,18 @@ etc/foo/bar.conf	(null)
 
         assert_eq!(
             files.backups(),
-            &[BackupEntry {
-                path: RelativeFilePath::from_str("etc/foo/foo.conf")?,
-                md5: Md5Checksum::from_str("d41d8cd98f00b204e9800998ecf8427e")?
-            }]
+            &[
+                BackupEntry {
+                    path: RelativeFilePath::from_str("etc/foo/foo.conf")?,
+                    md5: Some(Md5Checksum::from_str("d41d8cd98f00b204e9800998ecf8427e")?)
+                },
+                BackupEntry {
+                    path: RelativeFilePath::from_str("etc/foo/bar.conf")?,
+                    md5: None,
+                }
+            ]
         );
+        assert!(files.to_string().ends_with("etc/foo/bar.conf\t(null)\n"));
 
         Ok(())
     }

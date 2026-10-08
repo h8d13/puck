@@ -84,7 +84,7 @@ read-only copy of a real system db; byte-identical stdout, stderr, exit.
 |---|---|
 | downloads (`dload.c`): parallel, resume, mirrors, sandbox user | done (`reqwest`); sandbox child and Handle wiring pending |
 | signature verification (`signing.c`) | done (`gpg` over `--status-fd`, argv checked against gpgme's); Handle/db wiring pending |
-| db update/validation (`be_sync.c` writing side) | todo |
+| db update/validation (`be_sync.c` writing side) | done (`alpm_db_update`, `-Sy`/`-Syy`/`-Fy`); sandbox child and progress bars pending |
 
 Gate: pactest sync/download tests against the Rust binary.
 
@@ -94,8 +94,11 @@ Gate: pactest sync/download tests against the Rust binary.
 |---|---|
 | package files (`be_package.c` via `alpm-compress`, `alpm-pkginfo`, `alpm-mtree`) | partial (no signatures) |
 | deps resolution (`deps.c` rest + `graph.c`), `conflict.c`, `diskspace.c` | done |
-| `trans.c`, `sync.c`, `add.c`, `remove.c`, `hook.c`, scriptlets (chroot) | todo |
-| sandbox (landlock/seccomp), local db writing | todo |
+| `hook.c`, scriptlets (`_alpm_runscriptlet`), `_alpm_run_chroot`, `_alpm_ldconfig` | done (on unified callbacks, take `&mut Handle`) |
+| transaction prepare phase (`trans.c` model, `alpm_add/remove_pkg`, sysupgrade, sync/remove prepare, frontend prepare) | in progress |
+| transaction commit phase (downloads, validation, add.c, remove.c, hooks, db writes) | todo (after local db writing merges) |
+| sandbox (landlock/seccomp, download helper) | done |
+| local db writing | in progress |
 
 Gate: the full pactest suite (`meson test` baseline 338 ok, 6 expected
 fail) run against the Rust binary.
@@ -117,27 +120,31 @@ copied. State: todo until a patch lands, then the patch file name.
 
 | Crate | Divergence to correct | Seen on real data | State |
 |---|---|---|---|
-| alpm-types | `Url` normalised (trailing '/', lowercase, dot segments): keep original text | local 82/804, sync 1330/15334, cache 134/1250 | in progress |
-| alpm-types | `Packager` rejects `Unknown Packager`, `<a@b.c>` | local 1/804 | in progress |
-| alpm-types | `RelationOrSoname` rejects `foo.sound`, `d1.so62r` (no backtracking) | no | in progress |
-| alpm-types | `ExtraDataEntry` empty value swallows next line | no | in progress |
-| alpm-types | `Version` Ord: explicit epoch 0 > none, one-sided pkgrel counted; `is_satisfied_by` with pkgrel | no | in progress |
-| alpm-types | `OptionalDependency` description split at ':'+whitespace, trimmed, empty -> None | no | in progress |
-| alpm-types | pkgrel printed without leading zeros | no | in progress |
-| alpm-types (or owner crate) | `%DESC%`/pkgdesc whitespace normalised, checksums and arch lowercased | no | in progress |
-| alpm-db | v2 detected by `contains("%XDATA%")` anywhere | no | in progress |
-| alpm-db | files: blank line ends `%FILES%` (spec: ignored); absolute paths, missing parents, `usr`+`usr/` refused | no | in progress |
-| alpm-db | backups sorted by path, `(null)` hash entries dropped | local 15/804, 2/804 | in progress |
-| alpm-db | unknown keys, duplicate sections, sections pacman writes only when set treated as required, `%MAKEDEPENDS%`/`%CHECKDEPENDS%`, `%REASON%` other than 0/1, empty desc, CRLF | no | in progress |
-| alpm-repo-db | `%DATA%` (xdata) missing | no (pacman 7 reads it) | in progress |
-| alpm-repo-db | unknown keys, duplicate sections, required sections, `%MD5SUM%` without `%PGPSIG%`, empty `%GROUPS%`, extra blank lines | no | in progress |
-| alpm-repo-db | `RepoFilesV1` dedup/sort as `PathBuf` (`usr` == `usr/`) | no | in progress |
-| alpm-mtree | entries sorted by path instead of file order; duplicates not merged | 386/804 | in progress |
-| alpm-mtree | `mode` 3-4 digits (docs 3-5), required time/mode/uid/gid/sha256/link, char/block/fifo, unknown keywords, `size` on dirs/links, `\#`, `size=+5`, `/unset all`, v1 relative paths | rare (mode) | in progress |
-| alpm-mtree | `PathType` lacks `PartialEq`; gzip only through `MetadataFile` | api | in progress |
-| alpm-pkginfo | unknown keys (`basever`), `url = `, `pkgtype` must be first xdata, duplicate single keys, missing optional keys, leading-space lines | no | in progress |
-| alpm-compress | `GzDecoder` reads one member (libarchive: all) | no | in progress |
-| alpm-compress | no content sniffing (the port duplicates it in be_sync and be_package) | `.db` files have no extension | in progress |
+| alpm-types | `Url` normalised (trailing '/', lowercase, dot segments): keep original text | local 82/804, sync 1330/15334, cache 134/1250 | 0104 (`as_original_str`) |
+| alpm-types | `Packager` rejects `Unknown Packager`, `<a@b.c>` | local 1/804 | 0105 (`email()` now `Option`) |
+| alpm-types | `RelationOrSoname` rejects `foo.sound`, `d1.so62r` (no backtracking) | no | 0106 |
+| alpm-types | `ExtraDataEntry` empty value swallows next line | no | 0107 |
+| alpm-types | `Version` Ord: explicit epoch 0 > none, one-sided pkgrel counted; `is_satisfied_by` with pkgrel | no | 0101, 0102 (`vercmp`, `is_satisfied_by_vercmp`; Ord stays total) |
+| alpm-types | `OptionalDependency` description split at ':'+whitespace, trimmed, empty -> None | no | 0108 (changes 4 upstream test expectations) |
+| alpm-types | pkgrel printed without leading zeros | no | 0103 |
+| alpm-types | `%DESC%`/pkgdesc whitespace normalised | no | 0109 (`as_original_str`) |
+| alpm-types | arch `ANY` and checksums lowercased | no | open: enum/bytes types, case kept only with a type redesign |
+| alpm-types | xdata `a = b` trimmed, `%REASON%` other than 0/1 (no `Unknown` variant), `size = +5`, text dates | no | todo |
+| alpm-db | v2 detected by `contains("%XDATA%")` anywhere | no | 0201 |
+| alpm-db | files: blank line ends `%FILES%` (spec: ignored); absolute paths, missing parents, `usr`+`usr/` refused | no | 0206, 0207 (`from_str_libalpm`) |
+| alpm-db | backups sorted by path, `(null)` hash entries dropped | local 15/804, 2/804 | 0205 (`md5: Option`) |
+| alpm-db | unknown keys, duplicate sections, sections pacman writes only when set treated as required, `%MAKEDEPENDS%`/`%CHECKDEPENDS%`, empty desc, CRLF, blank lines between sections | no | 0202, 0203, 0204 (`parse_libalpm`, sections in file order) |
+| alpm-repo-db | `%DATA%` (xdata) missing | no (pacman 7 reads it) | 0303 |
+| alpm-repo-db | unknown keys, duplicate sections, required sections, `%MD5SUM%` without `%PGPSIG%`, empty `%GROUPS%`, extra blank lines | no | 0301, 0302 (`parse_libalpm`) |
+| alpm-repo-db | `RepoFilesV1` dedup/sort as `PathBuf` (`usr` == `usr/`) | no | 0304, 0305 (`from_str_libalpm`) |
+| alpm-db, alpm-repo-db | backup line without a tab (pacman: NULL hash), `%FILES%` inside a sync desc entry | no | open: no ALPM representation / packager-only |
+| alpm-mtree | entries sorted by path instead of file order; duplicates not merged | 386/804 | 0404, 0405 (`alpm_mtree::libarchive` reader) |
+| alpm-mtree | `mode` 3-4 digits (docs 3-5), required time/mode/uid/gid/sha256/link, char/block/fifo, unknown keywords, `size` on dirs/links, `\#`, `size=+5`, `/unset all`, v1 relative paths | rare (mode) | 0402, 0406-0410 |
+| alpm-mtree | `PathType` lacks `PartialEq`; gzip helper reads one member; `Error::Parse` display broken | api | 0401, 0403, 0411 |
+| alpm-pkginfo | unknown keys (`basever`), `url = `, `pkgtype` must be first xdata, duplicate single keys, missing optional keys, leading-space lines, xdata spaces, `size = +5`, text builddate | no | 0501-0506 (`PacmanPackageInfo`) |
+| alpm-compress | `GzDecoder` reads one member (libarchive: all) | no | 0551 |
+| alpm-compress | no content sniffing (the port duplicates it in be_sync and be_package) | `.db` files have no extension | 0552 (`from_magic`) |
+| alpm-compress | gzip-in-gzip, lz4, lzma archives; non-gzip `.MTREE` inside packages | no (makepkg writes gzip) | open |
 | all | non-UTF-8 text refused (pacman is byte based) | no | open: deep type change, decide after the units report |
 
 ## Precedent audit
@@ -158,7 +165,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | md5/sha256 | `md-5`, `sha2` | uses the crates |
 | `version::vercmp`, `deps::dep_from_string` | alpm-types versions/relations | kept: ALPM takes validated values only, pacman compares/parses arbitrary strings (CLI, `vercmp`, -T); ALPM vs C difftest done (`alpm_types_vs_c`) |
 | `pacman-common::ini` | alpm-parsers `custom_ini` | kept: `key=value` only, no sections/Include |
-| `be_sync` compression sniffing | `alpm-compress` | kept: ALPM picks by file extension, `.db` has none |
+| `be_sync` compression sniffing | `alpm-compress` | done: `from_magic` (patch 0552), shared by be_sync and be_package |
 | `util::fnmatch`, `regex`, getopt, conf glob | none (ALPM CLIs use clap, no getopt_long semantics) | kept |
 
 ## ALPM overlap
@@ -195,9 +202,10 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `lib/libalpm/package.c` | 868 | `alpm-core::package` (partial) | data model (`Package`, `PkgFrom`, `PkgReason`), dup, pkg_cmp, compare_versions, find, compute_requiredby/optionalfor (`DbCaches`), should_ignore (fixture handles + mirror fuzz): difftest via `#[repr(C)]` mirror (offsets checked through the C getters); handle/db/archive parts pending |
 | `lib/libalpm/be_package.c` | 778 | `alpm-core::be_package` (partial) | pkg_load_internal (full and metadata-only walk, .PKGINFO via alpm-pkginfo, .MTREE via alpm-mtree with archive fallback, file list, check_meta), pkg_load/pkg_validate at every level (.sig, base64 sig, sha256 skip), key import question, changelog: difftest on generated packages (gz/bz2/xz/zst/none, full on/off, every field + changelog), 82 pinned odd inputs, real cached packages (`DIFFTEST_PKG_CORPUS`); gpgme/.sig pending |
 | `lib/libalpm/be_local.c` | 1232 | `alpm-core::be_local` (partial) | register/validate (ALPM_DB_VERSION, creation), populate, local_db_read via `alpm-db`: difftest on random v1/v2 dbs (every field, cache counts), version-file fuzz, 69 pinned odd inputs, /var/lib/pacman read-only; writing, remove, mtree, changelog pending |
-| `lib/libalpm/be_sync.c` | 762 | `alpm-core::be_sync` (partial) | populate (tar walk, load_pkg_for_entry, check_meta subset, validate_filename, error ranking), get_validation, db_path, sync_db_validate (missing file, signature, import retry) via `alpm-repo-db` + `alpm-compress`: difftest on generated .db/.files in gz/bz2/xz/zst/none (fields, cache order, table counts), real sync db copies; download, gpgme validation, db update pending |
+| `lib/libalpm/be_sync.c` | 762 | `alpm-core::be_sync` (partial) | populate (tar walk, load_pkg_for_entry, check_meta subset, validate_filename, error ranking), get_validation, db_path, sync_db_validate (missing file, signature, import retry) via `alpm-repo-db` + `alpm-compress`: difftest on generated .db/.files in gz/bz2/xz/zst/none (fields, cache order, table counts), real sync db copies; alpm_db_update + get_sync_dir: difftest vs C on loopback mirrors with gpg-signed fixture dbs (sequences, edges, signatures, fuzz) |
 | `lib/libalpm/db.c` | 773 | `alpm-core::db` (partial) | register/unregister, servers (sanitize_url), usage, siglevel, get_valid, pkgcache/get_pkg, groupcache/get_group (load_grpcache order), add/remove pkg in cache, load_pkg (lazy loads in place), dbext read at load, db_path, db_cmp: difftest op-sequence fuzz (results, errno, db state each step); search (difftest fuzz), load_all/walk/find_satisfier; update pending |
-| `lib/libalpm/handle.c` | 1017 | `alpm-core::handle` (partial) | alpm_initialize path checks/normalisation, dbext, architectures, siglevels, ignore/noupgrade/noextract lists + match: difftest; callbacks, lock, cachedirs, hookdirs, gpgdir, logfile, sandbox, downloads pending |
+| `lib/libalpm/log.c` | 112 | `alpm-core::log` | logaction (logfile, errno), leader format, syslog packet: difftest (stamps stripped), clock injectable, UTC default |
+| `lib/libalpm/handle.c` | 1017 | `alpm-core::handle` (all but handle->user, trans) | options, lock, logfile, callbacks, keyring, dload state: difftest option fuzz, lock, logaction; earlier: | alpm_initialize path checks/normalisation, dbext, architectures, siglevels, ignore/noupgrade/noextract lists + match: difftest; callbacks, lock, cachedirs, hookdirs, gpgdir, logfile, sandbox, downloads pending |
 | `lib/libalpm/alpm.c` | 132 | - | |
 | `lib/libalpm/signing.c` | 1201 | `alpm-core::signing` | decode_signature, checksig (.sig and base64), check_pgp_helper, process_siglist, key_in_keychain, key_import (keyring/question part; WKD/keyserver failure only), pkg/db_check_pgp_signature, extract_keyid: difftest vs gpgme-backed C on throwaway keyrings (all status/validity pairs, bad/garbage/truncated/armored sigs), results, rc, pm_errno, questions, logs; gpg argv vs gpgme's; extract_keyid fuzz |
 | `lib/libalpm/dload.c` | 1474 | `alpm-core::dload` (partial) | _alpm_download (reqwest, fetchcb path), resume/mirrors/cache servers/server error counting/.sig/max size/time condition, alpm_fetch_pkgurl, download dir + filecache helpers: difftest vs C on scripted 127.0.0.1 HTTP servers and file://; sandbox child behind `Sandbox`: unit tests |
@@ -205,12 +213,12 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `lib/libalpm/graph.c` | 38 | `alpm-core::graph` | via sortbydeps |
 | `lib/libalpm/conflict.c` | 686 | `alpm-core::conflict` | innerconflicts, outerconflicts, checkconflicts, db_find_fileconflicts (both checks, skip_remove, progress): difftest on fixture roots (files, dirs, symlinks) and local dbs, 2M fuzz |
 | `lib/libalpm/diskspace.c` | 514 | `alpm-core::diskspace` | check_diskspace, check_downloadspace (+ mount list, fsinfo, match, sizes, check_mountpoint): difftest on fixture roots and root "/" (every log/progress line, f_bavail pinned from the C trace); getmntent parser vs glibc |
-| `lib/libalpm/trans.c` | 452 | - | |
+| `lib/libalpm/trans.c` | 452 | `alpm-core::trans` (partial) | _alpm_runscriptlet + grep: difftest under fakechroot |
 | `lib/libalpm/sync.c` | 1360 | - | |
 | `lib/libalpm/add.c` | 718 | - | |
 | `lib/libalpm/remove.c` | 798 | - | |
-| `lib/libalpm/hook.c` | 679 | - | |
-| `lib/libalpm/sandbox*.c` | 608 | - | |
+| `lib/libalpm/hook.c` | 679 | `alpm-core::hook` | parse/validate, dir scan and masking, triggers, Depends, AbortOnFail, NeedsTargets, run: difftest fuzz on root "/" and runs under fakechroot |
+| `lib/libalpm/sandbox*.c` | 608 | `alpm-core::{sandbox,sandbox_fs,sandbox_syscalls}` | restrict_writes_to (8 variants incl. injected landlock failures), syscalls_filter (list parsed from the C, raw syscall probes): errno per probe in spawned children vs C; callback pipe writer + parent loop: byte-stream fuzz; helper download vs C _alpm_download; uid switch: unit tests (root) |
 | regcomp/regexec (glibc, used by db.c, remove.c, files.c) | - | `alpm-core::regex` | difftest fuzz vs glibc (C.UTF-8, 4 flag sets) on agreeing characters; classes/towupper via std, divergence per class counted |
 | `src/common/*.c` | 445 | `pacman-common::{util_common,ini}` | all of util-common.c and ini.c: difftest fuzz (safe_fgets on fmemopen + real file, llstat on /tmp tree, ini via recorded callback) |
 | `src/pacman/*.c` | 10124 | - | excl. symlinks into `src/common` |
@@ -218,11 +226,11 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `src/pacman/check.c` (in the above) | 435 | `pacman-cli::check` | check_pkg_fast/full: difftest on fixture roots and dbs (all 22 message kinds), mtree readers compared per fixture and on 804 real mtrees |
 | `src/pacman/query.c` (in the above) | 521 | `pacman-cli::query` | every -Q mode, filter and message: difftest vs C pacman_query on fixture roots |
 | `src/pacman/deptest.c` (in the above) | 57 | `pacman-cli::deptest` | difftest vs C pacman_deptest |
-| `src/pacman/sync.c` (in the above) | 978 | `pacman-cli::sync` (partial) | sync_info, sync_list, sync_group, dispatch, check_syncdbs: difftest vs C pacman_sync (4 db states, warm caches); -Sc, -Sy, -Ss, sync_trans pending |
-| `src/pacman/files.c` (in the above) | 341 | `pacman-cli::files` | -F, -Fx, -Fq, --machinereadable, -Fl: difftest vs C pacman_files on .files dbs; -Fy pending |
+| `src/pacman/sync.c` (in the above) | 978 | `pacman-cli::sync` (partial) | sync_info, sync_list, sync_group, dispatch, check_syncdbs: difftest vs C pacman_sync (4 db states, warm caches); -Sy/-Syy: difftest vs C pacman_sync with the frontend callbacks (no bars); -Sc, -Ss, sync_trans pending |
+| `src/pacman/files.c` (in the above) | 341 | `pacman-cli::files` | -F, -Fx, -Fq, --machinereadable, -Fl: difftest vs C pacman_files on .files dbs; -Fy: same, with the frontend callbacks |
 | `src/pacman/package.c` (in the above) | 587 | `pacman-cli::package` | dump_pkg_full (all origins, -i/-ii), dump_pkg_backups, dump_pkg_files, print_installed, print_groups, dump_pkg_search: difftest on a real C handle with refilled db caches and real files under the root, strftime %c vs `format_date_utc` fuzz + localtime limits; changelog and gpgme results: unit tests |
 | `src/pacman/conf.c` (in the above) | 1468 | `pacman-cli::conf` (partial) | config model, parseconfigfile, setdefaults (include, siglevel, cleanmethod, usage, repeating options, $repo/$arch, sysroot), glob(3) subset: difftest on random config trees (return, stderr, whole config_t), glob vs libc; setup_libalpm, register_repo, XferCommand download pending |
-| `src/pacman/util.c` (in the above) | 1981 | `pacman-cli::util` (partial) | indentprint, strreplace, string_display, list_display(_linebreak), signature_display, humanize_size, arg_to_string, console cursor helpers: difftest fuzz; glibc mbstowcs: difftest; wcwidth via unicode-width, divergence per class counted, display difftests on agreeing characters |
+| `src/pacman/util.c` (in the above) | 1981 | `pacman-cli::util` (partial: all but trans_init/release, sync_syncdbs, tcflush) | display_targets + table engine, print_packages (--print-format), optdepends lists, select/multiselect/yesno prompts (stdin via fmemopen), rmrf: difftest; earlier helpers: | indentprint, strreplace, string_display, list_display(_linebreak), signature_display, humanize_size, arg_to_string, console cursor helpers: difftest fuzz; glibc mbstowcs: difftest; wcwidth via unicode-width, divergence per class counted, display difftests on agreeing characters |
 | `src/util/testpkg.c` | 103 | - | |
 
 Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
@@ -293,8 +301,11 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
   instead of the C's process-wide `umask(0)`. `copyfile` keeps the C
   behaviour: dest created even if src fails, no truncation, read errors
   count as success. `read_file` on an empty file is `System` like the C.
-- `be_local`/`be_sync` read desc/files with `alpm-db`/`alpm-repo-db` and
-  map the typed values onto `Package`; relations go through their
+- `be_local`/`be_sync` read desc with `parse_libalpm` (sections in file
+  order, folded key by key like the C: repeated values overwrite, lists
+  append, missing sections leave fields unset) and files with
+  `from_str_libalpm`; sync entries are joined with a blank line. Values
+  map onto `Package`, desc/url through `as_original_str`; relations go through their
   alpm-types string form into `dep_from_string`. Lazy loading keeps the C
   infolevel bits; a parse error empties the section and sets the sticky
   `INFRQ_ERROR` (the C keeps lines read before the error).
@@ -302,6 +313,10 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
   `HAVE_STRUCT_DIRENT_D_TYPE`, so symlinks to dirs count), `add_sorted`
   for append + msort. `ALPM_DB_VERSION` parsed with fscanf `%zu`
   semantics (alpm-db does not handle that file).
+- `be_sync::db_update` takes positions in `syncdbs()`, returns
+  `Ok(true)` (C 0), `Ok(false)` (1, all up to date) or `Err` (-1). After
+  several failed validations the errno is the last failure's, where the
+  C can report `ALPM_ERR_OK` (UPSTREAM.md).
 - `be_sync`: compression picked by magic bytes, desc + old split
   `depends` concatenated before parsing, any parse failure makes the db
   `DB_INVALID` like the C. Only the "no verification" validation path.
@@ -349,10 +364,12 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
   backrefs to repeated groups; approximated: backrefs + anchors without
   REG_NEWLINE, the non-NOSUB remove.c use, >2^20 instructions -> Space.
   Classes and towupper come from std `char` (the toolchain's Unicode).
-- `be_local` mtree via alpm-mtree: libarchive yields entries in file order
-  and stops at the first warning, alpm-mtree parses the whole file, sorts
-  by path and rejects it whole; `-Qkk` on a rejected mtree checks 0 files
-  (C: the entries before the bad line). Output goes into
+- `be_local`/`be_package` mtree via `alpm_mtree::libarchive` (patch 0404+):
+  file order, duplicates merged, libarchive defaults; any filter by
+  `from_magic`. An entry with a warning: the C walk stops there (UPSTREAM
+  bug), the port keeps checking; an mtree without sha256 is "information
+  not available" (C: mismatch on a zero digest). `url = ` is `None` here,
+  `""` in the C (both display None). Output goes into
   `Output{stdout,stderr}`.
 - `getopt` keeps glibc 2.44 semantics (optopt starts at 0, nextchar as an
   argv position). `parseargs` returns `Err(exit status)` where the C exits.
@@ -385,6 +402,21 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
   HTTP/1.1, no ftp://, rustls with the platform verifier, reqwest's proxy
   env handling, reqwest's normalised URL after a redirect, Last-Modified
   in RFC 1123/850/asctime forms only.
+- `hook`/`run_chroot`: chroot(8) (`/usr/bin/chroot`) instead of the C
+  child's chroot()+exec, so argv[0] is cmd (`/sbin/ldconfig` for
+  ldconfig) and a slash-less cmd gets `./`; root "/" spawns directly;
+  chroot(8)'s own failure line is reworded to the C child's text (English
+  messages only). umask(0022) in the child is not set (no safe way in the
+  child); only SIGPIPE and the signal mask are reset. Output lines split
+  like the C (2046-byte cut, NUL cuts, unterminated last line delivered
+  twice as in the C).
+- `sandbox`: the download child is a re-exec of the binary
+  (`/proc/self/exe --alpm-sandbox-helper`) with `CommandExt::uid`/`gid`;
+  the pacman binary's `main` must start with
+  `if let Some(c) = alpm_core::sandbox::helper_entry() { exit(c) }`.
+  Request over stdin, callbacks over stdout in the C pipe format.
+  no_new_privs comes before landlock (needed unprivileged); getpwnam via
+  `getent passwd`; parent sends SIGKILL after the loop (C: SIGTERM).
 
 Follow-ups raised by port units:
 
@@ -403,23 +435,33 @@ Follow-ups raised by port units:
 | fixture writer copied into `difftest/tests/deps_resolve.rs`, move to `fixtures.rs` | pkg follow-ups | done |
 | db search (`_alpm_db_search`) on the ported regex | db | done |
 | `LIB_VERSION` next to `PACKAGE_VERSION`, `needs_root` into util.rs, `TRANS_FLAG_*` with trans.c | args | todo |
-| one compression sniff for `be_sync` + `be_package`, one `check_meta` (be_sync, be_package, package), test ustar builders onto `fixtures::ustar` | be_package | todo |
+| one `check_meta` (be_sync, be_package, package), test ustar builders onto `fixtures::ustar` | be_package | todo (sniff done via 0552) |
 | precedent cleanup: base64, time, unicode-width, drop split_backup/parse_xdata, ALPM vs C difftest for vercmp/relations | audit | done |
 | regex class/towupper tables -> std `char` methods, divergence counted like wcwidth | audit | done |
-| handle callbacks + log.c: one `Log`/`Events`/`Progress`/`Questions` set in alpm-core (today per unit in deps, conflict, diskspace), wired into `Handle` with logcb/eventcb/progresscb/questioncb, overwrite_files, assumeinstalled, trans flags | deps, conflict, diskspace | todo |
-| shared helpers into util: `llstat` (copies in conflict, diskspace), `strerror(io::Error)` (4 copies), frontend `pm_printf`/`Output`/`check_syncdbs` (check, query, sync), `getcols` | conflict, diskspace, query, sync | todo |
-| `Handle` split borrow of local + sync caches (resolver and displays clone caches today) | deps, sync | todo |
+| handle callbacks + log.c: one `Callbacks` model wired into `Handle` (deps, conflict, diskspace, dload, signing, hooks, scriptlets, sandbox) | deps, conflict, diskspace | done |
+| wire `HelperSandbox::for_handle` into `Handle::fetch_pkgurl` once `handle->user` (getuid) is ported | integrate | todo |
+| dload difftest umask race (C umask(0) process-wide vs parallel tests) | integrate | in progress (integration pass 2) |
+| rustix `process`/`termios` features: handle->user, getcols tty width, flush_term_input | handle, cliutil2 | todo |
+| local time offset for log stamps (UTC today) | handle | todo |
+| shared helpers into util: `llstat`, `strerror`, `PATH_MAX` once; frontend `pm_printf`/`Output`/`check_syncdbs`/`getcols` | conflict, diskspace, query, sync | done |
+| `Handle` split borrow of local + sync caches (resolver and displays clone caches today) | deps, sync | in progress (integration) |
+| XferCommand via a sandbox helper exec mode (`alpm_sandbox_setup_child` from conf.c) | sandbox | todo |
+| conf difftest abort under long TMPDIR | sandbox, dbwrite reports | done: C one-byte heap overflow in `escape_chars` (UPSTREAM.md), fixture avoids it |
 | `alpm_extract_keyid` wired into -Sii/-Qii `sig_keys` | sync | todo (ported in signing) |
 | `Handle` owns `signing::Keyring` (gpgdir, known_keys) and implements `SigCallbacks`; `Db::register_sync` calls `be_sync::sync_db_validate` | signing | with the callbacks unit |
 | `alpm_sync_get_new_version` (lib sync.c) out of query.rs into alpm-core | query | with sync.c |
 | `Handle` owns dload `DownloadState`/`Settings`/cachedirs; `filecache_*` into util | dload | with the callbacks unit |
-| `alpm_db_update` (be_sync download + validate) | dload | after the callbacks unit |
+| `alpm_db_update` (be_sync download + validate) | dload | done |
+| drop `SyncCallbacks` and the `replace_callbacks` swap in sync.rs for `callback.rs` (progress bars, "is up to date", "failed to download") | dbupdate | with the frontend unit |
+| sandbox in `be_sync::downloader` (like `fetch_pkgurl`) | dbupdate | todo |
+| `umask(0022)` around `alpm_db_update` (rustix process) | dbupdate | todo |
 | difftest: `read_deps` pub(crate) (drops conflict's `CDepend`), `SyncWorld` into fixtures.rs | conflict, sync | todo |
-| be_sync: a non-archive db must fail at open (DB_OPEN, db invalid) like libarchive, not LIBARCHIVE | query | with the mtree/compress patch unit |
+| be_sync: a non-archive db must fail at open (DB_OPEN, db invalid) like libarchive, not LIBARCHIVE | query | done |
 | `%DATA%` in repo dbs, gzip multi-member, `Packager` default, backup `(null)` | db readers | ALPM side, see `UPSTREAM.md` |
 
-Divergences below are to be corrected in vendored ALPM
-(`vendor/patches/`, METHODOLOGY.md); none patched yet.
+Divergences below are corrected in vendored ALPM where listed in "ALPM
+patches for parity" (`vendor/patches/` 0101-0109, 0201-0207, 0301-0305);
+rows still here are the remaining ones.
 
 ## Divergences from pacman (precedent crates)
 

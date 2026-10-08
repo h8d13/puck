@@ -104,11 +104,20 @@ binary. A milestone counts as reached only when its gate passes (CLI
 parity against C pacman, then pactest). Units are picked in milestone
 order.
 
+## Unit workflow
+
+- `scripts/unit-worktree.sh <name>` (clean tree, so commit first) makes
+  `../ratman-worktrees/<name>` on branch `unit/<name>`: submodules cloned
+  `--shared`, the C reference build shared via `PACMAN_BUILD`, `TMPDIR`
+  inside the worktree (`.cargo/config.toml`). Nothing goes to /tmp: tests
+  use `std::env::temp_dir()`, logs go to `.tmp/`.
+- The unit commits on its branch; it is merged with `git merge`, then
+  `scripts/unit-worktree.sh --remove <name>`.
+
 ## Done means
 
-- nothing left behind in /tmp: fixtures, logs and probe programs created
-  for the unit are removed (corpora meant to be reused are named in the
-  report)
+- committed on the unit branch, the worktree's `.tmp/` emptied (corpora
+  meant to be reused are named in the report)
 - `cargo test --release` green for the whole workspace
 - `scripts/check-separation.sh` passes (no test modules, C access or
   difftest in port crates)

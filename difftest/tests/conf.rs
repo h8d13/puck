@@ -23,10 +23,18 @@ struct Tree {
 	root: PathBuf,
 }
 
+// malloc(n) of escape_chars for this sysroot, n or n + 1 (trailing '/')
+// at 16k+8 leaves no slack for the C's extra nul on glibc x86_64/aarch64
+fn escape_size_unsafe(path: &std::path::Path) -> bool {
+	let s = path.as_os_str().as_encoded_bytes();
+	let n = s.len() + s.iter().filter(|c| b"\\*?[".contains(c)).count();
+	n % 16 == 8 || (n + 1) % 16 == 8
+}
+
 impl Tree {
 	// glob characters in the name exercise the sysroot escaping
 	fn new(tag: &str, odd: bool) -> Tree {
-		let name = if odd {
+		let mut name = if odd {
 			format!(
 				"pacman-conf-dt-{}-{tag}-[x]*?\\",
 				std::process::id()
@@ -34,6 +42,15 @@ impl Tree {
 		} else {
 			format!("pacman-conf-dt-{}-{tag}", std::process::id())
 		};
+		// C precondition (UPSTREAM.md): escape_chars writes its nul one
+		// byte past malloc(len + escaped). keep that size (with and
+		// without a trailing '/') off 16k+8, where glibc's chunk has no
+		// slack, so the stray byte stays inside the allocation
+		while odd && escape_size_unsafe(
+			&std::env::temp_dir().join(&name),
+		) {
+			name.push('p');
+		}
 		let root = std::env::temp_dir().join(name);
 		if root.exists() {
 			fs::remove_dir_all(&root).unwrap();

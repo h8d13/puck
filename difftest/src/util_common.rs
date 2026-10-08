@@ -26,7 +26,7 @@ unsafe extern "C" {
 		mode: *const c_char,
 	) -> *mut File;
 	fn fopen(path: *const c_char, mode: *const c_char) -> *mut File;
-	fn ftell(f: *mut File) -> c_long;
+	pub(crate) fn ftell(f: *mut File) -> c_long;
 	fn __errno_location() -> *mut c_int;
 }
 

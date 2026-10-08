@@ -1,0 +1,85 @@
+diff -ruN '--exclude=VENDORED' a/alpm-mtree/src/libarchive.rs b/alpm-mtree/src/libarchive.rs
+--- a/alpm-mtree/src/libarchive.rs
++++ b/alpm-mtree/src/libarchive.rs
+@@ -12,6 +12,7 @@
+ //! [ALPM-MTREE]: https://alpm.archlinux.page/specifications/ALPM-MTREE.5.html
+ 
+ use std::{
++    collections::HashMap,
+     ffi::OsString,
+     fmt::{Display, Formatter},
+     io::{BufReader, Read},
+@@ -571,6 +572,8 @@
+ /// Parses ALPM-MTREE data like libarchive's mtree reader.
+ ///
+ /// Returns the entries in the order of their lines.
++/// Like libarchive, the lines of a path that is listed more than once make one entry at its
++/// first line, with the keywords of later lines replacing earlier ones.
+ ///
+ /// # Examples
+ ///
+@@ -601,18 +604,33 @@
+ ///
+ /// [ALPM-MTREE]: https://alpm.archlinux.page/specifications/ALPM-MTREE.5.html
+ pub fn parse(data: &[u8]) -> Result<Vec<Entry>, Error> {
++    let lines = path_lines(data)?;
++    let paths: Vec<Vec<u8>> = lines.iter().map(|line| decode(&line.raw)).collect();
++    // The lines of each path, in file order.
++    let mut lines_of: HashMap<&[u8], Vec<usize>> = HashMap::new();
++    for (i, path) in paths.iter().enumerate() {
++        lines_of.entry(path).or_default().push(i);
++    }
++    let mut read = vec![false; lines.len()];
+     let mut entries = Vec::new();
+ 
+-    for line in path_lines(data)? {
++    for (i, line) in lines.iter().enumerate() {
++        if read[i] {
++            continue;
++        }
+         // A path with a `/` (or `.`) is a full path, all others are relative to the
+         // directory of the previous lines.
+         if line.raw != b"." && !line.raw.contains(&b'/') {
+             return Err(line_error(line.number, t!("libarchive-relative-path")));
+         }
+-        let mut entry = Entry::new(decode(&line.raw));
++        let mut entry = Entry::new(paths[i].clone());
+         let mut seen = Seen::default();
+-        read_line(&mut entry, &mut seen, &line)?;
+-        ensure_required(&entry, &seen, &line)?;
++        // All lines of a path make one entry at its first line, later keywords win.
++        for &j in &lines_of[paths[i].as_slice()] {
++            read[j] = true;
++            read_line(&mut entry, &mut seen, &lines[j])?;
++        }
++        ensure_required(&entry, &seen, line)?;
+         entries.push(entry);
+     }
+ 
+@@ -723,6 +741,26 @@
+         Ok(())
+     }
+ 
++    /// Ensures that lines of the same path make one entry, where later keywords win.
++    #[test]
++    fn duplicate_paths() -> TestResult {
++        let data = mtree(&format!(
++            "{}{}./a time=5.0\n./\\141 uid=3 type=dir\n",
++            file("./a"),
++            file("./b")
++        ));
++        let entries = parse(data.as_bytes())?;
++        assert_eq!(entries.len(), 2);
++        let a = &entries[0];
++        assert_eq!(a.path, PathBuf::from("./a"));
++        assert_eq!(
++            (a.entry_type, a.time, a.uid),
++            (EntryType::Dir, Some((5, 0)), 3)
++        );
++        assert!(a.sha256_digest.is_some());
++        Ok(())
++    }
++
+     /// Ensures that `/set` takes any keyword, and `/unset all` removes all of them.
+     #[test]
+     fn set_and_unset() -> TestResult {

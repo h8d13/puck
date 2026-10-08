@@ -23,10 +23,7 @@ use crate::callbacks::{Callbacks, Progress};
 use crate::deps::{Depend, depcmp};
 use crate::package::{Package, PkgFrom, has_name, pkg_cmp};
 use crate::pkghash::PkgHash;
-use crate::util::{fnmatch_patterns, llstat, until_nul};
-
-// limits.h on linux, the snprintf buffers of the C
-const PATH_MAX: usize = 4096;
+use crate::util::{PATH_MAX, fnmatch_patterns, llstat, until_nul};
 
 // alpm_conflict_t. the C dups both packages and points reason into the
 // conflicts list of the package that declares it, cloned here

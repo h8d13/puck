@@ -1,0 +1,54 @@
+diff -ruN '--exclude=VENDORED' a/alpm-db/src/desc/schema.rs b/alpm-db/src/desc/schema.rs
+--- a/alpm-db/src/desc/schema.rs
++++ b/alpm-db/src/desc/schema.rs
+@@ -99,8 +99,11 @@
+     ///
+     /// The parser uses a simple heuristic:
+     ///
+-    /// - v1 → no `%XDATA%` section present
+-    /// - v2 → `%XDATA%` section present
++    /// - v1 → no `%XDATA%` section header line present
++    /// - v2 → `%XDATA%` section header line present
++    ///
++    /// Only a line holding the section header counts, `%XDATA%` in a value (e.g. in `%DESC%`)
++    /// does not.
+     ///
+     /// This approach avoids relying on explicit version metadata, as the DB desc
+     /// format itself is not self-describing.
+@@ -150,8 +153,9 @@
+     /// [alpm-db-desc]: https://alpm.archlinux.page/specifications/alpm-db-desc.5.html
+     fn derive_from_str(s: &str) -> Result<DbDescSchema, Error> {
+         // Instead of an explicit "format" key, we use a heuristic:
+-        // presence of `%XDATA%` implies version 2.
+-        if s.contains("%XDATA%") {
++        // presence of an `%XDATA%` section header line implies version 2.
++        // The header may be indented, as for the section parser.
++        if s.lines().any(|line| line.trim_start() == "%XDATA%") {
+             Ok(DbDescSchema::V2(SchemaVersion::new(Version::new(2, 0, 0))))
+         } else {
+             Ok(DbDescSchema::V1(SchemaVersion::new(Version::new(1, 0, 0))))
+@@ -214,3 +218,24 @@
+         )
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use rstest::rstest;
++    use testresult::TestResult;
++
++    use super::*;
++
++    /// Ensures that only an `%XDATA%` section header line selects version 2.
++    #[rstest]
++    #[case::header("%NAME%\nfoo\n\n%XDATA%\npkgtype=pkg\n", 2)]
++    #[case::indented_header("%NAME%\nfoo\n\n %XDATA%\npkgtype=pkg\n", 2)]
++    #[case::crlf_header("%NAME%\r\nfoo\r\n\r\n%XDATA%\r\npkgtype=pkg\r\n", 2)]
++    #[case::in_description("%NAME%\nfoo\n\n%DESC%\nsee %XDATA%\n", 1)]
++    #[case::no_header("%NAME%\nfoo\n", 1)]
++    fn derive_from_str_by_header_line(#[case] input: &str, #[case] major: u64) -> TestResult {
++        let schema = DbDescSchema::derive_from_str(input)?;
++        assert_eq!(schema.inner().inner().major, major);
++        Ok(())
++    }
++}

@@ -13,9 +13,10 @@
 // gets the same through its Term.
 use std::collections::VecDeque;
 use std::ffi::{CString, c_char, c_int, c_long, c_void};
+use std::io::Cursor;
 use std::ptr;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU16, Ordering};
 
 use alpm_core::callbacks::{
 	DownloadEvent, Event, LogLevel, Progress, Question,
@@ -103,53 +104,25 @@ pub unsafe extern "C" fn clock_gettime(clk: c_int, ts: *mut Timespec) -> c_int {
 	0
 }
 
-// the Rust side's process: buffers, the input of the call, the same
-// columns and fake clock as the C
-pub struct CapTerm {
-	pub output: Output,
-	input: VecDeque<u8>,
-	cols: u16,
+// columns getcols reports to both sides for the call
+static COLS: AtomicU16 = AtomicU16::new(0);
+
+fn cols() -> u16 {
+	COLS.load(Ordering::SeqCst)
 }
 
-impl Term for CapTerm {
-	fn out(&mut self, s: &[u8]) {
-		self.output.stdout.extend_from_slice(s);
-	}
+fn fake_ms() -> i64 {
+	FAKE_MS.load(Ordering::SeqCst)
+}
 
-	fn err(&mut self, s: &[u8]) {
-		self.output.stderr.extend_from_slice(s);
-	}
-
-	fn read_line(&mut self, size: usize) -> Option<Vec<u8>> {
-		let max = size.checked_sub(1)?;
-		let mut line = Vec::new();
-		while line.len() < max {
-			let Some(c) = self.input.pop_front() else {
-				break;
-			};
-			line.push(c);
-			if c == b'\n' {
-				break;
-			}
-		}
-		(!line.is_empty() || max == 0).then_some(line)
-	}
-
-	// fmemopen streams and memstreams have no fd
-	fn stdin_is_tty(&mut self) -> bool {
-		false
-	}
-
-	fn stdout_is_tty(&mut self) -> bool {
-		false
-	}
-
-	fn cols(&mut self) -> u16 {
-		self.cols
-	}
-
-	fn now_ms(&mut self) -> i64 {
-		FAKE_MS.load(Ordering::SeqCst)
+// the Rust side's process: the call's input, the same columns and fake
+// clock as the C. fmemopen streams and memstreams have no fd: no
+// terminal
+fn cap_term() -> Term<Cursor<Vec<u8>>> {
+	Term {
+		cols,
+		now_ms: fake_ms,
+		..Term::new(Cursor::new(Vec::new()), false, false)
 	}
 }
 
@@ -158,12 +131,12 @@ impl Term for CapTerm {
 pub struct Dbs(VecDeque<Vec<u8>>);
 
 impl Lookup for Dbs {
-	fn db_name(&mut self, _pkg: &Package) -> Vec<u8> {
-		self.0.pop_front().unwrap_or_default()
+	fn db_name(&mut self, _pkg: &Package) -> Option<Vec<u8>> {
+		Some(self.0.pop_front().unwrap_or_default())
 	}
 }
 
-type World = Frontend<CapTerm, Dbs>;
+type World = Frontend<Cursor<Vec<u8>>, Dbs>;
 
 static WORLD: Mutex<Option<World>> = Mutex::new(None);
 
@@ -668,12 +641,7 @@ pub fn cb_both(setup: &CbSetup, mut call: Call<'_>) -> (CbRun, CbRun) {
 	let _guard = FRONTEND.lock().unwrap_or_else(|e| e.into_inner());
 	let mut world = WORLD.lock().unwrap_or_else(|e| e.into_inner());
 	let w = world.get_or_insert_with(|| {
-		let term = CapTerm {
-			output: Output::default(),
-			input: VecDeque::new(),
-			cols: 0,
-		};
-		Frontend::with_lookup(Config::new(), term, Dbs::default())
+		Frontend::with_lookup(Config::new(), cap_term(), Dbs::default())
 	});
 	let cs = &setup.config.colstr;
 	let colstr = [
@@ -686,6 +654,7 @@ pub fn cb_both(setup: &CbSetup, mut call: Call<'_>) -> (CbRun, CbRun) {
 		_ => 0,
 	};
 	FAKE_MS.store(setup.now_ms, Ordering::SeqCst);
+	COLS.store(setup.cols, Ordering::SeqCst);
 	let mut k = Keep::default();
 	let (mut obuf, mut osize) = (ptr::null_mut(), 0usize);
 	let (mut ebuf, mut esize) = (ptr::null_mut(), 0usize);
@@ -742,12 +711,11 @@ pub fn cb_both(setup: &CbSetup, mut call: Call<'_>) -> (CbRun, CbRun) {
 		q.set_answer(answer0);
 	}
 	w.config = setup.config.clone();
-	w.term.output = Output::default();
-	w.term.input = setup.input.iter().copied().collect();
-	w.term.cols = setup.cols;
+	w.out = Output::default();
+	w.term.stdin = Cursor::new(setup.input.clone());
 	w.lookup = Dbs(setup.dbs.iter().cloned().collect());
 	let answer = call_rust(w, &mut call);
-	let out = std::mem::take(&mut w.term.output);
+	let out = std::mem::take(&mut w.out);
 	let r = CbRun {
 		stdout: out.stdout,
 		stderr: out.stderr,

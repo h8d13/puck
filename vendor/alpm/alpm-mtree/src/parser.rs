@@ -96,7 +96,7 @@ pub enum PathProperty<'a> {
 }
 
 /// All allowed kinds of path types.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PathType {
     /// A directory.
     Dir,
@@ -191,7 +191,7 @@ fn timestamp(input: &mut &str) -> ModalResult<i64> {
 ///
 /// Should be between 3-5 octal numbers **without** a `0o` prefix.
 fn mode<'s>(input: &mut &'s str) -> ModalResult<&'s str> {
-    cut_err(take_while(3..5, AsChar::is_oct_digit))
+    cut_err(take_while(3..=5, AsChar::is_oct_digit))
         .context(StrContext::Label("file mode"))
         .context(StrContext::Expected(StrContextValue::Description(
             "octal string of length 3-5.",
@@ -376,4 +376,48 @@ pub fn mtree<'s>(input: &mut &'s str) -> ModalResult<Vec<Statement<'s>>> {
         repeat_till(0.., statement, eof).parse_next(input)?;
 
     Ok(statements)
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+    use winnow::Parser;
+
+    use super::*;
+
+    /// Ensures that the path type of a `/set` line can be compared.
+    #[rstest]
+    #[case("/set type=dir\n", PathType::Dir)]
+    #[case("/set type=file\n", PathType::File)]
+    #[case("/set type=link\n", PathType::Link)]
+    fn set_path_type(#[case] input: &str, #[case] expected: PathType) {
+        let statements = mtree.parse(input).unwrap();
+        let [Statement::Set(properties)] = statements.as_slice() else {
+            panic!("expected one /set statement, got {statements:?}");
+        };
+        let [SetProperty::Type(path_type)] = properties.as_slice() else {
+            panic!("expected one type property, got {properties:?}");
+        };
+        assert_eq!(*path_type, expected);
+    }
+
+    /// Ensures that a file mode of 3 to 5 octal digits is accepted.
+    #[rstest]
+    #[case("644")]
+    #[case("4755")]
+    #[case("04755")]
+    fn mode_digits(#[case] digits: &str) {
+        let input = format!("/set mode={digits}\n");
+        let statements = mtree.parse(input.as_str()).unwrap();
+        let [Statement::Set(properties)] = statements.as_slice() else {
+            panic!("expected one /set statement, got {statements:?}");
+        };
+        assert!(matches!(properties.as_slice(), [SetProperty::Mode(m)] if *m == digits));
+    }
+
+    /// Ensures that a file mode of more than 5 octal digits is rejected.
+    #[test]
+    fn mode_too_long() {
+        assert!(mtree.parse("/set mode=100644\n").is_err());
+    }
 }

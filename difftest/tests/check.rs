@@ -5,8 +5,9 @@
 // retargeted, unreadable, parents missing or blocked), checked by C
 // check_pkg_fast/check_pkg_full on a real handle and by the port on the
 // same fixture: stdout, stderr and return compared. the C mtree reader's
-// entries are compared with alpm-mtree's on every fixture, odd inputs
-// pin the divergences, the real local db's mtree files give counts
+// entries are compared with alpm-mtree's libarchive reader on every
+// fixture, on odd inputs and on fuzzed mtree text; the real local db's
+// mtree files give counts
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
@@ -284,16 +285,25 @@ fn assert_checks(
 	}
 }
 
-// mode_t of the three types
+// archive_entry_filetype of a type
 fn filetype(k: MtreeType) -> u32 {
 	match k {
+		MtreeType::Block => 0o060000,
+		MtreeType::Char => 0o020000,
 		MtreeType::Dir => 0o040000,
+		MtreeType::Fifo => 0o010000,
 		MtreeType::File => 0o100000,
 		MtreeType::Link => 0o120000,
 	}
 }
 
-// one C entry against one alpm-mtree entry: what check.c reads
+// a digest as libarchive keeps it: unset reads as zeros
+fn digest(d: Option<&[u8]>) -> Option<Vec<u8>> {
+	d.filter(|d| d.iter().any(|&b| b != 0)).map(<[u8]>::to_vec)
+}
+
+// one C entry against one alpm-mtree entry: what check.c and
+// build_filelist_from_mtree read
 fn entry_diff(c: &CMtreeEntry, r: &MtreeEntry) -> Vec<&'static str> {
 	let mut d = Vec::new();
 	if c.path != r.path {
@@ -305,34 +315,34 @@ fn entry_diff(c: &CMtreeEntry, r: &MtreeEntry) -> Vec<&'static str> {
 	if c.mode_perm != r.mode {
 		d.push("mode");
 	}
-	if c.uid != i64::from(r.uid) || c.gid != i64::from(r.gid) {
+	if c.uid != r.uid || c.gid != r.gid {
 		d.push("owner");
 	}
-	if c.mtime.map(|t| t.0) != Some(r.mtime) {
+	// archive_entry_mtime is 0 when unset
+	if c.mtime.map_or(0, |t| t.0) != r.mtime {
 		d.push("mtime");
 	}
-	if r.kind == MtreeType::File {
-		if c.size != i64::try_from(r.size).ok() {
-			d.push("size");
-		}
-		let sha = r.sha256.as_ref().map(|s| s.inner().to_vec());
-		if c.sha256.map(|s| s.to_vec()) != sha {
-			d.push("sha256");
-		}
-		let md5 = r.md5.as_ref().map(|s| s.inner().to_vec());
-		// unset md5 reads as zeros in libarchive
-		let cmd5 = c.md5.filter(|m| m != &[0; 16]).map(|m| m.to_vec());
-		if cmd5 != md5 {
-			d.push("md5");
-		}
+	if c.size != i64::try_from(r.size).ok() {
+		d.push("size");
 	}
-	if r.kind == MtreeType::Link && c.link != r.link {
+	let sha = r.sha256.as_ref().map(|s| s.inner());
+	if digest(c.sha256.as_ref().map(|s| &s[..])) != digest(sha) {
+		d.push("sha256");
+	}
+	let md5 = r.md5.as_ref().map(|s| s.inner());
+	if digest(c.md5.as_ref().map(|s| &s[..])) != digest(md5) {
+		d.push("md5");
+	}
+	if c.link != r.link {
 		d.push("link");
 	}
 	d
 }
 
+// the C's entries against the port's up to the one the C stops at (the
+// first libarchive warns about, pacman's -Qkk ends there: UPSTREAM.md)
 fn entries_diff(c: &[CMtreeEntry], r: &[MtreeEntry]) -> Option<String> {
+	let r = &r[..r.iter().position(|e| e.warned).unwrap_or(r.len())];
 	if c.len() != r.len() {
 		return Some(format!("count C {} rust {}", c.len(), r.len()));
 	}
@@ -379,11 +389,10 @@ const MD5_A: &str = "0cc175b9c0f1b6a831c399e269772661";
 enum Read {
 	// C: alpm_pkg_mtree_open NULL; port: MtreeError::Missing/Read
 	NoMtree,
-	// C: entries before mtree_next stopped (with its value); port:
-	// entries parsed
+	// C: entries before mtree_next stopped, with its value; port: the
+	// entries before the first warned one (-1) or all (1), none for data
+	// it cannot parse (-1)
 	Entries(usize, i32),
-	// port only: alpm-mtree rejects the data
-	Rejected,
 }
 
 fn c_read(c: &Option<difftest::CMtree>) -> Read {
@@ -395,9 +404,12 @@ fn c_read(c: &Option<difftest::CMtree>) -> Read {
 
 fn r_read(r: &Result<Vec<MtreeEntry>, MtreeError>) -> Read {
 	match r {
-		Ok(v) => Read::Entries(v.len(), 1),
+		Ok(v) => match v.iter().position(|e| e.warned) {
+			Some(n) => Read::Entries(n, -1),
+			None => Read::Entries(v.len(), 1),
+		},
 		Err(MtreeError::Missing | MtreeError::Read(_)) => Read::NoMtree,
-		Err(MtreeError::Parse(_)) => Read::Rejected,
+		Err(MtreeError::Parse(_)) => Read::Entries(0, -1),
 	}
 }
 
@@ -405,17 +417,34 @@ fn line(path: &str, props: &str) -> String {
 	format!("{path} {props}\n")
 }
 
-// libarchive's mtree reader against alpm-mtree on inputs where they
-// differ (plain and gzip'd): C and port result, and whether the entries
-// both return agree (in order)
+// data compressed with one of alpm-compress's encoders
+fn compress(settings: &CompressionSettings, data: &[u8]) -> Vec<u8> {
+	let path = std::env::temp_dir().join(format!(
+		"difftest-check-c-{}-{:?}",
+		std::process::id(),
+		std::thread::current().id()
+	));
+	let file = fs::File::create(&path).unwrap();
+	let mut enc = CompressionEncoder::new(file, settings).unwrap();
+	enc.write_all(data).unwrap();
+	enc.finish().unwrap();
+	let out = fs::read(&path).unwrap();
+	fs::remove_file(&path).unwrap();
+	out
+}
+
+// libarchive's mtree reader against alpm-mtree's libarchive reader on odd
+// inputs (plain and gzip'd): what the C reads, the port reads the same
+// entries in the same order
 #[test]
-fn mtree_divergences() {
+fn mtree_odd_inputs() {
 	let set = "#mtree\n/set type=file uid=0 gid=0 mode=644\n";
 	let f = |p: &str| {
 		line(p, &format!("time=1.0 size=1 sha256digest={SHA_A}"))
 	};
-	let cases: Vec<(&str, String, Read, Read, bool)> = vec![
-		// agreeing baseline: file, dir, link, md5, CRLF, no #mtree
+	let all = |n| Read::Entries(n, 1);
+	let warned = |n| Read::Entries(n, -1);
+	let cases: Vec<(&str, String, Read)> = vec![
 		(
 			"baseline",
 			format!(
@@ -423,24 +452,18 @@ fn mtree_divergences() {
 			./c type=link link=a time=3.0 mode=777\n",
 				f("./a")
 			),
-			Read::Entries(3, 1),
-			Read::Entries(3, 1),
-			true,
+			all(3),
 		),
 		(
 			"md5",
 			format!("{set}./a time=1.0 size=1 md5digest={MD5_A} \
 			sha256digest={SHA_A}\n"),
-			Read::Entries(1, 1),
-			Read::Entries(1, 1),
-			true,
+			all(1),
 		),
 		(
 			"crlf",
 			format!("{set}{}", f("./a")).replace('\n', "\r\n"),
-			Read::Entries(1, 1),
-			Read::Entries(1, 1),
-			true,
+			all(1),
 		),
 		(
 			"no signature",
@@ -448,27 +471,17 @@ fn mtree_divergences() {
 				"/set type=file uid=0 gid=0 mode=644\n{}",
 				f("./a")
 			),
-			Read::Entries(1, 1),
-			Read::Entries(1, 1),
-			true,
+			all(1),
 		),
 		(
 			"dot entry",
 			"#mtree\n/set type=dir uid=0 gid=0 mode=755\n\
 			. time=1.0\n./a time=1.0\n"
 				.into(),
-			Read::Entries(2, 1),
-			Read::Entries(2, 1),
-			true,
+			all(2),
 		),
-		// alpm-mtree sorts by path (components): file order is lost
-		(
-			"unsorted",
-			format!("{set}{}{}", f("./b"), f("./a")),
-			Read::Entries(2, 1),
-			Read::Entries(2, 1),
-			false,
-		),
+		// file order, not path order
+		("unsorted", format!("{set}{}{}", f("./b"), f("./a")), all(2)),
 		(
 			"a-b before a/",
 			format!(
@@ -476,98 +489,61 @@ fn mtree_divergences() {
 				f("./a-b"),
 				f("./a/b")
 			),
-			Read::Entries(3, 1),
-			Read::Entries(3, 1),
-			false,
+			all(3),
 		),
-		// libarchive merges a repeated path into one entry
+		// a repeated path is one entry, later keywords win
 		(
 			"duplicate",
 			format!(
-				"{set}{}./a time=5.0 size=2 \
-			sha256digest={SHA_A}\n",
+				"{set}{}./b time=1.0\n./a time=5.0 size=2 \
+			sha256digest={SHA_A}\n./\\141 type=dir\n",
 				f("./a")
 			),
-			Read::Entries(1, 1),
-			Read::Entries(2, 1),
-			false,
+			all(2),
 		),
-		// "\#" kept verbatim by libarchive, decoded to '#' by alpm-mtree
+		("escaped #", format!("{set}{}", f("./h\\#x")), all(1)),
 		(
-			"escaped #",
-			format!("{set}{}", f("./h\\#x")),
-			Read::Entries(1, 1),
-			Read::Entries(1, 1),
-			false,
+			"escapes",
+			format!("{set}{}", f("./a\\\\b\\sc\\040\\x\\400\\0d")),
+			all(1),
 		),
-		// "size=+5": libarchive reads 0, alpm-mtree 5
+		("non-UTF-8 name", format!("{set}{}", f("./\\377")), all(1)),
 		(
 			"size sign",
 			format!("{set}./a time=1.0 size=+5 \
 			sha256digest={SHA_A}\n"),
-			Read::Entries(1, 1),
-			Read::Entries(1, 1),
-			false,
+			all(1),
 		),
-		// libarchive warns on uppercase hex digests and stops there
 		(
-			"uppercase sha256",
+			"numbers",
 			format!(
-				"{set}./a time=1.0 size=1 \
-			sha256digest={}\n",
-				SHA_A.to_uppercase()
+				"{set}./a time=-5.3 size=12x uid=-1 gid=99999999999 \
+			mode=0100644\n./b time=99999999999999999999.5 mode=7777777\n"
 			),
-			Read::Entries(0, -1),
-			Read::Entries(1, 1),
-			false,
+			all(2),
 		),
-		// an empty file is no mtree for libarchive (format bid fails)
-		(
-			"empty",
-			String::new(),
-			Read::NoMtree,
-			Read::Entries(0, 1),
-			false,
-		),
-		// read by libarchive, rejected whole by alpm-mtree
-		(
-			"no sha256",
-			format!("{set}./a time=1.0 size=1\n"),
-			Read::Entries(1, 1),
-			Read::Rejected,
-			false,
-		),
+		("empty", String::new(), Read::NoMtree),
+		("short", "./a\n".into(), Read::NoMtree),
+		("signature only", "#mtree".into(), all(0)),
+		// keywords libarchive does not require
+		("no sha256", format!("{set}./a time=1.0 size=1\n"), all(1)),
 		(
 			"no link",
 			"#mtree\n/set type=link uid=0 gid=0 mode=777\n\
 			./a time=1.0\n"
 				.into(),
-			Read::Entries(1, 1),
-			Read::Rejected,
-			false,
+			all(1),
 		),
 		(
 			"no time",
 			format!("{set}./a size=1 sha256digest={SHA_A}\n"),
-			Read::Entries(1, 1),
-			Read::Rejected,
-			false,
+			all(1),
 		),
 		(
 			"integer time",
 			format!("{set}./a time=7 size=1 \
 			sha256digest={SHA_A}\n"),
-			Read::Entries(1, 1),
-			Read::Rejected,
-			false,
-		),
-		(
-			"negative time",
-			format!("{set}./a time=-5.0 size=1 \
-			sha256digest={SHA_A}\n"),
-			Read::Entries(1, 1),
-			Read::Rejected,
-			false,
+			all(1),
 		),
 		(
 			"no mode",
@@ -575,92 +551,87 @@ fn mtree_divergences() {
 				"#mtree\n/set type=file uid=0 gid=0\n{}",
 				f("./a")
 			),
-			Read::Entries(1, 1),
-			Read::Rejected,
-			false,
+			all(1),
 		),
 		(
 			"5-digit mode",
 			format!("{set}./a time=1.0 size=1 mode=04755 \
 			sha256digest={SHA_A}\n"),
-			Read::Entries(1, 1),
-			Read::Rejected,
-			false,
+			all(1),
 		),
 		(
-			"fifo",
+			"1-digit mode",
+			format!("{set}./a time=1.0 size=1 mode=0 \
+			sha256digest={SHA_A}\n"),
+			all(1),
+		),
+		(
+			"special files",
 			format!(
-				"{set}{}./f type=fifo time=1.0\n{}",
+				"{set}{}./f type=fifo time=1.0\n./c type=char\n\
+				./b type=block\n{}",
 				f("./a"),
 				f("./z")
 			),
-			Read::Entries(3, 1),
-			Read::Rejected,
-			false,
+			all(5),
 		),
 		(
-			"nlink keyword",
-			format!("{set}./b time=1.0 size=1 nlink=1 \
-			sha256digest={SHA_A}\n"),
-			Read::Entries(1, 1),
-			Read::Rejected,
-			false,
+			"dir and link sizes",
+			format!(
+				"{set}./d type=dir size=9\n./l type=link link=a \
+				size=7\n"
+			),
+			all(2),
 		),
 		(
-			"non-UTF-8 name",
-			format!("{set}{}", f("./\\377")),
-			Read::Entries(1, 1),
-			Read::Rejected,
-			false,
-		),
-		(
-			"backslash escape",
-			format!("{set}{}", f("./a\\\\b")),
-			Read::Entries(1, 1),
-			Read::Rejected,
-			false,
+			"known keywords",
+			format!(
+				"{set}./b time=1.0 nlink=1 uname=root gname=root \
+			flags=none inode=3 cksum=1 tags=x content=y device=5 \
+			resdevice=native,1,2 nochange optional ignore \
+			sha1digest={}\n",
+				"a".repeat(40)
+			),
+			all(1),
 		),
 		(
 			"/unset all",
 			format!("{set}/unset all\n./a type=file uid=0 \
 			gid=0 mode=644 time=1.0 size=1 sha256digest={SHA_A}\n"),
-			Read::Entries(1, 1),
-			Read::Rejected,
-			false,
+			all(1),
 		),
 		(
 			"/set time",
 			"#mtree\n/set type=dir uid=0 gid=0 mode=755 \
 			time=1.0\n./a\n"
 				.into(),
-			Read::Entries(1, 1),
-			Read::Rejected,
-			false,
+			all(1),
 		),
 		(
 			"relative v1 paths",
 			"#mtree\n/set type=dir uid=0 gid=0 \
-			mode=755\nusr time=1.0\nbin time=1.0\n..\n"
+			mode=755\nusr time=1.0\nbin time=1.0\n..\nlib type=file\n\
+			./x type=file\n..\n..\nz\n"
 				.into(),
-			Read::Entries(2, 1),
-			Read::Rejected,
-			false,
+			all(5),
 		),
 		(
-			"trailing spaces",
-			format!("{set}./a time=1.0 size=1 \
-			sha256digest={SHA_A}  \n"),
-			Read::Entries(1, 1),
-			Read::Rejected,
-			false,
+			"whitespace",
+			format!("{set}  ./a\ttime=1.0 size=1 \
+			sha256digest={SHA_A}  \n\t# comment\n   \n"),
+			all(1),
 		),
 		(
-			"1-digit mode",
-			format!("{set}./a time=1.0 size=1 mode=0 \
-			sha256digest={SHA_A}\n"),
-			Read::Entries(1, 1),
-			Read::Rejected,
-			false,
+			"continuation",
+			format!(
+				"{set}./a time=1.0 \\\n size=1 sha256digest={SHA_A}\n"
+			),
+			all(1),
+		),
+		(
+			"last line without newline",
+			format!("{set}{}./b type=dir", f("./a")),
+			all(1),
 		),
 		(
 			"uid past u32",
@@ -669,12 +640,55 @@ fn mtree_divergences() {
 			gid=0 mode=644\n{}",
 				f("./a")
 			),
-			Read::Entries(1, 1),
-			Read::Rejected,
-			false,
+			all(1),
 		),
+		// libarchive warns: the C stops before that entry
+		(
+			"uppercase sha256",
+			format!(
+				"{set}{}./b time=1.0 size=1 sha256digest={}\n{}",
+				f("./a"),
+				SHA_A.to_uppercase(),
+				f("./c")
+			),
+			warned(1),
+		),
+		(
+			"short digest",
+			format!("{set}./a time=1.0 md5digest=abc\n"),
+			warned(0),
+		),
+		("unknown keyword", format!("{set}./a foo=1\n"), warned(0)),
+		("no value", format!("{set}./a time=1.0 #x\n"), warned(0)),
+		("unknown type", format!("{set}./a type=bogus\n"), warned(0)),
+		("symbolic mode", format!("{set}./a mode=u+x\n"), warned(0)),
+		("no type", "#mtree\n./a uid=0\n".into(), warned(0)),
+		(
+			"device format",
+			format!("{set}./a device=foo,1,2\n"),
+			warned(0),
+		),
+		// libarchive cannot parse the file: no entries
+		(
+			"raw UTF-8 name",
+			format!("{set}./a\u{e9} time=1.0\n"),
+			warned(0),
+		),
+		(
+			"control byte",
+			format!("{set}./a time=1.0\x7f\n"),
+			warned(0),
+		),
+		("inner CR", format!("{set}./a\r time=1.0\n"), warned(0)),
+		(
+			"unknown command",
+			format!("{set}{}/foo\n", f("./a")),
+			warned(0),
+		),
+		("/set alone", format!("{set}/set\n{}", f("./a")), warned(0)),
+		("/unset value", format!("{set}/unset uid=0\n"), warned(0)),
 	];
-	for (name, text, want_c, want_r, same) in &cases {
+	for (name, text, want) in &cases {
 		for gz in [false, true] {
 			let data = if gz && !text.is_empty() {
 				gzip(text.as_bytes())
@@ -682,49 +696,314 @@ fn mtree_divergences() {
 				text.clone().into_bytes()
 			};
 			let (c, r) = read_both(&data);
-			assert_eq!(
-				&c_read(&c),
-				want_c,
-				"{name} gz={gz} C {c:?}"
-			);
+			assert_eq!(&c_read(&c), want, "{name} gz={gz} C {c:?}");
 			assert_eq!(
 				&r_read(&r),
-				want_r,
+				want,
 				"{name} gz={gz} rust {r:?}"
 			);
-			let diff = match (&c, &r) {
-				(Some(c), Ok(r)) => entries_diff(&c.entries, r),
-				_ => Some("not both read".into()),
-			};
-			assert_eq!(
-				diff.is_none(),
-				*same,
-				"{name} gz={gz}: {diff:?}"
-			);
+			if let (Some(c), Ok(r)) = (&c, &r) {
+				let diff = entries_diff(&c.entries, r);
+				assert!(
+					diff.is_none(),
+					"{name} gz={gz}: {diff:?}"
+				);
+			}
 		}
 	}
-	// only gzip and plain are read by alpm-mtree, libarchive takes any
-	// filter: an xz'd mtree is read by the C only
+	// libarchive takes any filter, the port the ones alpm-compress knows
 	let text = format!("{set}{}", f("./a"));
-	let xz = {
-		let settings = CompressionSettings::Xz {
+	for settings in [
+		CompressionSettings::Xz {
 			compression_level: Default::default(),
-		};
-		let path = std::env::temp_dir().join(format!(
-			"difftest-check-xz-{}",
-			std::process::id()
-		));
-		let file = fs::File::create(&path).unwrap();
-		let mut enc = CompressionEncoder::new(file, &settings).unwrap();
-		enc.write_all(text.as_bytes()).unwrap();
-		enc.finish().unwrap();
-		let out = fs::read(&path).unwrap();
-		fs::remove_file(&path).unwrap();
-		out
+		},
+		CompressionSettings::Zstd {
+			compression_level: Default::default(),
+			threads: Default::default(),
+		},
+		CompressionSettings::Bzip2 {
+			compression_level: Default::default(),
+		},
+	] {
+		let data = compress(&settings, text.as_bytes());
+		let (c, r) = read_both(&data);
+		assert_eq!(c_read(&c), Read::Entries(1, 1), "{settings:?}");
+		assert_eq!(
+			r_read(&r),
+			Read::Entries(1, 1),
+			"{settings:?} {r:?}"
+		);
+	}
+	// gzip members are read one after the other
+	let parts = [format!("{set}{}", f("./a")), f("./b")];
+	let data =
+		[gzip(parts[0].as_bytes()), gzip(parts[1].as_bytes())].concat();
+	let (c, r) = read_both(&data);
+	assert_eq!(c_read(&c), Read::Entries(2, 1));
+	assert_eq!(r_read(&r), Read::Entries(2, 1), "{r:?}");
+}
+
+// a path of the fuzzed mtree text: escapes the C decodes, full ("./",
+// "/" inside, ".") or relative names, ".." now and then
+fn fuzz_path(rng: &mut Rng, seen: &[String]) -> String {
+	if !seen.is_empty() && rng.below(6) == 0 {
+		return seen[rng.below(seen.len())].clone();
+	}
+	let piece = |rng: &mut Rng| -> String {
+		match rng.below(16) {
+			0 => "\\s".into(),
+			1 => "\\#".into(),
+			2 => "\\\\".into(),
+			3 => format!("\\{:03o}", rng.below(256)),
+			4 => pick(rng, &["\\x", "\\4", "\\0", "\\01", "\\a"])
+				.into(),
+			5 => "#".into(),
+			6 => ".".into(),
+			_ => (rng.pick(b"abcz019-_+=") as char).to_string(),
+		}
 	};
-	let (c, r) = read_both(&xz);
-	assert_eq!(c_read(&c), Read::Entries(1, 1));
-	assert_eq!(r_read(&r), Read::Rejected, "{r:?}");
+	let seg = |rng: &mut Rng| -> String {
+		(0..1 + rng.below(3)).map(|_| piece(rng)).collect()
+	};
+	match rng.below(10) {
+		0 => pick(rng, &["..", ".", "./."]).into(),
+		1 | 2 => seg(rng),
+		_ => {
+			let mut p = String::from(".");
+			for _ in 0..1 + rng.below(3) {
+				p.push('/');
+				p += &seg(rng);
+			}
+			p
+		}
+	}
+}
+
+fn fuzz_number(rng: &mut Rng) -> String {
+	match rng.below(24) {
+		0 => format!("-{}", rng.below(100)),
+		1 => format!("+{}", rng.below(100)),
+		2 => "99999999999999999999".into(),
+		3 => format!("{}x", rng.below(100)),
+		4 => String::new(),
+		_ => rng.below(70000).to_string(),
+	}
+}
+
+fn fuzz_hex(rng: &mut Rng, len: usize) -> String {
+	let n = match rng.below(40) {
+		0 => len - 1,
+		1 => len + 1,
+		_ => len,
+	};
+	let alphabet: &[u8] = if rng.below(40) == 0 {
+		b"0123456789ABCDEF"
+	} else {
+		b"0123456789abcdef"
+	};
+	(0..n).map(|_| rng.pick(alphabet) as char).collect()
+}
+
+// one keyword of a path or /set line, mostly well formed
+fn fuzz_keyword(rng: &mut Rng) -> String {
+	match rng.below(24) {
+		0..=3 => format!(
+			"type={}",
+			pick(
+				rng,
+				&[
+					"dir", "file", "link", "file", "dir",
+					"file", "dir", "link", "block", "char",
+					"fifo", "bogus"
+				]
+			)
+		),
+		4 | 5 => format!("uid={}", fuzz_number(rng)),
+		6 => format!("gid={}", fuzz_number(rng)),
+		7 | 8 => match rng.below(8) {
+			0 if rng.below(4) == 0 => {
+				format!("mode={}", pick(rng, &["u+x", "", "9"]))
+			}
+			1 => format!(
+				"mode=0{:o}",
+				0o100000 | rng.below(0o7777)
+			),
+			_ => format!("mode={:o}", rng.below(0o10000)),
+		},
+		9 => format!("size={}", fuzz_number(rng)),
+		10 | 11 => {
+			let ns = match rng.below(4) {
+				0 => String::new(),
+				1 => format!(".{}", rng.below(1_000_000_000)),
+				2 => format!(".{}", fuzz_number(rng)),
+				_ => ".0".into(),
+			};
+			format!("time={}{ns}", fuzz_number(rng))
+		}
+		12 => format!("link={}", fuzz_path(rng, &[])),
+		13 | 14 => format!(
+			"{}={}",
+			pick(rng, &["sha256digest", "sha256"]),
+			fuzz_hex(rng, 64)
+		),
+		15 => format!(
+			"{}={}",
+			pick(rng, &["md5digest", "md5"]),
+			fuzz_hex(rng, 32)
+		),
+		16 => format!("sha1digest={}", fuzz_hex(rng, 40)),
+		17 => pick(
+			rng,
+			&[
+				"nlink=2",
+				"uname=root",
+				"gname=wheel",
+				"flags=uchg",
+				"cksum=7",
+				"inode=9",
+				"tags=a,b",
+				"device=12",
+				"resdevice=linux,8,1",
+				"device=foo,1",
+				"content=x",
+			],
+		)
+		.into(),
+		18 => pick(rng, &["nochange", "optional", "ignore"]).into(),
+		19 if rng.below(4) == 0 => {
+			pick(rng, &["foo=1", "foo", "=x", "TYPE=dir"]).into()
+		}
+		_ => format!("time={}.0", rng.below(5)),
+	}
+}
+
+// words joined by the separators libarchive splits on
+fn fuzz_join(rng: &mut Rng, words: &[String]) -> String {
+	let mut out = String::new();
+	for (i, w) in words.iter().enumerate() {
+		if i > 0 {
+			out += pick(
+				rng,
+				&[" ", " ", " ", "  ", "\t", " \\\n "],
+			);
+		}
+		out += w;
+	}
+	out
+}
+
+// mtree text around the shapes bsdtar writes and the odd ones libarchive
+// still reads, warns about or refuses
+fn fuzz_mtree(rng: &mut Rng) -> Vec<u8> {
+	// libarchive guesses whether data without the signature is mtree
+	// (detect_form), the port takes it as such: not fuzzed
+	let mut out = String::from(pick(rng, &["#mtree\n", "#mtree v2.0\n"]));
+	if rng.below(3) != 0 {
+		out += "/set type=file uid=0 gid=0 mode=644\n";
+	}
+	let mut seen = Vec::new();
+	for _ in 0..rng.below(12) {
+		let indent = pick(rng, &["", "", "", " ", "\t"]);
+		let words = |rng: &mut Rng| -> Vec<String> {
+			(0..rng.below(5)).map(|_| fuzz_keyword(rng)).collect()
+		};
+		let body = match rng.below(20) {
+			0 => "# a comment \\#".into(),
+			1 => String::new(),
+			2 | 3 => {
+				let mut w = vec!["/set".to_string()];
+				w.extend(words(rng));
+				fuzz_join(rng, &w)
+			}
+			4 => {
+				let mut w = vec!["/unset".to_string()];
+				for _ in 0..1 + rng.below(3) {
+					w.push(pick(
+						rng,
+						&[
+							"uid", "type", "mode",
+							"time", "all",
+						],
+					)
+					.into());
+				}
+				fuzz_join(rng, &w)
+			}
+			5 if rng.below(20) == 0 => pick(
+				rng,
+				&[
+					"/foo",
+					"/set",
+					"/unset uid=0",
+					"./a\u{e9}",
+					"./a\x01",
+				],
+			)
+			.into(),
+			_ => {
+				let path = fuzz_path(rng, &seen);
+				seen.push(path.clone());
+				let mut w = vec![path];
+				w.extend(words(rng));
+				fuzz_join(rng, &w)
+			}
+		};
+		out += indent;
+		out += &body;
+		if rng.below(10) == 0 {
+			out += pick(rng, &[" ", "\t", "\r"]);
+		}
+		out.push('\n');
+	}
+	if rng.below(10) == 0 {
+		out.pop();
+	}
+	out.into_bytes()
+}
+
+// fuzzed mtree text: the C's entries up to where it stops are the
+// port's, with the same reason to stop
+#[test]
+fn fuzz_mtree_reader() {
+	let mut rng = Rng::new(0x3a7e);
+	let n = (iters() / 20).max(200);
+	let (mut entries, mut warned, mut fatal) = (0, 0, 0);
+	for i in 0..n {
+		let text = fuzz_mtree(&mut rng);
+		let data = if rng.below(4) == 0 && !text.is_empty() {
+			gzip(&text)
+		} else {
+			text.clone()
+		};
+		let (c, r) = read_both(&data);
+		let what = || {
+			format!(
+				"iteration {i}\n{}",
+				String::from_utf8_lossy(&text)
+			)
+		};
+		assert_eq!(
+			c_read(&c),
+			r_read(&r),
+			"{}\nC {c:?}\nrust {r:?}",
+			what()
+		);
+		if let (Some(c), Ok(r)) = (&c, &r) {
+			let diff = entries_diff(&c.entries, r);
+			assert!(diff.is_none(), "{diff:?}\n{}", what());
+		}
+		match c_read(&c) {
+			Read::Entries(k, 1) => entries += k,
+			Read::Entries(0, _) if r.is_err() => fatal += 1,
+			Read::Entries(_, _) => warned += 1,
+			Read::NoMtree => {}
+		}
+	}
+	println!(
+		"fuzz_mtree_reader: {n} texts, {entries} entries, {warned} \
+		stopped at a warning, {fatal} refused"
+	);
+	assert!(entries > n && warned * 10 > n && fatal * 50 > n);
 }
 
 // one packaged path: what the mtree and files list say
@@ -770,7 +1049,8 @@ fn segment(rng: &mut Rng) -> String {
 		if rng.below(12) == 0 {
 			s.push('é');
 		}
-		// alpm-db reads a blank line as the end of %FILES%
+		// "." and ".." are no names on disk, alpm-db refuses a
+		// whitespace-only backup path
 		if s != "." && s != ".." && !s.trim().is_empty() {
 			return s;
 		}
@@ -806,6 +1086,7 @@ fn gen_disk(rng: &mut Rng, kind: MtreeType) -> Disk {
 		MtreeType::File => v.extend([Disk::Content, Disk::Grown]),
 		MtreeType::Link => v.push(Disk::Retarget),
 		MtreeType::Dir => v.push(Disk::Mode(pick(rng, DIR_MODES))),
+		MtreeType::Block | MtreeType::Char | MtreeType::Fifo => {}
 	}
 	pick(rng, &v)
 }
@@ -827,8 +1108,8 @@ fn gen_node(
 ) -> Node {
 	let mode = match kind {
 		MtreeType::Dir => pick(rng, DIR_MODES),
-		MtreeType::File => pick(rng, FILE_MODES),
 		MtreeType::Link => 0o777,
+		_ => pick(rng, FILE_MODES),
 	};
 	let content: Vec<u8> =
 		(0..rng.below(24)).map(|_| rng.next_u64() as u8).collect();
@@ -881,15 +1162,26 @@ fn gen_nodes(rng: &mut Rng, me: (u32, u32)) -> Vec<Node> {
 			}) {
 			continue;
 		}
-		let kind = pick(
-			rng,
-			&[
-				MtreeType::File,
-				MtreeType::File,
-				MtreeType::Link,
-				MtreeType::Dir,
-			],
-		);
+		let kind = if rng.below(20) == 0 {
+			pick(
+				rng,
+				&[
+					MtreeType::Block,
+					MtreeType::Char,
+					MtreeType::Fifo,
+				],
+			)
+		} else {
+			pick(
+				rng,
+				&[
+					MtreeType::File,
+					MtreeType::File,
+					MtreeType::Link,
+					MtreeType::Dir,
+				],
+			)
+		};
 		nodes.push(gen_node(rng, rel, kind, me));
 	}
 	nodes.sort_by(|a, b| Path::new(&a.rel).cmp(Path::new(&b.rel)));
@@ -926,7 +1218,10 @@ struct Set {
 
 fn kind_str(k: MtreeType) -> &'static str {
 	match k {
+		MtreeType::Block => "block",
+		MtreeType::Char => "char",
 		MtreeType::Dir => "dir",
+		MtreeType::Fifo => "fifo",
 		MtreeType::File => "file",
 		MtreeType::Link => "link",
 	}
@@ -955,11 +1250,11 @@ fn mtree_line(rng: &mut Rng, path: &str, n: &Node, set: &Set) -> String {
 	);
 	keep(rng, n.uid != set.uid, format!("uid={}", n.uid));
 	keep(rng, n.gid != set.gid, format!("gid={}", n.gid));
-	let mode = if rng.below(2) == 0 {
-		// alpm-mtree wants 3-4 digits
-		format!("mode={:03o}", n.mode)
-	} else {
-		format!("mode={:04o}", n.mode)
+	// bsdtar writes "%o", 1 to 4 digits
+	let mode = match rng.below(3) {
+		0 => format!("mode={:o}", n.mode),
+		1 => format!("mode={:03o}", n.mode),
+		_ => format!("mode={:04o}", n.mode),
 	};
 	keep(rng, n.mode != set.mode || n.mode < 0o100, mode);
 	props.push(format!("time={}", time_str(rng, n.mtime)));
@@ -982,7 +1277,7 @@ fn mtree_line(rng: &mut Rng, path: &str, n: &Node, set: &Set) -> String {
 			let t = escape(rng, &n.target);
 			props.push(format!("link={t}"));
 		}
-		MtreeType::Dir => {}
+		_ => {}
 	}
 	// keyword order is free
 	for i in (1..props.len()).rev() {
@@ -1041,7 +1336,13 @@ fn meta_nodes(rng: &mut Rng, me: (u32, u32)) -> Vec<Node> {
 fn gen_mtree(rng: &mut Rng, nodes: &[Node], me: (u32, u32)) -> String {
 	let mut all: Vec<(String, &Node)> =
 		nodes.iter().map(|n| (format!("./{}", n.rel), n)).collect();
+	// bsdtar's order (paths sorted), or any: the file order is kept
 	all.sort_by(|a, b| Path::new(&a.0).cmp(Path::new(&b.0)));
+	if rng.below(3) == 0 {
+		for i in (1..all.len()).rev() {
+			all.swap(i, rng.below(i + 1));
+		}
+	}
 	let mut out = String::from("#mtree\n");
 	let mut set = gen_set(rng, me);
 	out.push_str(&set_line(&set));
@@ -1093,6 +1394,11 @@ fn create(n: &Node, p: &Path) -> bool {
 	};
 	match kind {
 		MtreeType::Dir => fs::create_dir(p).unwrap(),
+		// a regular file in place of the special file: the check warns
+		// about the type before it looks
+		MtreeType::Block | MtreeType::Char | MtreeType::Fifo => {
+			fs::write(p, b"").unwrap()
+		}
 		MtreeType::File => {
 			let mut c = n.content.clone();
 			match n.disk {
@@ -1341,6 +1647,7 @@ const COVERAGE: &[&str] = &[
 	"\x1b[1;33mwarning:",
 	"/install (",
 	"/changelog (",
+	"file type not recognized: ",
 ];
 
 fn node(rel: &str, kind: MtreeType, disk: Disk, me: (u32, u32)) -> Node {
@@ -1351,8 +1658,8 @@ fn node(rel: &str, kind: MtreeType, disk: Disk, me: (u32, u32)) -> Node {
 		target: "t".into(),
 		mode: match kind {
 			MtreeType::Dir => 0o755,
-			MtreeType::File => 0o644,
 			MtreeType::Link => 0o777,
+			_ => 0o644,
 		},
 		uid: me.0,
 		gid: me.1,
@@ -1535,6 +1842,25 @@ fn full_both(fx: &Fixture) -> (String, String) {
 	(show(&c), show(&r))
 }
 
+// -Qkk on a backup entry with hash "(null)": still a backup file, its
+// change is noted, not warned about
+#[test]
+fn null_backup_hash() {
+	let fx = Fixture::new();
+	let me = me(&fx);
+	let mut rng = Rng::new(3);
+	let nodes = [
+		node("etc", MtreeType::Dir, Disk::Intact, me),
+		node("etc/x.conf", MtreeType::File, Disk::Grown, me),
+	];
+	let mtree = gen_mtree(&mut rng, &nodes, me);
+	let files =
+		"%FILES%\netc/\netc/x.conf\n\n%BACKUP%\netc/x.conf\t(null)\n\n";
+	let (c, r) = full_both(&raw_pkg(&nodes, files, &mtree));
+	assert!(c.contains("backup file: p: ") && c.contains("ret 0"), "{c}");
+	assert_eq!(c, r);
+}
+
 // -Qkk where the readers differ: pinned C and port outputs
 #[test]
 fn check_divergences() {
@@ -1542,31 +1868,15 @@ fn check_divergences() {
 		let fx = Fixture::new();
 		me(&fx)
 	};
-	let mut rng = Rng::new(3);
 	let conf = |rel: &str, disk: Disk| node(rel, MtreeType::File, disk, me);
 
-	// backup entry with hash "(null)": alpm-db drops it, so the port
-	// warns where the C notes a modified backup file
-	let nodes = [
-		node("etc", MtreeType::Dir, Disk::Intact, me),
-		conf("etc/x.conf", Disk::Grown),
-	];
-	let mtree = gen_mtree(&mut rng, &nodes, me);
-	let files =
-		"%FILES%\netc/\netc/x.conf\n\n%BACKUP%\netc/x.conf\t(null)\n\n";
-	let (c, r) = full_both(&raw_pkg(&nodes, files, &mtree));
-	assert!(c.contains("backup file: p: ") && c.contains("ret 0"), "{c}");
-	assert!(r.contains("warning: p: ") && r.contains("ret 1"), "{r}");
-
-	// empty mtree file: no mtree for libarchive, no entries for alpm
+	// read alike: empty mtree file, a fifo entry, file order
 	let nodes = [conf("a", Disk::Intact)];
 	let files = files_text(&nodes, &[]);
 	let (c, r) = full_both(&raw_pkg(&nodes, &files, ""));
 	assert!(c.contains("p: no mtree file\n"), "{c}");
-	assert!(r.contains("p: 0 total files, 0 altered files\n"), "{r}");
+	assert_eq!(c, r);
 
-	// a fifo entry: the C checks the others and warns, alpm-mtree
-	// rejects the file
 	let sha = hex(Sha256Checksum::calculate_from(b"hello\n").inner());
 	let (u, g) = me;
 	let mtree =
@@ -1578,36 +1888,55 @@ fn check_divergences() {
 	let (c, r) = full_both(&raw_pkg(&with_f, &files, &mtree));
 	assert!(c.contains("file type not recognized: "), "{c}");
 	assert!(c.contains("p: 2 total files, 0 altered files\n"), "{c}");
-	assert!(r.contains("p: 0 total files, 0 altered files\n"), "{r}");
+	assert_eq!(c, r);
+
+	let unsorted = [conf("a", Disk::Missing), conf("b", Disk::Missing)];
+	let mtree =
+		format!("#mtree\n/set type=file uid={u} gid={g} mode=644\n\
+		./b time=1.0 size=6 sha256digest={sha}\n\
+		./a time=1.0 size=6 sha256digest={sha}\n");
+	let files_ab = files_text(&unsorted, &[]);
+	let (c, r) = full_both(&raw_pkg(&unsorted, &files_ab, &mtree));
+	assert!(c.find("/b ").unwrap() < c.find("/a ").unwrap(), "{c}");
+	assert_eq!(c, r);
 
 	// a file entry without sha256: libarchive leaves a zero digest, the
-	// C reports a mismatch (never "information not available")
+	// C reports a mismatch, never "information not available" (UPSTREAM.md)
 	let mtree =
 		format!("#mtree\n/set type=file uid={u} gid={g} mode=644\n\
 		./a time={BASE_TIME}.0 size=6\n");
 	let (c, r) = full_both(&raw_pkg(&nodes, &files, &mtree));
 	assert!(c.contains("(SHA256 checksum mismatch)"), "{c}");
-	assert!(r.contains("p: 0 total files, 0 altered files\n"), "{r}");
+	assert!(
+		r.contains("(SHA256 checksum information not available)"),
+		"{r}"
+	);
 
-	// unsorted entries: same lines, the port's in path order
-	let nodes = [conf("a", Disk::Missing), conf("b", Disk::Missing)];
-	let files = files_text(&nodes, &[]);
-	let mtree =
-		format!("#mtree\n/set type=file uid={u} gid={g} mode=644\n\
-		./b time=1.0 size=6 sha256digest={sha}\n\
-		./a time=1.0 size=6 sha256digest={sha}\n");
-	let (c, r) = full_both(&raw_pkg(&nodes, &files, &mtree));
-	assert_ne!(c, r);
-	let mut cl: Vec<&str> = c.lines().collect();
-	let mut rl: Vec<&str> = r.lines().collect();
-	cl.sort_unstable();
-	rl.sort_unstable();
-	assert_eq!(cl, rl);
+	// an entry libarchive warns about (uppercase digest): the C stops
+	// there and prints totals as if done (UPSTREAM.md), the port checks
+	// it and goes on
+	let mtree = format!(
+		"#mtree\n/set type=file uid={u} gid={g} mode=644\n\
+		./a time={BASE_TIME}.0 size=6 sha256digest={sha}\n\
+		./f time={BASE_TIME}.0 size=6 sha256digest={}\n\
+		./g time={BASE_TIME}.0 size=6 sha256digest={sha}\n",
+		sha.to_uppercase()
+	);
+	let fg = [
+		conf("a", Disk::Intact),
+		conf("f", Disk::Intact),
+		conf("g", Disk::Intact),
+	];
+	let files_fg = files_text(&fg, &[]);
+	let (c, r) = full_both(&raw_pkg(&fg, &files_fg, &mtree));
+	assert!(c.contains("p: 1 total file, 0 altered files\n"), "{c}");
+	assert!(r.contains("p: 3 total files, 1 altered file\n"), "{r}");
+	assert!(r.contains("/f (SHA256 checksum information not available)"));
 }
 
 // the mtree files of the real local db, read-only through a fixture db
-// of symlinked package dirs: entries of both readers compared, counts
-// printed. skipped without /var/lib/pacman/local
+// of symlinked package dirs: entries of both readers compared, in
+// order. skipped without /var/lib/pacman/local
 #[test]
 fn real_local_mtrees() {
 	let real = Path::new("/var/lib/pacman/local");
@@ -1690,4 +2019,6 @@ fn real_local_mtrees() {
 		dirs.len()
 	);
 	assert_eq!(same + order + differ + rejected, dirs.len());
+	// file order and entries like libarchive's
+	assert_eq!((order, differ, rejected), (0, 0, 0));
 }

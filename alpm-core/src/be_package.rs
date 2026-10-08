@@ -7,9 +7,9 @@
 // the archive walk follows the C loop. libarchive is replaced by
 // alpm-compress (gzip, bzip2, xz, zstd, none, picked by magic bytes like
 // libarchive's filter bidding) and its tar reader; .PKGINFO goes through
-// alpm-pkginfo in place of parse_descfile, .MTREE through alpm-mtree in
-// place of libarchive's mtree reader. what those accept differs from the
-// C, see PORTING.md.
+// alpm-pkginfo's pacman reader, .MTREE through alpm-mtree's libarchive
+// reader. values are alpm-types, what those accept differs from the C,
+// see PORTING.md.
 //
 // file packages have no mtree stream: default_pkg_ops.mtree_open returns
 // NULL, nothing to port. logging is not modelled, it never changes the
@@ -18,17 +18,13 @@
 use std::ffi::{OsStr, c_int};
 use std::fmt::Display;
 use std::fs::File;
-use std::io::{self, ErrorKind, Read, Seek};
+use std::io::{self, ErrorKind, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::str::FromStr;
 
-use alpm_common::MetadataFile;
-use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
 use alpm_compress::tarball::{TarballEntry, TarballReader};
-use alpm_mtree::Mtree;
-use alpm_mtree::mtree::v2::Path as MtreePath;
-use alpm_pkginfo::PackageInfo;
+use alpm_mtree::libarchive::{self, EntryType};
+use alpm_pkginfo::pacman::PacmanPackageInfo;
 use alpm_types::Sha256Checksum;
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
@@ -47,7 +43,9 @@ use crate::signing::{
 	SIG_PACKAGE_UNKNOWN_OK, SigResult, check_pgp_helper, extract_keyid,
 	key_import, key_in_keychain, sigpath,
 };
-use crate::util::{fnmatch, hash_sdbm, until_nul};
+use crate::util::{
+	self, archive_io_err as io_err, fnmatch, hash_sdbm, until_nul,
+};
 
 // limits.h on linux
 const NAME_MAX: usize = 255;
@@ -67,11 +65,9 @@ const AE_IFIFO: u32 = 0o010000;
 // why a package file was refused, the C's pkg_invalid label
 #[derive(Debug)]
 pub enum Reason {
-	// alpm-pkginfo parses str, the C reads bytes
-	Utf8,
 	// the .PKGINFO data could not be read (parse_descfile's fgets)
 	Read(io::Error),
-	// alpm-pkginfo refused the .PKGINFO
+	// a .PKGINFO value alpm-types refuses, or one not UTF-8
 	Pkginfo(alpm_pkginfo::Error),
 	// "missing package name"/"invalid package version": empty name or
 	// no '-' in pkgver
@@ -145,44 +141,11 @@ fn open_err(e: io::Error) -> Error {
 	}
 }
 
-fn io_err(e: alpm_compress::Error) -> io::Error {
-	match e {
-		alpm_compress::Error::IoRead { source, .. } => source,
-		e => io::Error::other(e),
-	}
-}
-
-// filter libarchive's bidding would pick, for the four alpm-compress
-// has. anything else is read as a plain tar.
-// copy of be_sync's sniff without the size estimate, to dedupe later
-fn sniff(magic: &[u8]) -> DecompressionSettings {
-	if magic.starts_with(&[0x1f, 0x8b]) {
-		DecompressionSettings::Gzip
-	} else if magic.starts_with(b"BZh") {
-		DecompressionSettings::Bzip2
-	} else if magic.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0]) {
-		DecompressionSettings::Xz
-	} else if magic.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
-		DecompressionSettings::Zstd
-	} else {
-		DecompressionSettings::None
-	}
-}
-
-// _alpm_open_archive: the reader and st_size. a read error here (EISDIR)
-// is the C's archive_read_open_fd failure
+// _alpm_open_archive and the C's errno check after it: the reader and
+// st_size
 fn open_archive(path: &[u8]) -> Result<(TarballReader<'static>, i64), Error> {
-	let mut file = File::open(os(path)).map_err(open_err)?;
-	let size = file.metadata().map_err(Error::Open)?.len();
-	let mut magic = Vec::with_capacity(6);
-	(&mut file)
-		.take(6)
-		.read_to_end(&mut magic)
-		.map_err(Error::Open)?;
-	file.rewind().map_err(Error::Open)?;
-	let decoder = CompressionDecoder::new(file, sniff(&magic))
-		.map_err(|e| Error::Open(io_err(e)))?;
-	Ok((TarballReader::new(decoder), size as i64))
+	let archive = util::open_archive(path).map_err(open_err)?;
+	Ok((archive.reader, archive.meta.len() as i64))
 }
 
 // _alpm_pkg_check_meta on a package that has a name and a version with a
@@ -213,62 +176,63 @@ fn deps<T: Display>(v: &[T]) -> impl Iterator<Item = Depend> {
 	v.iter().map(|d| dep_from_string(&text(d)))
 }
 
-// parse_descfile's stores. single keys overwrite, list keys append: a
-// second .PKGINFO in the archive adds to the first like in the C.
-// basever is not known to alpm-pkginfo, the C ignores it anyway
-macro_rules! apply_info {
-	($pkg:expr, $v:expr) => {{
-		let (pkg, v) = ($pkg, $v);
-		let name = text(&v.pkgname);
-		pkg.name_hash = hash_sdbm(&name);
-		pkg.name = Some(name);
-		pkg.base = Some(text(&v.pkgbase));
-		pkg.version = Some(text(&v.pkgver));
-		pkg.desc = Some(text(&v.pkgdesc));
-		pkg.url = Some(text(&v.url));
-		pkg.builddate = v.builddate;
-		pkg.packager = Some(text(&v.packager));
-		pkg.arch = Some(text(&v.arch));
-		// _alpm_strtoofft casts the unsigned long long to off_t
-		pkg.isize = v.size as i64;
-		pkg.licenses.extend(texts(&v.license));
-		pkg.groups.extend(texts(&v.group));
-		pkg.replaces.extend(deps(&v.replaces));
-		pkg.conflicts.extend(deps(&v.conflict));
-		pkg.provides.extend(deps(&v.provides));
-		pkg.depends.extend(deps(&v.depend));
-		pkg.optdepends.extend(deps(&v.optdepend));
-		pkg.makedepends.extend(deps(&v.makedepend));
-		pkg.checkdepends.extend(deps(&v.checkdepend));
-		pkg.backup.extend(v.backup.iter().map(|b| Backup {
-			name: b.inner().as_os_str().as_bytes().to_vec(),
-			hash: None,
-		}));
-	}};
+// the value of a single key the .PKGINFO sets: a second .PKGINFO in the
+// archive overwrites only what it sets, like the C
+fn set<T: Display>(field: &mut Option<Vec<u8>>, v: &Option<T>) {
+	if let Some(v) = v {
+		*field = Some(text(v));
+	}
 }
 
-// parse_descfile plus the name/version checks _alpm_pkg_load_internal
-// runs after it
+// parse_descfile, through alpm-pkginfo's pacman reader, plus the
+// name/version checks _alpm_pkg_load_internal runs after it. list keys
+// append, so a second .PKGINFO adds to the first like in the C
 fn parse_descfile(
 	pkg: &mut Package,
 	entry: &mut TarballEntry,
 ) -> Result<(), Reason> {
 	let data = entry.content().map_err(|e| Reason::Read(io_err(e)))?;
-	let data = std::str::from_utf8(&data).map_err(|_| Reason::Utf8)?;
-	match PackageInfo::from_str(data).map_err(Reason::Pkginfo)? {
-		PackageInfo::V1(v) => apply_info!(&mut *pkg, v),
-		PackageInfo::V2(v) => {
-			apply_info!(&mut *pkg, &v);
-			pkg.xdata.extend(v.xdata.as_ref().iter().map(|x| {
-				PkgXData {
-					name: x.key().as_bytes().to_vec(),
-					value: x.value().as_bytes().to_vec(),
-				}
-			}));
-		}
+	let v = PacmanPackageInfo::parse(&data).map_err(Reason::Pkginfo)?;
+	if let Some(name) = &v.pkgname {
+		let name = text(name);
+		pkg.name_hash = hash_sdbm(&name);
+		pkg.name = Some(name);
 	}
-	// alpm-types never gives an empty name or version, a pkgrel is
-	// required, so this only guards the C's order of checks
+	set(&mut pkg.base, &v.pkgbase);
+	set(&mut pkg.version, &v.pkgver);
+	// as read, alpm-types normalizes their Display
+	if let Some(d) = &v.pkgdesc {
+		pkg.desc = Some(text(&d.as_original_str()));
+	}
+	if let Some(u) = &v.url {
+		pkg.url = Some(text(&u.as_original_str()));
+	}
+	set(&mut pkg.packager, &v.packager);
+	set(&mut pkg.arch, &v.arch);
+	if let Some(date) = v.builddate {
+		pkg.builddate = date;
+	}
+	if let Some(size) = v.size {
+		pkg.isize = size;
+	}
+	pkg.licenses.extend(texts(&v.license));
+	pkg.groups.extend(texts(&v.group));
+	pkg.replaces.extend(deps(&v.replaces));
+	pkg.conflicts.extend(deps(&v.conflict));
+	pkg.provides.extend(deps(&v.provides));
+	pkg.depends.extend(deps(&v.depend));
+	pkg.optdepends.extend(deps(&v.optdepend));
+	pkg.makedepends.extend(deps(&v.makedepend));
+	pkg.checkdepends.extend(deps(&v.checkdepend));
+	pkg.backup.extend(v.backup.iter().map(|b| Backup {
+		name: b.inner().as_os_str().as_bytes().to_vec(),
+		hash: None,
+	}));
+	pkg.xdata.extend(v.xdata.iter().map(|x| PkgXData {
+		name: x.key().as_bytes().to_vec(),
+		value: x.value().as_bytes().to_vec(),
+	}));
+	// "missing package name" / "invalid package version"
 	let version = pkg.version.as_deref().unwrap_or_default();
 	if pkg.name_bytes().is_empty() || !version.contains(&b'-') {
 		return Err(Reason::Version);
@@ -299,7 +263,7 @@ fn push_file(files: &mut FileList, path: &[u8], mode: u32, size: i64) {
 // archive_entry_mode and archive_entry_size of a tar entry the way
 // libarchive's tar reader sets them: the type from the type flag over the
 // header's permission bits. a hard link has no type bits and size 0
-fn tar_mode_size(entry: &TarballEntry) -> io::Result<(u32, i64)> {
+pub(crate) fn tar_mode_size(entry: &TarballEntry) -> io::Result<(u32, i64)> {
 	let header = entry.raw().header();
 	let perm = header.mode()? & !AE_IFMT;
 	let size = entry.raw().size() as i64;
@@ -319,34 +283,37 @@ fn tar_mode_size(entry: &TarballEntry) -> io::Result<(u32, i64)> {
 	Ok((kind | perm, size))
 }
 
-// libarchive's mtree reader on an alpm-mtree path: "./" stripped like
-// build_filelist_from_mtree does, no size for directories and links
-fn mtree_file(p: &MtreePath) -> (Vec<u8>, u32, i64) {
-	let (path, kind, mode, size) = match p {
-		MtreePath::Directory(d) => (&d.path, AE_IFDIR, &d.mode, 0),
-		MtreePath::File(f) => (&f.path, AE_IFREG, &f.mode, f.size),
-		MtreePath::Link(l) => (&l.path, AE_IFLNK, &l.mode, 0),
+// an entry of libarchive's mtree reader: "./" stripped like
+// build_filelist_from_mtree does, archive_entry_mode and _size
+fn mtree_file(e: &libarchive::Entry) -> (Vec<u8>, u32, i64) {
+	let kind = match e.entry_type {
+		EntryType::Block => AE_IFBLK,
+		EntryType::Char => AE_IFCHR,
+		EntryType::Dir => AE_IFDIR,
+		EntryType::Fifo => AE_IFIFO,
+		EntryType::File => AE_IFREG,
+		EntryType::Link => AE_IFLNK,
 	};
-	let path = path.as_os_str().as_bytes();
+	let path = e.path.as_os_str().as_bytes();
 	let path = path.strip_prefix(b"./").unwrap_or(path);
-	// alpm-mtree checked it as octal digits
-	let perm = u32::from_str_radix(mode, 8).unwrap_or(0) & !AE_IFMT;
-	(path.to_vec(), kind | perm, size as i64)
+	(path.to_vec(), kind | e.mode, e.size)
 }
 
 // build_filelist_from_mtree: the whole list or nothing, the C keeps the
-// archive's list on failure. a "./.INSTALL" line marks the scriptlet
+// archive's list on failure, which includes an entry libarchive warns
+// about. a "./.INSTALL" line marks the scriptlet
 fn filelist_from_mtree(
 	pkg: &mut Package,
 	entry: &mut TarballEntry,
 ) -> Option<FileList> {
 	let data = entry.content().ok()?;
-	let paths = match Mtree::from_reader(&data[..]).ok()? {
-		Mtree::V1(p) | Mtree::V2(p) => p,
-	};
+	let entries = libarchive::from_reader(&data[..]).ok()?;
+	if entries.iter().any(|e| !e.warnings.is_empty()) {
+		return None;
+	}
 	let mut files = FileList::default();
-	for p in &paths {
-		let (path, mode, size) = mtree_file(p);
+	for e in &entries {
+		let (path, mode, size) = mtree_file(e);
 		if !simple_path(pkg, &path) {
 			push_file(&mut files, &path, mode, size);
 		}

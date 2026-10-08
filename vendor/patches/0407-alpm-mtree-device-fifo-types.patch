@@ -1,0 +1,59 @@
+diff -ruN '--exclude=VENDORED' a/alpm-mtree/src/libarchive.rs b/alpm-mtree/src/libarchive.rs
+--- a/alpm-mtree/src/libarchive.rs
++++ b/alpm-mtree/src/libarchive.rs
+@@ -35,8 +35,14 @@
+ /// The file type of an [`Entry`].
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ pub enum EntryType {
++    /// A block device (`type=block`).
++    Block,
++    /// A character device (`type=char`).
++    Char,
+     /// A directory (`type=dir`).
+     Dir,
++    /// A named pipe (`type=fifo`).
++    Fifo,
+     /// A regular file (`type=file`).
+     File,
+     /// A symlink (`type=link`).
+@@ -486,7 +492,10 @@
+         }
+         b"type" => {
+             let entry_type = match value {
++                b"block" => Some(EntryType::Block),
++                b"char" => Some(EntryType::Char),
+                 b"dir" => Some(EntryType::Dir),
++                b"fifo" => Some(EntryType::Fifo),
+                 b"file" => Some(EntryType::File),
+                 b"link" => Some(EntryType::Link),
+                 _ => None,
+@@ -713,6 +722,29 @@
+         Ok(())
+     }
+ 
++    /// Ensures that all file types of libarchive are read.
++    #[test]
++    fn file_types() -> TestResult {
++        let data = "#mtree\n/set uid=0\n./b type=block\n./c type=char\n./d type=dir\n\
++            ./p type=fifo\n./f type=file\n./l type=link\n";
++        let types: Vec<EntryType> = parse(data.as_bytes())?
++            .into_iter()
++            .map(|entry| entry.entry_type)
++            .collect();
++        assert_eq!(
++            types,
++            [
++                EntryType::Block,
++                EntryType::Char,
++                EntryType::Dir,
++                EntryType::Fifo,
++                EntryType::File,
++                EntryType::Link
++            ]
++        );
++        Ok(())
++    }
++
+     /// Ensures that keywords that are not set keep the defaults libarchive uses.
+     #[test]
+     fn missing_keywords() -> TestResult {

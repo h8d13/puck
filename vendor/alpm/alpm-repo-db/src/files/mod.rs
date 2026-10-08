@@ -228,6 +228,22 @@ impl MetadataFile<RepoFilesSchema> for RepoFiles {
     }
 }
 
+impl RepoFiles {
+    /// Creates a new [`RepoFiles`] from a string slice the way libalpm reads [alpm-repo-files]
+    /// data.
+    ///
+    /// Delegates to [`RepoFilesV1::from_str_libalpm`]: libalpm does not know other versions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if [`RepoFilesV1::from_str_libalpm`] fails.
+    ///
+    /// [alpm-repo-files]: https://alpm.archlinux.page/specifications/alpm-repo-files.5.html
+    pub fn from_str_libalpm(s: &str) -> Result<Self, Error> {
+        Ok(RepoFiles::V1(RepoFilesV1::from_str_libalpm(s)?))
+    }
+}
+
 impl FromStr for RepoFiles {
     type Err = Error;
 

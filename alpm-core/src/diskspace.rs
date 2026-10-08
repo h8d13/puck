@@ -26,14 +26,12 @@ use crate::error::Errno;
 use crate::filelist::FileList;
 use crate::handle::Handle;
 use crate::package::Package;
-use crate::util::{llstat, strerror, until_nul};
+use crate::util::{PATH_MAX, llstat, strerror, until_nul};
 
 const DISKSPACE: Progress = Progress::DiskspaceStart;
 
 // _PATH_MOUNTED, what setmntent(MOUNTED, "r") opens
 pub const MOUNTED: &[u8] = b"/etc/mtab";
-// limits.h, the char path[PATH_MAX] buffers
-const PATH_MAX: usize = 4096;
 // getmntent's static line buffer, BUFFER_SIZE in glibc misc/mntent.c
 const MNT_BUFSIZ: usize = 4096;
 // char tmp[1024] get_mnt_entry drains the rest of a long line with

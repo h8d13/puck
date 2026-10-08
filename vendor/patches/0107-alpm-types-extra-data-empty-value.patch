@@ -1,0 +1,74 @@
+diff -ruN '--exclude=VENDORED' a/alpm-types/src/pkg.rs b/alpm-types/src/pkg.rs
+--- a/alpm-types/src/pkg.rs
++++ b/alpm-types/src/pkg.rs
+@@ -251,8 +251,9 @@
+                 .expected_text("a `=` between the key and value")
+                 .parse_next(input)?;
+ 
++            // The value may be empty, it must not run past the delimiter (e.g. a line ending).
+             let value: &str =
+-                repeat_till::<_, _, (), _, _, _, _>(1.., any, peek(delimiter_parser.by_ref()))
++                repeat_till::<_, _, (), _, _, _, _>(0.., any, peek(delimiter_parser.by_ref()))
+                     .take()
+                     .label("extra data value")
+                     .expected_text("a UTF-8 string")
+@@ -440,6 +441,7 @@
+     #[case("key=value", "key", "value")]
+     #[case("pkgtype=debug", "pkgtype", "debug")]
+     #[case("test-123@.foo_+=1000", "test-123@.foo_+", "1000")]
++    #[case("key=", "key", "")]
+     fn extra_data_entry_from_str(
+         #[case] data: &str,
+         #[case] key: &str,
+@@ -452,9 +454,28 @@
+         Ok(())
+     }
+ 
++    /// Ensure that an empty value does not consume the following line.
++    #[rstest]
++    #[case("a=\nb=c", "a", "", "\nb=c")]
++    #[case("a=b\nc=d", "a", "b", "\nc=d")]
++    #[case("a=\r\n", "a", "", "\r\n")]
++    fn extra_data_entry_parser_until_line_ending(
++        #[case] data: &str,
++        #[case] key: &str,
++        #[case] value: &str,
++        #[case] rest: &str,
++    ) -> TestResult {
++        let mut input = Input::new(data);
++        let extra_data = ExtraDataEntry::parser_until_line_ending(&mut input)?;
++        assert_eq!(extra_data.key(), key);
++        assert_eq!(extra_data.value(), value);
++        assert_eq!(*input, rest);
++        Ok(())
++    }
++
+     #[rstest]
+     #[case("key")]
+-    #[case("key=")]
++    #[case("")]
+     #[case("=value")]
+     fn extra_data_entry_from_str_error(#[case] input: &str) {
+         let (test_name, _guard) = configure_insta();
+diff -ruN '--exclude=VENDORED' a/alpm-types/src/snapshots/pkg::extra_data_entry_from_str_error@case_2.snap b/alpm-types/src/snapshots/pkg::extra_data_entry_from_str_error@case_2.snap
+--- a/alpm-types/src/snapshots/pkg::extra_data_entry_from_str_error@case_2.snap
++++ b/alpm-types/src/snapshots/pkg::extra_data_entry_from_str_error@case_2.snap
+@@ -1,12 +1,12 @@
+ ---
+ source: alpm-types/src/pkg.rs
+ ---
+-error: invalid extra data value
++error: invalid extra data key
+  | 
+- | key=
+- | ~~~~^ expected a UTF-8 string
++ | 
++ | ^ expected a UTF-8 string, followed by an equals (`=`) character.
+  | 
+  = while parsing:
+-   extra-data entry: (key=)
+-   → invalid extra data value
+-   → expected a UTF-8 string
++   extra-data entry: ()
++   → invalid extra data key
++   → expected a UTF-8 string, followed by an equals (`=`) character.

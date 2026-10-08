@@ -1,6 +1,7 @@
 // port of the read-only part of src/pacman/sync.c: -Si/-Sii (sync_info),
-// -Sl (sync_list), -Sg/-Sgg (sync_group), -Ss (sync_search), the
-// pacman_sync dispatch up to them, and util.c's check_syncdbs they rely on
+// -Sl (sync_list), -Sg/-Sgg (sync_group), -Ss (sync_search), -Sy/-Syy
+// (util.c's sync_syncdbs, shared with -Fy), the pacman_sync dispatch up
+// to them, and util.c's check_syncdbs they rely on
 //
 // the C prints to stdout and through pm_printf to stderr, both go into an
 // Output. config is the C global, handle config->handle; cols is what
@@ -9,12 +10,16 @@
 // local db and every sync db cache, which Handle only lends out one at a
 // time. messages are the untranslated msgids.
 //
+// what -Sy prints during alpm_db_update comes from the handle's
+// callbacks (callback.rs); out is flushed (Output::flush) before, so the
+// header goes out first.
+//
 // not ported, returned as Unported where pacman_sync reaches them: -Sc
 // (trans_init takes the db lock, then interactive prompts and unlinks
-// in the cache dirs), -Sy (db download) and the transaction of
+// in the cache dirs) and the transaction of
 // -S <targets>/-Su.
 
-use alpm_core::be_sync::get_validation;
+use alpm_core::be_sync::{db_update, get_validation};
 use alpm_core::db::Db;
 use alpm_core::error::Errno;
 use alpm_core::handle::Handle;
@@ -32,8 +37,6 @@ use crate::util::{Output, SigResult, check_syncdbs, pm_printf};
 pub enum Unported {
 	// -Sc/-Scc: sync_cleancache, sync_cleandb_all
 	Clean,
-	// -Sy/-Fy: sync_syncdbs
-	Refresh,
 	// sync_trans: -S <targets>, -Su
 	Transaction,
 }
@@ -421,8 +424,8 @@ pub fn pacman_sync<S: AsRef<[u8]>>(
 	if check_syncdbs(&mut out.stderr, config, handle, true, false) != 0 {
 		return Ok(1);
 	}
-	if config.op_s_sync != 0 {
-		return Err(Unported::Refresh);
+	if config.op_s_sync != 0 && !refresh(config, handle, out) {
+		return Ok(1);
 	}
 	if check_syncdbs(&mut out.stderr, config, handle, true, true) != 0 {
 		return Ok(1);
@@ -446,10 +449,51 @@ pub fn pacman_sync<S: AsRef<[u8]>>(
 		return Ok(sync_list(config, handle, targets, out));
 	}
 	if targets.is_empty() && config.op_s_upgrade == 0 {
-		// op_s_sync returned above
+		if config.op_s_sync != 0 {
+			return Ok(0);
+		}
 		let msg: &[u8] = b"no targets specified (use -h for help)\n";
 		error(out, config, &[msg]);
 		return Ok(1);
 	}
 	Err(Unported::Transaction)
+}
+
+// sync_syncdbs(level, every sync db): alpm_db_update, forced from -yy.
+// false (C 0) when it failed, after the error line
+pub fn sync_syncdbs(
+	config: &Config,
+	handle: &mut Handle,
+	level: u16,
+	out: &mut Output,
+) -> bool {
+	// what is buffered goes out first, the callbacks print now. the C
+	// also resets multibar_move_completed_up here: only a package
+	// download sets it, which this port does not have yet
+	out.flush();
+	let dbs: Vec<usize> = (0..handle.syncdbs().len()).collect();
+	let ret = db_update(handle, &dbs, level >= 2);
+	if let Err(e) = ret {
+		let msg = [
+			b"failed to synchronize all databases (",
+			e.strerror().as_bytes(),
+			b")\n",
+		];
+		error(out, config, &msg);
+	}
+	ret.is_ok()
+}
+
+// the -Sy/-Fy block of pacman_sync and pacman_files: the header, the
+// logfile line, sync_syncdbs
+pub(crate) fn refresh(
+	config: &Config,
+	handle: &mut Handle,
+	out: &mut Output,
+) -> bool {
+	let c = &config.colstr;
+	let head: &[u8] = b"Synchronizing package databases...\n";
+	out.stdout.extend(cat(&[c.colon, head, c.nocolor]));
+	let _ = handle.logaction(b"PACMAN", b"synchronizing package lists\n");
+	sync_syncdbs(config, handle, config.op_s_sync, out)
 }

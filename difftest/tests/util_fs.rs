@@ -5,7 +5,6 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use alpm_core::util::{
 	ReadFileError, copyfile, files_in_directory, makepath, makepath_mode,
@@ -14,11 +13,8 @@ use alpm_core::util::{
 use difftest::{
 	ALPM_ERR_MEMORY, ALPM_ERR_NOT_A_FILE, ALPM_ERR_SYSTEM, Rng, c_copyfile,
 	c_files_in_directory, c_makepath, c_makepath_mode, c_read_file,
-	c_umask, iters,
+	c_umask, iters, umask_lock,
 };
-
-// the C flips the process umask inside makepath: one test at a time
-static SERIAL: Mutex<()> = Mutex::new(());
 
 // fs ops are slower than string fuzz
 fn fs_iters() -> usize {
@@ -259,7 +255,7 @@ fn compare_trees(c: &Path, r: &Path, what: &str) {
 
 #[test]
 fn fixed_cases() {
-	let _guard = SERIAL.lock().unwrap();
+	let _umask = umask_lock();
 	// nonzero umask: the C runs mkdir under umask 0, the port must match
 	c_umask(0o027);
 	let sb = Sandbox::new("fixed");
@@ -325,7 +321,7 @@ fn fixed_cases() {
 
 #[test]
 fn fuzz_fs_ops() {
-	let _guard = SERIAL.lock().unwrap();
+	let _umask = umask_lock();
 	c_umask(0o027);
 	let sb = Sandbox::new("fuzz");
 	let mut rng = Rng::new(0xf11e);

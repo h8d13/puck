@@ -135,10 +135,10 @@ pub struct CShown {
 }
 
 pub struct PkgWorld {
-	dir: PathBuf,
-	h: *mut c_void,
-	local: *mut CDb,
-	sync: [*mut CDb; 2],
+	pub(crate) dir: PathBuf,
+	pub(crate) h: *mut c_void,
+	pub(crate) local: *mut CDb,
+	pub(crate) sync: [*mut CDb; 2],
 	root: Vec<u8>,
 }
 
@@ -230,7 +230,7 @@ impl PkgWorld {
 
 	// mirror-built package on this handle, origin_data pointing at its
 	// db (sync: SYNC_DBS[db])
-	fn c_pkg(&self, pkg: &Package, db: usize) -> CPkgBox {
+	pub(crate) fn c_pkg(&self, pkg: &Package, db: usize) -> CPkgBox {
 		let b = CPkgBox::new(pkg);
 		// SAFETY: b.0 is live and owned here; db origins keep no
 		// origin_data of their own, so nothing leaks

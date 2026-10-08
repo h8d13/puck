@@ -2,7 +2,12 @@
 source: alpm-types/src/openpgp.rs
 ---
 Parser failed with the following error:
-error: invalid alpm packager
+error: invalid email address
  | 
- | <foobar@mcfooface.org>
- | ^ expected a packager name
+ | <>
+ |  ^
+ | 
+ = while parsing:
+   alpm packager: (<>)
+   └ email address: (>)
+ = an error occurred: Missing separator character '@'.

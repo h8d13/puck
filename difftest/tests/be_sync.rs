@@ -1,17 +1,20 @@
 // alpm_core::be_sync against the C sync db backend: repo dbs generated
-// under /tmp (valid desc/files per the alpm-repo-db spec, every
+// under /tmp (desc/files as repo-add writes and pacman reads them:
+// sections left out, repeated or unknown, odd file lists; every
 // compression alpm-compress has), loaded by both, every field, the
 // validation getter, the cache order and the table counts compared. odd
 // inputs the C accepts pin each divergence; copies of the real sync dbs
 // give counts
+use std::ffi::c_int;
 use std::fs;
 use std::path::PathBuf;
 
 use alpm_core::be_sync::{self, get_validation, populate};
+use alpm_core::handle::Handle;
 use alpm_core::package::Package;
 use difftest::{
-	COMPS, CSyncDb, Comp, Rng, TarEntry, TempRoot, c_sync_db_load, iters,
-	section, tar_dir, tar_file, ustar, write_db,
+	CHandle, COMPS, CSyncDb, Comp, Rng, TarEntry, TempRoot, c_sync_db_load,
+	iters, section, tar_dir, tar_file, ustar, write_db,
 };
 
 // one db per iteration, a C handle each: far slower than string fuzz
@@ -93,9 +96,11 @@ fn full_version(rng: &mut Rng) -> String {
 		0 => format!("{}:", 1 + rng.below(9)),
 		_ => String::new(),
 	};
+	// a leading zero is kept as read
+	let zero = if rng.below(4) == 0 { "0" } else { "" };
 	let rel = match rng.below(4) {
-		0 => format!("{}.{}", 1 + rng.below(9), rng.below(9)),
-		_ => format!("{}", 1 + rng.below(20)),
+		0 => format!("{zero}{}.{}", 1 + rng.below(9), rng.below(9)),
+		_ => format!("{zero}{}", 1 + rng.below(20)),
 	};
 	format!("{epoch}{}-{rel}", pkgver(rng))
 }
@@ -109,18 +114,15 @@ fn description(rng: &mut Rng) -> String {
 			_ => word(rng, ALNUM, 1, 8),
 		})
 		.collect();
-	words.join(" ")
+	// runs of blanks are kept as read
+	words.join(pick(rng, &[" ", " ", "  ", " \t"]))
 }
 
 // relation lines stay far below 512 bytes, the smallest first data block
 // libarchive hands out: READ_AND_SPLITDEP parses a stale `line` once a
 // longer line makes _alpm_archive_fgets reallocate its buffer
 fn relation(rng: &mut Rng) -> String {
-	// alpm-types refuses names like "foo.sound" here, see odd_inputs
-	let mut name = pkg_name(rng);
-	while name.contains(".so") {
-		name = pkg_name(rng);
-	}
+	let name = pkg_name(rng);
 	match rng.below(10) {
 		0 => format!("lib{}.so=1-64", word(rng, LOWER, 1, 6)),
 		1 => format!(
@@ -156,7 +158,12 @@ fn optdepend(rng: &mut Rng) -> String {
 	let name = pkg_name(rng);
 	match rng.below(3) {
 		0 => name,
-		_ => format!("{name}: {}", description(rng)),
+		// libalpm keeps the description after ": " as is
+		_ => format!(
+			"{name}: {}{}",
+			pick(rng, &["", "", " "]),
+			description(rng)
+		),
 	}
 }
 
@@ -184,7 +191,8 @@ fn list(rng: &mut Rng, max: usize, f: fn(&mut Rng) -> String) -> Vec<String> {
 	(0..rng.below(max + 1)).map(|_| f(rng)).collect()
 }
 
-// relative paths with every parent listed, no duplicates
+// relative paths, pacman checks none of it: parents sometimes missing,
+// duplicates and file/dir twins ("usr", "usr/") sometimes
 fn file_list(rng: &mut Rng) -> Vec<String> {
 	let mut out: Vec<String> = Vec::new();
 	let mut dirs: Vec<String> = vec![String::new()];
@@ -196,13 +204,16 @@ fn file_list(rng: &mut Rng) -> Vec<String> {
 			"{parent}{leaf}{}",
 			if is_dir { "/" } else { "" }
 		);
-		let twin = format!("{parent}{leaf}");
-		let clash = out.iter().any(|o| o.trim_end_matches('/') == twin);
-		if clash || leaf == "." || leaf == ".." {
-			continue;
-		}
 		if is_dir {
 			dirs.push(p.clone());
+			if rng.below(10) == 0 {
+				continue;
+			}
+		}
+		match rng.below(12) {
+			0 => out.push(p.clone()),
+			1 => out.push(format!("{parent}{leaf}")),
+			_ => {}
 		}
 		out.push(p);
 	}
@@ -256,13 +267,17 @@ fn gen_pkg(rng: &mut Rng, name: String, files_db: bool) -> Gen {
 		),
 		section(
 			"PACKAGER",
-			&one(format!(
-				"{} {} <{}@{}.org>",
-				word(rng, ALNUM, 1, 8),
-				word(rng, ALNUM, 1, 8),
-				word(rng, LOWER, 1, 8),
-				word(rng, LOWER, 1, 8)
-			)),
+			&one(match rng.below(6) {
+				// makepkg's default
+				0 => "Unknown Packager".into(),
+				_ => format!(
+					"{} {} <{}@{}.org>",
+					word(rng, ALNUM, 1, 8),
+					word(rng, ALNUM, 1, 8),
+					word(rng, LOWER, 1, 8),
+					word(rng, LOWER, 1, 8)
+				),
+			}),
 		),
 	];
 	if rng.below(4) != 0 {
@@ -272,10 +287,12 @@ fn gen_pkg(rng: &mut Rng, name: String, files_db: bool) -> Gen {
 		let path =
 			list(rng, 3, |r| word(r, b"abcz09_-", 1, 6)).join("/");
 		let host = word(rng, LOWER, 1, 8);
-		fixed.push(section(
-			"URL",
-			&one(format!("https://{host}.org/{path}")),
-		));
+		// url::Url adds the '/' of an empty path and lowercases
+		let url = match rng.below(4) {
+			0 => format!("HTTPS://{host}.ORG"),
+			_ => format!("https://{host}.org/{path}"),
+		};
+		fixed.push(section("URL", &one(url)));
 	}
 	match rng.below(5) {
 		0 => {}
@@ -287,10 +304,6 @@ fn gen_pkg(rng: &mut Rng, name: String, files_db: bool) -> Gen {
 			let n = 8 + rng.below(90);
 			fixed.push(section("PGPSIG", &one(base64(rng, n))));
 		}
-	}
-	// v1 needs %PGPSIG% alongside %MD5SUM%
-	if fixed.iter().any(|s| s.starts_with("%MD5SUM%")) {
-		fixed.push(section("PGPSIG", &one(base64(rng, 20))));
 	}
 	fixed.push(section("GROUPS", &list(rng, 2, |r| word(r, NAME, 1, 8))));
 	fixed.push(section("LICENSE", &list(rng, 2, license)));
@@ -307,6 +320,52 @@ fn gen_pkg(rng: &mut Rng, name: String, files_db: bool) -> Gen {
 	if !split {
 		fixed.extend(rels.iter().cloned());
 	}
+	// repo-add always writes these, pacman reads a db without them
+	for key in [
+		"FILENAME",
+		"BASE",
+		"CSIZE",
+		"ISIZE",
+		"SHA256SUM",
+		"ARCH",
+		"BUILDDATE",
+		"PACKAGER",
+	] {
+		if rng.below(12) == 0 {
+			let head = format!("%{key}%\n");
+			fixed.retain(|s| !s.starts_with(&head));
+		}
+	}
+	// an empty list, extra data and an unknown key, read or skipped by
+	// pacman
+	if rng.below(8) == 0 {
+		let key = pick(
+			rng,
+			&["GROUPS", "LICENSE", "DEPENDS", "PROVIDES"],
+		);
+		fixed.push(format!("%{key}%\n\n"));
+	}
+	if rng.below(8) == 0 {
+		let mut data = list(rng, 3, |r| {
+			format!(
+				"{}={}",
+				word(r, LOWER, 1, 6),
+				word(r, ALNUM, 1, 6)
+			)
+		});
+		data.insert(0, "pkgtype=pkg".into());
+		fixed.push(section("DATA", &data));
+	}
+	if rng.below(8) == 0 {
+		let key = format!("X{}", word(rng, b"ABCXYZ_", 1, 6));
+		let vals = list(rng, 3, |r| word(r, b"abc%XY =", 1, 8));
+		fixed.push(format!("%{key}%\n{}\n", vals.join("\n")));
+	}
+	// a repeated value overwrites, a repeated list appends
+	if !fixed.is_empty() && rng.below(8) == 0 {
+		let again = fixed[rng.below(fixed.len())].clone();
+		fixed.push(again);
+	}
 	// pacman reads sections in any order
 	if rng.below(3) == 0 {
 		for i in (1..fixed.len()).rev() {
@@ -320,9 +379,14 @@ fn gen_pkg(rng: &mut Rng, name: String, files_db: bool) -> Gen {
 			false => format!("%FILES%\n{}\n\n", paths.join("\n")),
 		}
 	});
+	let mut desc = fixed.concat();
+	// blank lines between sections are skipped by pacman
+	if rng.below(6) == 0 {
+		desc = desc.replace("\n\n%", "\n\n\n%");
+	}
 	Gen {
 		dir: format!("{name}-{version}"),
-		desc: fixed.concat(),
+		desc,
 		depends: split.then(|| rels.concat()),
 		files,
 	}
@@ -402,7 +466,13 @@ fn assert_same(c: &Outcome, r: &Outcome, ctx: &dyn Fn() -> String) {
 				ctx()
 			);
 			for (a, b) in cp.iter().zip(rp) {
-				assert_eq!(a, b, "package\n{}", ctx());
+				assert_eq!(
+					a,
+					b,
+					"package, fields {:?}\n{}",
+					diff_fields(&a.0, &b.0),
+					ctx()
+				);
 			}
 			assert_eq!(
 				cc,
@@ -529,8 +599,7 @@ fn diff_fields(c: &Package, r: &Package) -> Vec<&'static str> {
 }
 
 // copies of the real sync dbs, read only: counts of packages per
-// differing field. no assertion on the fields, the divergences are
-// listed in PORTING.md
+// differing field, none expected
 #[test]
 fn real_sync_dbs() {
 	let Ok(dir) = fs::read_dir("/var/lib/pacman/sync") else {
@@ -618,8 +687,9 @@ fn real_sync_dbs() {
 			eprintln!("  url {u}");
 		}
 		assert!(urls.is_empty(), "{name}: other url normalization");
-		let known = fields.keys().all(|&f| f == "url");
-		assert!(known, "{name}: new divergence {fields:?}");
+		// alpm-types keeps the url as read (vendor/patches)
+		assert_eq!(slash, 0, "{name}: url with '/' appended");
+		assert!(fields.is_empty(), "{name}: new divergence {fields:?}");
 	}
 }
 
@@ -651,8 +721,8 @@ enum Expect {
 }
 
 // inputs pacman accepts or refuses in its own way. Same: both sides agree
-// (outcome and every field). Diverge: the documented C vs alpm-repo-db
-// (or libarchive vs alpm-compress) differences
+// (outcome and every field). Diverge: the documented C vs alpm-types
+// (or libarchive vs alpm-compress) differences, and pacman bugs not copied
 #[test]
 fn odd_inputs() {
 	use Expect::*;
@@ -661,28 +731,39 @@ fn odd_inputs() {
 	let long = format!("%DESC%\n{}\n\n", "x".repeat(600 * 1024));
 	let cases: Vec<(&str, Vec<TarEntry>, Expect)> = vec![
 		("minimal", foo(&base), Same),
-		("url no path", foo_with("%URL%\nhttps://a.org\n\n"), Diverge),
+		("url no path", foo_with("%URL%\nhttps://a.org\n\n"), Same),
+		(
+			"url upper, dot segment",
+			foo_with("%URL%\nHTTPS://A.org/x/./y\n\n"),
+			Same,
+		),
+		(
+			"unknown packager",
+			foo(&base.replace("A B <a@b.org>", "Unknown Packager")),
+			Same,
+		),
+		(
+			"packager email only",
+			foo(&base.replace("A B <a@b.org>", "<a@b.org>")),
+			Same,
+		),
 		(
 			"url with path",
 			foo_with("%URL%\nhttps://a.org/x\n\n"),
 			Same,
 		),
-		("unknown key", foo_with("%FOO%\nbar\n\n"), Diverge),
-		("xdata", foo_with("%DATA%\npkgtype=pkg\n\n"), Diverge),
-		(
-			"no %BASE%",
-			foo(&base.replace("%BASE%\nfoo\n\n", "")),
-			Diverge,
-		),
+		("unknown key", foo_with("%FOO%\nbar\n\n"), Same),
+		("xdata", foo_with("%DATA%\npkgtype=pkg\n\n"), Same),
+		("no %BASE%", foo(&base.replace("%BASE%\nfoo\n\n", "")), Same),
 		(
 			"no %PACKAGER%",
 			foo(&base.replace("%PACKAGER%\nA B <a@b.org>\n\n", "")),
-			Diverge,
+			Same,
 		),
-		("empty desc", foo(""), Diverge),
-		("desc spaces", foo_with("%DESC%\n a  b \n\n"), Diverge),
-		("desc empty value", foo_with("%DESC%\n\n"), Diverge),
-		("crlf", foo(&base.replace('\n', "\r\n")), Diverge),
+		("empty desc", foo(""), Same),
+		("desc spaces", foo_with("%DESC%\n a  b \n\n"), Same),
+		("desc empty value", foo_with("%DESC%\n\n"), Same),
+		("crlf", foo(&base.replace('\n', "\r\n")), Same),
 		(
 			"not utf-8",
 			vec![tar_file(
@@ -695,7 +776,7 @@ fn odd_inputs() {
 		(
 			"section twice",
 			foo_with("%DEPENDS%\na\n\n%DEPENDS%\nb\n\n"),
-			Diverge,
+			Same,
 		),
 		(
 			"same name twice",
@@ -707,10 +788,10 @@ fn odd_inputs() {
 				));
 				e
 			},
-			Diverge,
+			Same,
 		),
 		("%FILES% in desc", foo_with("%FILES%\nusr/\n\n"), Diverge),
-		("md5 without pgpsig", foo_with(&md5), Diverge),
+		("md5 without pgpsig", foo_with(&md5), Same),
 		(
 			"csize text",
 			foo(&base.replace("%CSIZE%\n1", "%CSIZE%\nx")),
@@ -721,18 +802,27 @@ fn odd_inputs() {
 			foo(&base.replace(&"ab".repeat(32), &"AB".repeat(32))),
 			Diverge,
 		),
-		("empty %GROUPS%", foo_with("%GROUPS%\n\n"), Diverge),
-		("blank lines", foo(&base.replace("\n\n", "\n\n\n")), Diverge),
+		("empty %GROUPS%", foo_with("%GROUPS%\n\n"), Same),
+		("blank lines", foo(&base.replace("\n\n", "\n\n\n")), Same),
 		(
 			"optdepend no space",
 			foo_with("%OPTDEPENDS%\na:b\n\n"),
 			Diverge,
 		),
-		// RelationOrSoname: SonameV1 fails without backtracking
 		(
 			"dep name with .so",
-			foo_with("%DEPENDS%\nfoo.sound\n\n"),
-			Diverge,
+			foo_with("%DEPENDS%\nfoo.sound\nd1.so62r\n\n"),
+			Same,
+		),
+		(
+			"dep pkgrel leading zero",
+			foo_with("%DEPENDS%\na=1-01\nb<2-1.01\n\n"),
+			Same,
+		),
+		(
+			"optdepend spaces",
+			foo_with("%OPTDEPENDS%\na:  x  y \nb: \n\n"),
+			Same,
 		),
 		("dep bad version", foo_with("%DEPENDS%\na>=\n\n"), Diverge),
 		("long line", foo_with(&long), Diverge),
@@ -771,7 +861,7 @@ fn odd_inputs() {
 		(
 			"files absolute",
 			vec![tar_file("foo-1-1/files", b"%FILES%\n/usr/\n")],
-			Diverge,
+			Same,
 		),
 		(
 			"files no parent",
@@ -779,7 +869,7 @@ fn odd_inputs() {
 				"foo-1-1/files",
 				b"%FILES%\nusr/bin/x\n",
 			)],
-			Diverge,
+			Same,
 		),
 		(
 			"files in a .db",
@@ -801,11 +891,55 @@ fn odd_inputs() {
 		(
 			"depends without desc",
 			vec![tar_file("foo-1-1/depends", b"%DEPENDS%\na\n\n")],
-			Diverge,
+			Same,
+		),
+		(
+			"files dir and file",
+			vec![tar_file(
+				"foo-1-1/files",
+				b"%FILES%\nusr\nusr/\n",
+			)],
+			Same,
+		),
+		(
+			"files duplicate",
+			vec![tar_file(
+				"foo-1-1/files",
+				b"%FILES%\nusr/\nusr/\n",
+			)],
+			Same,
+		),
+		(
+			"files blank line inside",
+			vec![tar_file(
+				"foo-1-1/files",
+				b"%FILES%\nusr/\n\nopt/\n",
+			)],
+			Same,
+		),
+		(
+			"files crlf",
+			vec![tar_file("foo-1-1/files", b"%FILES%\r\nusr/\r\n")],
+			Same,
+		),
+		(
+			"files after unknown key",
+			vec![tar_file(
+				"foo-1-1/files",
+				b"%FOO%\nx\n\n%FILES%\nusr/\n",
+			)],
+			Same,
+		),
+		("data without pkgtype", foo_with("%DATA%\na=b\n\n"), Same),
+		(
+			"header line in a list",
+			foo_with("%GROUPS%\ng\n%URL%\n\n"),
+			Same,
 		),
 		("empty archive", vec![], Same),
 	];
 	let mut report = Vec::new();
+	let mut wrong = Vec::new();
 	for (label, entries, expect) in cases {
 		let (c, r, why) = run_case(&entries, Comp::None, ".db");
 		let got = if c == r { Same } else { Diverge };
@@ -824,11 +958,14 @@ fn odd_inputs() {
 			brief(&c),
 			brief(&r)
 		));
-		assert_eq!(got, expect, "{label}\nC {c:?}\nrust {r:?}");
+		if got != expect {
+			wrong.push(format!("{label}: expected {expect:?}"));
+		}
 	}
 	for line in report {
 		eprintln!("{line}");
 	}
+	assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 fn brief(o: &Outcome) -> String {
@@ -863,9 +1000,9 @@ fn odd_archives() {
 	short_tar.truncate(700);
 	let cases: Vec<(&str, Vec<u8>, Expect)> = vec![
 		("empty file", Vec::new(), Same),
-		// errno only: libarchive refuses at open, tar at the first header
-		("garbage", b"not an archive at all\n".repeat(40), Diverge),
-		("two gzip members", two, Diverge),
+		// refused at open (the first tar header): the db is invalid
+		("garbage", b"not an archive at all\n".repeat(40), Same),
+		("two gzip members", two, Same),
 		("truncated gzip", truncated, Diverge),
 		("truncated tar", short_tar, Same),
 		("no end blocks", good[..good.len() - 1024].to_vec(), Same),
@@ -878,5 +1015,38 @@ fn odd_archives() {
 		let got = if c == r { Same } else { Diverge };
 		eprintln!("{label}: C {} / rust {}", brief(&c), brief(&r));
 		assert_eq!(got, expect, "{label}\nC {c:?}\nrust {r:?}");
+		if expect == Same {
+			assert_eq!(
+				validity(&fx, "t"),
+				c_validity(&fx, "t"),
+				"{label}"
+			);
+		}
 	}
+}
+
+// a db registered on a handle after its cache load failed or not:
+// pkgcache errno, then alpm_db_get_valid
+fn validity(fx: &TempRoot, tree: &str) -> (c_int, (c_int, c_int)) {
+	let mut h = Handle::initialize(&fx.path("root"), &fx.dbpath()).unwrap();
+	h.register_syncdb(tree.as_bytes(), 0).unwrap();
+	let ext = h.dbext().to_vec();
+	let db = h
+		.syncdbs_mut()
+		.iter_mut()
+		.find(|d| d.name() == tree.as_bytes())
+		.unwrap();
+	let e = db.pkgcache(&ext).err().map_or(0, |e| e as c_int);
+	let valid = match db.valid() {
+		Ok(()) => (0, 0),
+		Err(e) => (-1, e as c_int),
+	};
+	(e, valid)
+}
+
+fn c_validity(fx: &TempRoot, tree: &str) -> (c_int, (c_int, c_int)) {
+	let c = CHandle::new(&fx.path("root"), &fx.dbpath()).unwrap();
+	c.register_syncdb(tree.as_bytes(), 0);
+	let (_, e) = c.pkgcache(tree.as_bytes());
+	(e, c.valid(tree.as_bytes()))
 }

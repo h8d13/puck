@@ -33,7 +33,7 @@ use crate::callbacks::{Callbacks, LogLevel, Question};
 use crate::db::Db;
 use crate::error::Errno;
 use crate::package::Package;
-use crate::util::until_nul;
+use crate::util::{strerror, until_nul};
 
 pub use crate::db::{SIG_DATABASE, SIG_USE_DEFAULT};
 
@@ -203,15 +203,9 @@ enum ListMode {
 	Extern,
 }
 
-// gpg_error_from_errno's text for a failed read: io::Error's without
-// the " (os error N)" std adds
+// gpg_error_from_errno's text for a failed read
 fn read_error(e: std::io::Error) -> GpgError {
-	let text = e.to_string();
-	let text = match text.rfind(" (os error ") {
-		Some(i) => &text[..i],
-		None => &text[..],
-	};
-	GpgError::Read(text.as_bytes().to_vec())
+	GpgError::Read(strerror(&e))
 }
 
 // the first read gpgme's data callback makes on the file

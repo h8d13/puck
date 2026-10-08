@@ -1,5 +1,7 @@
 // alpm-types versions and relations against the C (alpm_pkg_vercmp,
-// alpm_dep_from_string), on the inputs alpm-types parses
+// alpm_dep_from_string, _alpm_depcmp_provides), on the inputs alpm-types
+// parses. the divergence classes are kept to name a regression, none is
+// expected (vendor/patches 0101-0109)
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -9,7 +11,7 @@ use alpm_types::{
 	FullVersion, OptionalDependency, PackageRelation, Version,
 	VersionComparison, VersionRequirement,
 };
-use difftest::{Rng, c_dep_from_string, c_vercmp, iters};
+use difftest::{Rng, c_dep_from_string, c_depcmp_provides, c_vercmp, iters};
 
 const DIGITS: &[u8] = b"0012399";
 const PKGVER: &[u8] = b"0012399abzAZ.._+~";
@@ -124,9 +126,9 @@ impl Tally {
 const EPOCH0: &str = "explicit epoch 0";
 const PKGREL1: &str = "pkgrel on one side";
 
-// why Version/FullVersion order a against b unlike the C: "0:" counts as
-// an epoch (the C treats it as none), a pkgrel present on one side only
-// counts (the C skips the release then)
+// why Version/FullVersion order a against b unlike the C: "0:" counting
+// as an epoch (the C treats it as none), a pkgrel present on one side
+// only counting (the C skips the release then)
 fn vercmp_classes(
 	(ea, eb): (Option<usize>, Option<usize>),
 	(ra, rb): (bool, bool),
@@ -152,11 +154,42 @@ fn epoch(e: Option<alpm_types::Epoch>) -> Option<usize> {
 	e.map(|e| e.0)
 }
 
+const REQ_OPS: [VersionComparison; 5] = [
+	VersionComparison::Equal,
+	VersionComparison::Less,
+	VersionComparison::Greater,
+	VersionComparison::LessOrEqual,
+	VersionComparison::GreaterOrEqual,
+];
+
+// "p<op>b" satisfied by a provision "p=a": is_satisfied_by_vercmp
+// against _alpm_depcmp_provides (dep_vercmp)
+fn requirement_against_c(
+	rng: &mut Rng,
+	(a, x): (&str, &Version),
+	(b, y): (&str, &Version),
+	tally: &mut Tally,
+) {
+	let op = REQ_OPS[rng.below(REQ_OPS.len())];
+	let req = VersionRequirement::new(op, y.clone());
+	let r = req.is_satisfied_by_vercmp(x);
+	let dep = c_dep_from_string(format!("p{req}").as_bytes());
+	let prov = c_dep_from_string(format!("p={a}").as_bytes());
+	let c = c_depcmp_provides(&dep, &[prov]);
+	let k = vercmp_classes(
+		(epoch(x.epoch), epoch(y.epoch)),
+		(x.pkgrel.is_some(), y.pkgrel.is_some()),
+		r == c,
+	);
+	tally.add(&k, || format!("p{req} by {a:?} ({b:?}) c={c} alpm={r}"));
+}
+
 #[test]
 fn vercmp_against_c() {
 	let mut rng = Rng::new(0xa1b2);
 	let n = iters();
 	let (mut generic, mut full) = (Tally::default(), Tally::default());
+	let mut req = Tally::default();
 	for _ in 0..n {
 		let a = version(&mut rng);
 		let b = if rng.below(2) == 0 {
@@ -180,6 +213,12 @@ fn vercmp_against_c() {
 				r == c,
 			);
 			generic.add(&k, show(r));
+			requirement_against_c(
+				&mut rng,
+				(&a, &x),
+				(&b, &y),
+				&mut req,
+			);
 		}
 		if let (Ok(x), Ok(y)) =
 			(FullVersion::from_str(&a), FullVersion::from_str(&b))
@@ -193,31 +232,33 @@ fn vercmp_against_c() {
 			full.add(&k, show(r));
 		}
 	}
-	// measured with 200000: Version 985 per 1000 agree, FullVersion 988
-	generic.finish("Version", n, (260, 980), &[EPOCH0, PKGREL1]);
-	full.finish("FullVersion", n, (80, 980), &[EPOCH0]);
+	// measured with 200000: 355 Version, 116 FullVersion pairs per 1000
+	generic.finish("Version", n, (260, 1000), &[]);
+	full.finish("FullVersion", n, (80, 1000), &[]);
+	req.finish("VersionRequirement", n, (260, 1000), &[]);
 }
 
 #[test]
 fn vercmp_pinned() {
-	// (a, b, C, Version, FullVersion where both parse as one)
-	let cases: &[(&str, &str, i32, i32, Option<i32>)] = &[
-		("1.0", "1.0", 0, 0, None),
-		("1.0a", "1.0", -1, -1, None),
-		("1.0-2", "1.0-10", -1, -1, Some(-1)),
-		("1:0.1", "2.0", 1, 1, None),
+	// (a, b, C): Version::vercmp and, where both parse as one, FullVersion
+	// order like the C
+	let cases: &[(&str, &str, i32)] = &[
+		("1.0", "1.0", 0),
+		("1.0a", "1.0", -1),
+		("1.0-2", "1.0-10", -1),
+		("1:0.1", "2.0", 1),
 		// '~' is a plain separator in the C, no pre-release
-		("1.0~rc1-1", "1.0-1", 1, 1, Some(1)),
-		("01.0", "1.0", 0, 0, None),
+		("1.0~rc1-1", "1.0-1", 1),
+		("01.0", "1.0", 0),
 		// EPOCH0
-		("0:1.0", "1.0", 0, 1, None),
-		("0:1.0-1", "1.0-1", 0, 1, Some(1)),
-		("0:2", "1:1", -1, -1, None),
+		("0:1.0", "1.0", 0),
+		("0:1.0-1", "1.0-1", 0),
+		("0:2", "1:1", -1),
 		// PKGREL1
-		("1.0", "1.0-1", 0, -1, None),
-		("1.0-5", "1.0", 0, 1, None),
+		("1.0", "1.0-1", 0),
+		("1.0-5", "1.0", 0),
 	];
-	for &(a, b, c, g, f) in cases {
+	for &(a, b, c) in cases {
 		let what = format!("{a:?} {b:?}");
 		assert_eq!(
 			c_vercmp(Some(a.as_bytes()), Some(b.as_bytes())),
@@ -228,14 +269,37 @@ fn vercmp_pinned() {
 			Version::from_str(a).unwrap(),
 			Version::from_str(b).unwrap(),
 		);
-		assert_eq!(i32::from(Version::vercmp(&x, &y)), g, "{what}");
-		let full = FullVersion::from_str(a)
-			.and_then(|x| Ok((x, FullVersion::from_str(b)?)));
-		assert_eq!(
-			full.ok().map(|(x, y)| sign(x.cmp(&y))),
-			f,
-			"{what}"
-		);
+		assert_eq!(i32::from(Version::vercmp(&x, &y)), c, "{what}");
+		if let (Ok(x), Ok(y)) =
+			(FullVersion::from_str(a), FullVersion::from_str(b))
+		{
+			assert_eq!(sign(x.cmp(&y)), c, "{what}");
+		}
+	}
+}
+
+#[test]
+fn requirement_pinned() {
+	// (requirement, provided version, C): PKGREL1, a provision without
+	// pkgrel satisfies a requirement with one
+	let cases: &[(&str, &str, bool)] = &[
+		(">=1.5-3", "1.5", true),
+		(">=1.5-3", "1.5-2", false),
+		("<1.5-3", "1.5", false),
+		("=1.5-3", "1.5", true),
+		("=1.5", "1.5-3", true),
+		// EPOCH0
+		("=0:1.5", "1.5-3", true),
+		("<1:1", "0:2", true),
+	];
+	for &(req, ver, c) in cases {
+		let what = format!("p{req} by p={ver}");
+		let dep = c_dep_from_string(format!("p{req}").as_bytes());
+		let prov = c_dep_from_string(format!("p={ver}").as_bytes());
+		assert_eq!(c_depcmp_provides(&dep, &[prov]), c, "{what}");
+		let r = VersionRequirement::from_str(req).unwrap();
+		let v = Version::from_str(ver).unwrap();
+		assert_eq!(r.is_satisfied_by_vercmp(&v), c, "{what}");
 	}
 }
 
@@ -280,6 +344,12 @@ const DESC_DELIM: &str = "':' + whitespace starts the description";
 // the C fields against the ALPM ones: name, operator, version as
 // alpm-types prints it (what be_local/be_sync pass on), description
 type Fields = (Vec<u8>, DepMod, Option<Vec<u8>>, Option<Vec<u8>>);
+
+fn optdep_fields(r: &OptionalDependency) -> Fields {
+	let (m, v) = requirement(r.version_requirement().as_ref());
+	let desc = r.description().clone().map(String::into_bytes);
+	(r.name().to_string().into_bytes(), m, v, desc)
+}
 
 // ALPM starts the description at ':' + any whitespace, the C at the
 // first ": "
@@ -363,81 +433,59 @@ fn relation_against_c() {
 			});
 		}
 		if let Ok(r) = OptionalDependency::from_str(&s) {
-			let (m, v) =
-				requirement(r.version_requirement().as_ref());
-			let desc =
-				r.description().clone().map(String::into_bytes);
-			let got =
-				(r.name().to_string().into_bytes(), m, v, desc);
-			let k = relation_classes(&s, &c, &got);
+			let k = relation_classes(&s, &c, &optdep_fields(&r));
 			opt.add(&k, || {
 				format!("{s:?} c={} alpm={r:?}", show(&c))
 			});
 		}
 	}
-	// measured with 200000: PackageRelation 958 per 1000 agree,
-	// OptionalDependency 748
-	rel.finish("PackageRelation", n, (130, 950), &[VERSION_TEXT]);
-	opt.finish(
-		"OptionalDependency",
-		n,
-		(200, 740),
-		&[VERSION_TEXT, DESC_TRIM, DESC_DELIM],
-	);
+	// measured with 200000: 181 PackageRelation, 261 OptionalDependency
+	// inputs per 1000 parse
+	rel.finish("PackageRelation", n, (130, 1000), &[]);
+	opt.finish("OptionalDependency", n, (200, 1000), &[]);
 }
 
 #[test]
 fn relation_pinned() {
-	// (input, C name/op/version/desc, ALPM display)
+	// (input, C name/op/version/desc, ALPM parses it). what ALPM parses
+	// has the C fields and prints back unchanged
 	type CDep = (
 		&'static str,
 		DepMod,
 		Option<&'static str>,
 		Option<&'static str>,
 	);
-	let cases: &[(&str, CDep, &str)] = &[
-		("foo", ("foo", DepMod::Any, None, None), "foo"),
-		(
-			"foo>=1.0-1",
-			("foo", DepMod::Ge, Some("1.0-1"), None),
-			"foo>=1.0-1",
-		),
-		(
-			"foo: bar",
-			("foo", DepMod::Any, None, Some("bar")),
-			"foo: bar",
-		),
+	let cases: &[(&str, CDep, bool)] = &[
+		("foo", ("foo", DepMod::Any, None, None), true),
+		("foo>=1.0-1", ("foo", DepMod::Ge, Some("1.0-1"), None), true),
+		("foo: bar", ("foo", DepMod::Any, None, Some("bar")), true),
 		// VERSION_TEXT
 		(
 			"foo=1.0-01",
 			("foo", DepMod::Eq, Some("1.0-01"), None),
-			"foo=1.0-1",
+			true,
 		),
 		(
 			"foo<2-1.01",
 			("foo", DepMod::Lt, Some("2-1.01"), None),
-			"foo<2-1.1",
+			true,
 		),
 		// DESC_TRIM
 		(
 			"foo:  bar ",
 			("foo", DepMod::Any, None, Some(" bar ")),
-			"foo: bar",
+			true,
 		),
-		("foo: ", ("foo", DepMod::Any, None, Some("")), "foo"),
-		// DESC_DELIM
-		(
-			"foo:\tbar",
-			("foo:\tbar", DepMod::Any, None, None),
-			"foo: bar",
-		),
+		("foo: ", ("foo", DepMod::Any, None, Some("")), true),
+		// DESC_DELIM: no ": ", the C name is no valid ALPM name
+		("foo:\tbar", ("foo:\tbar", DepMod::Any, None, None), false),
 		(
 			"foo>1:\tbar",
 			("foo", DepMod::Gt, Some("1:\tbar"), None),
-			"foo>1: bar",
+			false,
 		),
 	];
-	for &(s, (name, depmod, version, desc), alpm) in cases {
+	for &(s, (name, depmod, version, desc), parses) in cases {
 		let c = c_dep_from_string(s.as_bytes());
 		let want = Depend {
 			name: name.as_bytes().to_vec(),
@@ -447,7 +495,12 @@ fn relation_pinned() {
 			depmod,
 		};
 		assert_eq!(c, want, "{s:?}");
-		let r = OptionalDependency::from_str(s).unwrap();
-		assert_eq!(r.to_string(), alpm, "{s:?}");
+		let r = OptionalDependency::from_str(s);
+		assert_eq!(r.is_ok(), parses, "{s:?}");
+		if let Ok(r) = r {
+			assert!(relation_classes(s, &c, &optdep_fields(&r))
+				.is_empty());
+			assert_eq!(r.to_string(), s, "{s:?}");
+		}
 	}
 }

@@ -19,6 +19,7 @@ use crate::{
 };
 
 use pacman_cli::conf::{ColStr, Config, ConfigRepo};
+use pacman_cli::util::Output;
 
 // colstr_t of conf.h
 #[derive(Clone, Copy)]
@@ -66,7 +67,7 @@ pub(crate) struct ConfigC {
 	disable_dl_timeout: u16,
 	disable_sandbox_filesystem: u16,
 	disable_sandbox_syscalls: u16,
-	print_format: *mut c_char,
+	pub(crate) print_format: *mut c_char,
 	configfile: *mut c_char,
 	rootdir: *mut c_char,
 	dbpath: *mut c_char,
@@ -113,7 +114,7 @@ pub(crate) struct ConfigC {
 	remotefilesiglevel_mask: c_int,
 
 	pub(crate) chomp: u16,
-	verbosepkglists: u16,
+	pub(crate) verbosepkglists: u16,
 	parallel_downloads: c_uint,
 	cleanmethod: u16,
 	holdpkg: *mut CList,
@@ -129,8 +130,8 @@ pub(crate) struct ConfigC {
 
 	pub(crate) handle: *mut c_void,
 
-	explicit_adds: *mut CList,
-	explicit_removes: *mut CList,
+	pub(crate) explicit_adds: *mut CList,
+	pub(crate) explicit_removes: *mut CList,
 
 	pub(crate) colstr: ColStrC,
 
@@ -524,6 +525,9 @@ pub fn c_uname_machine() -> Vec<u8> {
 
 // glob(pattern, GLOB_NOCHECK, NULL): the result paths, or Err(ret)
 pub fn c_glob(pattern: &[u8]) -> Result<Vec<Vec<u8>>, i32> {
+	// parseconfig globs under FRONTEND too: keep every C call in this
+	// binary serialized
+	let _guard = FRONTEND.lock().unwrap_or_else(|e| e.into_inner());
 	let p = cstr(pattern);
 	let mut g = GlobT {
 		gl_pathc: 0,
@@ -800,44 +804,25 @@ pub fn c_setup(file: &[u8], preset: &Preset) -> SetupRun {
 	}
 }
 
-// one stderr for the conf.c messages and the callbacks, in order
-#[derive(Clone, Default)]
-struct SharedErr(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
-
-impl pacman_cli::util::Term for SharedErr {
-	fn out(&mut self, s: &[u8]) {
-		self.0.borrow_mut().extend_from_slice(s);
-	}
-
-	fn err(&mut self, s: &[u8]) {
-		self.0.borrow_mut().extend_from_slice(s);
-	}
-
-	fn read_line(&mut self, _size: usize) -> Option<Vec<u8>> {
-		None
-	}
-
-	fn stdin_is_tty(&mut self) -> bool {
-		false
-	}
-
-	fn stdout_is_tty(&mut self) -> bool {
-		false
-	}
-
-	fn cols(&mut self) -> u16 {
-		0
-	}
-
-	fn now_ms(&mut self) -> i64 {
-		0
-	}
+thread_local! {
+	// one stderr for the conf.c messages and the callbacks, in order
+	static SETUP_ERR: std::cell::RefCell<Vec<u8>> =
+		const { std::cell::RefCell::new(Vec::new()) };
 }
 
-impl pacman_cli::conf::Host for SharedErr {
+// Output::sink of the Rust setup's callbacks
+fn setup_sink(o: &mut Output) {
+	let mut b = std::mem::take(&mut o.stdout);
+	b.append(&mut o.stderr);
+	SETUP_ERR.with(|e| e.borrow_mut().extend(b));
+}
+
+struct SetupHost;
+
+impl pacman_cli::conf::Host for SetupHost {
 	fn log(&mut self, cfg: &Config, msg: &pacman_cli::conf::Msg) {
 		if let Some(s) = pacman_cli::conf::format_msg(cfg, msg) {
-			self.0.borrow_mut().extend_from_slice(&s);
+			SETUP_ERR.with(|e| e.borrow_mut().extend(s));
 		}
 	}
 
@@ -849,20 +834,21 @@ impl pacman_cli::conf::Host for SharedErr {
 // the same on the port: Config::parseconfig, then setup_libalpm with the
 // frontend callbacks
 pub fn rust_setup(file: &[u8], preset: &Preset) -> SetupRun {
+	SETUP_ERR.with(|e| e.borrow_mut().clear());
 	let mut cfg = preset.config();
-	let mut host = SharedErr::default();
+	let mut host = SetupHost;
 	let res = cfg.parseconfig(file, &mut host).and_then(|()| {
-		let cb = pacman_cli::callback::Frontend::new(
-			cfg.clone(),
-			host.clone(),
-		);
+		let term = pacman_cli::util::Term::new(&b""[..], false, false);
+		let mut cb =
+			pacman_cli::callback::Frontend::new(cfg.clone(), term);
+		cb.out.sink = Some(setup_sink);
 		cfg.setup_libalpm(&mut host, Box::new(cb))
 	});
 	let (ret, handle) = match res {
 		Ok(h) => (0, Some(HandleSnap::of(&h))),
 		Err(e) => (e.ret, None),
 	};
-	let err = host.0.borrow().clone();
+	let err = SETUP_ERR.with(|e| std::mem::take(&mut *e.borrow_mut()));
 	SetupRun {
 		ret,
 		handle,

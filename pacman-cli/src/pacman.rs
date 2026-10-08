@@ -21,14 +21,15 @@
 // cursor restore, no SIGWINCH (getcols is not cached anyway).
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use alpm_core::PACKAGE_VERSION;
 use alpm_core::handle::Handle;
 use alpm_core::util::strerror;
-use pacman_common::util_common::{mbasename, safe_fgets};
+use pacman_common::util_common::{PATH_MAX, mbasename};
 
 use crate::callback::Frontend;
 use crate::conf::{
@@ -42,14 +43,11 @@ use crate::query::{QueryEnv, pacman_query};
 use crate::sync::{Unported, pacman_sync};
 use crate::util::{
 	Output, Term, arg_to_string, console_cursor_hide, console_cursor_show,
-	debug_stamp, getcols, list_display, now_secs, pm_printf_term,
+	debug_stamp, getcols, list_display, now_secs, pm_printf,
 };
 
 // alpm_version() of the reference build (meson LIB_VERSION)
 pub const LIB_VERSION: &str = "16.0.1";
-
-// limits.h: --config and --logfile go through strndup(optarg, PATH_MAX)
-const PATH_MAX: usize = 4096;
 
 // conf.h operations, PM_OP_MAIN in conf
 pub const PM_OP_REMOVE: u16 = 2;
@@ -1464,94 +1462,83 @@ pub fn main_args<F: FnOnce() -> Result<(), i32>>(
 	Ok((config, targets))
 }
 
-// the binary's process: std streams (stdout line buffered like a C
-// terminal stdout, flushed where the C flushes), stdin lines, getcols
-// and a monotonic millisecond clock
-pub struct StdTerm {
-	start: Instant,
+// the binary's stdin, buffered here: a held lock would block the next
+// Term (callbacks are re-installed after setup)
+pub type StdIn = io::BufReader<io::Stdin>;
+
+// CLOCK_MONOTONIC_COARSE counts from boot, so a fresh bar's zero sync
+// time is long past: the offset keeps that
+fn monotonic_ms() -> i64 {
+	static START: OnceLock<Instant> = OnceLock::new();
+	let ms = START.get_or_init(Instant::now).elapsed().as_millis();
+	i64::try_from(ms)
+		.unwrap_or(i64::MAX)
+		.saturating_add(1 << 30)
 }
 
-impl Default for StdTerm {
-	fn default() -> Self {
-		StdTerm {
-			start: Instant::now(),
-		}
+// the binary's process: std's stdin, the terminal probes, getcols and
+// the clocks
+pub fn std_term() -> Term<StdIn> {
+	Term {
+		stdin: io::BufReader::new(io::stdin()),
+		stdin_tty: io::stdin().is_terminal(),
+		stdout_tty: io::stdout().is_terminal(),
+		cols: getcols,
+		now_ms: monotonic_ms,
+		now_secs,
 	}
 }
 
+// Output::sink of the binary: stdout, then stderr, written through.
 // write errors are dropped like the unchecked C stdio calls
-impl Term for StdTerm {
-	fn out(&mut self, s: &[u8]) {
-		let _ = io::stdout().write_all(s);
-	}
-
-	fn err(&mut self, s: &[u8]) {
-		let _ = io::stderr().write_all(s);
-	}
-
-	fn flush(&mut self) {
-		let _ = io::stdout().flush();
-		let _ = io::stderr().flush();
-	}
-
-	fn read_line(&mut self, size: usize) -> Option<Vec<u8>> {
-		safe_fgets(&mut io::stdin().lock(), size).ok().flatten()
-	}
-
-	fn stdin_is_tty(&mut self) -> bool {
-		io::stdin().is_terminal()
-	}
-
-	fn stdout_is_tty(&mut self) -> bool {
-		io::stdout().is_terminal()
-	}
-
-	fn cols(&mut self) -> u16 {
-		getcols()
-	}
-
-	// CLOCK_MONOTONIC_COARSE counts from boot, a fresh bar's zero sync
-	// time is long past: the offset keeps that
-	fn now_ms(&mut self) -> i64 {
-		let ms = self.start.elapsed().as_millis();
-		i64::try_from(ms)
-			.unwrap_or(i64::MAX)
-			.saturating_add(1 << 30)
-	}
+pub fn std_sink(o: &mut Output) {
+	let mut out = io::stdout();
+	let _ = out.write_all(&std::mem::take(&mut o.stdout));
+	let _ = out.flush();
+	let _ = io::stderr().write_all(&std::mem::take(&mut o.stderr));
 }
 
-// pm_printf of conf.c messages through a Term
-struct TermHost<'a> {
-	term: &'a mut dyn Term,
+// pm_printf of conf.c messages into an Output
+struct OutHost<'a> {
+	out: &'a mut Output,
+	now_secs: fn() -> i64,
 }
 
-impl Host for TermHost<'_> {
+impl Host for OutHost<'_> {
 	fn log(&mut self, config: &Config, msg: &Msg) {
-		let now = self.term.now_secs();
+		let now = (self.now_secs)();
 		if let Some(s) = stamped(config, msg, true, now) {
-			self.term.err(&s);
+			self.out.stderr.extend_from_slice(&s);
 		}
 	}
 }
 
-// main(): Err from main_args is cleanup(ret), the parse output goes out
-// before anything else is printed
-fn setup<T: Term + 'static>(
+// main() up to the operation: Err is cleanup(ret). the parse output
+// goes out before anything else is printed
+fn setup<R: BufRead + 'static>(
 	argv: &mut [Vec<u8>],
 	process: Process<'_, impl FnOnce() -> Result<(), i32>>,
 	io: &mut Io,
-	term: &mut T,
-	new_term: &impl Fn() -> T,
+	out: &mut Output,
+	new_term: &impl Fn() -> Term<R>,
 ) -> Result<(Config, Vec<Vec<u8>>, Handle), i32> {
 	let parsed = main_args(argv, process, io);
-	term.out(&std::mem::take(&mut io.out));
-	term.err(&std::mem::take(&mut io.err));
+	out.stdout.append(&mut io.out);
+	out.stderr.append(&mut io.err);
+	out.flush();
 	let (mut config, targets) = parsed?;
-	let cb = Box::new(Frontend::new(config.clone(), new_term()));
-	let mut host = TermHost { term };
-	let mut handle = config
-		.setup_libalpm(&mut host, cb)
-		.map_err(|e| e.ret & 0xff)?;
+	let sink = out.sink;
+	let frontend = |config: &Config| {
+		let mut f = Frontend::new(config.clone(), new_term());
+		f.out.sink = sink;
+		Box::new(f)
+	};
+	let cb = frontend(&config);
+	let now_secs = cb.term.now_secs;
+	let mut host = OutHost { out, now_secs };
+	let handle = config.setup_libalpm(&mut host, cb);
+	out.flush();
+	let mut handle = handle.map_err(|e| e.ret & 0xff)?;
 	// noask is meant to be non-interactive
 	if config.noask != 0 {
 		config.noconfirm = 1;
@@ -1563,14 +1550,13 @@ fn setup<T: Term + 'static>(
 		config.logmask &= !LOG_WARNING;
 	}
 	// the callbacks read the config as it is from here on
-	let cb = Frontend::new(config.clone(), new_term());
-	handle.set_callbacks(Box::new(cb));
+	handle.set_callbacks(frontend(&config));
 	Ok((config, targets, handle))
 }
 
 // the -v lines before the operation
 fn verbose(
-	term: &mut dyn Term,
+	out: &mut Vec<u8>,
 	config: &Config,
 	handle: &Handle,
 	targets: &[Vec<u8>],
@@ -1590,90 +1576,90 @@ fn verbose(
 		(b"Log File  : ", null(handle.logfile())),
 		(b"GPG Dir   : ", null(handle.gpgdir())),
 	];
-	let mut out = Vec::new();
 	for (title, value) in lines {
 		out.extend_from_slice(&[title, &value[..], b"\n"].concat());
 	}
 	let title = b"Targets   :";
-	list_display(&mut out, Some(title), targets, 0, &config.colstr);
-	term.out(&out);
+	list_display(out, Some(title), targets, 0, &config.colstr);
 }
 
 // a branch this port does not have yet: reported, status 1
-fn unported(term: &mut dyn Term, config: &Config, what: &str) -> i32 {
+fn unported(err: &mut Vec<u8>, config: &Config, what: &str) -> i32 {
 	let msg = format!("{what} is not supported by this port yet\n");
-	pm_printf_term(term, config, LOG_ERROR, msg.as_bytes());
+	pm_printf(err, config, LOG_ERROR, msg.as_bytes());
 	1
-}
-
-fn unported_sync(term: &mut dyn Term, config: &Config, u: Unported) -> i32 {
-	let what = match u {
-		Unported::Clean => "--clean",
-		Unported::Refresh => "--refresh",
-		Unported::Transaction => "installing or upgrading packages",
-	};
-	unported(term, config, what)
 }
 
 // the operation of config.op on handle: the exit status
 fn dispatch(
-	term: &mut dyn Term,
+	out: &mut Output,
 	config: &Config,
 	handle: &mut Handle,
 	targets: &[Vec<u8>],
+	cols: u16,
 ) -> i32 {
-	let mut o = Output::default();
-	let cols = term.cols();
-	let ret = match config.op {
-		PM_OP_DATABASE => unported(term, config, "--database"),
-		PM_OP_REMOVE => unported(term, config, "--remove"),
-		PM_OP_UPGRADE => unported(term, config, "--upgrade"),
+	match config.op {
+		PM_OP_DATABASE => {
+			unported(&mut out.stderr, config, "--database")
+		}
+		PM_OP_REMOVE => unported(&mut out.stderr, config, "--remove"),
+		PM_OP_UPGRADE => unported(&mut out.stderr, config, "--upgrade"),
 		PM_OP_QUERY => {
 			let path =
 				std::env::var_os("PATH").map(|p| p.into_vec());
 			let env = QueryEnv { cols, path };
-			pacman_query(config, handle, &env, targets, &mut o)
+			pacman_query(config, handle, &env, targets, out)
 		}
 		PM_OP_SYNC => {
-			match pacman_sync(config, handle, targets, cols, &mut o)
-			{
+			match pacman_sync(config, handle, targets, cols, out) {
 				Ok(ret) => ret,
-				Err(u) => unported_sync(term, config, u),
+				Err(Unported::Clean) => unported(
+					&mut out.stderr,
+					config,
+					"--clean",
+				),
+				Err(Unported::Transaction) => {
+					let what = "installing or upgrading packages";
+					unported(&mut out.stderr, config, what)
+				}
 			}
 		}
-		PM_OP_DEPTEST => pacman_deptest(handle, targets, &mut o),
-		PM_OP_FILES => {
-			match pacman_files(config, handle, targets, &mut o) {
-				Ok(ret) => ret,
-				Err(u) => unported_sync(term, config, u),
-			}
-		}
+		PM_OP_DEPTEST => pacman_deptest(handle, targets, out),
+		PM_OP_FILES => pacman_files(config, handle, targets, out),
 		_ => {
 			let msg = b"no operation specified (use -h for help)\n";
-			pm_printf_term(term, config, LOG_ERROR, msg);
+			pm_printf(&mut out.stderr, config, LOG_ERROR, msg);
 			1
 		}
-	};
-	term.out(&o.stdout);
-	term.err(&o.stderr);
-	ret
+	}
 }
 
-// main(): the exit status (cleanup(ret) exits with ret & 0xff). new_term
-// gives the callbacks their own Term onto the same process
-pub fn run<T: Term + 'static>(
+// main(): the exit status (cleanup(ret) exits with ret & 0xff).
+// new_term gives the process to each Frontend, sink is where output
+// goes (std_sink for the binary)
+pub fn run<R: BufRead + 'static>(
 	argv: &mut [Vec<u8>],
 	process: Process<'_, impl FnOnce() -> Result<(), i32>>,
 	io: &mut Io,
-	new_term: impl Fn() -> T,
+	new_term: impl Fn() -> Term<R>,
+	sink: Option<fn(&mut Output)>,
 ) -> i32 {
-	let mut term = new_term();
-	console_cursor_hide(&mut term);
-	let ret = match setup(argv, process, io, &mut term, &new_term) {
+	let term = new_term();
+	let mut out = Output {
+		sink,
+		..Output::default()
+	};
+	console_cursor_hide(&mut out.stdout, term.stdout_tty);
+	let ret = match setup(argv, process, io, &mut out, &new_term) {
 		Err(ret) => ret,
 		Ok((config, targets, mut handle)) => {
 			if config.verbose > 0 {
-				verbose(&mut term, &config, &handle, &targets);
+				verbose(
+					&mut out.stdout,
+					&config,
+					&handle,
+					&targets,
+				);
 			}
 			if needs_root(&config) {
 				let cl =
@@ -1682,11 +1668,12 @@ pub fn run<T: Term + 'static>(
 					.concat();
 				let _ = handle.logaction(b"PACMAN", &msg);
 			}
-			dispatch(&mut term, &config, &mut handle, &targets)
+			let cols = (term.cols)();
+			dispatch(&mut out, &config, &mut handle, &targets, cols)
 				& 0xff
 		}
 	};
-	console_cursor_show(&mut term);
-	term.flush();
+	console_cursor_show(&mut out.stdout, term.stdout_tty);
+	out.flush();
 	ret
 }

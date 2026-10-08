@@ -1,0 +1,40 @@
+diff -ruN '--exclude=VENDORED' a/alpm-mtree/src/parser.rs b/alpm-mtree/src/parser.rs
+--- a/alpm-mtree/src/parser.rs
++++ b/alpm-mtree/src/parser.rs
+@@ -96,7 +96,7 @@
+ }
+ 
+ /// All allowed kinds of path types.
+-#[derive(Clone, Copy, Debug)]
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ pub enum PathType {
+     /// A directory.
+     Dir,
+@@ -377,3 +377,27 @@
+ 
+     Ok(statements)
+ }
++
++#[cfg(test)]
++mod tests {
++    use rstest::rstest;
++    use winnow::Parser;
++
++    use super::*;
++
++    /// Ensures that the path type of a `/set` line can be compared.
++    #[rstest]
++    #[case("/set type=dir\n", PathType::Dir)]
++    #[case("/set type=file\n", PathType::File)]
++    #[case("/set type=link\n", PathType::Link)]
++    fn set_path_type(#[case] input: &str, #[case] expected: PathType) {
++        let statements = mtree.parse(input).unwrap();
++        let [Statement::Set(properties)] = statements.as_slice() else {
++            panic!("expected one /set statement, got {statements:?}");
++        };
++        let [SetProperty::Type(path_type)] = properties.as_slice() else {
++            panic!("expected one type property, got {properties:?}");
++        };
++        assert_eq!(*path_type, expected);
++    }
++}

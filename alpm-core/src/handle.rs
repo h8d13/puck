@@ -25,14 +25,13 @@ use crate::error::Errno;
 use crate::log::{Clock, Logger};
 use crate::package::{DbCaches, Package};
 use crate::signing::Keyring;
-use crate::util::{fnmatch_patterns, hash_sdbm, makepath, until_nul};
+use crate::util::{
+	CALLER_PREFIX, PATH_MAX, fnmatch_patterns, hash_sdbm, makepath,
+	until_nul,
+};
 
-// limits.h on linux, the realpath buffer of _alpm_set_directory_option
-const PATH_MAX: usize = 4096;
 // SYSHOOKDIR of the meson build, appended to root without its '/'
 const SYSHOOKDIR: &[u8] = b"/usr/share/libalpm/hooks/";
-// ALPM_CALLER_PREFIX
-const CALLER_PREFIX: &[u8] = b"ALPM";
 // getpwnam(3) with the "files" NSS source
 const PASSWD: &str = "/etc/passwd";
 const ENOENT: i32 = 2;
@@ -75,6 +74,15 @@ pub struct Handle {
 	db_local: Option<Db>,
 	// registration order
 	dbs_sync: Vec<Db>,
+}
+
+// Handle::sync_parts
+pub(crate) struct SyncParts<'h> {
+	pub(crate) keyring: &'h mut Keyring,
+	pub(crate) download: &'h mut DownloadState,
+	pub(crate) cb: &'h mut dyn Callbacks,
+	pub(crate) fetch: Option<&'h mut dyn Fetch>,
+	pub(crate) dbs: &'h mut [Db],
 }
 
 impl fmt::Debug for Handle {
@@ -218,6 +226,26 @@ impl Handle {
 
 	pub fn callbacks(&mut self) -> &mut dyn Callbacks {
 		&mut *self.cb
+	}
+
+	// set_callbacks giving the old set back, for a caller that swaps
+	// them for one call
+	pub fn replace_callbacks(
+		&mut self,
+		cb: Box<dyn Callbacks>,
+	) -> Box<dyn Callbacks> {
+		std::mem::replace(&mut self.cb, cb)
+	}
+
+	// what alpm_db_update works on at once, borrowed apart
+	pub(crate) fn sync_parts(&mut self) -> SyncParts<'_> {
+		SyncParts {
+			keyring: &mut self.keyring,
+			download: &mut self.download,
+			cb: &mut *self.cb,
+			fetch: self.fetch.as_deref_mut().map(|f| f as _),
+			dbs: &mut self.dbs_sync,
+		}
 	}
 
 	// alpm_option_set_fetchcb, None is the built-in downloader

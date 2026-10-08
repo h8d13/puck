@@ -16,6 +16,7 @@ alpm-types.workspace = true
 base64.workspace = true
 landlock.workspace = true
 libseccomp.workspace = true
+pacman-common = { path = "../pacman-common" }
 reqwest.workspace = true
 rustix.workspace = true
 

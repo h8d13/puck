@@ -149,8 +149,13 @@ impl CHandle {
 		unsafe { alpm_errno(self.h) }
 	}
 
+	// the live handle, for wrappers of other C files
+	pub(crate) fn raw(&self) -> *mut c_void {
+		self.h
+	}
+
 	// f with pm_errno reset before, its result and pm_errno after
-	fn call<R>(&self, f: impl FnOnce() -> R) -> (R, c_int) {
+	pub(crate) fn call<R>(&self, f: impl FnOnce() -> R) -> (R, c_int) {
 		self.reset();
 		let r = f();
 		(r, self.errno())

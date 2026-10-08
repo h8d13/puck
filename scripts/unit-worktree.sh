@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # git worktree for one port unit: ../ratman-worktrees/<name>, branch unit/<name>
 # usage: scripts/unit-worktree.sh <name>...          create (tree must be clean)
+#        scripts/unit-worktree.sh --from REF <name>... create from REF
 #        scripts/unit-worktree.sh --remove <name>... remove after merging
 #
 # the unit works and commits on its branch; merge back with `git merge`.
@@ -29,9 +30,9 @@ create() {
 		echo "$wt exists" >&2
 		exit 1
 	fi
-	git worktree add -q -b "unit/$name" "$wt" HEAD
+	git worktree add -q -b "unit/$name" "$wt" "$from"
 	for sub in pacman alpm; do
-		sha=$(git rev-parse "HEAD:$sub")
+		sha=$(git rev-parse "$from:$sub")
 		git clone -q --shared --no-checkout "$root/$sub" "$wt/$sub"
 		git -C "$wt/$sub" checkout -q "$sha"
 	done
@@ -42,8 +43,14 @@ create() {
 		PACMAN_BUILD = "$root/pacman/build"
 		TMPDIR = "$wt/.tmp"
 	EOF
-	echo "$wt (branch unit/$name)"
+	echo "$wt (branch unit/$name from $from)"
 }
+
+from=HEAD
+if [ "${1:-}" = "--from" ]; then
+	from=$2
+	shift 2
+fi
 
 if [ "${1:-}" = "--remove" ]; then
 	shift

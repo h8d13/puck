@@ -10,10 +10,10 @@ use alpm_types::RelativePath;
 use fluent_i18n::t;
 use winnow::{
     ascii::{line_ending, multispace0, space0, till_line_ending},
-    combinator::{alt, cut_err, eof, not, repeat, terminated},
+    combinator::{alt, cut_err, eof, not, preceded, repeat, terminated},
 };
 
-use crate::files::Error;
+use crate::{files::Error, libalpm};
 
 /// The raw data section in [alpm-repo-files] data.
 ///
@@ -245,6 +245,76 @@ impl Display for RepoFilesV1 {
     }
 }
 
+impl RepoFilesV1 {
+    /// Recognizes [alpm-repo-files] data the way libalpm's `sync_db_read` reads it.
+    ///
+    /// Lines are compared as they are. A `%FILES%` section ends at a blank line or at the end of
+    /// the file and a later one replaces an earlier one. Any other line starts an unknown section,
+    /// which is skipped up to the next blank line.
+    ///
+    /// [alpm-repo-files]: https://alpm.archlinux.page/specifications/alpm-repo-files.5.html
+    fn libalpm_parser<'a>(input: &mut Input<'a>) -> PResult<'a, Vec<PathBuf>> {
+        let mut paths = Vec::new();
+        while !input.is_empty() {
+            match libalpm::line.parse_next(input)? {
+                FilesSection::SECTION_KEYWORD => {
+                    paths = repeat(
+                        0..,
+                        preceded(not(libalpm::end_of_block), libalpm::line.map(PathBuf::from)),
+                    )
+                    .parse_next(input)?;
+                }
+                "" => {}
+                // libalpm warns about an unknown key and skips its values
+                _ => {
+                    while !input.is_empty() && !input.starts_with('\n') {
+                        libalpm::line.parse_next(input)?;
+                    }
+                }
+            }
+        }
+        Ok(paths)
+    }
+
+    /// Creates a new [`RepoFilesV1`] from a string slice the way libalpm reads [alpm-repo-files]
+    /// data.
+    ///
+    /// This is meant for reading what pacman reads, e.g. repository databases created by other
+    /// tools. Lines are compared as they are (a header followed by `\r\n` is not a header). The
+    /// `%FILES%` section ends at a blank line or at the end of the file and a later one replaces
+    /// an earlier one. Other sections are skipped up to the next blank line. Input without a
+    /// `%FILES%` section has no paths.
+    ///
+    /// Paths are taken as they are and keep their order. Unlike [`Self::try_from`], absolute
+    /// paths, paths without a parent and duplicate paths are accepted: libalpm reads them. Paths
+    /// are compared as strings, so `usr` and `usr/` are two paths.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::path::PathBuf;
+    ///
+    /// use alpm_repo_db::files::RepoFilesV1;
+    ///
+    /// # fn main() -> Result<(), alpm_repo_db::files::Error> {
+    /// let data = "\n%FILES%\nusr/\n\nusr/bin/\n";
+    /// let files = RepoFilesV1::from_str_libalpm(data)?;
+    /// assert_eq!(files.as_ref(), vec![PathBuf::from("usr/")]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the parser fails: every line is a path, a section header or skipped,
+    /// so no input is expected to.
+    ///
+    /// [alpm-repo-files]: https://alpm.archlinux.page/specifications/alpm-repo-files.5.html
+    pub fn from_str_libalpm(s: &str) -> Result<Self, Error> {
+        Ok(Self(Self::libalpm_parser.parse(Input::new(s))?))
+    }
+}
+
 impl FromStr for RepoFilesV1 {
     type Err = Error;
 
@@ -471,6 +541,25 @@ mod tests {
     use testresult::TestResult;
 
     use super::*;
+
+    /// Ensures that the libalpm reader reads the paths libalpm reads.
+    #[rstest]
+    #[case::empty("", &[])]
+    #[case::header_only("%FILES%\n", &[])]
+    #[case::blank_line_ends_section("%FILES%\nusr/\n\nusr/bin/\n", &["usr/"])]
+    #[case::unknown_section("%FOO%\nbar\n\n%FILES%\nusr/\n", &["usr/"])]
+    #[case::unknown_section_swallows_header("foo\n%FILES%\nusr/\n", &[])]
+    #[case::crlf("%FILES%\r\nusr/\r\n", &[])]
+    #[case::later_section_replaces("%FILES%\na\n\n%FILES%\nb\n", &["b"])]
+    #[case::absolute("%FILES%\n/usr/\n", &["/usr/"])]
+    #[case::without_parent("%FILES%\nusr/bin/foo\n", &["usr/bin/foo"])]
+    #[case::file_and_dir("%FILES%\nusr/\nusr\nusr/\n", &["usr/", "usr", "usr/"])]
+    fn repofilesv1_from_str_libalpm(#[case] data: &str, #[case] expected: &[&str]) -> TestResult {
+        let files = RepoFilesV1::from_str_libalpm(data)?;
+        let expected: Vec<PathBuf> = expected.iter().map(PathBuf::from).collect();
+        assert_eq!(files.as_ref(), expected);
+        Ok(())
+    }
 
     /// Ensures that a [`RepoFilesV1`] can be successfully created from a directory.
     #[test]

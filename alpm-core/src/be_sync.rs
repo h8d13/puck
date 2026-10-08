@@ -3,49 +3,58 @@
 // branch of db.c's _alpm_db_path.
 //
 // the tar walk follows the C, the entry contents do not: desc/depends go
-// through alpm-repo-db's desc parser and files through its files parser,
-// in place of _alpm_archive_fgets and the READ_AND_STORE macros. what the
-// two accept differs, see PORTING.md. libarchive is replaced by
-// alpm-compress (gzip, bzip2, xz, zstd, none) picked by magic bytes, as
-// the db file name carries no compression suffix.
+// through alpm-repo-db's libalpm-compatible desc reader and files through
+// its files reader, in place of _alpm_archive_fgets and the READ_AND_STORE
+// macros. the typed values still differ, see PORTING.md. libarchive is
+// replaced by alpm-compress (gzip, bzip2, xz, zstd, none) picked by magic
+// bytes, as the db file name carries no compression suffix.
 //
 // sync_db_validate without the status bits db.c keeps: the missing file
-// and the signature check (signing.rs). not ported: alpm_db_update
-// (dload), get_sync_dir. populate on a db file that does not exist is
-// NotFound.
+// and the signature check (signing.rs). alpm_db_update with get_sync_dir:
+// downloads through dload.rs, validation through Db::validate. populate
+// on a db file that does not exist is NotFound.
 
 use std::collections::HashMap;
-use std::ffi::c_int;
+use std::ffi::{OsStr, c_int};
 use std::fmt::Display;
-use std::fs::File;
-use std::io::{self, ErrorKind, Read, Seek};
+use std::fs;
+use std::io::{self, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
-use std::str::FromStr;
+use std::path::Path;
 
-use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
+use alpm_compress::decompression::DecompressionSettings;
 use alpm_compress::tarball::{TarballEntry, TarballReader};
-use alpm_repo_db::desc::{RepoDescFile, RepoDescFileV2};
+use alpm_repo_db::desc::{Section, parse_libalpm};
 use alpm_repo_db::files::RepoFiles;
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
-use crate::callbacks::{Callbacks, LogLevel};
+use crate::callbacks::{Callbacks, Event, LogLevel};
+use crate::db::{DB_USAGE_SYNC, Db};
 use crate::deps::{Depend, dep_from_string};
+use crate::dload::{
+	Downloader, Payload, Settings, remove_temporary_download_dir,
+};
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
+use crate::handle::{Handle, SyncParts};
 use crate::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
-	PKG_VALIDATION_SIGNATURE, Package, PkgFrom,
+	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, PkgXData,
 };
 use crate::pkghash::PkgHash;
 use crate::signing::{
 	Keyring, SIG_DATABASE, SIG_DATABASE_MARGINAL_OK, SIG_DATABASE_OPTIONAL,
 	SIG_DATABASE_UNKNOWN_OK, check_pgp_helper, process_siglist,
 };
-use crate::util::{fnmatch, hash_sdbm, splitname, strerror, until_nul};
+use crate::util::{
+	self, PATH_MAX, archive_io_err as io_err, fnmatch, get_fullpath,
+	hash_sdbm, makepath, splitname, strerror, until_nul,
+};
 
 // limits.h on linux
 const NAME_MAX: usize = 255;
-const PATH_MAX: usize = 4096;
+// hard upper limit of a db download
+const DB_MAX_SIZE: i64 = 128 * 1024 * 1024;
 
 // why an entry made the db invalid
 #[derive(Debug)]
@@ -159,6 +168,181 @@ pub fn sync_db_validate(
 	}
 }
 
+// get_sync_dir: "<dbpath>sync/", made when stat(2) fails, a non-directory
+// there unlinked first. Err is ALPM_ERR_SYSTEM
+fn get_sync_dir(
+	dbpath: &[u8],
+	cb: &mut dyn Callbacks,
+) -> Result<Vec<u8>, Errno> {
+	let syncpath = [until_nul(dbpath), b"sync/"].concat();
+	let p = Path::new(OsStr::from_bytes(&syncpath));
+	match fs::metadata(p) {
+		Err(_) => {
+			let msg = [
+				b"database dir '",
+				&syncpath[..],
+				b"' does not exist, creating it\n",
+			];
+			cb.log(LogLevel::Debug, &msg.concat());
+			makepath(&syncpath).map_err(|_| Errno::System)?;
+		}
+		Ok(m) if !m.is_dir() => {
+			let msg = [
+				b"removing invalid file: ",
+				&syncpath[..],
+				b"\n",
+			];
+			cb.log(LogLevel::Warning, &msg.concat());
+			fs::remove_file(p).map_err(|_| Errno::System)?;
+			makepath(&syncpath).map_err(|_| Errno::System)?;
+		}
+		Ok(_) => {}
+	}
+	Ok(syncpath)
+}
+
+fn downloader<'a>(
+	parts: &'a mut SyncParts<'_>,
+	settings: &'a Settings,
+) -> Downloader<'a> {
+	Downloader {
+		settings,
+		state: &mut *parts.download,
+		cb: &mut *parts.cb,
+		fetch: parts.fetch.as_deref_mut().map(|f| f as _),
+		// sandbox.c plugs in here (_alpm_use_sandbox: root, a sandbox
+		// user, a restriction enabled), like for fetch_pkgurl
+		sandbox: None,
+	}
+}
+
+// the download payload of a db: "<treename><dbext>" from its servers
+// into tmp, its .sig as the siglevel asks
+fn db_payload(
+	db: &Db,
+	dbext: &[u8],
+	siglevel: c_int,
+	force: bool,
+	tmp: &[u8],
+) -> Payload {
+	let name = [db.name(), until_nul(dbext)].concat();
+	let mut p = Payload::default();
+	p.servers = db.servers().to_vec();
+	p.destfile_name = Some(get_fullpath(tmp, &name, b""));
+	p.tempfile_name = get_fullpath(tmp, &name, b".part");
+	p.filepath = Some(name.clone());
+	p.remote_name = name;
+	p.force = force;
+	p.unlink_on_fail = true;
+	p.download_signature = siglevel & SIG_DATABASE != 0;
+	p.signature_optional = siglevel & SIG_DATABASE_OPTIONAL != 0;
+	p.max_size = DB_MAX_SIZE;
+	p
+}
+
+// alpm_db_update once the lock is held: payloads, the download between
+// the DB_RETRIEVE events, then every db's cache dropped and its status
+// validated anew. a failed validation is Err, the errno of the last one
+fn update_locked(
+	handle: &mut Handle,
+	settings: &Settings,
+	dbs: &[usize],
+	force: bool,
+	syncpath: &[u8],
+	tmp: &[u8],
+) -> Result<bool, Errno> {
+	let dbext = handle.dbext().to_vec();
+	let default = handle.default_siglevel();
+	let mut parts = handle.sync_parts();
+	let mut payloads = Vec::new();
+	let mut synced = Vec::new();
+	for &i in dbs {
+		let db = &parts.dbs[i];
+		if db.usage() & DB_USAGE_SYNC == 0 {
+			continue;
+		}
+		if db.servers().is_empty() {
+			return Err(Errno::ServerNone);
+		}
+		// an invalid db is fetched again: a db and signature that do
+		// not match may be fixed upstream
+		let dbforce = force || db.valid().is_err();
+		let level = db.siglevel(default);
+		payloads.push(db_payload(db, &dbext, level, dbforce, tmp));
+		synced.push(i);
+	}
+	if payloads.is_empty() {
+		return Ok(true);
+	}
+	parts.cb.event(&Event::DbRetrieveStart);
+	let ret = downloader(&mut parts, settings).download(
+		&mut payloads,
+		syncpath,
+		tmp,
+	);
+	if ret.is_err() {
+		parts.cb.event(&Event::DbRetrieveFailed);
+		return ret;
+	}
+	parts.cb.event(&Event::DbRetrieveDone);
+	let mut failed = None;
+	for i in synced {
+		let db = &mut parts.dbs[i];
+		db.free_pkgcache();
+		let res = db.validate(default, parts.keyring, parts.cb);
+		if let Err(e) = res {
+			let msg =
+				[b"failed to validate db: ", db.name(), b"\n"];
+			parts.cb.log(LogLevel::Debug, &msg.concat());
+			failed = Some(e);
+		}
+	}
+	failed.map_or(ret, Err)
+}
+
+// alpm_db_update: the sync dbs at positions dbs of handle.syncdbs() (used
+// for syncing) downloaded into "<dbpath>sync/", with If-Modified-Since
+// unless force or the db is invalid. Ok(true) something was downloaded
+// (C 0), Ok(false) every db was up to date (C 1), Err the pm_errno of
+// the failure (C -1). an empty dbs is the C's NULL list: Err(Errno::Ok),
+// the C leaves pm_errno as it was. the C's umask(0022) for the call is
+// left out (rustix "process"), files get the process umask
+pub fn db_update(
+	handle: &mut Handle,
+	dbs: &[usize],
+	force: bool,
+) -> Result<bool, Errno> {
+	if dbs.is_empty() {
+		return Err(Errno::Ok);
+	}
+	let dbpath = handle.dbpath().to_vec();
+	let syncpath = get_sync_dir(&dbpath, handle.callbacks())?;
+	let settings = handle.dload_settings();
+	let mut parts = handle.sync_parts();
+	let tmp = downloader(&mut parts, &settings)
+		.download_dir_setup(&syncpath)?;
+	let ret = match handle.lock() {
+		Ok(()) => update_locked(
+			handle, &settings, dbs, force, &syncpath, &tmp,
+		),
+		Err(_) => Err(Errno::HandleLock),
+	};
+	handle.handle_unlock();
+	if let Err(e) = ret {
+		let msg = [
+			b"failed to sync dbs: ",
+			e.strerror().as_bytes(),
+			b"\n",
+		];
+		handle.callbacks().log(LogLevel::Debug, &msg.concat());
+	}
+	// a sandbox download dir left by an early error (the C keeps it)
+	if tmp != syncpath {
+		remove_temporary_download_dir(&tmp);
+	}
+	ret
+}
+
 // _sync_get_validation, what alpm_pkg_get_validation computes on first
 // use. Package::validation stays 0 in the cache like the C field
 pub fn get_validation(pkg: &Package) -> c_int {
@@ -175,19 +359,15 @@ pub fn get_validation(pkg: &Package) -> c_int {
 	if v == 0 { PKG_VALIDATION_NONE } else { v }
 }
 
-// filter libarchive would detect, with estimate_package_count's bytes
-// per package for it. zstd has no case there and takes the default
-fn sniff(magic: &[u8]) -> (DecompressionSettings, u64) {
-	if magic.starts_with(&[0x1f, 0x8b]) {
-		(DecompressionSettings::Gzip, 464)
-	} else if magic.starts_with(b"BZh") {
-		(DecompressionSettings::Bzip2, 394)
-	} else if magic.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0]) {
-		(DecompressionSettings::Xz, 400)
-	} else if magic.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
-		(DecompressionSettings::Zstd, 500)
-	} else {
-		(DecompressionSettings::None, 3015)
+// estimate_package_count's bytes per package for the filter libarchive
+// detects. zstd has no case there and takes the default
+fn bytes_per_package(settings: &DecompressionSettings) -> u64 {
+	match settings {
+		DecompressionSettings::Gzip => 464,
+		DecompressionSettings::Bzip2 => 394,
+		DecompressionSettings::Xz => 400,
+		DecompressionSettings::Zstd => 500,
+		DecompressionSettings::None => 3015,
 	}
 }
 
@@ -196,27 +376,17 @@ fn open_archive(
 	path: &[u8],
 	dbext: &[u8],
 ) -> Result<(TarballReader<'static>, u64), Error> {
-	let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
-	let mut file = File::open(path).map_err(|e| match e.kind() {
+	let archive = util::open_archive(path).map_err(|e| match e.kind() {
 		ErrorKind::NotFound => Error::NotFound,
 		_ => Error::Open(e),
 	})?;
-	let size = file.metadata().map_err(Error::Open)?.len();
-	let mut magic = Vec::with_capacity(6);
-	(&mut file)
-		.take(6)
-		.read_to_end(&mut magic)
-		.map_err(Error::Open)?;
-	file.rewind().map_err(Error::Open)?;
-	let (settings, per_package) = sniff(&magic);
-	let decoder = CompressionDecoder::new(file, settings)
-		.map_err(|e| Error::Open(io::Error::other(e)))?;
-	let mut est = size / per_package + 1;
+	let size = archive.meta.len();
+	let mut est = size / bytes_per_package(&archive.settings) + 1;
 	// files dbs are about four times larger on average
 	if dbext == b".files" {
 		est /= 4;
 	}
-	Ok((TarballReader::new(decoder), est))
+	Ok((archive.reader, est))
 }
 
 // _alpm_pkg_check_meta on what load_pkg_for_entry sets. splitname already
@@ -315,19 +485,16 @@ impl Walk {
 			invalid(&entryname, Reason::Read(io_err(e)))
 		})?;
 		let text = text.get_or_insert_with(Vec::new);
-		// split desc/depends: a section must start on a new line
-		if !text.is_empty() && text.last() != Some(&b'\n') {
+		// the C reads each entry on its own: a blank line ends whatever
+		// section the previous entry left open
+		if !text.is_empty() {
+			if text.last() != Some(&b'\n') {
+				text.push(b'\n');
+			}
 			text.push(b'\n');
 		}
 		text.extend_from_slice(&data);
 		Ok(())
-	}
-}
-
-fn io_err(e: alpm_compress::Error) -> io::Error {
-	match e {
-		alpm_compress::Error::IoRead { source, .. } => source,
-		e => io::Error::other(e),
 	}
 }
 
@@ -354,48 +521,66 @@ fn utf8(data: &[u8]) -> Result<&str, Reason> {
 	std::str::from_utf8(data).map_err(|_| Reason::Utf8)
 }
 
-// what sync_db_read stores from a desc. %NAME% and %VERSION% are only
-// compared with the entry name by the C (logged, never stored), the
-// %MD5SUM% of a v1 desc is dropped like the C skips it. %DATA% (xdata) is
-// not known to alpm-repo-db
+// what sync_db_read stores from a desc, key by key: a repeated value
+// overwrites, a repeated list appends, a missing section leaves the field
+// unset
 fn fill_desc(pkg: &mut Package, data: &[u8]) -> Result<(), Reason> {
-	let desc = match RepoDescFile::from_str(utf8(data)?) {
-		Ok(RepoDescFile::V1(v1)) => RepoDescFileV2::from(v1),
-		Ok(RepoDescFile::V2(v2)) => v2,
-		Err(e) => return Err(Reason::Desc(e)),
-	};
-	let filename = text(&desc.file_name);
-	if !validate_filename(&filename) {
-		return Err(Reason::Filename);
+	let desc = parse_libalpm(utf8(data)?).map_err(Reason::Desc)?;
+	desc.into_iter().try_for_each(|s| fill_section(pkg, s))
+}
+
+fn fill_section(pkg: &mut Package, section: Section) -> Result<(), Reason> {
+	match section {
+		// only compared with the entry name by the C (logged, never
+		// stored); %MD5SUM% is skipped
+		Section::Name(_) | Section::Version(_) | Section::Md5Sum(_) => {
+		}
+		Section::Filename(v) => {
+			let filename = text(&v);
+			if !validate_filename(&filename) {
+				return Err(Reason::Filename);
+			}
+			pkg.filename = Some(filename);
+		}
+		Section::Base(v) => pkg.base = Some(text(&v)),
+		// description and url as read, alpm-types normalizes Display
+		Section::Desc(v) => pkg.desc = Some(text(&v.as_original_str())),
+		Section::Groups(v) => pkg.groups.extend(texts(&v)),
+		// an empty value is alpm-repo-db's None
+		Section::Url(v) => {
+			pkg.url = Some(v
+				.map(|u| text(&u.as_original_str()))
+				.unwrap_or_default())
+		}
+		Section::License(v) => pkg.licenses.extend(texts(&v)),
+		Section::Arch(v) => pkg.arch = Some(text(&v)),
+		Section::BuildDate(v) => pkg.builddate = v,
+		Section::Packager(v) => pkg.packager = Some(text(&v)),
+		Section::CSize(v) => pkg.size = off_t(v),
+		Section::ISize(v) => pkg.isize = off_t(v),
+		Section::Sha256Sum(v) => pkg.sha256sum = Some(text(&v)),
+		Section::PgpSig(v) => pkg.base64_sig = Some(text(&v)),
+		Section::Replaces(v) => pkg.replaces.extend(deps(&v)),
+		Section::Depends(v) => pkg.depends.extend(deps(&v)),
+		Section::OptDepends(v) => pkg.optdepends.extend(deps(&v)),
+		Section::MakeDepends(v) => pkg.makedepends.extend(deps(&v)),
+		Section::CheckDepends(v) => pkg.checkdepends.extend(deps(&v)),
+		Section::Conflicts(v) => pkg.conflicts.extend(deps(&v)),
+		Section::Provides(v) => pkg.provides.extend(deps(&v)),
+		Section::Data(v) => {
+			pkg.xdata.extend(v.iter().map(|x| PkgXData {
+				name: x.key().as_bytes().to_vec(),
+				value: x.value().as_bytes().to_vec(),
+			}))
+		}
 	}
-	pkg.filename = Some(filename);
-	pkg.base = Some(text(&desc.base));
-	// an empty description is what alpm-repo-db gives for a missing one
-	let d = text(&desc.description);
-	pkg.desc = (!d.is_empty()).then_some(d);
-	pkg.groups = texts(&desc.groups);
-	pkg.url = desc.url.as_ref().map(text);
-	pkg.licenses = texts(&desc.license);
-	pkg.arch = Some(text(&desc.arch));
-	pkg.builddate = desc.build_date;
-	pkg.packager = Some(text(&desc.packager));
-	pkg.size = off_t(desc.compressed_size);
-	pkg.isize = off_t(desc.installed_size);
-	pkg.sha256sum = Some(text(&desc.sha256_checksum));
-	pkg.base64_sig = desc.pgp_signature.as_ref().map(text);
-	pkg.replaces = deps(&desc.replaces);
-	pkg.depends = deps(&desc.dependencies);
-	pkg.optdepends = deps(&desc.optional_dependencies);
-	pkg.makedepends = deps(&desc.make_dependencies);
-	pkg.checkdepends = deps(&desc.check_dependencies);
-	pkg.conflicts = deps(&desc.conflicts);
-	pkg.provides = deps(&desc.provides);
 	Ok(())
 }
 
 // %FILES%, sorted with _alpm_filelist_sort like the C
 fn fill_files(pkg: &mut Package, data: &[u8]) -> Result<(), Reason> {
-	let files = RepoFiles::from_str(utf8(data)?).map_err(Reason::Files)?;
+	let files = RepoFiles::from_str_libalpm(utf8(data)?)
+		.map_err(Reason::Files)?;
 	let files = files.as_ref().iter().map(|p| PkgFile {
 		name: p.as_os_str().as_bytes().to_vec(),
 		..PkgFile::default()
@@ -443,9 +628,12 @@ pub fn populate(path: &[u8], dbext: &[u8]) -> Result<PkgHash<Package>, Error> {
 	let mut broken = None;
 	let entries =
 		archive.entries().map_err(|e| Error::Archive(io_err(e)))?;
-	for entry in entries {
+	for (i, entry) in entries.enumerate() {
 		let mut entry = match entry {
 			Ok(e) => e,
+			// libarchive picks the format while opening: a first header
+			// no reader takes is an open failure, like be_package
+			Err(e) if i == 0 => return Err(Error::Open(io_err(e))),
 			Err(e) => {
 				broken = Some(io_err(e));
 				break;

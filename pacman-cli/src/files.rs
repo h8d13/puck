@@ -5,8 +5,7 @@
 // them, like setup_libalpm does for -F.
 //
 // output goes into an Output like sync.rs, messages are the untranslated
-// msgids. -Fy (db download) is not ported, pacman_files returns
-// Unported::Refresh there.
+// msgids. -Fy is sync.rs's sync_syncdbs.
 
 use alpm_core::db::Db;
 use alpm_core::handle::Handle;
@@ -16,7 +15,7 @@ use alpm_core::util::until_nul;
 
 use crate::conf::{Config, cat};
 use crate::package::{print_groups, print_installed};
-use crate::sync::{Unported, cache_list, error};
+use crate::sync::{cache_list, error, refresh};
 use crate::util::{Output, check_syncdbs};
 
 // print_line_machinereadable: repo, name, version, file, nul separated
@@ -301,28 +300,27 @@ pub fn files_list<S: AsRef<[u8]>>(
 	ret
 }
 
-// pacman_files: Ok is the C return value, Err(Refresh) for -Fy
+// pacman_files, the C return value
 pub fn pacman_files<S: AsRef<[u8]>>(
 	config: &Config,
 	handle: &mut Handle,
 	targets: &[S],
 	out: &mut Output,
-) -> Result<i32, Unported> {
+) -> i32 {
 	if check_syncdbs(&mut out.stderr, config, handle, true, false) != 0 {
-		return Ok(1);
+		return 1;
 	}
-	if config.op_s_sync != 0 {
-		return Err(Unported::Refresh);
+	if config.op_s_sync != 0 && !refresh(config, handle, out) {
+		return 1;
 	}
 	if config.op_q_list != 0 {
-		return Ok(files_list(config, handle, targets, out));
+		return files_list(config, handle, targets, out);
 	}
-	if targets.is_empty() {
-		// op_s_sync returned above
+	if targets.is_empty() && config.op_s_sync == 0 {
 		let msg: &[u8] = b"no targets specified (use -h for help)\n";
 		error(out, config, &[msg]);
-		return Ok(1);
+		return 1;
 	}
 	let regex = config.op_f_regex != 0;
-	Ok(files_search(config, handle, targets, regex, out))
+	files_search(config, handle, targets, regex, out)
 }

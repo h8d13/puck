@@ -39,6 +39,8 @@ Every finding states who controls the input that triggers it:
 | `alpm_decode_signature` newline-only | api |
 | `_alpm_filelist_intersection` empty names | none |
 | `rawstr.c` no callers | none |
+| `alpm_db_update` fails with `ALPM_ERR_OK` | real |
+| stale `.sig` kept after a sync | real (rare) |
 | minor sections | per bullet |
 
 ## `_alpm_filelist_pathcmp` compares signed `char`
@@ -542,6 +544,48 @@ declarations. No existing MR found for it.
 - every helper failure, corrupt `.sig` included, reports PKG_INVALID_SIG
   (be_package.c:341). **real**, message only
 
+## `alpm_db_update` can fail with `ALPM_ERR_OK`
+
+Practice: **real**. Arch's default `SigLevel = Required DatabaseOptional`
+with the official dbs shipping no `.sig`: any custom repo listed before
+them that fails validation triggers it.
+
+In the validation loop (be_sync.c:255) a db failing with DB_INVALID_SIG
+sets pm_errno, then a later db with a missing optional signature goes
+through `_alpm_check_pgp_helper`, which sets `pm_errno = ALPM_ERR_OK`
+(signing.c:817). The update returns -1 and pacman prints "failed to
+synchronize all databases (unexpected error)".
+
+- port: keeps the last failure's errno
+- difftest: `errno_reset_pinned`
+
+## stale `.sig` kept after a sync
+
+Practice: **real (rare)**. Needs a repo with optional signatures that
+stops serving (or fails on) its `.sig`.
+
+be_sync.c:207-209 queues the signature with dload's optional flag: a 404
+or server error on the `.sig` leaves the previous sync's `<db>.sig` in
+place, the new db is checked against it and turns invalid.
+
+- port: same behaviour
+- difftest: `signatures` ("optional missing")
+
+## `be_sync.c` minor
+
+- the "removing invalid file" branch of `get_sync_dir` is dead: `stat`
+  on `sync/` with the trailing '/' fails ENOTDIR for a regular file, and
+  `_alpm_makepath` accepts EEXIST; the update fails later opening `.part`
+  files, with no warning (be_sync.c:53-66). **local**
+- `alpm_db_update` unlocks a lock the caller already holds:
+  `_alpm_handle_lock` returns 0 when locked (handle.c:124) and cleanup
+  always unlocks (be_sync.c:163, 271), removing a transaction's lock
+  file. **api**
+- `ASSERT(dbs != NULL)` runs before pm_errno is reset: an empty list
+  returns -1 with a stale errno (be_sync.c:149-150). **api**
+- "skip validation to preserve the download error" comment is stale, a
+  failed download already left at line 233 (be_sync.c:254). **none**
+
 ## `dload.c` minor
 
 - `ASSERT(chown(...), return)` returns when chown succeeds
@@ -556,8 +600,8 @@ declarations. No existing MR found for it.
   later download in the process fails. **real (rare)**
 - queueing a `.sig` runs `alpm_option_get_dbext`, whose CHECK_HANDLE
   resets pm_errno: with parallel downloads an earlier failure can end as
-  -1 with ALPM_ERR_OK, "unexpected error" (dload.c:620). **real**, not
-  verified end to end
+  -1 with ALPM_ERR_OK, "unexpected error" (dload.c:620). **real**, hit
+  once by the db_update fuzz (timing dependent)
 - a `.part` with `max_size == initial_size` is neither started nor
   renamed, stays `.part` forever (dload.c:785-789). **real (rare)**
 - with the sandbox, the mkdtemp'd `download-XXXXXX` dir is left behind on
@@ -573,6 +617,84 @@ declarations. No existing MR found for it.
   pm_errno when `create_tempfile` fails (1396-1399) **env**; server
   errors persist for the handle's lifetime (136-222) **api**; warning
   format puts "\n" before strerror (util.c:875) **none**
+
+## hooks, run_chroot, scriptlets
+
+- an unterminated last output line is delivered twice: the read at EOF
+  does not reset `*buf_size`, the leftover flush sends it again
+  (util.c:556-561, 760-764; read-error branch 566-569). Any scriptlet or
+  hook ending in `printf 'x'` duplicates its last line. **real**
+- the stdin feed races the child: a NeedsTargets hook exiting early logs
+  "unable to write to pipe (Broken pipe)" or not depending on timing
+  (util.c:490-518, 727-756). **real (rare)**
+- `Operation`/`Type`/`When` without `=` pass NULL to strcmp (hook.c:177,
+  190, 209); `Target` without `=` stores NULL that fnmatch dereferences
+  (hook.c:197-200, util.c:1537); empty `Exec =` passes validation and
+  execv(NULL) (hook.c:235, 521). **packager** (hooks ship in packages)
+- `AbortOnFail`/`NeedsTargets` values are ignored, `AbortOnFail = false`
+  enables it (hook.c:226-229). **packager / local**, cosmetic
+- a hook that fails to parse does not mask the same-named hook in a lower
+  priority dir: an admin override with a typo silently runs the packaged
+  hook (hook.c:605-611). **local**
+- `grep` loops on `!feof` and spins on a read error; a name split across
+  1023-byte chunks or after a `#` skips the scriptlet silently
+  (trans.c:316-325). **env / packager**
+- `chdir(root)` failure reports success without running (util.c:628-633)
+  **env**; the forked child calls non-async-signal-safe functions
+  (util.c:691-701) **api**
+
+## sandbox
+
+- `ret = errno` after `seccomp_load` fails: without errno set the download
+  runs unfiltered while logging "...: 0!" (sandbox_syscalls.c:156, 165).
+  **env**
+- a kernel without Landlock makes every sandboxed download fail unless
+  DisableSandboxFilesystem is set (sandbox_fs.c:111-115). **real** (by
+  design)
+- `alpm_sandbox_setup_child` fails its root and getpwnam checks silently
+  (sandbox.c:56-57); callback type read without EINTR retry (dload.c:1000).
+  **api**
+- SIGTERM sent after every normal EOF, unknown callback types skipped
+  (dload.c:1000-1022); 0-byte pipe writes refused (sandbox.c:84, 108);
+  chroot/pivot_root listed twice (sandbox_syscalls.c:43/95, 52/100);
+  `ruleset_fd` leaked on early returns (sandbox_fs.c:140, 157). **none**
+
+## `escape_chars` writes its nul past the buffer
+
+Practice: **local**. `--sysroot` (or an Include pattern under sysroot
+with GLOB_NOESCAPE) whose path contains `\`, `*`, `?` or `[`.
+
+conf.c:1111-1150 allocates `len + escaped` bytes and writes the
+terminating nul one byte past them. On glibc it corrupts the heap when
+that size is 16k+8 (no chunk slack): `free(): invalid size` aborts.
+Found through the conf difftest aborting only with longer TMPDIR paths.
+
+- port: no buffer
+- difftest: odd-root fixture names padded so the size avoids 16k+8
+
+## `handle.c` / `log.c` / frontend `util.c` minor
+
+- `alpm_option_get/set_disable_sandbox` declared in alpm.h:2314/2321 but
+  not exported (no SYMEXPORT, handle.c:971, 984). **api**
+- `alpm_logaction` ignores `fflush`'s result, a full disk on a line under
+  the stdio buffer returns 0 (log.c:94); fd leaked when fdopen fails
+  (log.c:65). **env**
+- add/remove assumeinstalled compare different name_hash sources
+  (handle.c:758, 785); `set_sandboxuser` drops the old user before
+  validating (606-617); parallel_downloads returned as int (363-366).
+  **api**
+- `multiselect_question` keeps the grown buffer and its last bytes after
+  an invalid answer: a long invalid selection can swallow the next line
+  (util.c:1567-1609). **real (rare)**
+- `multiselect_parse` ties "deselect all first" to strtok's first token,
+  a whitespace-only first token keeps everything selected (util.c:1486).
+  **real (rare)**
+- `print_packages` passes `localtime()` unchecked to strftime
+  (util.c:1224-1230, same as the -Si build date crash) **packager**;
+  `pkg_get_location` with a NULL filename prints "(null)" or crashes in
+  strdup (util.c:1118-1137) **packager**
+- `select_display` NULL handling (1427-1440), `target_cmp` returns 0/1
+  (1043), `parseindex("")` is 0 (1447-1448). **none**
 
 ## `src/pacman/conf.c` minor
 
@@ -602,6 +724,27 @@ To be written up and reported through pacman's usual channels by the
 maintainer of this repo, not from here.
 
 # ALPM findings
+
+Corrected in `vendor/patches/` (see PORTING.md "ALPM patches for
+parity"): epoch Ord 0101, one-sided pkgrel 0102, pkgrel text 0103, Url
+0104, Packager 0105, RelationOrSoname 0106, ExtraDataEntry 0107,
+OptionalDependency 0108, PackageDescription 0109, desc v2 detection 0201,
+blank lines 0202/0301, backups 0205, files blank line 0206, `%DATA%` 0303,
+`usr` == `usr/` 0305, mtree order/duplicates/defaults/types/keywords
+0401-0410, mtree gzip members 0403, pkginfo strictness 0501-0506, gzip
+members 0551, content sniffing 0552. Further notes from the patch work:
+
+- alpm-mtree `Error::Parse` display broken (`error-parse` wants `$source`,
+  code passes `error`), fixed in 0411. **api**
+
+- strict desc parsers allow one blank line between sections only,
+  against the spec. **packager**
+- alpm-db-files' "Empty lines are ignored" contradicts upstream's own
+  `empty_line_in_list_of_paths` fixture. **none** (spec wording)
+- keeping `(null)` backups needs an exemption from the not-in-`%FILES%`
+  check, pacman writes them for exactly those paths. **real** (2/804)
+- layer strings swapped between alpm-db and alpm-repo-db ("alpm-repo-desc
+  file value section" in alpm-db and the reverse). **none**
 
 Issues in the ALPM crates (`alpm/` at `0eedcb8`) met while using them for
 pacman's formats. Same practice labels, judged against real databases.

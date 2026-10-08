@@ -5,16 +5,19 @@
 // the C statics (on_progress, the delayed output list, the total bar,
 // prevpercent/prevcurrent, the timediff clock, the multibar UI) are the
 // fields of a Frontend, one per handle. the global config is the
-// Frontend's own copy, taken when it is installed. output, input, getcols
-// and the monotonic clock go through a util::Term. what the C asks
-// config->handle (the provider's db, the local db and the transaction
-// for optdepends) comes from a Lookup, () until trans.c is ported.
+// Frontend's own copy, taken when it is installed. stdout and stderr
+// collect in an Output flushed to its sink where the C fflushes and at
+// the end of every callback; stdin, getcols and the clocks come from a
+// util::Term. what the C asks config->handle (the provider's db, the
+// local db cache and the transaction for optdepends) comes from a
+// Lookup, () until trans.c is ported.
 //
 // wide character handling follows util.rs: glibc's UTF-8 decoder, a
 // string that does not decode keeps its valid prefix (swprintf fails
 // there in the C), wcwidth from unicode-width. messages are the msgids.
 // where the C asserts a download bar exists, an unknown file is ignored.
 use std::ffi::c_int;
+use std::io::BufRead;
 
 use alpm_core::callbacks::{
 	Callbacks, DownloadEvent, Event, HookWhen, LogLevel, PackageOperation,
@@ -28,9 +31,9 @@ use alpm_core::util::until_nul;
 use crate::conf::{ColStr, Config, LOG_WARNING};
 use crate::pacman::PM_OP_FILES;
 use crate::util::{
-	Term, colon_printf, console_cursor_move_down, console_cursor_move_up,
-	console_erase_line, display_new_optdepends, display_optdepends,
-	humanize_size, list_display, mbstowcs, noyes, pm_printf_term,
+	Output, Term, colon_printf, console_cursor_move_down,
+	console_cursor_move_up, console_erase_line, display_new_optdepends,
+	display_optdepends, humanize_size, list_display, mbstowcs, noyes,
 	pm_vasprintf, pm_vfprintf, select_display, select_question, wcwidth,
 	yesno,
 };
@@ -40,16 +43,16 @@ const UPDATE_SPEED_MS: i64 = 200;
 
 // what the callbacks need from the handle besides the callback data
 pub trait Lookup {
-	// alpm_db_get_name(alpm_pkg_get_db(pkg)) of a provider
-	fn db_name(&mut self, _pkg: &Package) -> Vec<u8> {
-		Vec::new()
+	// alpm_db_get_name(alpm_pkg_get_db(pkg)) of a provider, None for a
+	// package without db
+	fn db_name(&mut self, _pkg: &Package) -> Option<Vec<u8>> {
+		None
 	}
 
-	// make_optstring's status of a dep string: " [installed]" when the
-	// local db satisfies it, " [pending]" when the transaction's add
-	// list does
-	fn optdep_status(&mut self, _dep: &[u8]) -> Option<&'static [u8]> {
-		None
+	// make_optstring's lists: the local db cache and the transaction's
+	// add list
+	fn installed(&mut self) -> (Vec<Package>, Vec<Package>) {
+		(Vec::new(), Vec::new())
 	}
 }
 
@@ -80,10 +83,12 @@ pub struct Multibar {
 	pub cursor_lineno: c_int,
 }
 
-// the frontend callbacks over a Term
-pub struct Frontend<T: Term, L: Lookup = ()> {
+// the frontend callbacks, printing into out
+pub struct Frontend<R: BufRead, L: Lookup = ()> {
 	pub config: Config,
-	pub term: T,
+	pub term: Term<R>,
+	// stdout and stderr since the last flush, its sink set by the owner
+	pub out: Output,
 	pub lookup: L,
 	on_progress: bool,
 	// the delayed stderr lines, printed when the bar is done
@@ -177,17 +182,18 @@ fn spaces(n: i32) -> Vec<u8> {
 	vec![b' '; usize::try_from(n).unwrap_or(0)]
 }
 
-impl<T: Term> Frontend<T, ()> {
-	pub fn new(config: Config, term: T) -> Self {
+impl<R: BufRead> Frontend<R, ()> {
+	pub fn new(config: Config, term: Term<R>) -> Self {
 		Frontend::with_lookup(config, term, ())
 	}
 }
 
-impl<T: Term, L: Lookup> Frontend<T, L> {
-	pub fn with_lookup(config: Config, term: T, lookup: L) -> Self {
+impl<R: BufRead, L: Lookup> Frontend<R, L> {
+	pub fn with_lookup(config: Config, term: Term<R>, lookup: L) -> Self {
 		Frontend {
 			config,
 			term,
+			out: Output::default(),
 			lookup,
 			on_progress: false,
 			output: Vec::new(),
@@ -212,16 +218,20 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 		self.multibar.move_completed_up = value;
 	}
 
-	fn out(&mut self, s: &[u8]) {
-		self.term.out(s);
+	fn print(&mut self, s: &[u8]) {
+		self.out.stdout.extend_from_slice(s);
 	}
 
 	fn colon(&mut self, msg: &[u8]) {
-		colon_printf(&mut self.term, &self.config, msg);
+		colon_printf(&mut self.out.stdout, &self.config.colstr, msg);
+		self.out.flush();
 	}
 
+	// pm_printf, stamped by the Term's clock
 	fn warn(&mut self, msg: &[u8]) {
-		pm_printf_term(&mut self.term, &self.config, LOG_WARNING, msg);
+		let now = (self.term.now_secs)();
+		let line = pm_vfprintf(&self.config, LOG_WARNING, msg, now);
+		self.out.stderr.extend(line.unwrap_or_default());
 	}
 
 	// pm_sprintf into the delayed output while a bar runs, else pm_printf
@@ -237,7 +247,7 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 
 	// get_update_timediff
 	fn update_timediff(&mut self, first_call: bool) -> i64 {
-		let now = self.term.now_ms();
+		let now = (self.term.now_ms)();
 		if first_call {
 			self.last_time = now;
 			return 0;
@@ -274,8 +284,8 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 			);
 		}
 		s.push(b'\r');
-		self.out(&s);
-		self.term.flush();
+		self.print(&s);
+		self.out.flush();
 	}
 
 	// one column of the bar, the ILoveCandy one with chomp
@@ -307,15 +317,15 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 
 	// flush_output_list
 	fn flush_output_list(&mut self) {
-		self.term.flush();
+		self.out.flush();
 		for s in std::mem::take(&mut self.output) {
-			self.term.err(&s);
+			self.out.stderr.extend_from_slice(&s);
 		}
-		self.term.flush();
+		self.out.flush();
 	}
 
 	fn progressbar_enabled(&mut self) -> bool {
-		self.config.noprogressbar == 0 && self.term.cols() != 0
+		self.config.noprogressbar == 0 && (self.term.cols)() != 0
 	}
 
 	// console_cursor_goto_bar
@@ -333,7 +343,7 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 				cur.wrapping_sub(num) as u32,
 			);
 		}
-		self.out(&s);
+		self.print(&s);
 		self.multibar.cursor_lineno = num;
 	}
 
@@ -346,7 +356,7 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 	fn init_total_progressbar(&mut self) {
 		self.totalbar = Some(Bar {
 			filename: b"Total".to_vec(),
-			init_time: self.term.now_ms(),
+			init_time: (self.term.now_ms)(),
 			total_size: self.list_total,
 			howmany: self.list_total_pkgs,
 			..Bar::default()
@@ -355,7 +365,7 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 
 	// draw_pacman_progress_bar
 	fn draw(&mut self, bar: &Bar) {
-		let cols = self.term.cols();
+		let cols = (self.term.cols)();
 		let file_percent = match bar.total_size {
 			0 => 100,
 			t => bar.sync_xfered.wrapping_mul(100).wrapping_div(t)
@@ -405,7 +415,7 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 			_ => "--:--".to_string(),
 		};
 		s.extend_from_slice(eta.as_bytes());
-		self.out(&s);
+		self.print(&s);
 		self.fill_progress(file_percent, i32::from(cols) - infolen);
 	}
 
@@ -426,24 +436,24 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 	fn dload_init(&mut self, filename: &[u8]) {
 		let cleaned = clean_filename(filename);
 		if !self.progressbar_enabled() {
-			self.out(&[b" ", &cleaned[..], b" downloading...\n"]
+			self.print(&[b" ", &cleaned[..], b" downloading...\n"]
 				.concat());
 			return;
 		}
 		let bar = Bar {
 			filename: until_nul(filename).to_vec(),
-			init_time: self.term.now_ms(),
+			init_time: (self.term.now_ms)(),
 			..Bar::default()
 		};
 		self.multibar.active.push(bar);
 		// the cursor goes to the old end, under the bars before it
 		let end = self.multibar.active.len() as c_int - 1;
 		self.goto_bar(end);
-		self.out(&[b" ", &cleaned[..], b"\n"].concat());
+		self.print(&[b" ", &cleaned[..], b"\n"].concat());
 		self.multibar.cursor_lineno += 1;
 		if self.total_enabled {
 			self.draw_total();
-			self.out(b"\n");
+			self.print(b"\n");
 			self.multibar.cursor_lineno += 1;
 		}
 	}
@@ -495,7 +505,7 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 		let Some(index) = self.find_bar(filename) else {
 			return;
 		};
-		let now = self.term.now_ms();
+		let now = (self.term.now_ms)();
 		let bar = &mut self.multibar.active[index];
 		// the total size comes after the download starts
 		let last_chunk_amount = downloaded.wrapping_sub(bar.xfered);
@@ -507,7 +517,7 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 			self.draw(&bar);
 		}
 		if self.total_enabled {
-			let now = self.term.now_ms();
+			let now = (self.term.now_ms)();
 			let redraw = self.totalbar.as_mut().is_some_and(|t| {
 				t.xfered = t
 					.xfered
@@ -519,7 +529,7 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 				self.draw_total();
 			}
 		}
-		self.term.flush();
+		self.out.flush();
 	}
 
 	// dload_retry_event
@@ -530,7 +540,7 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 		let Some(index) = self.find_bar(filename) else {
 			return;
 		};
-		let now = self.term.now_ms();
+		let now = (self.term.now_ms)();
 		let bar = &mut self.multibar.active[index];
 		// the total does not count partial downloads that restart
 		let total =
@@ -573,7 +583,7 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 			1 => {
 				self.goto_bar(index as c_int);
 				let cleaned = clean_filename(filename);
-				self.out(&[
+				self.print(&[
 					b" ",
 					&cleaned[..],
 					b" is up to date",
@@ -582,7 +592,7 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 				self.erase_line();
 			}
 			0 => {
-				let now = self.term.now_ms();
+				let now = (self.term.now_ms)();
 				Self::update_bar_finalstats(now, bar);
 				if self.multibar.move_completed_up && index != 0
 				{
@@ -602,12 +612,16 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 			_ => {
 				self.goto_bar(index as c_int);
 				let name = until_nul(filename);
-				self.out(&[b" ", name, b" failed to download"]
-					.concat());
+				self.print(&[
+					b" ",
+					name,
+					b" failed to download",
+				]
+				.concat());
 				self.erase_line();
 			}
 		}
-		self.term.flush();
+		self.out.flush();
 		// completed bars at the top are never redrawn
 		while self.multibar.active.first().is_some_and(|b| b.completed)
 		{
@@ -619,61 +633,28 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 	fn erase_line(&mut self) {
 		let mut s = Vec::new();
 		console_erase_line(&mut s);
-		self.out(&s);
+		self.print(&s);
 	}
 
-	// make_optstring
-	fn optstring(&mut self, dep: &Depend) -> Vec<u8> {
-		let s = dep_compute_string(dep);
-		match self.lookup.optdep_status(&s) {
-			Some(status) => [&s[..], status].concat(),
-			None => s,
+	// display_optdepends of a new package, display_new_optdepends of an
+	// upgrade (old Some)
+	fn show_optdepends(&mut self, old: Option<&Package>, new: &Package) {
+		let (local, pending) = self.lookup.installed();
+		let local: Vec<&Package> = local.iter().collect();
+		let pending: Vec<&Package> = pending.iter().collect();
+		let lists = (&local[..], &pending[..]);
+		let cols = (self.term.cols)();
+		let (out, c) = (&mut self.out.stdout, &self.config.colstr);
+		match old {
+			None => display_optdepends(out, c, new, lists, cols),
+			Some(old) => display_new_optdepends(
+				out,
+				c,
+				(old, new),
+				lists,
+				cols,
+			),
 		}
-	}
-
-	// display_optdepends on a newly installed package
-	fn show_optdepends(&mut self, pkg: &Package) {
-		let opts: Vec<Vec<u8>> = pkg
-			.optdepends
-			.iter()
-			.map(|d| self.optstring(d))
-			.collect();
-		display_optdepends(
-			&mut self.term,
-			&self.config,
-			pkg.name_bytes(),
-			&opts,
-		);
-	}
-
-	// display_new_optdepends: the optdepends of new missing from old,
-	// alpm_list_diff on depend_cmp (both sides sorted)
-	fn show_new_optdepends(&mut self, old: &Package, new: &Package) {
-		let mut left: Vec<&Depend> = new.optdepends.iter().collect();
-		let mut right: Vec<&Depend> = old.optdepends.iter().collect();
-		left.sort_by(|a, b| depend_cmp(a, b));
-		right.sort_by(|a, b| depend_cmp(a, b));
-		let mut diff = Vec::new();
-		let mut r = right.into_iter().peekable();
-		for l in left {
-			while r.peek().is_some_and(|x| depend_cmp(l, x).is_gt())
-			{
-				r.next();
-			}
-			if r.peek().is_some_and(|x| depend_cmp(l, x).is_eq()) {
-				r.next();
-				continue;
-			}
-			diff.push(l);
-		}
-		let opts: Vec<Vec<u8>> =
-			diff.into_iter().map(|d| self.optstring(d)).collect();
-		display_new_optdepends(
-			&mut self.term,
-			&self.config,
-			new.name_bytes(),
-			&opts,
-		);
 	}
 
 	// cb_event
@@ -699,20 +680,22 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 					"({:d$}/{:d$}) ",
 					e.position, e.total
 				);
-				self.out(&[head.as_bytes(), name, b"\n"]
+				self.print(&[head.as_bytes(), name, b"\n"]
 					.concat());
 			}
 			Event::CheckdepsStart => {
-				self.out(b"checking dependencies...\n")
+				self.print(b"checking dependencies...\n")
 			}
 			Event::FileconflictsStart if !bar => {
-				self.out(b"checking for file conflicts...\n")
+				self.print(b"checking for file conflicts...\n")
 			}
 			Event::ResolvedepsStart => {
-				self.out(b"resolving dependencies...\n")
+				self.print(b"resolving dependencies...\n")
 			}
-			Event::InterconflictsStart => self
-				.out(b"looking for conflicting packages...\n"),
+			Event::InterconflictsStart => {
+				self
+					.print(b"looking for conflicting packages...\n")
+			}
 			Event::TransactionStart => {
 				self.colon(b"Processing package changes...\n")
 			}
@@ -741,7 +724,7 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 				};
 				let line =
 					[verb, &name(pkg), b"...\n"].concat();
-				self.out(&line);
+				self.print(&line);
 			}
 			Event::PackageOperationDone(e) => {
 				match (e.operation, e.oldpkg, e.newpkg) {
@@ -749,30 +732,33 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 						PackageOperation::Install,
 						_,
 						Some(new),
-					) => self.show_optdepends(new),
+					) => self.show_optdepends(None, new),
 					(
 						PackageOperation::Upgrade
 						| PackageOperation::Downgrade,
 						Some(old),
 						Some(new),
-					) => self.show_new_optdepends(old, new),
+					) => self.show_optdepends(
+						Some(old),
+						new,
+					),
 					_ => {}
 				}
 			}
 			Event::IntegrityStart if !bar => {
-				self.out(b"checking package integrity...\n")
+				self.print(b"checking package integrity...\n")
 			}
 			Event::KeyringStart if !bar => {
-				self.out(b"checking keyring...\n")
+				self.print(b"checking keyring...\n")
 			}
 			Event::KeyDownloadStart => {
-				self.out(b"downloading required keys...\n")
+				self.print(b"downloading required keys...\n")
 			}
 			Event::LoadStart if !bar => {
-				self.out(b"loading package files...\n")
+				self.print(b"loading package files...\n")
 			}
 			Event::ScriptletInfo { line } => {
-				self.out(until_nul(line))
+				self.print(until_nul(line))
 			}
 			Event::DbRetrieveStart => self.on_progress = true,
 			Event::PkgRetrieveStart { num, total_size } => {
@@ -787,9 +773,8 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 					self.init_total_progressbar();
 				}
 			}
-			Event::DiskspaceStart if !bar => {
-				self.out(b"checking available disk space...\n")
-			}
+			Event::DiskspaceStart if !bar => self
+				.print(b"checking available disk space...\n"),
 			Event::OptdepRemoval { pkg, optdep } => {
 				let dep = dep_compute_string(optdep);
 				let msg = [
@@ -844,13 +829,13 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 					if let Some(mut t) =
 						self.totalbar.take()
 					{
-						let now = self.term.now_ms();
+						let now = (self.term.now_ms)();
 						Self::update_bar_finalstats(
 							now, &mut t,
 						);
 						self.draw(&t);
 					}
-					self.out(b"\n");
+					self.print(b"\n");
 				}
 				self.total_enabled = false;
 				self.flush_output_list();
@@ -859,7 +844,7 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 			// done events, starts the progress bar stands for
 			_ => {}
 		}
-		self.term.flush();
+		self.out.flush();
 	}
 
 	// cb_question
@@ -885,14 +870,16 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 	}
 
 	fn ask(&mut self, question: &Question<'_>) -> c_int {
-		let (term, config) = (&mut self.term, &self.config);
+		let (out, term) = (&mut self.out, &mut self.term);
+		let config = &self.config;
+		let yes = |b: bool| c_int::from(b);
 		match *question {
 			Question::InstallIgnorepkg { pkg, .. } => {
 				if config.op_s_downloadonly != 0 {
 					return 1;
 				}
 				let msg = [pkg.name_bytes(), IGNORED].concat();
-				yesno(term, config, &msg)
+				yes(yesno(out, config, term, &msg))
 			}
 			Question::ReplacePkg {
 				oldpkg,
@@ -909,26 +896,25 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 					newpkg.name_bytes(),
 					b"?",
 				];
-				yesno(term, config, &msg.concat())
+				yes(yesno(out, config, term, &msg.concat()))
 			}
 			Question::ConflictPkg { conflict, .. } => {
 				let msg =
 					conflict_msg(conflict, &config.colstr);
-				noyes(term, config, &msg)
+				yes(noyes(out, config, term, &msg))
 			}
 			Question::RemovePkgs { packages, .. } => {
-				ask_remove_pkgs(term, config, packages)
+				ask_remove_pkgs(out, config, term, packages)
 			}
 			Question::SelectProvider {
 				providers, depend, ..
 			} => {
-				let dbs: Vec<Vec<u8>> = providers
+				let dbs: Vec<Option<Vec<u8>>> = providers
 					.iter()
 					.map(|p| self.lookup.db_name(p))
 					.collect();
-				ask_provider(
-					term, config, providers, &dbs, depend,
-				)
+				let p = (providers, &dbs[..]);
+				ask_provider(out, config, term, p, depend)
 			}
 			Question::CorruptedPkg {
 				filepath, reason, ..
@@ -940,7 +926,7 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 					reason.strerror().as_bytes(),
 					b").\nDo you want to delete it?",
 				];
-				yesno(term, config, &msg.concat())
+				yes(yesno(out, config, term, &msg.concat()))
 			}
 			Question::ImportKey {
 				uid, fingerprint, ..
@@ -966,7 +952,7 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 						parts.concat()
 					}
 				};
-				yesno(term, config, &msg)
+				yes(yesno(out, config, term, &msg))
 			}
 		}
 	}
@@ -982,7 +968,7 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 	) {
 		let pkgname = until_nul(pkgname);
 		let has_pkgname = !pkgname.is_empty();
-		let cols = self.term.cols();
+		let cols = (self.term.cols)();
 		if self.config.noprogressbar != 0 || cols == 0 {
 			return;
 		}
@@ -1034,11 +1020,11 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 		};
 		let (w, padwid) = fit(mbstowcs(&text).0, textlen);
 		let head = format!("({current:digits$}/{howmany:digits$}) ");
-		self.out(&[head.as_bytes(), &encode(&w), &spaces(padwid)]
+		self.print(&[head.as_bytes(), &encode(&w), &spaces(padwid)]
 			.concat());
 		self.fill_progress(percent, i32::from(cols) - infolen);
 		if percent == 100 {
-			self.out(b"\n");
+			self.print(b"\n");
 			self.flush_output_list();
 			self.on_progress = false;
 		} else {
@@ -1079,9 +1065,9 @@ impl<T: Term, L: Lookup> Frontend<T, L> {
 			}
 			return;
 		}
-		let now = self.term.now_secs();
+		let now = (self.term.now_secs)();
 		if let Some(s) = pm_vfprintf(&self.config, level, msg, now) {
-			self.term.err(&s);
+			self.out.stderr.extend_from_slice(&s);
 		}
 	}
 }
@@ -1119,9 +1105,10 @@ fn conflict_msg(conflict: &Conflict, c: &ColStr) -> Vec<u8> {
 }
 
 // ALPM_QUESTION_REMOVE_PKGS: the names listed, then skip them?
-fn ask_remove_pkgs<T: Term>(
-	term: &mut T,
+fn ask_remove_pkgs<R: BufRead>(
+	out: &mut Output,
 	config: &Config,
+	term: &mut Term<R>,
 	packages: &[&Package],
 ) -> c_int {
 	let names: Vec<&[u8]> =
@@ -1136,13 +1123,11 @@ fn ask_remove_pkgs<T: Term>(
 		what,
 		b" be upgraded due to unresolvable dependencies:\n",
 	];
-	colon_printf(term, config, &head.concat());
-	let cols = term.cols();
-	let mut out = Vec::new();
+	let c = &config.colstr;
+	colon_printf(&mut out.stdout, c, &head.concat());
 	let title = Some(&b"     "[..]);
-	list_display(&mut out, title, &names, cols, &config.colstr);
-	out.push(b'\n');
-	term.out(&out);
+	list_display(&mut out.stdout, title, &names, (term.cols)(), c);
+	out.stdout.push(b'\n');
 	let what: &[u8] = match names.len() {
 		1 => b"package",
 		_ => b"packages",
@@ -1152,16 +1137,16 @@ fn ask_remove_pkgs<T: Term>(
 		what,
 		b" for this upgrade?",
 	];
-	noyes(term, config, &ask.concat())
+	c_int::from(noyes(out, config, term, &ask.concat()))
 }
 
 // ALPM_QUESTION_SELECT_PROVIDER: the providers by db, then the index.
 // only the plural line ends in ':'
-fn ask_provider<T: Term>(
-	term: &mut T,
+fn ask_provider<R: BufRead>(
+	out: &mut Output,
 	config: &Config,
-	providers: &[&Package],
-	dbs: &[Vec<u8>],
+	term: &mut Term<R>,
+	(providers, dbs): (&[&Package], &[Option<Vec<u8>>]),
 	depend: &Depend,
 ) -> c_int {
 	let count = providers.len();
@@ -1171,39 +1156,32 @@ fn ask_provider<T: Term>(
 		_ => format!("There are {count} providers available for "),
 	};
 	let tail: &[u8] = if count == 1 { b"\n" } else { b":\n" };
-	colon_printf(term, config, &[head.as_bytes(), &dep, tail].concat());
-	let list: Vec<(&[u8], &[u8])> = dbs
+	let c = &config.colstr;
+	let line = [head.as_bytes(), &dep, tail].concat();
+	colon_printf(&mut out.stdout, c, &line);
+	let list: Vec<(Option<&[u8]>, &Package)> = dbs
 		.iter()
 		.zip(providers)
-		.map(|(d, p)| (&d[..], p.name_bytes()))
+		.map(|(d, &p)| (d.as_deref(), p))
 		.collect();
-	select_display(term, config, &list);
-	select_question(term, config, count as c_int)
+	select_display(&mut out.stdout, c, &list, (term.cols)());
+	select_question(out, config, term, count as c_int)
 }
 
-// depend_cmp: name, mod, then version and desc with NULL first
-fn depend_cmp(a: &Depend, b: &Depend) -> std::cmp::Ordering {
-	fn opt(x: &Option<Vec<u8>>) -> Option<&[u8]> {
-		x.as_deref().map(until_nul)
-	}
-	until_nul(&a.name)
-		.cmp(until_nul(&b.name))
-		.then((a.depmod as i32).cmp(&(b.depmod as i32)))
-		.then(opt(&a.version).cmp(&opt(&b.version)))
-		.then(opt(&a.desc).cmp(&opt(&b.desc)))
-}
-
-impl<T: Term, L: Lookup> Callbacks for Frontend<T, L> {
+impl<R: BufRead, L: Lookup> Callbacks for Frontend<R, L> {
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {
 		self.cb_log(level, msg);
+		self.out.flush();
 	}
 
 	fn event(&mut self, event: &Event<'_>) {
 		self.cb_event(event);
+		self.out.flush();
 	}
 
 	fn question(&mut self, question: &mut Question<'_>) {
 		self.cb_question(question);
+		self.out.flush();
 	}
 
 	fn progress(
@@ -1215,9 +1193,11 @@ impl<T: Term, L: Lookup> Callbacks for Frontend<T, L> {
 		current: usize,
 	) {
 		self.cb_progress(progress, pkg, percent, howmany, current);
+		self.out.flush();
 	}
 
 	fn download(&mut self, filename: &[u8], event: DownloadEvent) {
 		self.cb_download(filename, event);
+		self.out.flush();
 	}
 }

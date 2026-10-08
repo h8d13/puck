@@ -9,10 +9,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
-use crate::util_common::{safe_fgets, strtrim, until_nul};
-
-// PATH_MAX on linux, the C line buffer
-pub const LINE_MAX: usize = 4096;
+use crate::util_common::{PATH_MAX, safe_fgets, strtrim, until_nul};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Ini<'a> {
@@ -56,7 +53,7 @@ where
 {
 	let mut section: Option<Vec<u8>> = None;
 	let mut line = 0;
-	while let Ok(Some(chunk)) = safe_fgets(&mut r, LINE_MAX) {
+	while let Ok(Some(chunk)) = safe_fgets(&mut r, PATH_MAX) {
 		line += 1;
 		let s = strtrim(until_nul(&chunk));
 		if s.is_empty() || s[0] == b'#' {

@@ -83,7 +83,8 @@ impl AlpmParser for PackageType {
 /// - Tabs and newlines are substituted with spaces.
 /// - Multiple, consecutive spaces are substituted with a single space.
 ///
-/// This is a type alias for [`String`].
+/// The string it has been created from stays available via
+/// [`PackageDescription::as_original_str`].
 ///
 /// ## Examples
 ///
@@ -95,18 +96,37 @@ impl AlpmParser for PackageType {
 /// let description = PackageDescription::from("my special package ");
 ///
 /// assert_eq!(&description.to_string(), "my special package");
+/// assert_eq!(description.as_original_str(), "my special package ");
 /// # }
 /// ```
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "serde", derive(DeserializeFromStr, Serialize))]
-pub struct PackageDescription(String);
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(DeserializeFromStr, SerializeDisplay))]
+pub struct PackageDescription {
+    description: String,
+    /// The string the description has been created from.
+    original: String,
+}
 
 impl PackageDescription {
     /// Create a new `PackageDescription` from a given `String`.
     pub fn new(description: &str) -> Self {
         Self::from(description)
     }
+
+    /// Returns the string the `PackageDescription` has been created from, before normalization.
+    pub fn as_original_str(&self) -> &str {
+        &self.original
+    }
 }
+
+/// Compares the normalized descriptions.
+impl PartialEq for PackageDescription {
+    fn eq(&self, other: &Self) -> bool {
+        self.description == other.description
+    }
+}
+
+impl Eq for PackageDescription {}
 
 impl Default for PackageDescription {
     /// Returns the default [`PackageDescription`].
@@ -129,7 +149,7 @@ impl FromStr for PackageDescription {
 impl AsRef<str> for PackageDescription {
     /// Returns a reference to the inner [`String`].
     fn as_ref(&self) -> &str {
-        &self.0
+        &self.description
     }
 }
 
@@ -153,13 +173,16 @@ impl From<&str> for PackageDescription {
             true
         });
 
-        Self(description)
+        Self {
+            description,
+            original: value.to_string(),
+        }
     }
 }
 
 impl Display for PackageDescription {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.description)
     }
 }
 
@@ -251,8 +274,9 @@ impl ParserUntil for ExtraDataEntry {
                 .expected_text("a `=` between the key and value")
                 .parse_next(input)?;
 
+            // The value may be empty, it must not run past the delimiter (e.g. a line ending).
             let value: &str =
-                repeat_till::<_, _, (), _, _, _, _>(1.., any, peek(delimiter_parser.by_ref()))
+                repeat_till::<_, _, (), _, _, _, _>(0.., any, peek(delimiter_parser.by_ref()))
                     .take()
                     .label("extra data value")
                     .expected_text("a UTF-8 string")
@@ -440,6 +464,7 @@ mod tests {
     #[case("key=value", "key", "value")]
     #[case("pkgtype=debug", "pkgtype", "debug")]
     #[case("test-123@.foo_+=1000", "test-123@.foo_+", "1000")]
+    #[case("key=", "key", "")]
     fn extra_data_entry_from_str(
         #[case] data: &str,
         #[case] key: &str,
@@ -452,9 +477,28 @@ mod tests {
         Ok(())
     }
 
+    /// Ensure that an empty value does not consume the following line.
+    #[rstest]
+    #[case("a=\nb=c", "a", "", "\nb=c")]
+    #[case("a=b\nc=d", "a", "b", "\nc=d")]
+    #[case("a=\r\n", "a", "", "\r\n")]
+    fn extra_data_entry_parser_until_line_ending(
+        #[case] data: &str,
+        #[case] key: &str,
+        #[case] value: &str,
+        #[case] rest: &str,
+    ) -> TestResult {
+        let mut input = Input::new(data);
+        let extra_data = ExtraDataEntry::parser_until_line_ending(&mut input)?;
+        assert_eq!(extra_data.key(), key);
+        assert_eq!(extra_data.value(), value);
+        assert_eq!(*input, rest);
+        Ok(())
+    }
+
     #[rstest]
     #[case("key")]
-    #[case("key=")]
+    #[case("")]
     #[case("=value")]
     fn extra_data_entry_from_str_error(#[case] input: &str) {
         let (test_name, _guard) = configure_insta();
@@ -489,6 +533,9 @@ mod tests {
     #[case("\nsome\t whitespace\n chars\n", "some whitespace chars")]
     #[case("  \neverything\t   combined\n yeah \n   ", "everything combined yeah")]
     fn package_description(#[case] input: &str, #[case] result: &str) {
-        assert_eq!(PackageDescription::new(input).to_string(), result);
+        let description = PackageDescription::new(input);
+        assert_eq!(description.to_string(), result);
+        assert_eq!(description.as_original_str(), input);
+        assert_eq!(description, PackageDescription::new(result));
     }
 }

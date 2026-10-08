@@ -1,0 +1,111 @@
+diff -ruN '--exclude=VENDORED' a/alpm-mtree/src/libarchive.rs b/alpm-mtree/src/libarchive.rs
+--- a/alpm-mtree/src/libarchive.rs
++++ b/alpm-mtree/src/libarchive.rs
+@@ -74,6 +74,10 @@
+     pub md5_digest: Option<Md5Checksum>,
+     /// The SHA-256 hash digest.
+     pub sha256_digest: Option<Sha256Checksum>,
++    /// What libarchive warns about when reading the entry.
++    ///
++    /// pacman refuses the file list of a package's `.MTREE` if an entry has a warning.
++    pub warnings: Vec<Warning>,
+ }
+ 
+ impl Entry {
+@@ -90,6 +94,7 @@
+             link: None,
+             md5_digest: None,
+             sha256_digest: None,
++            warnings: Vec::new(),
+         }
+     }
+ }
+@@ -515,19 +520,17 @@
+ 
+ /// Reads the keywords of `line` into `entry` like libarchive's `parse_line`.
+ ///
+-/// # Errors
+-///
+-/// Returns an error if libarchive warns about one of the keywords or the type is not set.
+-fn read_line(entry: &mut Entry, seen: &mut Seen, line: &PathLine) -> Result<(), Error> {
++/// Adds a [`Warning`] for each keyword libarchive warns about, or one if the type is not set.
++fn read_line(entry: &mut Entry, seen: &mut Seen, line: &PathLine) {
++    let warnings = entry.warnings.len();
+     for keyword in &line.keywords.0 {
+         if let Err(warning) = read_keyword(entry, seen, keyword) {
+-            return Err(line_error(line.number, warning.to_string()));
++            entry.warnings.push(warning);
+         }
+     }
+-    if !seen.entry_type {
+-        return Err(line_error(line.number, Warning::MissingType.to_string()));
++    if entry.warnings.len() == warnings && !seen.entry_type {
++        entry.warnings.push(Warning::MissingType);
+     }
+-    Ok(())
+ }
+ 
+ /// Parses ALPM-MTREE data like libarchive's mtree reader.
+@@ -537,6 +540,7 @@
+ /// first line, with the keywords of later lines replacing earlier ones.
+ /// Keywords that are not set keep the defaults of [`Entry`], [ALPM-MTREE] requires them by file
+ /// type.
++/// Keywords libarchive warns about are not read, the entry carries the [`Warning`].
+ ///
+ /// # Examples
+ ///
+@@ -561,7 +565,6 @@
+ ///
+ /// Returns an error if
+ /// - a line cannot be parsed,
+-/// - libarchive warns about a keyword of a path,
+ /// - or a path is not relative to the package (`./`).
+ ///
+ /// [ALPM-MTREE]: https://alpm.archlinux.page/specifications/ALPM-MTREE.5.html
+@@ -590,7 +593,7 @@
+         // All lines of a path make one entry at its first line, later keywords win.
+         for &j in &lines_of[paths[i].as_slice()] {
+             read[j] = true;
+-            read_line(&mut entry, &mut seen, &lines[j])?;
++            read_line(&mut entry, &mut seen, &lines[j]);
+         }
+         entries.push(entry);
+     }
+@@ -821,7 +824,7 @@
+         assert!(parse(mtree(line).as_bytes()).is_err());
+     }
+ 
+-    /// Ensures that keywords libarchive warns about fail.
++    /// Ensures that keywords libarchive warns about are not read and give a warning.
+     #[rstest]
+     #[case::unknown_keyword("foo=1")]
+     #[case::no_value("foo")]
+@@ -832,11 +835,23 @@
+     )]
+     #[case::short_digest("md5digest=abc")]
+     #[case::device_format("device=foo,1,2")]
+-    fn warned_keywords(#[case] keyword: &str) {
+-        let data = mtree(&format!(
+-            "./a time=1.0 size=0 sha256digest={SHA256} {keyword}\n"
+-        ));
+-        assert!(parse(data.as_bytes()).is_err());
++    fn warned_keywords(#[case] keyword: &str) -> TestResult {
++        let data = mtree(&format!("./a time=1.0 {keyword}\n"));
++        let entry = &parse(data.as_bytes())?[0];
++        assert_eq!(entry.warnings.len(), 1, "{entry:?}");
++        assert_eq!(entry.entry_type, EntryType::File);
++        assert_eq!(entry.sha256_digest, None);
++        assert_eq!(entry.time, Some((1, 0)));
++        Ok(())
++    }
++
++    /// Ensures that an entry without type is a file with a warning.
++    #[test]
++    fn missing_type() -> TestResult {
++        let entry = &parse(b"#mtree\n./a uid=1\n")?[0];
++        assert_eq!(entry.warnings, [Warning::MissingType]);
++        assert_eq!((entry.entry_type, entry.uid), (EntryType::File, 1));
++        Ok(())
+     }
+ 
+     /// Ensures that the data may be gzip compressed.

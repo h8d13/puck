@@ -1,0 +1,55 @@
+diff -ruN '--exclude=VENDORED' a/alpm-pkginfo/src/pacman.rs b/alpm-pkginfo/src/pacman.rs
+--- a/alpm-pkginfo/src/pacman.rs
++++ b/alpm-pkginfo/src/pacman.rs
+@@ -79,7 +79,7 @@
+     pub makedepend: Vec<PackageRelation>,
+     /// The packages this package is checked with (`checkdepend`).
+     pub checkdepend: Vec<PackageRelation>,
+-    /// The extra data of the package (`xdata`), split at the first `=`.
++    /// The extra data of the package (`xdata`), split at the first `=`, in any order.
+     pub xdata: Vec<ExtraDataEntry>,
+ }
+ 
+@@ -163,9 +163,6 @@
+                 let Some((name, value)) = value.split_once('=') else {
+                     return Err(Error::ExtraDataEmpty);
+                 };
+-                if self.xdata.is_empty() && name != "pkgtype" {
+-                    return Err(Error::FirstExtraDataNotPkgType);
+-                }
+                 self.xdata
+                     .push(ExtraDataEntry::new(name.to_string(), value.to_string()));
+             }
+@@ -209,7 +206,7 @@
+     ///
+     /// Returns an error if
+     /// - a value is not valid UTF-8 or cannot be parsed into its ALPM type,
+-    /// - or an `xdata` value has no `=` or the first one is not `pkgtype`.
++    /// - or an `xdata` value has no `=`.
+     pub fn parse(data: &[u8]) -> Result<Self, Error> {
+         let mut pkginfo = Self::default();
+         for line in data.split(|&b| b == b'\n') {
+@@ -298,6 +295,15 @@
+         Ok(())
+     }
+ 
++    /// Ensures that xdata is read in any order, without `pkgtype`.
++    #[test]
++    fn xdata_order() -> TestResult {
++        let data = PKGINFO.replace("pkgtype=pkg", "a=b");
++        let pkginfo = PacmanPackageInfo::parse(data.as_bytes())?;
++        assert_eq!(pkginfo.xdata[0].key(), "a");
++        Ok(())
++    }
++
+     /// Ensures that numbers are read like pacman's `_alpm_parsedate` and `_alpm_strtoofft`.
+     #[rstest]
+     #[case::date_sign("+5", 5)]
+@@ -374,7 +380,6 @@
+     ///
+     /// [PKGINFO]: https://alpm.archlinux.page/specifications/PKGINFO.5.html
+     #[rstest]
+-    #[case::pkgtype_not_first(PKGINFO.replace("pkgtype=pkg", "a=b"))]
+     #[case::empty_url(PKGINFO.replace("url = https://example.org/", "url = "))]
+     fn refused(#[case] data: String) {
+         assert!(PacmanPackageInfo::parse(data.as_bytes()).is_err());

@@ -1,0 +1,109 @@
+diff -ruN '--exclude=VENDORED' a/alpm-db/src/desc/parser.rs b/alpm-db/src/desc/parser.rs
+--- a/alpm-db/src/desc/parser.rs
++++ b/alpm-db/src/desc/parser.rs
+@@ -169,6 +169,10 @@
+     Provides(Vec<RelationOrSoname>),
+     /// %XDATA%
+     XData(ExtraData),
++    /// %MAKEDEPENDS%, only read by [`parse_libalpm`]
++    MakeDepends(Vec<PackageRelation>),
++    /// %CHECKDEPENDS%, only read by [`parse_libalpm`]
++    CheckDepends(Vec<PackageRelation>),
+ }
+ 
+ /// One or multiple newlines.
+@@ -454,6 +458,40 @@
+     terminated(take_till(0.., '\n'), alt(("\n", eof))).parse_next(input)
+ }
+ 
++/// Parses the value or values of the section with the header `%name%` as libalpm reads them.
++///
++/// Returns [`None`] for a section libalpm does not know.
++///
++/// # Errors
++///
++/// Returns an error if the section body contains malformed values.
++fn libalpm_section<'a>(input: &mut Input<'a>, name: &str) -> PResult<'a, Option<Section>> {
++    let section = match name {
++        // libalpm reads them from any desc file, though it never writes them to a local database
++        "MAKEDEPENDS" => Section::MakeDepends(
++            values(
++                PackageRelation::parser_until_line_ending,
++                "makedepends",
++                ListEnd::Libalpm,
++            )
++            .parse_next(input)?,
++        ),
++        "CHECKDEPENDS" => Section::CheckDepends(
++            values(
++                PackageRelation::parser_until_line_ending,
++                "checkdepends",
++                ListEnd::Libalpm,
++            )
++            .parse_next(input)?,
++        ),
++        name => match SectionKeyword::from_str(name) {
++            Ok(keyword) => section_value(input, keyword, ListEnd::Libalpm)?,
++            Err(_) => return Ok(None),
++        },
++    };
++    Ok(Some(section))
++}
++
+ /// Parses all sections from the given input the way libalpm's `local_db_read` reads them.
+ ///
+ /// - Section headers are whole lines compared as they are: an indented header, or one followed
+@@ -472,16 +510,15 @@
+     let mut sections = Vec::new();
+     while !input.is_empty() {
+         let line = libalpm_line.parse_next(input)?;
+-        let keyword = line
++        let name = line
+             .strip_prefix('%')
+             .and_then(|line| line.strip_suffix('%'))
+-            .and_then(|name| SectionKeyword::from_str(name).ok());
+-        match keyword {
+-            Some(keyword) => {
+-                let section =
+-                    (move |i: &mut Input<'a>| section_value(i, keyword.clone(), ListEnd::Libalpm))
+-                        .layer("alpm-db-desc file value section")
+-                        .parse_next(input)?;
++            .unwrap_or_default();
++        let section = (|i: &mut Input<'a>| libalpm_section(i, name))
++            .layer("alpm-db-desc file value section")
++            .parse_next(input)?;
++        match section {
++            Some(section) => {
+                 sections.push(section);
+                 alt((line_ending, eof)).parse_next(input)?;
+             }
+@@ -550,6 +587,8 @@
+     #[case::header_in_list("%GROUPS%\na\n%DESC%\n\n%BASE%\nfoo\n", "Groups(2) Base")]
+     #[case::empty_list("%GROUPS%\n\n%BASE%\nfoo\n", "Groups(0) Base")]
+     #[case::repeated("%GROUPS%\na\n\n%GROUPS%\nb\nc\n", "Groups(1) Groups(2)")]
++    #[case::makedepends("%MAKEDEPENDS%\ngcc\nmake>=4\n", "MakeDepends(2)")]
++    #[case::checkdepends("%CHECKDEPENDS%\npython\n", "CheckDepends(1)")]
+     fn libalpm_sections_in_file_order(#[case] input: &str, #[case] expected: &str) -> TestResult {
+         let names: Vec<String> = parse_libalpm(input)?
+             .iter()
+@@ -557,6 +596,8 @@
+                 Section::Base(_) => "Base".to_string(),
+                 Section::Desc(_) => "Desc".to_string(),
+                 Section::Groups(groups) => format!("Groups({})", groups.len()),
++                Section::MakeDepends(v) => format!("MakeDepends({})", v.len()),
++                Section::CheckDepends(v) => format!("CheckDepends({})", v.len()),
+                 other => format!("{other:?}"),
+             })
+             .collect();
+diff -ruN '--exclude=VENDORED' a/alpm-db/src/desc/v1.rs b/alpm-db/src/desc/v1.rs
+--- a/alpm-db/src/desc/v1.rs
++++ b/alpm-db/src/desc/v1.rs
+@@ -388,6 +388,8 @@
+                 Section::Conflicts(v) => set_vec_once!(conflicts, v, SectionKeyword::Conflicts),
+                 Section::Provides(v) => set_vec_once!(provides, v, SectionKeyword::Provides),
+                 Section::XData(_) => {}
++                // Not part of alpm-db-desc, only read by `parse_libalpm`.
++                Section::MakeDepends(_) | Section::CheckDepends(_) => {}
+             }
+         }
+ 

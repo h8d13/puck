@@ -6,8 +6,8 @@
 // the package cache take handle->dbext as it is at call time, for the sync
 // populate size estimate. pm_errno is not modelled: every call returns
 // the alpm_errno_t it would leave as Err, Ok where it leaves ALPM_ERR_OK.
-// logging is not modelled past registration. not ported: alpm_db_update
-// and db->ops (Backend picks the backend).
+// logging is not modelled past registration. alpm_db_update is in
+// be_sync.rs. not ported: db->ops (Backend picks the backend).
 
 use std::cmp::Ordering;
 use std::ffi::c_int;
@@ -242,23 +242,26 @@ impl Db {
 		);
 		let mut db = Db::new(treename, path, Backend::Sync);
 		db.siglevel = siglevel;
-		db.validate(default_siglevel, kr, cb);
+		let _ = db.validate(default_siglevel, kr, cb);
 		db
 	}
 
-	// sync_db_validate: a missing file sends ALPM_EVENT_DATABASE_MISSING
-	// and is valid, a failed signature check makes the db invalid
-	fn validate(
+	// sync_db_validate with the status bits cleared first, as at
+	// registration and after alpm_db_update's download: a missing file
+	// sends ALPM_EVENT_DATABASE_MISSING and is valid, a failed signature
+	// check makes the db invalid (Err)
+	pub fn validate(
 		&mut self,
 		default_siglevel: c_int,
 		kr: &mut Keyring,
 		cb: &mut dyn Callbacks,
-	) {
+	) -> Result<(), Errno> {
 		let level = self.siglevel(default_siglevel);
 		let name = &self.treename;
-		self.status = match be_sync::sync_db_validate(
+		let res = be_sync::sync_db_validate(
 			kr, cb, &self.path, name, level,
-		) {
+		);
+		self.status = match res {
 			Ok(true) => Status::Valid,
 			Ok(false) => {
 				let ev =
@@ -268,6 +271,7 @@ impl Db {
 			}
 			Err(_) => Status::Invalid,
 		};
+		res.map(drop)
 	}
 
 	// alpm_db_get_name

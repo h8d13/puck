@@ -1,0 +1,116 @@
+diff -ruN '--exclude=VENDORED' a/alpm-pkginfo/locales/en-US/main.ftl b/alpm-pkginfo/locales/en-US/main.ftl
+--- a/alpm-pkginfo/locales/en-US/main.ftl
++++ b/alpm-pkginfo/locales/en-US/main.ftl
+@@ -30,8 +30,6 @@
+ 
+ error-invalid-variant = Invalid variant ({ $error }).
+ 
+-error-duplicate-key = The key { $key } is set more than once.
+-
+ error-missing-key = The key { $key } is not set.
+ 
+ error-missing-extra-data = Extra data is missing.
+diff -ruN '--exclude=VENDORED' a/alpm-pkginfo/src/error.rs b/alpm-pkginfo/src/error.rs
+--- a/alpm-pkginfo/src/error.rs
++++ b/alpm-pkginfo/src/error.rs
+@@ -58,10 +58,6 @@
+     #[error("{msg}", msg = t!("error-first-extra-data-not-pkgtype"))]
+     FirstExtraDataNotPkgType,
+ 
+-    /// A key that may only be set once is set more than once.
+-    #[error("{msg}", msg = t!("error-duplicate-key", { "key" => .0 }))]
+-    DuplicateKey(String),
+-
+     /// A required key is not set.
+     #[error("{msg}", msg = t!("error-missing-key", { "key" => .0 }))]
+     MissingKey(String),
+diff -ruN '--exclude=VENDORED' a/alpm-pkginfo/src/pacman.rs b/alpm-pkginfo/src/pacman.rs
+--- a/alpm-pkginfo/src/pacman.rs
++++ b/alpm-pkginfo/src/pacman.rs
+@@ -32,7 +32,8 @@
+ 
+ /// PKGINFO data as pacman reads it.
+ ///
+-/// Single keys are [`None`] if not set, list keys keep the order of their lines.
++/// Single keys are [`None`] if not set and the last line of a key wins, like in pacman. List keys
++/// keep the order of their lines.
+ #[derive(Clone, Debug, Default, PartialEq)]
+ pub struct PacmanPackageInfo {
+     /// The name of the package (`pkgname`).
+@@ -133,35 +134,23 @@
+     }
+ }
+ 
+-/// Sets a single key, which may only be set once.
+-fn set_once<T>(field: &mut Option<T>, key: &str, value: T) -> Result<(), Error> {
+-    if field.is_some() {
+-        return Err(Error::DuplicateKey(key.to_string()));
+-    }
+-    *field = Some(value);
+-    Ok(())
+-}
+-
+ impl PacmanPackageInfo {
+     /// Reads one `key = value` line.
+     fn read(&mut self, key: &str, value: &str) -> Result<(), Error> {
+         match key {
+-            "pkgname" => set_once(&mut self.pkgname, key, parse(value)?)?,
+-            "pkgbase" => set_once(&mut self.pkgbase, key, parse(value)?)?,
+-            "pkgver" => set_once(&mut self.pkgver, key, parse(value)?)?,
++            "pkgname" => self.pkgname = Some(parse(value)?),
++            "pkgbase" => self.pkgbase = Some(parse(value)?),
++            "pkgver" => self.pkgver = Some(parse(value)?),
+             // Not used by pacman.
+             "basever" => {}
+-            "pkgdesc" => {
+-                let Ok(desc) = PackageDescription::from_str(value);
+-                set_once(&mut self.pkgdesc, key, desc)?
+-            }
++            "pkgdesc" => self.pkgdesc = Some(value.into()),
+             "group" => self.group.push(value.to_string()),
+-            "url" => set_once(&mut self.url, key, parse(value)?)?,
++            "url" => self.url = Some(parse(value)?),
+             "license" => self.license.push(parse(value)?),
+-            "builddate" => set_once(&mut self.builddate, key, parsedate(value))?,
+-            "packager" => set_once(&mut self.packager, key, parse(value)?)?,
+-            "arch" => set_once(&mut self.arch, key, parse(value)?)?,
+-            "size" => set_once(&mut self.size, key, strtoofft(value))?,
++            "builddate" => self.builddate = Some(parsedate(value)),
++            "packager" => self.packager = Some(parse(value)?),
++            "arch" => self.arch = Some(parse(value)?),
++            "size" => self.size = Some(strtoofft(value)),
+             "depend" => self.depend.push(parse(value)?),
+             "optdepend" => self.optdepend.push(parse(value)?),
+             "makedepend" => self.makedepend.push(parse(value)?),
+@@ -242,7 +231,6 @@
+     ///
+     /// Returns an error if
+     /// - a value is not valid UTF-8 or cannot be parsed into its ALPM type,
+-    /// - a single key is set twice,
+     /// - an `xdata` value has no `=` or the first one is not `pkgtype`,
+     /// - or a key the [PKGINFO] specification requires is not set.
+     ///
+@@ -368,6 +356,15 @@
+         Ok(())
+     }
+ 
++    /// Ensures that the last line of a single key wins.
++    #[test]
++    fn duplicate_keys() -> TestResult {
++        let pkginfo = PacmanPackageInfo::parse(with("pkgdesc = second\nsize = 5").as_bytes())?;
++        assert_eq!(pkginfo.pkgdesc, Some(PackageDescription::from("second")));
++        assert_eq!(pkginfo.size, Some(5));
++        Ok(())
++    }
++
+     /// Ensures that unknown keys are skipped.
+     #[test]
+     fn unknown_keys() -> TestResult {
+@@ -391,7 +388,6 @@
+     ///
+     /// [PKGINFO]: https://alpm.archlinux.page/specifications/PKGINFO.5.html
+     #[rstest]
+-    #[case::duplicate_key(with("pkgdesc = second"))]
+     #[case::missing_key(PKGINFO.replace("url = https://example.org/\n", ""))]
+     #[case::pkgtype_not_first(PKGINFO.replace("pkgtype=pkg", "a=b"))]
+     #[case::empty_url(PKGINFO.replace("url = https://example.org/", "url = "))]

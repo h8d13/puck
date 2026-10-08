@@ -9,10 +9,10 @@
 // Output. messages are the untranslated msgids, _n() picks the singular
 // for 1 like ngettext without a catalog.
 //
-// mtree entries come from alpm-mtree (be_local::read_mtree), which only
-// knows dir/file/link entries, so the C's "file type not recognized"
-// branch has no input here. data alpm-mtree rejects checks no entries,
-// where the C checks those before the first bad one.
+// mtree entries come from alpm-mtree's libarchive reader
+// (be_local::read_mtree), in file order like the C. an entry libarchive
+// warns about ends the C's walk silently (UPSTREAM.md), here it is
+// checked; data that cannot be parsed checks no entries in both.
 
 use std::fs::{self, File, Metadata};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -25,13 +25,10 @@ use alpm_core::be_local::{
 use alpm_core::handle::Handle;
 use alpm_core::package::Package;
 use alpm_core::util::{strerror, until_nul};
-use pacman_common::util_common::llstat;
+use pacman_common::util_common::{PATH_MAX, llstat};
 
 use crate::conf::{Config, LOG_ERROR, LOG_WARNING, cat};
 use crate::util::{Output, pm_printf};
-
-// limits.h, the filepath buffers of check.c
-const PATH_MAX: usize = 4096;
 
 // the libalpm calls of check.c
 pub trait CheckEnv {
@@ -197,6 +194,8 @@ fn type_matches(kind: MtreeType, st: &Metadata) -> bool {
 		MtreeType::File => t.is_file(),
 		MtreeType::Dir => t.is_dir(),
 		MtreeType::Link => t.is_symlink(),
+		// not recognized, check_pkg_full skips them before
+		MtreeType::Block | MtreeType::Char | MtreeType::Fifo => false,
 	}
 }
 
@@ -212,8 +211,8 @@ fn permissions(
 ) -> usize {
 	let q = c.quiet != 0;
 	let checks: [(bool, &[u8]); 3] = [
-		(st.uid() != e.uid, b"UID mismatch"),
-		(st.gid() != e.gid, b"GID mismatch"),
+		(i64::from(st.uid()) != e.uid, b"UID mismatch"),
+		(i64::from(st.gid()) != e.gid, b"GID mismatch"),
 		// S_ISUID | S_ISGID | S_ISVTX | S_IRWXU | S_IRWXG | S_IRWXO
 		(st.mode() & 0o7777 != e.mode, b"Permissions mismatch"),
 	];
@@ -435,6 +434,17 @@ pub fn check_pkg_full(
 			}
 			Exists::NoExtract => continue,
 		};
+		let known = [MtreeType::Dir, MtreeType::File, MtreeType::Link];
+		if !known.contains(&e.kind) {
+			let msg = cat(&[
+				b"file type not recognized: ",
+				root,
+				path,
+				b"\n",
+			]);
+			pm_printf(&mut o.stderr, c, LOG_WARNING, &msg);
+			continue;
+		}
 		if !type_matches(e.kind, &st) {
 			if c.quiet != 0 {
 				quiet_line(o, pkgname, &fp);

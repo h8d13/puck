@@ -1,0 +1,124 @@
+diff -ruN '--exclude=VENDORED' a/alpm-types/src/version/base.rs b/alpm-types/src/version/base.rs
+--- a/alpm-types/src/version/base.rs
++++ b/alpm-types/src/version/base.rs
+@@ -38,6 +38,7 @@
+ /// See [alpm-epoch] for details on the format.
+ ///
+ /// An Epoch wraps a [`usize`].
++/// An unset epoch is considered to be `0`, which is what [`Default`] returns.
+ ///
+ /// ## Examples
+ /// ```
+@@ -50,7 +51,7 @@
+ /// ```
+ ///
+ /// [alpm-epoch]: https://alpm.archlinux.page/specifications/alpm-epoch.7.html
+-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
++#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+ #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+ pub struct Epoch(pub usize);
+ 
+diff -ruN '--exclude=VENDORED' a/alpm-types/src/version/pkg_full.rs b/alpm-types/src/version/pkg_full.rs
+--- a/alpm-types/src/version/pkg_full.rs
++++ b/alpm-types/src/version/pkg_full.rs
+@@ -254,13 +254,13 @@
+     /// [alpm-package-version]: https://alpm.archlinux.page/specifications/alpm-package-version.7.html
+     /// [alpm-pkgver]: https://alpm.archlinux.page/specifications/alpm-pkgver.7.html
+     fn cmp(&self, other: &Self) -> Ordering {
+-        match (self.epoch, other.epoch) {
+-            (Some(self_epoch), Some(other_epoch)) if self_epoch.cmp(&other_epoch).is_ne() => {
+-                return self_epoch.cmp(&other_epoch);
+-            }
+-            (Some(_), None) => return Ordering::Greater,
+-            (None, Some(_)) => return Ordering::Less,
+-            (_, _) => {}
++        // An unset epoch is considered to be `0` (see alpm-epoch).
++        let epoch_cmp = self
++            .epoch
++            .unwrap_or_default()
++            .cmp(&other.epoch.unwrap_or_default());
++        if epoch_cmp.is_ne() {
++            return epoch_cmp;
+         }
+ 
+         let pkgver_cmp = self.pkgver.cmp(&other.pkgver);
+@@ -462,6 +462,8 @@
+     #[case::full_with_epoch_less("1:1.0.0-1", "2:1.0.0-1", Ordering::Less)]
+     #[case::full_with_epoch_greater("1:1.0.0-1", "1.0.0-1", Ordering::Greater)]
+     #[case::full_with_epoch_greater("2:1.0.0-1", "1:1.0.0-1", Ordering::Greater)]
++    #[case::full_with_epoch_zero_equal("0:1.0.0-1", "1.0.0-1", Ordering::Equal)]
++    #[case::full_with_epoch_zero_less("0:2.0.0-1", "1:1.0.0-1", Ordering::Less)]
+     fn full_version_comparison(
+         #[case] version_a: &str,
+         #[case] version_b: &str,
+diff -ruN '--exclude=VENDORED' a/alpm-types/src/version/pkg_generic.rs b/alpm-types/src/version/pkg_generic.rs
+--- a/alpm-types/src/version/pkg_generic.rs
++++ b/alpm-types/src/version/pkg_generic.rs
+@@ -193,13 +193,13 @@
+ 
+ impl Ord for Version {
+     fn cmp(&self, other: &Self) -> Ordering {
+-        match (self.epoch, other.epoch) {
+-            (Some(self_epoch), Some(other_epoch)) if self_epoch.cmp(&other_epoch).is_ne() => {
+-                return self_epoch.cmp(&other_epoch);
+-            }
+-            (Some(_), None) => return Ordering::Greater,
+-            (None, Some(_)) => return Ordering::Less,
+-            (_, _) => {}
++        // An unset epoch is considered to be `0` (see alpm-epoch).
++        let epoch_cmp = self
++            .epoch
++            .unwrap_or_default()
++            .cmp(&other.epoch.unwrap_or_default());
++        if epoch_cmp.is_ne() {
++            return epoch_cmp;
+         }
+ 
+         let pkgver_cmp = self.pkgver.cmp(&other.pkgver);
+@@ -360,6 +360,14 @@
+         Version::from_str("1.a1a.1"),
+         Ordering::Equal
+     )]
++    // An unset epoch is considered to be `0`
++    #[case(Version::from_str("0:1.0"), Version::from_str("1.0"), Ordering::Equal)]
++    #[case(
++        Version::from_str("0:1.1"),
++        Version::from_str("1.0"),
++        Ordering::Greater
++    )]
++    #[case(Version::from_str("0:2"), Version::from_str("1:1"), Ordering::Less)]
+     fn version_cmp(
+         #[case] version_a: Result<Version, Error>,
+         #[case] version_b: Result<Version, Error>,
+diff -ruN '--exclude=VENDORED' a/alpm-types/src/version/pkg_minimal.rs b/alpm-types/src/version/pkg_minimal.rs
+--- a/alpm-types/src/version/pkg_minimal.rs
++++ b/alpm-types/src/version/pkg_minimal.rs
+@@ -231,13 +231,13 @@
+     /// [alpm-package-version]: https://alpm.archlinux.page/specifications/alpm-package-version.7.html
+     /// [alpm-pkgver]: https://alpm.archlinux.page/specifications/alpm-pkgver.7.html
+     fn cmp(&self, other: &Self) -> Ordering {
+-        match (self.epoch, other.epoch) {
+-            (Some(self_epoch), Some(other_epoch)) if self_epoch.cmp(&other_epoch).is_ne() => {
+-                return self_epoch.cmp(&other_epoch);
+-            }
+-            (Some(_), None) => return Ordering::Greater,
+-            (None, Some(_)) => return Ordering::Less,
+-            (_, _) => {}
++        // An unset epoch is considered to be `0` (see alpm-epoch).
++        let epoch_cmp = self
++            .epoch
++            .unwrap_or_default()
++            .cmp(&other.epoch.unwrap_or_default());
++        if epoch_cmp.is_ne() {
++            return epoch_cmp;
+         }
+ 
+         self.pkgver.cmp(&other.pkgver)
+@@ -439,6 +439,7 @@
+     #[case::minimal_with_epoch_less("1:1.0.0", "2:1.0.0", Ordering::Less)]
+     #[case::minimal_with_epoch_greater("1:1.0.0", "1.0.0", Ordering::Greater)]
+     #[case::minimal_with_epoch_greater("2:1.0.0", "1:1.0.0", Ordering::Greater)]
++    #[case::minimal_with_epoch_zero_equal("0:1.0.0", "1.0.0", Ordering::Equal)]
+     fn minimal_version_comparison(
+         #[case] version_a: &str,
+         #[case] version_b: &str,
