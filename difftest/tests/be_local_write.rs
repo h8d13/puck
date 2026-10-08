@@ -13,7 +13,7 @@ use alpm_core::be_local::{
 	INFRQ_ALL, INFRQ_BASE, INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET,
 	LocalDb, WriteError,
 };
-use alpm_core::deps::{DepMod, Depend, dep_from_string};
+use alpm_core::deps::{DepMod, Depend};
 use alpm_core::error::Errno;
 use alpm_core::filelist::{File, FileList};
 use alpm_core::package::{Package, PkgFrom, PkgReason, PkgXData};
@@ -140,8 +140,8 @@ fn compare(
 
 fn none(_: &TempRoot) {}
 
-// generators: arbitrary bytes for the writer (no nul: the mirror builds
-// C strings), alpm-db valid values where the port has to read back
+// generators: arbitrary bytes (no nul: the mirror builds C strings),
+// read back by both readers where set_reason loads the cache
 
 const TEXT: &[u8] = b"ab %\n\t=:/<>\xc3\xa9";
 const MODS: [DepMod; 6] = [
@@ -291,70 +291,7 @@ fn write_fuzz() {
 	);
 }
 
-// a package alpm-db reads back as written, so set_reason sees the same
-// fields on both sides
-fn valid_pkg(rng: &mut Rng) -> Package {
-	let (name, version) = ident(rng);
-	let words = |r: &mut Rng| {
-		let n = 1 + r.below(3);
-		let w: Vec<Vec<u8>> =
-			(0..n).map(|_| r.bytes(b"abcxyz", 5)).collect();
-		let w: Vec<Vec<u8>> =
-			w.into_iter().filter(|w| !w.is_empty()).collect();
-		match w.is_empty() {
-			true => b"word".to_vec(),
-			false => w.join(&b' '),
-		}
-	};
-	let rel = |r: &mut Rng| {
-		let s: &[&[u8]] = &[b"foo", b"bar>=1.0", b"baz=2-1", b"qux<3"];
-		dep_from_string(s[r.below(s.len())])
-	};
-	let opt_rel = |r: &mut Rng| {
-		let s: &[&[u8]] = &[b"foo", b"bar: for bar", b"baz>=1: x"];
-		dep_from_string(s[r.below(s.len())])
-	};
-	let validations = [1, 4, 8, 1 | 4, 4 | 8, 1 | 4 | 8];
-	let mut xdata = Vec::new();
-	if rng.below(2) == 0 {
-		xdata.push(PkgXData {
-			name: b"pkgtype".to_vec(),
-			value: b"pkg".to_vec(),
-		});
-		xdata.extend(some(rng, 2, |r| PkgXData {
-			name: [b"k", &r.bytes(b"ab", 3)[..]].concat(),
-			value: [b"v", &r.bytes(b"01", 3)[..]].concat(),
-		}));
-	}
-	Package {
-		name_hash: hash_sdbm(&name),
-		base: Some(name.clone()),
-		name: Some(name),
-		version: Some(version),
-		desc: Some(words(rng)),
-		url: Some(b"https://example.org/x".to_vec()),
-		arch: Some(b"x86_64".to_vec()),
-		packager: Some(b"Foo Bar <foo@bar.org>".to_vec()),
-		builddate: 1 + rng.below(1 << 30) as i64,
-		installdate: 1 + rng.below(1 << 30) as i64,
-		isize: rng.below(1 << 20) as i64,
-		reason: REASONS[rng.below(2)],
-		groups: some(rng, 2, |r| {
-			[b"g", &r.bytes(b"ab", 3)[..]].concat()
-		}),
-		licenses: some(rng, 2, |_| b"MIT".to_vec()),
-		validation: validations[rng.below(validations.len())],
-		replaces: some(rng, 2, rel),
-		depends: some(rng, 3, rel),
-		optdepends: some(rng, 2, opt_rel),
-		conflicts: some(rng, 2, rel),
-		provides: some(rng, 2, rel),
-		xdata,
-		..Package::default()
-	}
-}
-
-// valid packages written whole, then set_reason on them by name
+// packages written whole, then set_reason on them by name
 #[test]
 fn reason_fuzz() {
 	let mut rng = Rng::new(0x5eed_4ea5);
@@ -364,14 +301,14 @@ fn reason_fuzz() {
 		// a few packages before the cache loads, then anything
 		let mut ops = Vec::new();
 		for _ in 0..1 + rng.below(3) {
-			let p = valid_pkg(&mut rng);
+			let p = random_pkg(&mut rng);
 			ops.push(WriteOp::Prepare(p.clone()));
 			ops.push(WriteOp::Write(p, INFRQ_ALL));
 		}
 		let n = 1 + rng.below(8);
 		ops.extend((0..n).flat_map(|_| match rng.below(3) {
 			0 => {
-				let p = valid_pkg(&mut rng);
+				let p = random_pkg(&mut rng);
 				vec![
 					WriteOp::Prepare(p.clone()),
 					WriteOp::Write(p, INFRQ_ALL),
@@ -382,7 +319,7 @@ fn reason_fuzz() {
 				let reason = REASONS[rng.below(2)];
 				vec![WriteOp::SetReason(name.to_vec(), reason)]
 			}
-			_ => vec![random_op(&mut rng, valid_pkg)],
+			_ => vec![random_op(&mut rng, random_pkg)],
 		}));
 		let res = compare(&format!("reason_fuzz {i}"), &none, &ops);
 		for (op, r) in ops.iter().zip(&res) {
