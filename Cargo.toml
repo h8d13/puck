@@ -17,7 +17,6 @@ license = "GPL-2.0-or-later"
 alpm-common = { path = "vendor/alpm/alpm-common" }
 alpm-compress = { path = "vendor/alpm/alpm-compress" }
 alpm-db = { path = "vendor/alpm/alpm-db" }
-alpm-mtree = { path = "vendor/alpm/alpm-mtree" }
 alpm-parsers = { path = "vendor/alpm/alpm-parsers" }
 alpm-repo-db = { path = "vendor/alpm/alpm-repo-db" }
 alpm-types = { path = "vendor/alpm/alpm-types" }

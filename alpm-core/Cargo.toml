@@ -8,7 +8,6 @@ license.workspace = true
 alpm-common.workspace = true
 alpm-compress.workspace = true
 alpm-db.workspace = true
-alpm-mtree.workspace = true
 alpm-repo-db.workspace = true
 alpm-types.workspace = true
 base64.workspace = true

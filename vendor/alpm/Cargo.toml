@@ -19,7 +19,6 @@ members = [
     "alpm-common",
     "alpm-db",
     "alpm-repo-db",
-    "alpm-mtree",
     "alpm-compress",
 ]
 resolver = "3"
