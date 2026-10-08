@@ -38,8 +38,8 @@ use alpm_core::trans::{
 use alpm_core::{add, remove, sync, trans};
 use difftest::{
 	CTx, FrontOp, Rng, TP_GROUPS, TP_SYNC, TempRoot, TpAdd, TpAsk, TpCalls,
-	TpData, TpEvent, TpId, TpRet, TpSetup, TpView, TpWorld, c_front,
-	gen_world, iters, tp_cachedir, tree_snapshot, write_world,
+	TpData, TpEvent, TpId, TpRet, TpSetup, TpView, TpWorld, UNPORTED_DEBUG,
+	c_front, gen_world, iters, tp_cachedir, tree_snapshot, write_world,
 };
 use pacman_cli::conf::{ColStr, Config, LOG_ERROR, LOG_WARNING};
 use pacman_cli::package::format_date_utc;
@@ -116,6 +116,12 @@ fn name(p: &alpm_core::package::Package) -> Vec<u8> {
 
 impl Callbacks for Script {
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {
+		// what the C side drops too
+		let unported = level == LogLevel::Debug
+			&& UNPORTED_DEBUG.iter().any(|p| msg.starts_with(p));
+		if level == LogLevel::Function || unported {
+			return;
+		}
 		let mut s = self.0.borrow_mut();
 		s.calls.logs.push((level as c_int, msg.to_vec()));
 	}
@@ -202,6 +208,12 @@ fn errno(e: alpm_core::error::Errno) -> c_int {
 impl RustTx {
 	fn new(fx: &TempRoot, setup: &TpSetup) -> Self {
 		let mut h = rust_handle(fx, setup);
+		// the caches loaded before the callbacks, like the C side
+		let dbs = h.dbs_mut();
+		for db in dbs.local.into_iter().chain(dbs.sync.iter_mut()) {
+			let _ = db.pkgcache(dbs.dbext, &mut ());
+			let _ = db.groupcache(dbs.dbext, &mut ());
+		}
 		let rec = Rc::new(RefCell::new(Shared::default()));
 		h.set_callbacks(Box::new(Script(rec.clone())));
 		RustTx { h, rec }

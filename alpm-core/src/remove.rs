@@ -5,7 +5,6 @@
 // commit port). trans->remove holds dups of local packages; the C dups
 // force-load every section, trans.rs reloads them fully after prepare.
 
-use crate::be_local::INFRQ_ALL;
 use crate::callbacks::{Callbacks, Event, LogLevel};
 use crate::deps::{
 	DepMissing, checkdeps, dep_compute_string, find_satisfier, recursedeps,
@@ -45,7 +44,7 @@ pub fn remove_pkg(h: &mut Handle, pkg: &Package) -> Result<(), Errno> {
 	let full = dbs
 		.local
 		.and_then(|db| {
-			db.load_pkg(dbext, cb, pkg.name_bytes(), INFRQ_ALL).ok()
+			db.force_load_pkg(dbext, cb, pkg.name_bytes()).ok()
 		})
 		.map(Package::dup);
 	let copy = full.unwrap_or_else(|| pkg.dup());

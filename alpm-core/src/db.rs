@@ -16,7 +16,7 @@ use std::ffi::c_int;
 use std::ops::ControlFlow;
 
 use crate::be_local::{
-	DbError, INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET, LocalDb,
+	DbError, INFRQ_ALL, INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET, LocalDb,
 };
 use crate::be_sync;
 use crate::callbacks::{Callbacks, Event, LogLevel, logv};
@@ -573,6 +573,22 @@ impl Db {
 	) -> Result<&Package, Errno> {
 		let (backend, pkg) = self.find_pkg(dbext, cb, name)?;
 		lazy_load(backend, pkg, inforeq, cb);
+		Ok(pkg)
+	}
+
+	// _alpm_db_get_pkgfromcache, then the force_load of _alpm_pkg_dup:
+	// one local_db_read of INFRQ_ALL (logged each time, INFRQ_DSIZE is
+	// never set)
+	pub fn force_load_pkg(
+		&mut self,
+		dbext: &[u8],
+		cb: &mut dyn Callbacks,
+		name: &[u8],
+	) -> Result<&Package, Errno> {
+		let (backend, pkg) = self.find_pkg(dbext, cb, name)?;
+		if let Backend::Local(local) = backend {
+			let _ = local.read(pkg, INFRQ_ALL, cb);
+		}
 		Ok(pkg)
 	}
 
