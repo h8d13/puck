@@ -5,8 +5,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use alpm_core::handle::Handle;
-use pacman_cli::check::Output;
 use pacman_cli::deptest::pacman_deptest;
+use pacman_cli::util::Output;
 
 // <tmp>/pacman-cli-deptest-<pid>/ with root/ and db/, removed on drop
 struct Tmp(PathBuf);

@@ -11,6 +11,7 @@ use alpm_core::filelist::{File, FileList};
 use alpm_core::package::Package;
 use pacman_cli::check::*;
 use pacman_cli::conf::{ColStr, Config};
+use pacman_cli::util::Output;
 
 // <tmp>/pacman-cli-check-<pid>-<name>/ with root/, removed on drop
 struct Tmp(PathBuf);

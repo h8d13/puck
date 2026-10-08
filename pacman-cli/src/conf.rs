@@ -20,7 +20,7 @@ use std::io::{self, IsTerminal};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
-use alpm_core::util::fnmatch;
+use alpm_core::util::{fnmatch, strerror};
 use pacman_common::ini::{Ini, parse_ini};
 use pacman_common::util_common::wordsplit;
 
@@ -283,13 +283,6 @@ pub enum Msg {
 	Debug(Vec<u8>),
 }
 
-// strerror(err): std formats "<strerror_r text> (os error N)"
-pub(crate) fn strerror(err: i32) -> Vec<u8> {
-	let s = io::Error::from_raw_os_error(err).to_string();
-	let suffix = format!(" (os error {err})");
-	s.strip_suffix(&suffix).unwrap_or(&s).as_bytes().to_vec()
-}
-
 pub(crate) fn cat(parts: &[&[u8]]) -> Vec<u8> {
 	parts.concat()
 }
@@ -320,7 +313,7 @@ impl Msg {
 				b"config file ",
 				file,
 				b" could not be read: ",
-				&strerror(*err),
+				&strerror(&io::Error::from_raw_os_error(*err)),
 				b"\n",
 			]),
 			Msg::NoSection { file, line } => cat(&[
@@ -380,7 +373,7 @@ impl Msg {
 				b"' passed to '",
 				option.as_bytes(),
 				b"': ",
-				&strerror(*err),
+				&strerror(&io::Error::from_raw_os_error(*err)),
 				b"\n",
 			]),
 			Msg::MirrorNoArch { mirror } => cat(&[

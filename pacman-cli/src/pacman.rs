@@ -14,6 +14,7 @@ use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 use alpm_core::PACKAGE_VERSION;
+use alpm_core::util::strerror;
 use pacman_common::util_common::mbasename;
 
 use crate::conf::{
@@ -238,13 +239,6 @@ fn pm_error(config: &Config, io: &mut Io, parts: &[&[u8]]) {
 	for p in parts {
 		io.err.extend_from_slice(p);
 	}
-}
-
-// strerror(err): std formats "<strerror_r text> (os error N)"
-fn strerror(err: i32) -> Vec<u8> {
-	let s = io::Error::from_raw_os_error(err).to_string();
-	let suffix = format!(" (os error {err})");
-	s.strip_suffix(&suffix).unwrap_or(&s).as_bytes().to_vec()
 }
 
 fn is_space(c: u8) -> bool {
@@ -1364,7 +1358,7 @@ pub fn stdin_targets(
 			io,
 			&[
 				b"failed to reopen stdin for reading: (",
-				&strerror(e),
+				&strerror(&io::Error::from_raw_os_error(e)),
 				b")\n",
 			],
 		);

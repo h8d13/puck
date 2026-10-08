@@ -21,10 +21,9 @@ use alpm_core::handle::Handle;
 use alpm_core::package::{DbCaches, Package};
 use alpm_core::util::until_nul;
 
-use crate::check::{Output, pm_printf};
 use crate::conf::{Config, LOG_ERROR, cat};
 use crate::package::{FileProbe, PkgEnv, dump_pkg_full, print_installed};
-use crate::util::SigResult;
+use crate::util::{Output, SigResult, check_syncdbs, pm_printf};
 
 // a pacman_sync/pacman_files branch this port does not have yet
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,43 +39,7 @@ pub enum Unported {
 }
 
 pub(crate) fn error(out: &mut Output, config: &Config, msg: &[&[u8]]) {
-	pm_printf(out, config, LOG_ERROR, &cat(msg));
-}
-
-// check_syncdbs (util.c): 1 without sync dbs when need_repos, or when
-// check_valid finds an invalid db (each one reported)
-pub fn check_syncdbs(
-	config: &Config,
-	handle: &Handle,
-	need_repos: bool,
-	check_valid: bool,
-	out: &mut Output,
-) -> i32 {
-	let dbs = handle.syncdbs();
-	if need_repos && dbs.is_empty() {
-		let msg: &[u8] =
-			b"no usable package repositories configured.\n";
-		error(out, config, &[msg]);
-		return 1;
-	}
-	let mut ret = 0;
-	if check_valid {
-		for db in dbs {
-			if let Err(e) = db.valid() {
-				let e = e.strerror().as_bytes();
-				let msg: [&[u8]; 5] = [
-					b"database '",
-					db.name(),
-					b"' is not valid (",
-					e,
-					b")\n",
-				];
-				error(out, config, &msg);
-				ret = 1;
-			}
-		}
-	}
-	ret
+	pm_printf(&mut out.stderr, config, LOG_ERROR, &cat(msg));
 }
 
 // alpm_db_get_pkgcache as the C list: empty when the cache cannot load
@@ -148,9 +111,7 @@ impl PkgEnv for SyncEnv<'_> {
 	}
 
 	fn error(&mut self, msg: &[u8]) {
-		let mut o = Output::default();
-		pm_printf(&mut o, self.config, LOG_ERROR, msg);
-		self.stderr.extend(o.stderr);
+		pm_printf(&mut self.stderr, self.config, LOG_ERROR, msg);
 	}
 }
 
@@ -409,13 +370,13 @@ pub fn pacman_sync<S: AsRef<[u8]>>(
 	if config.op_s_clean != 0 {
 		return Err(Unported::Clean);
 	}
-	if check_syncdbs(config, handle, true, false, out) != 0 {
+	if check_syncdbs(&mut out.stderr, config, handle, true, false) != 0 {
 		return Ok(1);
 	}
 	if config.op_s_sync != 0 {
 		return Err(Unported::Refresh);
 	}
-	if check_syncdbs(config, handle, true, true, out) != 0 {
+	if check_syncdbs(&mut out.stderr, config, handle, true, true) != 0 {
 		return Ok(1);
 	}
 	if config.op_s_search != 0 {

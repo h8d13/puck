@@ -15,7 +15,6 @@
 // where the C checks those before the first bad one.
 
 use std::fs::{self, File, Metadata};
-use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -25,10 +24,11 @@ use alpm_core::be_local::{
 };
 use alpm_core::handle::Handle;
 use alpm_core::package::Package;
-use alpm_core::util::until_nul;
+use alpm_core::util::{strerror, until_nul};
 use pacman_common::util_common::llstat;
 
-use crate::conf::{self, Config, LOG_ERROR, LOG_WARNING, cat};
+use crate::conf::{Config, LOG_ERROR, LOG_WARNING, cat};
+use crate::util::{Output, pm_printf};
 
 // limits.h, the filepath buffers of check.c
 const PATH_MAX: usize = 4096;
@@ -70,38 +70,6 @@ impl CheckEnv for HandleEnv<'_> {
 	}
 }
 
-// what the C writes to stdout and stderr
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Output {
-	pub stdout: Vec<u8>,
-	pub stderr: Vec<u8>,
-}
-
-// pm_printf(level, ...) to stderr: logmask filter, then the prefix
-pub(crate) fn pm_printf(
-	o: &mut Output,
-	config: &Config,
-	level: u16,
-	msg: &[u8],
-) {
-	if config.logmask & level == 0 {
-		return;
-	}
-	let c = &config.colstr;
-	let prefix: &[&[u8]] = match level {
-		LOG_ERROR => &[c.err, b"error: ", c.nocolor],
-		_ => &[c.warn, b"warning: ", c.nocolor],
-	};
-	o.stderr.extend(prefix.concat());
-	o.stderr.extend_from_slice(msg);
-}
-
-// strerror(errno) of an io::Error, errors without errno as std prints them
-fn strerror(e: &io::Error) -> Vec<u8> {
-	e.raw_os_error()
-		.map_or_else(|| e.to_string().into_bytes(), conf::strerror)
-}
-
 // _n(singular, plural, n) without a catalog
 fn plural(n: usize, one: &str, many: &str) -> String {
 	if n == 1 { one } else { many }.to_string()
@@ -117,7 +85,7 @@ fn quiet_line(o: &mut Output, pkgname: &[u8], filepath: &[u8]) {
 
 fn warn(o: &mut Output, c: &Config, pkgname: &[u8], fp: &[u8], what: &[u8]) {
 	let msg = cat(&[pkgname, b": ", fp, b" (", what, b")\n"]);
-	pm_printf(o, c, LOG_WARNING, &msg);
+	pm_printf(&mut o.stderr, c, LOG_WARNING, &msg);
 }
 
 // the "backup file: " note check.c prints instead of a warning
@@ -182,7 +150,7 @@ pub fn check_pkg_fast(
 	let rootlen = root.len();
 	if rootlen + 1 > PATH_MAX {
 		let msg = cat(&[b"path too long: ", root, b"\n"]);
-		pm_printf(o, c, LOG_ERROR, &msg);
+		pm_printf(&mut o.stderr, c, LOG_ERROR, &msg);
 		return 1;
 	}
 	let pkgname = until_nul(pkg.name.as_deref().unwrap_or_default());
@@ -192,7 +160,7 @@ pub fn check_pkg_fast(
 		let path = until_nul(&file.name);
 		if rootlen + 1 + path.len() > PATH_MAX {
 			let msg = cat(&[b"path too long: ", root, path, b"\n"]);
-			pm_printf(o, c, LOG_WARNING, &msg);
+			pm_printf(&mut o.stderr, c, LOG_WARNING, &msg);
 			continue;
 		}
 		let filepath = cat(&[root, path]);
@@ -278,7 +246,7 @@ fn link(
 	let Some(target) = target else {
 		let msg =
 			cat(&[b"unable to read symlink contents: ", fp, b"\n"]);
-		pm_printf(o, c, LOG_ERROR, &msg);
+		pm_printf(&mut o.stderr, c, LOG_ERROR, &msg);
 		return 1;
 	};
 	let want = until_nul(e.link.as_deref().unwrap_or_default());
@@ -365,7 +333,7 @@ fn entry_filepath(
 		let fp = cat(&[root, path]);
 		if fp.len() >= PATH_MAX {
 			let msg = cat(&[b"path too long: ", root, path, b"\n"]);
-			pm_printf(o, c, LOG_WARNING, &msg);
+			pm_printf(&mut o.stderr, c, LOG_WARNING, &msg);
 			return None;
 		}
 		return Some(fp);
@@ -385,7 +353,7 @@ fn entry_filepath(
 	let fp = parts.concat();
 	if fp.len() >= PATH_MAX {
 		let msg = cat(&[b"path too long: ", &fp, b"\n"]);
-		pm_printf(o, c, LOG_WARNING, &msg);
+		pm_printf(&mut o.stderr, c, LOG_WARNING, &msg);
 		return None;
 	}
 	Some(fp)
@@ -434,7 +402,7 @@ pub fn check_pkg_full(
 	let rootlen = root.len();
 	if rootlen + 1 > PATH_MAX {
 		let msg = cat(&[b"path too long: ", root, b"\n"]);
-		pm_printf(o, c, LOG_ERROR, &msg);
+		pm_printf(&mut o.stderr, c, LOG_ERROR, &msg);
 		return 1;
 	}
 	let pkgname = until_nul(pkg.name.as_deref().unwrap_or_default());

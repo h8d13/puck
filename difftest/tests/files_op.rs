@@ -7,10 +7,10 @@ use alpm_core::handle::Handle;
 use difftest::{
 	BASENAMES, DIRS, NAMES, REPOS, Rng, SyncWorld, c_pacman_files, iters,
 };
-use pacman_cli::check::Output;
 use pacman_cli::conf::{ColStr, Config, LOG_ERROR, LOG_WARNING};
 use pacman_cli::files::pacman_files;
 use pacman_cli::sync::Unported;
+use pacman_cli::util::Output;
 
 // a fixture and four handles per case: far slower than string fuzz
 fn cases() -> usize {

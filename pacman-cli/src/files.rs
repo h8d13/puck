@@ -14,10 +14,10 @@ use alpm_core::package::Package;
 use alpm_core::regex::{Flags, Regex};
 use alpm_core::util::until_nul;
 
-use crate::check::Output;
 use crate::conf::{Config, cat};
 use crate::package::{print_groups, print_installed};
-use crate::sync::{Unported, cache_list, check_syncdbs, error};
+use crate::sync::{Unported, cache_list, error};
+use crate::util::{Output, check_syncdbs};
 
 // print_line_machinereadable: repo, name, version, file, nul separated
 fn machine_line(out: &mut Vec<u8>, repo: &[u8], pkg: &Package, file: &[u8]) {
@@ -308,7 +308,7 @@ pub fn pacman_files<S: AsRef<[u8]>>(
 	targets: &[S],
 	out: &mut Output,
 ) -> Result<i32, Unported> {
-	if check_syncdbs(config, handle, true, false, out) != 0 {
+	if check_syncdbs(&mut out.stderr, config, handle, true, false) != 0 {
 		return Ok(1);
 	}
 	if config.op_s_sync != 0 {
