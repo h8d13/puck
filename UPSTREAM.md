@@ -39,6 +39,8 @@ Every finding states who controls the input that triggers it:
 | `alpm_decode_signature` newline-only | api |
 | `_alpm_filelist_intersection` empty names | none |
 | `rawstr.c` no callers | none |
+| `alpm_db_update` fails with `ALPM_ERR_OK` | real |
+| stale `.sig` kept after a sync | real (rare) |
 | minor sections | per bullet |
 
 ## `_alpm_filelist_pathcmp` compares signed `char`
@@ -542,6 +544,48 @@ declarations. No existing MR found for it.
 - every helper failure, corrupt `.sig` included, reports PKG_INVALID_SIG
   (be_package.c:341). **real**, message only
 
+## `alpm_db_update` can fail with `ALPM_ERR_OK`
+
+Practice: **real**. Arch's default `SigLevel = Required DatabaseOptional`
+with the official dbs shipping no `.sig`: any custom repo listed before
+them that fails validation triggers it.
+
+In the validation loop (be_sync.c:255) a db failing with DB_INVALID_SIG
+sets pm_errno, then a later db with a missing optional signature goes
+through `_alpm_check_pgp_helper`, which sets `pm_errno = ALPM_ERR_OK`
+(signing.c:817). The update returns -1 and pacman prints "failed to
+synchronize all databases (unexpected error)".
+
+- port: keeps the last failure's errno
+- difftest: `errno_reset_pinned`
+
+## stale `.sig` kept after a sync
+
+Practice: **real (rare)**. Needs a repo with optional signatures that
+stops serving (or fails on) its `.sig`.
+
+be_sync.c:207-209 queues the signature with dload's optional flag: a 404
+or server error on the `.sig` leaves the previous sync's `<db>.sig` in
+place, the new db is checked against it and turns invalid.
+
+- port: same behaviour
+- difftest: `signatures` ("optional missing")
+
+## `be_sync.c` minor
+
+- the "removing invalid file" branch of `get_sync_dir` is dead: `stat`
+  on `sync/` with the trailing '/' fails ENOTDIR for a regular file, and
+  `_alpm_makepath` accepts EEXIST; the update fails later opening `.part`
+  files, with no warning (be_sync.c:53-66). **local**
+- `alpm_db_update` unlocks a lock the caller already holds:
+  `_alpm_handle_lock` returns 0 when locked (handle.c:124) and cleanup
+  always unlocks (be_sync.c:163, 271), removing a transaction's lock
+  file. **api**
+- `ASSERT(dbs != NULL)` runs before pm_errno is reset: an empty list
+  returns -1 with a stale errno (be_sync.c:149-150). **api**
+- "skip validation to preserve the download error" comment is stale, a
+  failed download already left at line 233 (be_sync.c:254). **none**
+
 ## `dload.c` minor
 
 - `ASSERT(chown(...), return)` returns when chown succeeds
@@ -556,8 +600,8 @@ declarations. No existing MR found for it.
   later download in the process fails. **real (rare)**
 - queueing a `.sig` runs `alpm_option_get_dbext`, whose CHECK_HANDLE
   resets pm_errno: with parallel downloads an earlier failure can end as
-  -1 with ALPM_ERR_OK, "unexpected error" (dload.c:620). **real**, not
-  verified end to end
+  -1 with ALPM_ERR_OK, "unexpected error" (dload.c:620). **real**, hit
+  once by the db_update fuzz (timing dependent)
 - a `.part` with `max_size == initial_size` is neither started nor
   renamed, stays `.part` forever (dload.c:785-789). **real (rare)**
 - with the sandbox, the mkdtemp'd `download-XXXXXX` dir is left behind on
