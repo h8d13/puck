@@ -574,6 +574,47 @@ declarations. No existing MR found for it.
   errors persist for the handle's lifetime (136-222) **api**; warning
   format puts "\n" before strerror (util.c:875) **none**
 
+## hooks, run_chroot, scriptlets
+
+- an unterminated last output line is delivered twice: the read at EOF
+  does not reset `*buf_size`, the leftover flush sends it again
+  (util.c:556-561, 760-764; read-error branch 566-569). Any scriptlet or
+  hook ending in `printf 'x'` duplicates its last line. **real**
+- the stdin feed races the child: a NeedsTargets hook exiting early logs
+  "unable to write to pipe (Broken pipe)" or not depending on timing
+  (util.c:490-518, 727-756). **real (rare)**
+- `Operation`/`Type`/`When` without `=` pass NULL to strcmp (hook.c:177,
+  190, 209); `Target` without `=` stores NULL that fnmatch dereferences
+  (hook.c:197-200, util.c:1537); empty `Exec =` passes validation and
+  execv(NULL) (hook.c:235, 521). **packager** (hooks ship in packages)
+- `AbortOnFail`/`NeedsTargets` values are ignored, `AbortOnFail = false`
+  enables it (hook.c:226-229). **packager / local**, cosmetic
+- a hook that fails to parse does not mask the same-named hook in a lower
+  priority dir: an admin override with a typo silently runs the packaged
+  hook (hook.c:605-611). **local**
+- `grep` loops on `!feof` and spins on a read error; a name split across
+  1023-byte chunks or after a `#` skips the scriptlet silently
+  (trans.c:316-325). **env / packager**
+- `chdir(root)` failure reports success without running (util.c:628-633)
+  **env**; the forked child calls non-async-signal-safe functions
+  (util.c:691-701) **api**
+
+## sandbox
+
+- `ret = errno` after `seccomp_load` fails: without errno set the download
+  runs unfiltered while logging "...: 0!" (sandbox_syscalls.c:156, 165).
+  **env**
+- a kernel without Landlock makes every sandboxed download fail unless
+  DisableSandboxFilesystem is set (sandbox_fs.c:111-115). **real** (by
+  design)
+- `alpm_sandbox_setup_child` fails its root and getpwnam checks silently
+  (sandbox.c:56-57); callback type read without EINTR retry (dload.c:1000).
+  **api**
+- SIGTERM sent after every normal EOF, unknown callback types skipped
+  (dload.c:1000-1022); 0-byte pipe writes refused (sandbox.c:84, 108);
+  chroot/pivot_root listed twice (sandbox_syscalls.c:43/95, 52/100);
+  `ruleset_fd` leaked on early returns (sandbox_fs.c:140, 157). **none**
+
 ## `src/pacman/conf.c` minor
 
 - CacheServer `file://` URLs do not get the sysroot, Server ones do

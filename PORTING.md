@@ -94,8 +94,10 @@ Gate: pactest sync/download tests against the Rust binary.
 |---|---|
 | package files (`be_package.c` via `alpm-compress`, `alpm-pkginfo`, `alpm-mtree`) | partial (no signatures) |
 | deps resolution (`deps.c` rest + `graph.c`), `conflict.c`, `diskspace.c` | done |
-| `trans.c`, `sync.c`, `add.c`, `remove.c`, `hook.c`, scriptlets (chroot) | todo |
-| sandbox (landlock/seccomp), local db writing | todo |
+| `hook.c`, scriptlets (`_alpm_runscriptlet`), `_alpm_run_chroot`, `_alpm_ldconfig` | done (callbacks integration in progress) |
+| `trans.c` rest, `sync.c`, `add.c`, `remove.c` | todo |
+| sandbox (landlock/seccomp, download helper) | done |
+| local db writing | in progress |
 
 Gate: the full pactest suite (`meson test` baseline 338 ok, 6 expected
 fail) run against the Rust binary.
@@ -209,12 +211,12 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `lib/libalpm/graph.c` | 38 | `alpm-core::graph` | via sortbydeps |
 | `lib/libalpm/conflict.c` | 686 | `alpm-core::conflict` | innerconflicts, outerconflicts, checkconflicts, db_find_fileconflicts (both checks, skip_remove, progress): difftest on fixture roots (files, dirs, symlinks) and local dbs, 2M fuzz |
 | `lib/libalpm/diskspace.c` | 514 | `alpm-core::diskspace` | check_diskspace, check_downloadspace (+ mount list, fsinfo, match, sizes, check_mountpoint): difftest on fixture roots and root "/" (every log/progress line, f_bavail pinned from the C trace); getmntent parser vs glibc |
-| `lib/libalpm/trans.c` | 452 | - | |
+| `lib/libalpm/trans.c` | 452 | `alpm-core::trans` (partial) | _alpm_runscriptlet + grep: difftest under fakechroot |
 | `lib/libalpm/sync.c` | 1360 | - | |
 | `lib/libalpm/add.c` | 718 | - | |
 | `lib/libalpm/remove.c` | 798 | - | |
-| `lib/libalpm/hook.c` | 679 | - | |
-| `lib/libalpm/sandbox*.c` | 608 | - | |
+| `lib/libalpm/hook.c` | 679 | `alpm-core::hook` | parse/validate, dir scan and masking, triggers, Depends, AbortOnFail, NeedsTargets, run: difftest fuzz on root "/" and runs under fakechroot |
+| `lib/libalpm/sandbox*.c` | 608 | `alpm-core::{sandbox,sandbox_fs,sandbox_syscalls}` | restrict_writes_to (8 variants incl. injected landlock failures), syscalls_filter (list parsed from the C, raw syscall probes): errno per probe in spawned children vs C; callback pipe writer + parent loop: byte-stream fuzz; helper download vs C _alpm_download; uid switch: unit tests (root) |
 | regcomp/regexec (glibc, used by db.c, remove.c, files.c) | - | `alpm-core::regex` | difftest fuzz vs glibc (C.UTF-8, 4 flag sets) on agreeing characters; classes/towupper via std, divergence per class counted |
 | `src/common/*.c` | 445 | `pacman-common::{util_common,ini}` | all of util-common.c and ini.c: difftest fuzz (safe_fgets on fmemopen + real file, llstat on /tmp tree, ini via recorded callback) |
 | `src/pacman/*.c` | 10124 | - | excl. symlinks into `src/common` |
@@ -394,6 +396,21 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
   HTTP/1.1, no ftp://, rustls with the platform verifier, reqwest's proxy
   env handling, reqwest's normalised URL after a redirect, Last-Modified
   in RFC 1123/850/asctime forms only.
+- `hook`/`run_chroot`: chroot(8) (`/usr/bin/chroot`) instead of the C
+  child's chroot()+exec, so argv[0] is cmd (`/sbin/ldconfig` for
+  ldconfig) and a slash-less cmd gets `./`; root "/" spawns directly;
+  chroot(8)'s own failure line is reworded to the C child's text (English
+  messages only). umask(0022) in the child is not set (no safe way in the
+  child); only SIGPIPE and the signal mask are reset. Output lines split
+  like the C (2046-byte cut, NUL cuts, unterminated last line delivered
+  twice as in the C).
+- `sandbox`: the download child is a re-exec of the binary
+  (`/proc/self/exe --alpm-sandbox-helper`) with `CommandExt::uid`/`gid`;
+  the pacman binary's `main` must start with
+  `if let Some(c) = alpm_core::sandbox::helper_entry() { exit(c) }`.
+  Request over stdin, callbacks over stdout in the C pipe format.
+  no_new_privs comes before landlock (needed unprivileged); getpwnam via
+  `getent passwd`; parent sends SIGKILL after the loop (C: SIGTERM).
 
 Follow-ups raised by port units:
 
@@ -417,7 +434,9 @@ Follow-ups raised by port units:
 | regex class/towupper tables -> std `char` methods, divergence counted like wcwidth | audit | done |
 | handle callbacks + log.c: one `Log`/`Events`/`Progress`/`Questions` set in alpm-core (today per unit in deps, conflict, diskspace), wired into `Handle` with logcb/eventcb/progresscb/questioncb, overwrite_files, assumeinstalled, trans flags | deps, conflict, diskspace | todo |
 | shared helpers into util: `llstat` (copies in conflict, diskspace), `strerror(io::Error)` (4 copies), frontend `pm_printf`/`Output`/`check_syncdbs` (check, query, sync), `getcols` | conflict, diskspace, query, sync | todo |
-| `Handle` split borrow of local + sync caches (resolver and displays clone caches today) | deps, sync | todo |
+| `Handle` split borrow of local + sync caches (resolver and displays clone caches today) | deps, sync | in progress (integration) |
+| XferCommand via a sandbox helper exec mode (`alpm_sandbox_setup_child` from conf.c) | sandbox | todo |
+| every difftest touching C frontend globals (`config`, stdout/stderr, locale) holds `FRONTEND` | conf race report | done for conf (`c_glob`) |
 | `alpm_extract_keyid` wired into -Sii/-Qii `sig_keys` | sync | todo (ported in signing) |
 | `Handle` owns `signing::Keyring` (gpgdir, known_keys) and implements `SigCallbacks`; `Db::register_sync` calls `be_sync::sync_db_validate` | signing | with the callbacks unit |
 | `alpm_sync_get_new_version` (lib sync.c) out of query.rs into alpm-core | query | with sync.c |
