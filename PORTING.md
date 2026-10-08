@@ -121,12 +121,13 @@ in the milestone 1 gate and equal.
 Gate: upstream's full meson suite against the Rust binaries,
 `scripts/upstream-suite.sh` (pactest's 341 tests, vercmptest and the two
 script tests): meson's 338 ok / 6 expected fail, reproduced by
-`pacman/build`. Rust with the owned readers (`.PKGINFO`, local and sync
-db): 336 ok / 6 xfail / 2 fail / 0 unexpected pass, vercmptest and the
-script tests included. Left: scriptlet-signal-handling (signals are not
+`pacman/build`. Progress: 135 ok (start of the owned readers) -> 203
+(`.PKGINFO` reader, `-Sc`) -> 336 ok / 6 xfail / 2 fail / 0 unexpected
+pass (local and sync db readers, dbreaders branch; master confirmation
+pending), vercmptest and the script tests included. Left: scriptlet-signal-handling (signals are not
 caught, SIGINT during a scriptlet ends pacman with 130) and
 upgrade-download-pkg-and-sig-with-filename (`-U` URL downloads through
-HTTP redirects: "Empty reply from server").
+HTTP redirects: "Empty reply from server"). Units: signals, redirect.
 
 ### 4. Drop-in
 
@@ -151,11 +152,32 @@ reader patches and crate dependencies go once nothing uses them.
 | sync db desc/files | be_sync.c `sync_db_read`, `_alpm_archive_fgets` | `alpm-core::be_sync` | 0301-0305, alpm-repo-db | done |
 | `.PKGINFO` | be_package.c `parse_descfile` | `alpm-core::be_package` | 0501-0506, alpm-pkginfo, alpm-package, alpm-buildinfo | done |
 | `.MTREE` / local mtree | libarchive mtree reader (as pacman uses it) | `alpm-core::mtree` | 0401-0411, alpm-mtree | todo |
-| alpm-types patches | whatever still uses ALPM types after the above | - | 01xx no longer used | todo (after the readers) |
+| alpm-types patches | port uses alpm-types only for `Checksum`/`digests::{Md5, Sha256}` (be_local, be_package, util); no patched type is used | - | 0101-0109; alpm-types itself if checksums go to md-5/sha2 directly | todo (after mtree) |
 
 Kept and to report upstream: 0551 (gzip members), 0552 (content
 sniffing), and any 01xx/04xx fix that is an ALPM bug on its own terms
 (0401 `PartialEq`, 0403 mtree gzip members, 0411 `Error::Parse` display).
+
+## Dependencies
+
+What the port links today and why. Changes land here with the unit that
+makes them; METHODOLOGY.md has the rules.
+
+| Crate | Used by | Why | Since |
+|---|---|---|---|
+| alpm-compress (vendored, 0551, 0552) | util `Filter`, be_sync, be_local, add | the decoders (gzip/bzip2/xz/zstd) under libarchive's block filter | start |
+| alpm-types (vendored, 0101-0109 unused) | be_local, be_package, util | `Checksum` md5/sha256 only | start; patches to drop |
+| alpm-mtree (vendored, 0401-0411) | be_package, be_local | mtree reader | start; mtree unit replaces it |
+| alpm-common, alpm-parsers (vendored) | none directly | dependencies of alpm-types/alpm-mtree | start |
+| tar 0.4 | util `Filter` + `tar::Archive` | tar headers (ALPM's own tar dependency) | compress unit |
+| reqwest 0.13 blocking, rustls | dload | HTTP downloads (ALPM dev-scripts precedent) | dload unit |
+| rustix 1.1 (`fs`) | util, diskspace, lock, sandbox | statvfs, access, umask; `process`/`termios` being added (process unit) | handle unit |
+| landlock 0.4, libseccomp 0.4 | sandbox | `alpm_sandbox_setup_child` | sandbox unit |
+| md-5, sha2, base64, time, unicode-width | through alpm-types / directly | precedent crates of ALPM | start |
+
+Removed, with their patches: alpm-db (0201-0207), alpm-repo-db
+(0301-0305), alpm-pkginfo (0501-0506), alpm-package, alpm-buildinfo.
+The vendored tree went from 10 crates / 40 patches to 5 / 22.
 
 ## ALPM patches for parity
 
