@@ -10,7 +10,10 @@
 
 set -u
 bindir=${1:-target/release}
-build=pacman/build
+# the C build lives in the main checkout only, worktrees share its git
+# common dir (like cargo-test.sh)
+common=$(git rev-parse --path-format=absolute --git-common-dir)
+build=${PACMAN_BUILD:-$(dirname "$common")/pacman/build}
 tests=pacman/test
 for b in pacman vercmp; do
 	if [ ! -x "$bindir/$b" ]; then
