@@ -42,7 +42,7 @@ use crate::callbacks::{Callbacks, DownloadEvent, Event, Fetch, LogLevel};
 use crate::error::Errno;
 use crate::util::{
 	PATH_MAX, filecache_exists, filecache_find, filecache_setup,
-	get_fullpath, strerror, until_nul,
+	get_fullpath, getuid, strerror, until_nul,
 };
 
 // ALPM_SIG_PACKAGE, ALPM_SIG_PACKAGE_OPTIONAL
@@ -1639,14 +1639,16 @@ pub fn download_internal(
 }
 
 // finalize_download_file: an empty file is removed (1), others go to
-// root:root (the sandbox only runs as root) with mode 0666 under the umask
+// root:root when running as root, with mode 0666 under the umask
 fn finalize_download_file(file: &[u8]) -> io::Result<c_int> {
 	let md = fs::metadata(path(file))?;
 	if md.len() == 0 {
 		let _ = fs::remove_file(path(file));
 		return Ok(1);
 	}
-	chown(path(file), Some(0), Some(0))?;
+	if getuid() == 0 {
+		chown(path(file), Some(0), Some(0))?;
+	}
 	let mode = !current_umask() & 0o666;
 	fs::set_permissions(path(file), fs::Permissions::from_mode(mode))?;
 	Ok(0)
@@ -1951,7 +1953,8 @@ impl Downloader<'_> {
 	// alpm_fetch_pkgurl: the local path of every url, cached files as they
 	// are (with their .sig when siglevel wants package signatures), the
 	// rest downloaded into the first usable cachedir. siglevel is the
-	// remote file siglevel
+	// remote file siglevel. a sandbox download dir nothing was downloaded
+	// through is removed (the C keeps it, UPSTREAM.md)
 	pub fn fetch_pkgurl<U: AsRef<[u8]>>(
 		&mut self,
 		cachedirs: &mut Vec<Vec<u8>>,
@@ -1960,6 +1963,22 @@ impl Downloader<'_> {
 	) -> Result<Vec<Vec<u8>>, Errno> {
 		let cachedir = filecache_setup(cachedirs, self.cb);
 		let tmp = self.download_dir_setup(&cachedir)?;
+		let r = self
+			.fetch_into(cachedirs, siglevel, urls, &cachedir, &tmp);
+		if tmp != until_nul(&cachedir) {
+			remove_temporary_download_dir(&tmp);
+		}
+		r
+	}
+
+	fn fetch_into<U: AsRef<[u8]>>(
+		&mut self,
+		cachedirs: &mut [Vec<u8>],
+		siglevel: c_int,
+		urls: &[U],
+		cachedir: &[u8],
+		tmp: &[u8],
+	) -> Result<Vec<Vec<u8>>, Errno> {
 		let mut fetched = Vec::new();
 		let mut payloads = Vec::new();
 		for url in urls {
@@ -1995,12 +2014,12 @@ impl Downloader<'_> {
 			if pkg && !p.remote_name.is_empty() {
 				// a usable package filename to download to
 				p.destfile_name = Some(get_fullpath(
-					&tmp,
+					tmp,
 					&p.remote_name,
 					b"",
 				));
 				p.tempfile_name = get_fullpath(
-					&tmp,
+					tmp,
 					&p.remote_name,
 					b".part",
 				);
@@ -2008,7 +2027,7 @@ impl Downloader<'_> {
 			} else {
 				// no filename: a temporary file, no resume
 				p.unlink_on_fail = true;
-				if !create_tempfile(&mut p, &tmp, self.cb) {
+				if !create_tempfile(&mut p, tmp, self.cb) {
 					// pm_errno as CHECK_HANDLE left it
 					return Err(Errno::Ok);
 				}
@@ -2023,7 +2042,7 @@ impl Downloader<'_> {
 		}
 		let (num, total_size) = (payloads.len(), 0);
 		self.cb.event(&Event::PkgRetrieveStart { num, total_size });
-		if self.download(&mut payloads, &cachedir, &tmp).is_err() {
+		if self.download(&mut payloads, cachedir, tmp).is_err() {
 			let m = b"failed to retrieve some files\n";
 			self.cb.log(LogLevel::Warning, m);
 			self.cb.event(&Event::PkgRetrieveFailed {

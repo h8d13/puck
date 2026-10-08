@@ -23,7 +23,7 @@
 // getpwnam are checked by the parent before spawning. SIGINT/SIGQUIT are
 // not ignored in the parent while the helper runs (no safe std API).
 use std::ffi::{OsStr, OsString, c_int};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
@@ -39,7 +39,7 @@ use crate::error::Errno;
 use crate::handle::Handle;
 use crate::sandbox_fs::restrict_writes_to;
 use crate::sandbox_syscalls::syscalls_filter;
-use crate::util::{PATH_MAX, until_nul};
+use crate::util::{PATH_MAX, getuid, until_nul};
 
 // argv[1] of the helper
 pub const HELPER_ARG: &str = "--alpm-sandbox-helper";
@@ -614,22 +614,12 @@ pub trait Host {
 }
 
 // the running system. getpwnam through getent(1), which asks NSS like
-// the C; getuid from /proc/self/status, kill through kill(1)
+// the C; kill through kill(1)
 pub struct System;
 
 impl Host for System {
 	fn uid(&self) -> u32 {
-		// "Uid:\t<real>\t<effective>\t<saved>\t<fs>"
-		let status = fs::read("/proc/self/status").unwrap_or_default();
-		status.split(|&c| c == b'\n')
-			.find_map(|l| l.strip_prefix(b"Uid:"))
-			.and_then(|l| {
-				let real = l
-					.split(|c| c.is_ascii_whitespace())
-					.find(|f| !f.is_empty())?;
-				std::str::from_utf8(real).ok()?.parse().ok()
-			})
-			.unwrap_or(u32::MAX)
+		getuid()
 	}
 
 	fn getpwnam(
@@ -680,6 +670,13 @@ impl Host for System {
 			.arg(std::process::id().to_string())
 			.status();
 	}
+}
+
+// the sandbox of a handle's downloads (its default SandboxFor): a
+// HelperSandbox where _alpm_use_sandbox holds for handle->user
+pub fn handle_sandbox(handle: &Handle) -> Option<Box<dyn Sandbox>> {
+	let sb = HelperSandbox::for_handle(handle, handle.user())?;
+	Some(Box::new(sb))
 }
 
 // the dload::Sandbox of a handle with a DownloadUser
