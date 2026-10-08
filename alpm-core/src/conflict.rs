@@ -409,7 +409,7 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 			None => {
 				p1.files.files
 					.iter()
-					.map(|f| until_nul(&f.name))
+					.map(|f| f.name())
 					.collect()
 			}
 		};

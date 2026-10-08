@@ -113,10 +113,7 @@ fn filelist(names: &[Vec<u8>]) -> FileList {
 	FileList {
 		files: names
 			.iter()
-			.map(|n| File {
-				name: n.clone(),
-				..File::default()
-			})
+			.map(|n| File::new(n.clone(), 0, 0))
 			.collect(),
 	}
 }
@@ -408,7 +405,7 @@ fn show(p: &[&Package]) -> Vec<(String, Vec<String>)> {
 			.files
 			.files
 			.iter()
-			.map(|f| String::from_utf8_lossy(&f.name).into())
+			.map(|f| String::from_utf8_lossy(f.name()).into())
 			.collect();
 		(name, files)
 	})

@@ -624,7 +624,7 @@ impl Db {
 		inforeq: c_int,
 	) -> Option<&Package> {
 		self.load_pkgcache(dbext, cb).ok()?;
-		let pkg = self.pkgcache.as_mut()?.iter_mut().nth(i)?;
+		let pkg = self.pkgcache.as_mut()?.at_mut(i)?;
 		lazy_load(&self.backend, pkg, inforeq, cb);
 		Some(pkg)
 	}

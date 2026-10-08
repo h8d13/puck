@@ -1446,6 +1446,9 @@ dependencies = [
 [[package]]
 name = "pacman-common"
 version = "0.1.0"
+dependencies = [
+ "rustix",
+]
 
 [[package]]
 name = "percent-encoding"

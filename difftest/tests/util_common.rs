@@ -7,8 +7,8 @@ use difftest::{
 	c_mbasename, c_mdirname, c_strtrim, c_strtrim_null, c_wordsplit, iters,
 };
 use pacman_common::util_common::{
-	hex_representation, llstat, mbasename, mdirname, safe_fgets, strtrim,
-	wordsplit,
+	hex_representation, llstat, llstat_buf, mbasename, mdirname,
+	safe_fgets, strtrim, wordsplit,
 };
 
 // C-locale space, bytes that are space elsewhere (\x85, \xa0), plus filler
@@ -175,6 +175,21 @@ fn rust_llstat(p: &[u8]) -> Result<CStat, i32> {
 		.map_err(|e| e.raw_os_error().unwrap())
 }
 
+// llstat_buf, which must leave its buffer as it was like the C
+fn rust_llstat_buf(p: &[u8]) -> Result<CStat, i32> {
+	let mut buf = p.to_vec();
+	let st = llstat_buf(&mut buf);
+	assert_eq!(buf, p, "llstat_buf did not restore its path");
+	st.map(|st| CStat {
+		dev: st.st_dev,
+		ino: st.st_ino,
+		mode: st.st_mode,
+		nlink: st.st_nlink,
+		size: st.st_size,
+	})
+	.map_err(|e| e.raw_os_error().unwrap())
+}
+
 #[test]
 fn llstat_temp_tree() {
 	// fuzz paths start 3 levels below base and use at most 3 components,
@@ -195,7 +210,9 @@ fn llstat_temp_tree() {
 	symlink("nope", format!("{root}/dang")).unwrap();
 
 	let check = |p: &[u8]| {
-		assert_eq!(c_llstat(p), rust_llstat(p), "{}", show(p));
+		let c = c_llstat(p);
+		assert_eq!(c, rust_llstat(p), "{}", show(p));
+		assert_eq!(c, rust_llstat_buf(p), "buf {}", show(p));
 	};
 	let base_slashes = format!("{base}//");
 	for p in [&b""[..], b"/", b"//", b"///", b".", b"./"] {

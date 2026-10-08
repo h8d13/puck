@@ -62,7 +62,7 @@ struct Owned {
 impl Owned {
 	fn new(fl: &FileList) -> Self {
 		let names: Vec<CString> =
-			fl.files.iter().map(|f| cstr(&f.name)).collect();
+			fl.files.iter().map(|f| cstr(f.name())).collect();
 		let files =
 			fl.files.iter()
 				.zip(&names)
@@ -100,17 +100,15 @@ pub fn c_filelist_sort(fl: &FileList) -> FileList {
 	let mut l = o.list();
 	// SAFETY: l describes o.files, the C permutes it in place
 	unsafe { _alpm_filelist_sort(&mut l) };
-	let files =
-		o.files.iter()
-			.map(|f| File {
-				// SAFETY: names still point into o._names
-				name: unsafe { CStr::from_ptr(f.name) }
-					.to_bytes()
-					.to_vec(),
-				size: f.size,
-				mode: f.mode,
-			})
-			.collect();
+	let files = o
+		.files
+		.iter()
+		.map(|f| {
+			// SAFETY: names still point into o._names
+			let name = unsafe { CStr::from_ptr(f.name) };
+			File::new(name.to_bytes().to_vec(), f.size, f.mode)
+		})
+		.collect();
 	FileList { files }
 }
 
@@ -156,7 +154,7 @@ pub fn c_filelist_difference(a: &FileList, b: &FileList) -> Vec<usize> {
 
 // C precondition: no empty names, see UPSTREAM.md
 pub fn c_filelist_intersection(a: &FileList, b: &FileList) -> Vec<usize> {
-	let empty = a.files.iter().chain(&b.files).any(|f| f.name.is_empty());
+	let empty = a.files.iter().chain(&b.files).any(|f| f.name().is_empty());
 	assert!(!empty, "empty name, C would read out of bounds");
 	merge(_alpm_filelist_intersection, a, b)
 }

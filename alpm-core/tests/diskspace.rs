@@ -338,11 +338,7 @@ impl Drop for Tmp {
 }
 
 fn file(name: &str, size: i64, mode: u32) -> File {
-	File {
-		name: name.into(),
-		size,
-		mode,
-	}
+	File::new(name.into(), size, mode)
 }
 
 fn files(list: &[File]) -> FileList {

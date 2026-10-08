@@ -5,19 +5,19 @@
 // what the C asks libalpm through config->handle (root, dbpath, NoExtract
 // matching, the package's mtree, files list and backup entries, which a
 // local package lazy-loads at the getter) goes through CheckEnv; files
-// are looked at with plain std calls on root + path, like the C. the C
-// prints to stdout and, through pm_printf, to stderr: both are appended
-// to an Output. messages are the untranslated msgids, _n() picks the
-// singular for 1 like ngettext without a catalog.
+// are looked at on root + path like the C: llstat_buf (fstatat on the
+// path buffer), std calls to read links and contents. the C prints to
+// stdout and, through pm_printf, to stderr: both are appended to an
+// Output. messages are the untranslated msgids, _n() picks the singular
+// for 1 like ngettext without a catalog.
 //
 // mtree entries come from libarchive's mtree reader (alpm_core::mtree
 // through be_local::read_mtree), in file order. an entry libarchive
 // warns about ends the C's walk silently (UPSTREAM.md), here it is
 // checked; data that cannot be parsed checks no entries in both.
 
-use std::fs::{self, File, Metadata};
+use std::fs::{self, File};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use alpm_core::backup::Backup;
@@ -28,7 +28,8 @@ use alpm_core::filelist;
 use alpm_core::handle::Handle;
 use alpm_core::package::Package;
 use alpm_core::util::{strerror, until_nul};
-use pacman_common::util_common::{PATH_MAX, llstat};
+use pacman_common::util_common::{PATH_MAX, llstat_buf};
+use rustix::fs::{FileType, Stat};
 
 use crate::conf::{Config, LOG_ERROR, LOG_WARNING, cat};
 use crate::util::{Output, pm_printf};
@@ -42,13 +43,12 @@ pub trait CheckEnv {
 	// alpm_option_match_noextract: None nothing matched (C -1),
 	// Some(false) a pattern matched (C 0), Some(true) a negated one
 	fn match_noextract(&self, path: &[u8]) -> Option<bool>;
-	// alpm_pkg_get_files. a local package lazy-loads them here, o holds
-	// what the check printed before
-	fn files(
-		&mut self,
-		o: &mut Output,
-		pkg: &Package,
-	) -> Vec<filelist::File>;
+	// alpm_pkg_get_files, split in two so the list is borrowed, not
+	// copied: a local package lazy-loads it here, o holds what the
+	// check printed before
+	fn load_files(&mut self, o: &mut Output, pkg: &Package);
+	// the list load_files loaded
+	fn files<'a>(&'a self, pkg: &'a Package) -> &'a [filelist::File];
 	// alpm_pkg_get_backup has an entry named path, loaded like files
 	fn is_backup(
 		&mut self,
@@ -82,12 +82,10 @@ impl CheckEnv for HandleEnv<'_> {
 		self.handle.match_noextract(path)
 	}
 
-	fn files(
-		&mut self,
-		_: &mut Output,
-		pkg: &Package,
-	) -> Vec<filelist::File> {
-		pkg.files.files.clone()
+	fn load_files(&mut self, _: &mut Output, _: &Package) {}
+
+	fn files<'a>(&'a self, pkg: &'a Package) -> &'a [filelist::File] {
+		&pkg.files.files
 	}
 
 	fn is_backup(
@@ -144,7 +142,7 @@ fn backup_note(
 }
 
 enum Exists {
-	Yes(Metadata),
+	Yes(Stat),
 	// matched by NoExtract, not counted
 	NoExtract,
 	Missing,
@@ -153,16 +151,17 @@ enum Exists {
 // check_file_exists: llstat, a missing file is reported unless its path
 // below the root matches NoExtract. the C matches filepath + rootlen,
 // for db files (.INSTALL) an offset into the dbpath string; past its
-// end the C reads stale buffer bytes, here nothing matches
+// end the C reads stale buffer bytes, here nothing matches. filepath
+// is llstat_buf's buffer, left as it was
 fn file_exists(
 	o: &mut Output,
 	c: &Config,
 	env: &impl CheckEnv,
 	pkgname: &[u8],
-	filepath: &[u8],
+	filepath: &mut Vec<u8>,
 	rootlen: usize,
 ) -> Exists {
-	match llstat(filepath) {
+	match llstat_buf(filepath) {
 		Ok(st) => Exists::Yes(st),
 		Err(e) => {
 			if let Some(rel) = filepath.get(rootlen..)
@@ -197,13 +196,15 @@ pub fn check_pkg_fast(
 		return 1;
 	}
 	let pkgname = until_nul(pkg.name.as_deref().unwrap_or_default());
-	let files = env.files(o, pkg);
+	env.load_files(o, pkg);
+	let env = &*env;
+	let files = env.files(pkg);
 	let mut errors = 0usize;
 	// one path buffer like the C's filepath[PATH_MAX]: root, then each
 	// file's name after it
 	let mut filepath = root.clone();
-	for file in &files {
-		let path = until_nul(&file.name);
+	for file in files {
+		let path = file.name();
 		if rootlen + 1 + path.len() > PATH_MAX {
 			let msg = cat(&[b"path too long: ", root, path, b"\n"]);
 			pm_printf(&mut o.stderr, c, LOG_WARNING, &msg);
@@ -211,15 +212,14 @@ pub fn check_pkg_fast(
 		}
 		filepath.truncate(rootlen);
 		filepath.extend_from_slice(path);
-		let filepath = &filepath[..];
-		match file_exists(o, c, env, pkgname, filepath, rootlen) {
+		match file_exists(o, c, env, pkgname, &mut filepath, rootlen) {
 			Exists::Yes(st) => {
 				// the C reads path[plen - 1], files lists never
 				// hold empty names
 				let expect_dir = path.last() == Some(&b'/');
-				if expect_dir != st.is_dir() {
+				if expect_dir != is_dir(&st) {
 					let what = b"File type mismatch";
-					warn(o, c, pkgname, filepath, what);
+					warn(o, c, pkgname, &filepath, what);
 					errors += 1;
 				}
 			}
@@ -238,13 +238,17 @@ pub fn check_pkg_fast(
 	i32::from(errors != 0)
 }
 
+fn is_dir(st: &Stat) -> bool {
+	FileType::from_raw_mode(st.st_mode) == FileType::Directory
+}
+
 // check_file_type: lstat type against the entry type
-fn type_matches(kind: MtreeType, st: &Metadata) -> bool {
-	let t = st.file_type();
+fn type_matches(kind: MtreeType, st: &Stat) -> bool {
+	let t = FileType::from_raw_mode(st.st_mode);
 	match kind {
-		MtreeType::File => t.is_file(),
-		MtreeType::Dir => t.is_dir(),
-		MtreeType::Link => t.is_symlink(),
+		MtreeType::File => t == FileType::RegularFile,
+		MtreeType::Dir => t == FileType::Directory,
+		MtreeType::Link => t == FileType::Symlink,
 		// not recognized, check_pkg_full skips them before
 		MtreeType::Block | MtreeType::Char | MtreeType::Fifo => false,
 	}
@@ -257,15 +261,15 @@ fn permissions(
 	c: &Config,
 	pkgname: &[u8],
 	fp: &[u8],
-	st: &Metadata,
+	st: &Stat,
 	e: &MtreeEntry,
 ) -> usize {
 	let q = c.quiet != 0;
 	let checks: [(bool, &[u8]); 3] = [
-		(i64::from(st.uid()) != e.uid, b"UID mismatch"),
-		(i64::from(st.gid()) != e.gid, b"GID mismatch"),
+		(i64::from(st.st_uid) != e.uid, b"UID mismatch"),
+		(i64::from(st.st_gid) != e.gid, b"GID mismatch"),
 		// S_ISUID | S_ISGID | S_ISVTX | S_IRWXU | S_IRWXG | S_IRWXO
-		(st.mode() & 0o7777 != e.mode, b"Permissions mismatch"),
+		(st.st_mode & 0o7777 != e.mode, b"Permissions mismatch"),
 	];
 	let mut errors = 0;
 	for (bad, what) in checks {
@@ -286,13 +290,13 @@ fn link(
 	c: &Config,
 	pkgname: &[u8],
 	fp: &[u8],
-	st: &Metadata,
+	st: &Stat,
 	e: &MtreeEntry,
 ) -> usize {
 	let target = fs::read_link(os(fp))
 		.map(|t| t.into_os_string().into_vec())
 		.ok()
-		.filter(|t| t.len() as u64 == st.size());
+		.filter(|t| t.len() as u64 == st.st_size as u64);
 	let Some(target) = target else {
 		let msg =
 			cat(&[b"unable to read symlink contents: ", fp, b"\n"]);
@@ -422,7 +426,7 @@ fn entry_errors(
 	env: &mut impl CheckEnv,
 	pkg: &Package,
 	fp: &[u8],
-	st: &Metadata,
+	st: &Stat,
 	e: &MtreeEntry,
 ) -> usize {
 	let pkgname = until_nul(pkg.name.as_deref().unwrap_or_default());
@@ -433,12 +437,12 @@ fn entry_errors(
 	// expected to fail when a backup file was modified. the first entry
 	// to get here loads the files in the C, after the warnings above
 	let backup = env.is_backup(o, pkg, entry_path(e));
-	if e.kind != MtreeType::Dir && st.mtime() != e.mtime {
+	if e.kind != MtreeType::Dir && st.st_mtime != e.mtime {
 		let what = b"Modification time mismatch";
 		errors += mismatch(o, c, pkgname, fp, backup, what);
 	}
 	if e.kind == MtreeType::File {
-		if st.size() != e.size {
+		if st.st_size as u64 != e.size {
 			let what = b"Size mismatch";
 			errors += mismatch(o, c, pkgname, fp, backup, what);
 		}
@@ -480,11 +484,12 @@ pub fn check_pkg_full(
 	let (mut errors, mut file_count) = (0usize, 0usize);
 	for e in &entries {
 		let path = entry_path(e);
-		let Some(fp) = entry_filepath(o, c, env, pkg, path) else {
+		let Some(mut fp) = entry_filepath(o, c, env, pkg, path) else {
 			continue;
 		};
 		file_count += 1;
-		let st = match file_exists(o, c, env, pkgname, &fp, rootlen) {
+		let st = match file_exists(o, c, env, pkgname, &mut fp, rootlen)
+		{
 			Exists::Yes(st) => st,
 			Exists::Missing => {
 				errors += 1;

@@ -110,7 +110,7 @@ fn fields() {
 	assert_eq!(&*foo.depends[0].name, b"bar");
 	assert_eq!(&*foo.depends[1].name, b"libx.so");
 	let files: Vec<&[u8]> =
-		foo.files.files.iter().map(|f| &f.name[..]).collect();
+		foo.files.files.iter().map(|f| f.name()).collect();
 	assert_eq!(files, [&b"usr/"[..], b"usr/a", b"usr/b"]);
 	// version comes from the entry name, not %VERSION%
 	assert_eq!(pkgs[1].version.as_deref(), Some(&b"2-1"[..]));

@@ -67,8 +67,10 @@ impl CheckEnv for Env {
 		(path == b"skipped").then_some(false)
 	}
 
-	fn files(&mut self, _: &mut Output, pkg: &Package) -> Vec<File> {
-		pkg.files.files.clone()
+	fn load_files(&mut self, _: &mut Output, _: &Package) {}
+
+	fn files<'a>(&'a self, pkg: &'a Package) -> &'a [File] {
+		&pkg.files.files
 	}
 
 	fn is_backup(
@@ -95,10 +97,7 @@ fn pkg(files: &[&str], backup: &[&str]) -> Package {
 		files: FileList {
 			files: files
 				.iter()
-				.map(|f| File {
-					name: f.as_bytes().to_vec(),
-					..File::default()
-				})
+				.map(|f| File::new(f.as_bytes().to_vec(), 0, 0))
 				.collect(),
 		},
 		backup: backup

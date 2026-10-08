@@ -211,7 +211,7 @@ fn fields(p: &Package) -> Vec<(&'static str, String)> {
 				p.files.files
 					.iter()
 					.map(|f| (
-						lossy(&f.name),
+						lossy(f.name()),
 						f.size,
 						format!("{:o}", f.mode)
 					))

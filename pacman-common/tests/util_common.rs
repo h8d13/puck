@@ -62,3 +62,15 @@ fn llstat_strips_trailing_slash() {
 	assert!(m.is_dir());
 	assert_eq!(llstat(b"").unwrap_err().raw_os_error(), Some(2));
 }
+
+#[test]
+fn llstat_buf_restores_path() {
+	let mut tmp = std::env::temp_dir().into_os_string().into_vec();
+	tmp.extend_from_slice(b"///");
+	let before = tmp.clone();
+	let st = llstat_buf(&mut tmp).unwrap();
+	assert_eq!(st.st_mode & 0o170000, 0o040000);
+	assert_eq!(tmp, before);
+	let err = llstat_buf(&mut Vec::new()).unwrap_err();
+	assert_eq!(err.raw_os_error(), Some(2));
+}

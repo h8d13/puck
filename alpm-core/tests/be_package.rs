@@ -72,7 +72,7 @@ fn ustar(entries: &[(&[u8], u8, &[u8])]) -> Vec<u8> {
 }
 
 fn names(p: &Package) -> Vec<&[u8]> {
-	p.files.files.iter().map(|f| &f.name[..]).collect()
+	p.files.files.iter().map(|f| f.name()).collect()
 }
 
 #[test]

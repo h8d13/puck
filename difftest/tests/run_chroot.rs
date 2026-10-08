@@ -683,11 +683,13 @@ fn fc_hooks() {
 				..Package::default()
 			};
 			for f in paths.iter().filter(|_| rng.below(2) == 0) {
-				p.files.files.push(alpm_core::filelist::File {
-					name: f.as_bytes().to_vec(),
-					size: 0,
-					mode: 0o100644,
-				});
+				p.files.files.push(
+					alpm_core::filelist::File::new(
+						f.as_bytes().to_vec(),
+						0,
+						0o100644,
+					),
+				);
 			}
 			p
 		};

@@ -236,7 +236,7 @@ fn c_files(fl: &FileList) -> CFileList {
 		// SAFETY: i < the count allocated
 		unsafe {
 			files.add(i).write(CFile {
-				name: dup_str(Some(&f.name)),
+				name: dup_str(Some(f.name())),
 				size: f.size,
 				mode: f.mode,
 			})
@@ -438,11 +438,7 @@ pub(crate) fn read_files(fl: *const CFileList) -> FileList {
 	let read = |i: usize| {
 		// SAFETY: i < count entries behind files
 		let f = unsafe { &*fl.files.add(i) };
-		File {
-			name: field(f.name).unwrap(),
-			size: f.size,
-			mode: f.mode,
-		}
+		File::new(field(f.name).unwrap(), f.size, f.mode)
 	};
 	FileList {
 		files: (0..fl.count).map(read).collect(),

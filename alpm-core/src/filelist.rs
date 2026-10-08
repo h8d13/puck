@@ -1,7 +1,8 @@
 // port of lib/libalpm/filelist.c
 //
-// names are read as C strings, cut at the first nul. sort, contains and
-// difference order like strcmp (unsigned bytes), intersection goes through
+// a name never holds a nul: File::new cuts it at the first one, as the
+// C's strdup'd names end there. sort, contains and difference order like
+// strcmp (unsigned bytes), intersection goes through
 // _alpm_filelist_pathcmp, which orders differently, see pathcmp.
 
 use std::cmp::Ordering;
@@ -10,22 +11,31 @@ use std::ffi::c_char;
 use crate::util::until_nul;
 
 // alpm_file_t. size is off_t, 64 bit as meson sets _FILE_OFFSET_BITS=64,
-// mode is mode_t, u32 on linux
+// mode is mode_t, u32 on linux. name is private so every File goes
+// through new: readers of a name never scan it for a nul again
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct File {
-	pub name: Vec<u8>,
+	name: Vec<u8>,
 	pub size: i64,
 	pub mode: u32,
+}
+
+impl File {
+	// the name as the C string it is in the C, up to its first nul
+	pub fn new(mut name: Vec<u8>, size: i64, mode: u32) -> Self {
+		name.truncate(until_nul(&name).len());
+		File { name, size, mode }
+	}
+
+	pub fn name(&self) -> &[u8] {
+		&self.name
+	}
 }
 
 // alpm_filelist_t, count is files.len()
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileList {
 	pub files: Vec<File>,
-}
-
-fn name(f: &File) -> &[u8] {
-	until_nul(&f.name)
 }
 
 // _alpm_filelist_pathcmp: strcmp where one side ending right where the
@@ -57,10 +67,10 @@ impl FileList {
 	pub fn sort(&mut self) {
 		// the C's pre-sorted check: written lists are sorted, one pass
 		// and no scratch allocation
-		if self.files.windows(2).all(|w| name(&w[0]) <= name(&w[1])) {
+		if self.files.windows(2).all(|w| w[0].name() <= w[1].name()) {
 			return;
 		}
-		self.files.sort_by(|a, b| name(a).cmp(name(b)));
+		self.files.sort_by(|a, b| a.name().cmp(b.name()));
 	}
 
 	// alpm_filelist_contains: binary search, files must be sorted.
@@ -69,7 +79,7 @@ impl FileList {
 		let path = until_nul(path);
 		let i = self
 			.files
-			.binary_search_by(|f| name(f).cmp(path))
+			.binary_search_by(|f| f.name().cmp(path))
 			.ok()?;
 		Some(&self.files[i])
 	}
@@ -82,9 +92,9 @@ impl FileList {
 		let (mut i, mut j) = (0, 0);
 		let mut out = Vec::new();
 		while i < a.len() && j < b.len() {
-			match name(&a[i]).cmp(name(&b[j])) {
+			match a[i].name().cmp(b[j].name()) {
 				Ordering::Less => {
-					out.push(name(&a[i]));
+					out.push(a[i].name());
 					i += 1;
 				}
 				Ordering::Greater => j += 1,
@@ -94,7 +104,7 @@ impl FileList {
 				}
 			}
 		}
-		out.extend(a[i..].iter().map(name));
+		out.extend(a[i..].iter().map(File::name));
 		out
 	}
 
@@ -106,7 +116,7 @@ impl FileList {
 		let (mut i, mut j) = (0, 0);
 		let mut out = Vec::new();
 		while i < a.len() && j < b.len() {
-			let (x, y) = (name(&a[i]), name(&b[j]));
+			let (x, y) = (a[i].name(), b[j].name());
 			match pathcmp(x, y) {
 				Ordering::Less => i += 1,
 				Ordering::Greater => j += 1,

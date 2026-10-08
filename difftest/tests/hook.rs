@@ -398,11 +398,7 @@ fn files(rng: &mut Rng) -> FileList {
 	FileList {
 		files: names
 			.iter()
-			.map(|n| File {
-				name: n.as_bytes().to_vec(),
-				size: 0,
-				mode: 0o100644,
-			})
+			.map(|n| File::new(n.as_bytes().to_vec(), 0, 0o100644))
 			.collect(),
 	}
 }
@@ -528,7 +524,7 @@ fn desc(p: &Package) -> String {
 	let names: Vec<String> =
 		p.files.files
 			.iter()
-			.map(|f| String::from_utf8_lossy(&f.name).into_owned())
+			.map(|f| String::from_utf8_lossy(f.name()).into_owned())
 			.collect();
 	format!("{} {names:?}", String::from_utf8_lossy(p.name_bytes()))
 }

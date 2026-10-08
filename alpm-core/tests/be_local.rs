@@ -181,7 +181,7 @@ fn read_sections() {
 	db.read(&mut p, INFRQ_FILES | INFRQ_SCRIPTLET, &mut ())
 		.unwrap();
 	let files: Vec<&[u8]> =
-		p.files.files.iter().map(|f| &f.name[..]).collect();
+		p.files.files.iter().map(|f| f.name()).collect();
 	// strcmp order: '-' sorts before '/'
 	let want: [&[u8]; 4] =
 		[b"usr/", b"usr/lib-x", b"usr/lib/", b"usr/lib/a"];

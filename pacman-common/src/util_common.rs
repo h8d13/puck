@@ -5,10 +5,13 @@
 // >= 0x80 are never space. wordsplit_free is not ported (Vec drop), the
 // strnlen/strndup fallbacks are not built (HAVE_STRNLEN, HAVE_STRNDUP).
 
-use std::ffi::OsStr;
+use std::ffi::{CStr, OsStr};
 use std::fs::{self, Metadata};
 use std::io::{self, BufRead, Read};
+use std::mem;
 use std::os::unix::ffi::OsStrExt;
+
+use rustix::fs::{AtFlags, CWD, Stat, statat};
 
 // limits.h on linux, the buffer size of paths and lines in the C
 pub const PATH_MAX: usize = 4096;
@@ -63,13 +66,33 @@ pub fn mdirname(path: &[u8]) -> Vec<u8> {
 	}
 }
 
+// the length llstat stats: trailing '/' stripped, but not a lone "/"
+fn llstat_len(path: &[u8]) -> usize {
+	let slashes = path.iter().rev().take_while(|&&c| c == b'/').count();
+	(path.len() - slashes).max(1).min(path.len())
+}
+
 // llstat: lstat with trailing '/' stripped (but not a lone "/"), so
 // "dirsymlink/" describes the link instead of its target
 pub fn llstat(path: &[u8]) -> io::Result<Metadata> {
 	let path = until_nul(path);
-	let slashes = path.iter().rev().take_while(|&&c| c == b'/').count();
-	let len = (path.len() - slashes).max(1).min(path.len());
-	fs::symlink_metadata(OsStr::from_bytes(&path[..len]))
+	fs::symlink_metadata(OsStr::from_bytes(&path[..llstat_len(path)]))
+}
+
+// llstat on a path buffer, like the C's on its char array: a nul is
+// written where the '/' strip ends and taken back after, the path is
+// left as it was. std copies a Path into a C string and scans it again;
+// here the one scan is the CStr's, and the stat is the C's fstatat. a
+// nul inside the path ends it, as in the C
+pub fn llstat_buf(path: &mut Vec<u8>) -> io::Result<Stat> {
+	let len = llstat_len(path);
+	path.push(0);
+	let cut = mem::replace(&mut path[len], 0);
+	let p = CStr::from_bytes_until_nul(path).expect("nul written above");
+	let st = statat(CWD, p, AtFlags::SYMLINK_NOFOLLOW);
+	path[len] = cut;
+	path.pop();
+	st.map_err(io::Error::from)
 }
 
 // safe_fgets: one fgets(3) call of a buffer of `size` bytes. returns at most

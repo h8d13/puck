@@ -120,4 +120,9 @@ fn mutable_access() {
 	h.remove(&named(b"b")).unwrap();
 	let order: Vec<i64> = h.iter_mut().map(|p| p.isize).collect();
 	assert_eq!(order, [9, 1, 2]);
+	// at and at_mut index the list order, past the slab hole remove left
+	assert_eq!(h.at(1).unwrap().isize, 1);
+	h.at_mut(2).unwrap().size = 5;
+	assert_eq!(h.iter().map(|p| p.size).collect::<Vec<_>>(), [0, 0, 5]);
+	assert!(h.at(3).is_none() && h.at_mut(3).is_none());
 }

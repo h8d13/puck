@@ -536,7 +536,7 @@ pub fn dump_pkg_files(
 			out.push(b' ');
 		}
 		out.extend_from_slice(root);
-		out.extend_from_slice(until_nul(&f.name));
+		out.extend_from_slice(f.name());
 		out.push(b'\n');
 	}
 }

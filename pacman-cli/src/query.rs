@@ -239,29 +239,29 @@ impl CheckEnv for Checks<'_> {
 		self.handle.match_noextract(path)
 	}
 
-	fn files(
-		&mut self,
-		o: &mut Output,
-		pkg: &Package,
-	) -> Vec<filelist::File> {
-		// only the list is copied out: local_at would copy the whole
-		// package (every field) per -Qk entry
+	// the entry is loaded in place, not copied out like local_at
+	// would (every field, every name) per -Qk entry
+	fn load_files(&mut self, o: &mut Output, _: &Package) {
 		if let Some(i) = self.pos {
 			o.flush();
 			let dbs = self.handle.dbs_mut();
-			let entry = dbs.local.and_then(|db| {
+			if let Some(db) = dbs.local {
 				db.load_pkg_at(
 					dbs.dbext,
 					dbs.cb,
 					i,
 					INFRQ_FILES,
-				)
-			});
-			if let Some(p) = entry {
-				return p.files.files.clone();
+				);
 			}
 		}
-		pkg.files.files.clone()
+	}
+
+	// the cache entry load_files loaded, pkg if there is none
+	fn files<'a>(&'a self, pkg: &'a Package) -> &'a [filelist::File] {
+		let entry = self.pos.and_then(|i| {
+			self.handle.localdb()?.loaded_pkgcache()?.at(i)
+		});
+		&entry.unwrap_or(pkg).files.files
 	}
 
 	fn is_backup(

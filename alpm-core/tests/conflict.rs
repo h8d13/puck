@@ -13,12 +13,9 @@ use alpm_core::util::hash_sdbm;
 fn pkg(name: &str, conflicts: &[&str], files: &[&str]) -> Package {
 	let mut files: Vec<File> = files
 		.iter()
-		.map(|f| File {
-			name: f.as_bytes().to_vec(),
-			..File::default()
-		})
+		.map(|f| File::new(f.as_bytes().to_vec(), 0, 0))
 		.collect();
-	files.sort_by(|a, b| a.name.cmp(&b.name));
+	files.sort_by(|a, b| a.name().cmp(b.name()));
 	Package {
 		name_hash: hash_sdbm(name.as_bytes()),
 		name: Some(name.as_bytes().into()),

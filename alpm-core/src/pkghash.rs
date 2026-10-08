@@ -127,6 +127,17 @@ impl<P: Borrow<Package>> PkgHash<P> {
 		})
 	}
 
+	// the entry at list position i, without walking the list
+	pub fn at(&self, i: usize) -> Option<&P> {
+		Some(self.entry(*self.list.get(i)?))
+	}
+
+	// at for loading in place, same rules as iter_mut
+	pub fn at_mut(&mut self, i: usize) -> Option<&mut P> {
+		let slot = &mut self.slab[*self.list.get(i)?];
+		Some(slot.as_mut().expect("slab index points at a hole"))
+	}
+
 	fn entry(&self, i: usize) -> &P {
 		self.slab[i].as_ref().expect("slab index points at a hole")
 	}
