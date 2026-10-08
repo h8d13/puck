@@ -204,6 +204,15 @@ the java keystore and ldconfig's aux-cache not compared (dates, inode
 numbers); `download-XXXXXX` names canonicalised. Runtime ~2-3 min warm
 (network bound), ~620 MiB per root.
 
+### Rename to puck
+
+METHODOLOGY.md "Naming". One unit after output and filters merge: crate
+dirs and names, `use` paths, binaries (`puck`, `puck-conf`), scripts
+(pactest/upstream-suite/twin-root put a `pacman` symlink to `puck` in a
+temp bin dir), docs, `unit-worktree.sh`'s dir. The GitHub repo rename
+(`h8d13/ratman` -> `puck`) is the owner's; the local remote URL follows.
+State: todo.
+
 ### Later (low priority)
 
 Not needed for an English-locale replacement; noted so it is not lost.
