@@ -20,6 +20,7 @@ use crate::error::Errno;
 use crate::graph::{Graph, State};
 use crate::package::{Package, PkgReason, has_name, pkg_cmp, pkg_find};
 use crate::pkghash::PkgHash;
+use crate::trans::opt_str;
 use crate::util::fnmatch;
 use crate::util::{hash_sdbm, until_nul};
 use crate::version::vercmp;
@@ -38,9 +39,9 @@ pub enum DepMod {
 // alpm_depend_t. NULL strings are None, name is never NULL once parsed
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Depend {
-	pub name: Vec<u8>,
-	pub version: Option<Vec<u8>>,
-	pub desc: Option<Vec<u8>>,
+	pub name: Box<[u8]>,
+	pub version: Option<Box<[u8]>>,
+	pub desc: Option<Box<[u8]>>,
 	pub name_hash: c_ulong,
 	pub depmod: DepMod,
 }
@@ -152,7 +153,7 @@ where
 pub fn dep_from_string(s: &[u8]) -> Depend {
 	let s = until_nul(s);
 	let (head, desc) = match s.windows(2).position(|w| w == b": ") {
-		Some(i) => (&s[..i], Some(s[i + 2..].to_vec())),
+		Some(i) => (&s[..i], Some(s[i + 2..].into())),
 		None => (s, None),
 	};
 
@@ -175,12 +176,12 @@ pub fn dep_from_string(s: &[u8]) -> Depend {
 
 	let (name, version, depmod) = match found {
 		Some((i, start, m)) => {
-			(&head[..i], Some(head[start..].to_vec()), m)
+			(&head[..i], Some(head[start..].into()), m)
 		}
 		None => (head, None, DepMod::Any),
 	};
 	Depend {
-		name: name.to_vec(),
+		name: name.into(),
 		version,
 		desc,
 		name_hash: hash_sdbm(name),
@@ -259,11 +260,6 @@ pub struct DepsEnv<'a> {
 	pub local: DbPkgs<'a>,
 	// handle->dbs_sync, registration order
 	pub sync: &'a [DbPkgs<'a>],
-}
-
-// a string field through printf %s: glibc prints NULL as "(null)"
-fn opt_str(s: &Option<Vec<u8>>) -> &[u8] {
-	s.as_deref().map_or(b"(null)", until_nul)
 }
 
 fn name_of(pkg: &Package) -> &[u8] {

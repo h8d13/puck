@@ -14,9 +14,9 @@ fn backup_dup_fuzz() {
 	let mut rng = Rng::new(0xd0b);
 	for _ in 0..iters() / 10 {
 		let b = Backup {
-			name: rng.bytes(ALPHABET, 8),
+			name: rng.bytes(ALPHABET, 8).into(),
 			hash: (rng.below(2) == 0)
-				.then(|| rng.bytes(ALPHABET, 8)),
+				.then(|| rng.bytes(ALPHABET, 8).into()),
 		};
 		assert_eq!(c_backup_dup(&b), b);
 	}
@@ -32,13 +32,13 @@ fn needbackup_fuzz() {
 	for _ in 0..n {
 		let backup: Vec<Backup> = (0..rng.below(6))
 			.map(|_| Backup {
-				name: rng.bytes(b"ab/", 3),
+				name: rng.bytes(b"ab/", 3).into(),
 				hash: (rng.below(2) == 0)
-					.then(|| rng.bytes(b"ab", 3)),
+					.then(|| rng.bytes(b"ab", 3).into()),
 			})
 			.collect();
 		let pkg = Package {
-			backup,
+			backup: backup.into(),
 			..Package::default()
 		};
 		let file = rng.bytes(b"ab/", 3);
@@ -52,7 +52,7 @@ fn needbackup_fuzz() {
 		let c = c_needbackup(&file, &pkg);
 		assert_eq!(c, r, "{:?} in {:?}", show(&file), pkg.backup);
 		found += usize::from(c.is_some());
-		let same = |b: &&Backup| b.name == file;
+		let same = |b: &&Backup| *b.name == file[..];
 		dup += usize::from(pkg.backup.iter().filter(same).count() > 1);
 	}
 	assert!(found >= n / 10 && dup >= n / 50, "{found} {dup}/{n}");

@@ -337,13 +337,13 @@ fn local_db_pkgpath() {
 	let dbpath = [t.0.as_os_str().as_bytes(), b"/"].concat();
 	let db = LocalDb::register(&dbpath).unwrap();
 	let pkg = Package {
-		name: Some(b"foo".to_vec()),
-		version: Some(b"1-1".to_vec()),
+		name: Some(b"foo"[..].into()),
+		version: Some(b"1-1"[..].into()),
 		..Package::default()
 	};
 	assert_eq!(db.mtree(&pkg, &mut ()).unwrap().len(), 3);
 	let other = Package {
-		version: Some(b"2-1".to_vec()),
+		version: Some(b"2-1"[..].into()),
 		..pkg
 	};
 	assert!(matches!(

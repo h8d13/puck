@@ -351,8 +351,8 @@ fn add_pkg(rng: &mut Rng, pool: &[String], free: u64) -> Package {
 		.collect();
 	Package {
 		name_hash: hash_sdbm(name.as_bytes()),
-		name: Some(name.into()),
-		version: Some(b"2.0-1".to_vec()),
+		name: Some(name.as_bytes().into()),
+		version: Some(b"2.0-1"[..].into()),
 		files: FileList { files },
 		..Default::default()
 	}

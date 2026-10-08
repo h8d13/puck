@@ -44,6 +44,19 @@ pub fn get_fullpath(path: &[u8], filename: &[u8], suffix: &[u8]) -> Vec<u8> {
 	[until_nul(path), until_nul(filename), until_nul(suffix)].concat()
 }
 
+// a boxed list grown as a Vec and boxed back at its length: readers
+// append section by section, and no slack stays for the cache's life,
+// like the C's lists
+pub(crate) fn with_vec<T, R>(
+	b: &mut Box<[T]>,
+	f: impl FnOnce(&mut Vec<T>) -> R,
+) -> R {
+	let mut v = std::mem::take(b).into_vec();
+	let r = f(&mut v);
+	*b = v.into_boxed_slice();
+	r
+}
+
 // _alpm_hash_sdbm. C feeds plain char into the sum, signed on x86_64 and
 // unsigned on aarch64, c_char keeps the same hash per platform
 pub fn hash_sdbm(s: &[u8]) -> c_ulong {

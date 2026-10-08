@@ -10,9 +10,9 @@ fn dep(
 	desc: Option<&[u8]>,
 ) -> Depend {
 	Depend {
-		name: name.to_vec(),
-		version: version.map(<[u8]>::to_vec),
-		desc: desc.map(<[u8]>::to_vec),
+		name: name.into(),
+		version: version.map(Box::from),
+		desc: desc.map(Box::from),
 		name_hash: hash_sdbm(name),
 		depmod,
 	}
@@ -94,8 +94,8 @@ fn pkg(
 ) -> alpm_core::package::Package {
 	alpm_core::package::Package {
 		name_hash: hash_sdbm(name),
-		name: Some(name.to_vec()),
-		version: Some(version.to_vec()),
+		name: Some(name.into()),
+		version: Some(version.into()),
 		provides: provides.iter().map(|p| dep_from_string(p)).collect(),
 		..Default::default()
 	}
@@ -173,8 +173,8 @@ mod resolve {
 		};
 		Package {
 			name_hash: hash_sdbm(name.as_bytes()),
-			name: Some(name.as_bytes().to_vec()),
-			version: Some(b"1.0-1".to_vec()),
+			name: Some(name.as_bytes().into()),
+			version: Some(b"1.0-1"[..].into()),
 			depends: deps(depends),
 			provides: deps(provides),
 			reason: PkgReason::Depend,

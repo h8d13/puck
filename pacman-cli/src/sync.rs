@@ -907,7 +907,7 @@ pub(crate) fn warning(out: &mut Output, config: &Config, msg: &[&[u8]]) {
 	pm_printf(&mut out.stderr, config, LOG_WARNING, &cat(msg));
 }
 
-fn opt(s: &Option<Vec<u8>>) -> &[u8] {
+fn opt(s: &Option<Box<[u8]>>) -> &[u8] {
 	s.as_deref().map_or(b"(null)", until_nul)
 }
 

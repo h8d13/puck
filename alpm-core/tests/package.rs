@@ -4,7 +4,7 @@ use alpm_core::package::*;
 fn named(name: &[u8]) -> Package {
 	Package {
 		name_hash: alpm_core::util::hash_sdbm(name),
-		name: Some(name.to_vec()),
+		name: Some(name.into()),
 		..Package::default()
 	}
 }
@@ -12,12 +12,14 @@ fn named(name: &[u8]) -> Package {
 #[test]
 fn dup_drops_uncopied_fields() {
 	let p = Package {
-		base64_sig: Some(b"sig".to_vec()),
+		base64_sig: Some(b"sig"[..].into()),
 		download_size: 3,
-		checkdepends: vec![alpm_core::deps::dep_from_string(b"a")],
-		makedepends: vec![alpm_core::deps::dep_from_string(b"b")],
-		xdata: vec![PkgXData::default()],
-		origin: Some(PkgFrom::File(b"/x".to_vec())),
+		checkdepends: vec![alpm_core::deps::dep_from_string(b"a")]
+			.into(),
+		makedepends: vec![alpm_core::deps::dep_from_string(b"b")]
+			.into(),
+		xdata: vec![PkgXData::default()].into(),
+		origin: Some(PkgFrom::File(b"/x"[..].into())),
 		reason: PkgReason::Depend,
 		size: 9,
 		..named(b"foo")
@@ -32,9 +34,9 @@ fn dup_drops_uncopied_fields() {
 		Package {
 			base64_sig: None,
 			download_size: 0,
-			checkdepends: Vec::new(),
-			makedepends: Vec::new(),
-			xdata: Vec::new(),
+			checkdepends: Vec::new().into(),
+			makedepends: Vec::new().into(),
+			xdata: Vec::new().into(),
 			..p
 		}
 	);
@@ -47,7 +49,7 @@ fn cmp_and_versions() {
 	assert_eq!(pkg_cmp(&named(b"b\xc3"), &named(b"bz")), Greater);
 	assert_eq!(pkg_cmp(&named(b"a\0x"), &named(b"a")), Equal);
 	let v = |s: Option<&[u8]>| Package {
-		version: s.map(<[u8]>::to_vec),
+		version: s.map(Box::from),
 		..Package::default()
 	};
 	assert_eq!(
@@ -86,11 +88,11 @@ fn user(name: &[u8], dep: &[u8], opt: bool) -> Package {
 	let d = vec![alpm_core::deps::dep_from_string(dep)];
 	match opt {
 		false => Package {
-			depends: d,
+			depends: d.into(),
 			..named(name)
 		},
 		true => Package {
-			optdepends: d,
+			optdepends: d.into(),
 			..named(name)
 		},
 	}
@@ -115,7 +117,7 @@ fn requiredby_cases() {
 	// local and file origins: local cache order, no sort
 	p.origin = Some(PkgFrom::LocalDb);
 	assert_eq!(compute_requiredby(&p, &mut caches), [b"z", b"b"]);
-	p.origin = Some(PkgFrom::File(b"/x".to_vec()));
+	p.origin = Some(PkgFrom::File(b"/x"[..].into()));
 	assert_eq!(compute_requiredby(&p, &mut caches), [b"z", b"b"]);
 	assert!(compute_optionalfor(&p, &mut caches).is_empty());
 	// sync: every sync db, deduped, sorted
@@ -141,7 +143,7 @@ fn should_ignore_cases() {
 		alpm_core::handle::Handle::initialize(&path(""), &path("db"))
 			.unwrap();
 	let mut p = named(b"foo");
-	p.groups = vec![b"kde-apps".to_vec()];
+	p.groups = vec![b"kde-apps"[..].into()].into();
 	assert!(!pkg_should_ignore(&h, &p));
 	h.set_ignorepkgs(&[b"f*"]);
 	assert!(pkg_should_ignore(&h, &p));

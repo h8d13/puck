@@ -316,7 +316,7 @@ fn fixed_masking() {
 	write_entry(&fix.dir(0), "zz.hook", Kind::Hook, hook);
 	write_entry(&fix.dir(1), "zz.hook", Kind::Hook, hook);
 	let pkg = Package {
-		name: Some(b"p".to_vec()),
+		name: Some(b"p"[..].into()),
 		..Package::default()
 	};
 	let when = HookWhen::PostTransaction;
@@ -411,8 +411,8 @@ fn pkg(rng: &mut Rng) -> Package {
 	let name = pick(rng, &PKGS).as_bytes().to_vec();
 	Package {
 		name_hash: hash_sdbm(&name),
-		name: Some(name),
-		version: Some(b"1.0-1".to_vec()),
+		name: Some(name.into()),
+		version: Some(b"1.0-1"[..].into()),
 		files: files(rng),
 		..Package::default()
 	}

@@ -71,7 +71,7 @@ fn listed(
 }
 
 // the parts of a loaded package the signature path decides
-type Loaded = Option<(Option<Vec<u8>>, Option<Vec<u8>>, c_int)>;
+type Loaded = Option<(Option<Box<[u8]>>, Option<Box<[u8]>>, c_int)>;
 
 fn loaded(p: Option<&Package>) -> Loaded {
 	p.map(|p| (p.name.clone(), p.version.clone(), p.validation))
@@ -285,8 +285,8 @@ impl Bench {
 
 	fn pkg(&self, name: &str, b64: Option<Vec<u8>>) -> Package {
 		Package {
-			filename: Some(self.fx.file(name)),
-			base64_sig: b64,
+			filename: Some(self.fx.file(name).into()),
+			base64_sig: b64.map(Box::from),
 			..Package::default()
 		}
 	}
@@ -465,8 +465,8 @@ fn sync_package_validation_against_c() {
 				[None, Some(good.clone()), Some(b"00".to_vec())]
 			{
 				let sync = Package {
-					base64_sig: sig.clone(),
-					sha256sum: sha.clone(),
+					base64_sig: sig.clone().map(Box::from),
+					sha256sum: sha.clone().map(Box::from),
 					..Package::default()
 				};
 				for bits in [0, 1, 3, 7] {
@@ -576,8 +576,8 @@ fn fuzz_against_c() {
 				let sha = (rng.below(2) == 0)
 					.then(|| b.sha256(name));
 				let sync = Package {
-					base64_sig: b64,
-					sha256sum: sha,
+					base64_sig: b64.map(Box::from),
+					sha256sum: sha.map(Box::from),
 					..Package::default()
 				};
 				let level = pkg_level(bits)

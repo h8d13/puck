@@ -90,8 +90,8 @@ impl CheckEnv for Env {
 
 fn pkg(files: &[&str], backup: &[&str]) -> Package {
 	Package {
-		name: Some(b"p".to_vec()),
-		version: Some(b"1-1".to_vec()),
+		name: Some(b"p"[..].into()),
+		version: Some(b"1-1"[..].into()),
 		files: FileList {
 			files: files
 				.iter()
@@ -104,7 +104,7 @@ fn pkg(files: &[&str], backup: &[&str]) -> Package {
 		backup: backup
 			.iter()
 			.map(|b| Backup {
-				name: b.as_bytes().to_vec(),
+				name: b.as_bytes().into(),
 				hash: None,
 			})
 			.collect(),

@@ -72,14 +72,16 @@ impl Drop for Tmp {
 
 fn names(db: &mut Db) -> Vec<Vec<u8>> {
 	let cache = db.pkgcache(DBEXT, &mut ()).unwrap();
-	cache.iter().map(|p| p.name.clone().unwrap()).collect()
+	cache.iter()
+		.map(|p| p.name.as_deref().unwrap().to_vec())
+		.collect()
 }
 
 fn pkg(name: &str, version: &str) -> Package {
 	Package {
 		name_hash: hash_sdbm(name.as_bytes()),
-		name: Some(name.as_bytes().to_vec()),
-		version: Some(version.as_bytes().to_vec()),
+		name: Some(name.as_bytes().into()),
+		version: Some(version.as_bytes().into()),
 		infolevel: INFRQ_DESC,
 		..Package::default()
 	}
@@ -226,9 +228,9 @@ fn cache_add_remove() {
 	);
 	db.pkgcache(DBEXT, &mut ()).unwrap();
 	let mut file = pkg("c", "2");
-	file.origin = Some(PkgFrom::File(b"/x.pkg".to_vec()));
-	file.groups = vec![b"g".to_vec()];
-	file.makedepends = vec![alpm_core::deps::dep_from_string(b"m")];
+	file.origin = Some(PkgFrom::File(b"/x.pkg"[..].into()));
+	file.groups = vec![b"g"[..].into()].into();
+	file.makedepends = vec![alpm_core::deps::dep_from_string(b"m")].into();
 	db.add_pkg_in_cache(&mut (), &file).unwrap();
 	db.add_pkg_in_cache(&mut (), &pkg("a", "1")).unwrap();
 	db.add_pkg_in_cache(&mut (), &pkg("a", "2")).unwrap();
@@ -289,7 +291,7 @@ fn load_pkg_in_place() {
 	);
 	assert_eq!(db.get_pkg(DBEXT, &mut (), b"a").unwrap().desc, None);
 	let a = db.load_pkg(DBEXT, &mut (), b"a", INFRQ_DESC).unwrap();
-	assert_eq!(a.groups, [b"g".to_vec()]);
+	assert_eq!(*a.groups, [Box::from(&b"g"[..])]);
 	let a = db.get_pkg(DBEXT, &mut (), b"a").unwrap();
 	assert_eq!(a.desc.as_deref(), Some(&b"d"[..]));
 	// no files file: the error sticks to the entry too
@@ -386,7 +388,7 @@ fn load_all_and_at() {
 	let a = db.load_pkg_at(DBEXT, &mut (), 0, 0).unwrap();
 	assert_eq!((a.name_bytes(), a.desc.as_deref()), (&b"a"[..], None));
 	let b = db.load_pkg_at(DBEXT, &mut (), 1, INFRQ_DESC).unwrap();
-	assert_eq!(b.groups, [b"g".to_vec()]);
+	assert_eq!(*b.groups, [Box::from(&b"g"[..])]);
 	assert!(db.load_pkg_at(DBEXT, &mut (), 2, INFRQ_DESC).is_none());
 	let cache = db.load_all(DBEXT, &mut (), INFRQ_DESC).unwrap();
 	assert!(cache.iter().all(|p| p.desc.as_deref() == Some(&b"d"[..])));

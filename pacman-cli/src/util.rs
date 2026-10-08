@@ -744,7 +744,7 @@ impl DbPkg<'_> {
 	}
 }
 
-fn opt(s: &Option<Vec<u8>>) -> &[u8] {
+fn opt(s: &Option<Box<[u8]>>) -> &[u8] {
 	until_nul(s.as_deref().unwrap_or_default())
 }
 
@@ -1234,7 +1234,7 @@ pub fn print_packages(
 
 // strcmp with NULL before any string, the order depend_cmp gives
 // version and desc
-fn cmp_opt(a: &Option<Vec<u8>>, b: &Option<Vec<u8>>) -> Ordering {
+fn cmp_opt(a: &Option<Box<[u8]>>, b: &Option<Box<[u8]>>) -> Ordering {
 	match (a, b) {
 		(Some(a), Some(b)) => until_nul(a).cmp(until_nul(b)),
 		_ => a.is_some().cmp(&b.is_some()),
