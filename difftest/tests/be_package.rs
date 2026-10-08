@@ -85,25 +85,59 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 // the C's lines the port does not log: RET_ERR/GOTO_ERR's debug lines (C
-// source position) and those carrying libarchive's error texts
+// source position) and those carrying libarchive's tar and filter texts
 fn c_only(msg: &[u8]) -> bool {
-	let heads: [&[u8]; 4] = [
+	let heads: [&[u8]; 3] = [
 		b"returning error ",
 		b"got error ",
 		b"error while reading package ",
-		b"error while reading mtree of package ",
 	];
 	heads.iter().any(|h| msg.starts_with(h))
 }
 
-// an open failure's text is strerror, libarchive's or the port's reader's:
-// cut after the path
+// the texts of libarchive's mtree reader, which the port has too
+const MTREE_TEXTS: [&[u8]; 20] = [
+	b"Unrecognized archive format\n",
+	b"Can't parse line ",
+	b"Line too long\n",
+	b"/unset shall not contain",
+	b"Missing type keyword",
+	b"Malformed attribute ",
+	b"Unrecognized key ",
+	b"Unrecognized file type ",
+	b"Symbolic or non-octal mode ",
+	b"incorrect digest length",
+	b"invalid digest data",
+	b"Unknown format `",
+	b"Missing number\n",
+	b"Too many arguments\n",
+	b"Not enough arguments\n",
+	b"invalid major number\n",
+	b"invalid minor number\n",
+	b"too many fields for format\n",
+	b"invalid unit number\n",
+	b"invalid subunit number\n",
+];
+
+// an open failure's text is strerror, libarchive's or the port's reader's,
+// an mtree failure's the filter's unless the mtree reader's: cut after
+// the path
 fn cut_text(mut msg: Vec<u8>) -> Vec<u8> {
-	let head = b"could not open file ";
-	if msg.starts_with(head)
-		&& let Some(i) = find(&msg[head.len()..], b": ")
-	{
-		msg.truncate(head.len() + i + 2);
+	let mtree = b"error while reading mtree of package ";
+	for head in [&b"could not open file "[..], mtree] {
+		if !msg.starts_with(head) {
+			continue;
+		}
+		let Some(i) = find(&msg[head.len()..], b": ") else {
+			continue;
+		};
+		let at = head.len() + i + 2;
+		let text = &msg[at..];
+		if head != mtree
+			|| !MTREE_TEXTS.iter().any(|t| text.starts_with(t))
+		{
+			msg.truncate(at);
+		}
 	}
 	msg
 }
@@ -1823,7 +1857,7 @@ fn fixed_archive() {
 			["same", "same"],
 		),
 		// the C marks the scriptlet from a .MTREE it then drops for
-		// the archive list (UPSTREAM.md), the port drops it whole
+		// the archive list (UPSTREAM.md)
 		(
 			"mtree install",
 			vec![
@@ -1836,7 +1870,7 @@ fn fixed_archive() {
 				info.clone(),
 				file(b"a", b"abc"),
 			],
-			["same", "fields rest"],
+			["same", "same"],
 		),
 		(
 			"mtree char dev",
@@ -2129,4 +2163,181 @@ fn fixed_validate() {
 		h.validate(b"", None),
 		pkg_validate_internal(b"", None).map_err(|e| e.errno() as i32)
 	);
+}
+
+// a keyword libarchive's mtree reader reads oddly, warns about or that
+// changes the entry
+fn odd_keyword(rng: &mut Rng) -> String {
+	let sha = "a".repeat(64);
+	let v = [
+		"uid=1".to_string(),
+		"mode=0".into(),
+		"mode=0104755".into(),
+		"mode=u+x".into(),
+		"size=-5".into(),
+		"size=12x".into(),
+		"size=9".into(),
+		"type=dir".into(),
+		"type=char".into(),
+		"type=fifo".into(),
+		"type=block".into(),
+		"type=link".into(),
+		"type=bogus".into(),
+		"foo=1".into(),
+		"foo".into(),
+		"nochange".into(),
+		"link=a\\sb".into(),
+		format!("sha256digest={}", sha.to_uppercase()),
+		format!("sha256={sha}"),
+		"md5digest=abc".into(),
+		"device=linux,1,2".into(),
+		"device=foo,1".into(),
+		"time=1.5".into(),
+	];
+	v[rng.below(v.len())].clone()
+}
+
+// .MTREE text over a tree: makepkg's lines, mutated, duplicated or mixed
+// with /set, /unset, comments, relative paths and the odd broken line
+fn gen_odd_mtree(rng: &mut Rng, tree: &[Entry]) -> Vec<u8> {
+	let mut out = String::from(match rng.below(12) {
+		0 => "",
+		1 => "#mtree v2.0\n",
+		_ => "#mtree\n",
+	});
+	if rng.below(4) != 0 {
+		out += "/set type=file uid=0 gid=0 mode=644\n";
+	}
+	if rng.below(4) == 0 {
+		out += "./.INSTALL time=1.0 size=1\n";
+	}
+	let mut lines: Vec<String> = Vec::new();
+	for e in tree {
+		let Some(mut l) = mtree_line(e) else {
+			continue;
+		};
+		if rng.below(4) == 0 {
+			l.pop();
+			for _ in 0..1 + rng.below(2) {
+				l = format!("{l} {}", odd_keyword(rng));
+			}
+			l.push('\n');
+		}
+		if rng.below(8) == 0 {
+			l = l.replacen(" type=", " \\\n type=", 1);
+		}
+		lines.push(l);
+	}
+	for _ in 0..rng.below(4) {
+		let extra = match rng.below(10) {
+			0 => "/unset uid\n".to_string(),
+			1 => "/unset all\n".into(),
+			2 => "/set type=dir mode=755\n".into(),
+			3 => "# comment\n".into(),
+			4 => "usr type=dir\n".into(),
+			5 => "..\n".into(),
+			6 => "./a\\040b type=file size=3\n".into(),
+			7 => "/foo\n".into(),
+			8 => "./z\0 type=file\n".into(),
+			_ => format!("./d type=dir {}\n", odd_keyword(rng)),
+		};
+		lines.insert(rng.below(lines.len() + 1), extra);
+	}
+	if !lines.is_empty() && rng.below(6) == 0 {
+		let dup = lines[rng.below(lines.len())].clone();
+		lines.push(dup);
+	}
+	out.extend(lines);
+	if rng.below(10) == 0 {
+		out = out.replace('\n', "\r\n");
+	}
+	out.into_bytes()
+}
+
+// packages whose .MTREE libarchive reads oddly, in every compression the
+// port knows: the file list (mtree or archive fallback), the scriptlet
+// and the mtree log lines compared
+#[test]
+fn fuzz_mtree_packages() {
+	let fx = Fixture::new();
+	let h = fx.handle();
+	let mut rng = Rng::new(0x03a7_e9ac);
+	let path = fx.pkg("mtree.pkg.tar");
+	let mtree_path = fx.0.join("mtree");
+	let (mut listed, mut fallback) = (0, 0);
+	for _ in 0..pkg_iters() {
+		let tree = gen_tree(&mut rng);
+		let text = gen_odd_mtree(&mut rng, &tree);
+		compress(&mtree_path, COMPS[rng.below(COMPS.len())], &text);
+		let mut entries = vec![
+			file(b".PKGINFO", PKGINFO.as_bytes()),
+			file(b".MTREE", &fs::read(&mtree_path).unwrap()),
+		];
+		entries.extend(tree);
+		write_pkg(&path, Comp::None, &entries);
+		assert_same(&h, &path, &lossy(&text));
+		let logs = load_c(&h, &path, true).logs;
+		let done = |(_, m): &(c_int, Vec<u8>)| {
+			m.starts_with(b"finished mtree reading")
+		};
+		match logs.iter().any(done) {
+			true => listed += 1,
+			false => fallback += 1,
+		}
+	}
+	eprintln!(
+		"fuzz_mtree_packages: {} packages, {listed} mtree lists, \
+		{fallback} archive lists",
+		pkg_iters()
+	);
+	assert!(listed * 5 > pkg_iters() && fallback * 5 > pkg_iters());
+}
+
+// a .MTREE over several filter blocks, cut short: inside the first
+// block libarchive's open fails (archive list), past it the failed read
+// ends the data and the list is what came before
+#[test]
+fn mtree_cuts() {
+	let fx = Fixture::new();
+	let h = fx.handle();
+	let path = fx.pkg("cut.pkg.tar");
+	let mtree_path = fx.0.join("mtree");
+	let mut rng = Rng::new(0x3e7_c07);
+	let mut text = String::from(MTREE_HEAD);
+	for i in 0..6000 {
+		let w = word(&mut rng, ALNUM, 0, 40);
+		text += &format!(
+			"./usr/{w}{i} time={i}.0 size={} sha256digest={}\n",
+			rng.below(99999),
+			"0".repeat(64)
+		);
+	}
+	let mut lists = std::collections::BTreeSet::new();
+	for comp in [Comp::Gzip, Comp::Bzip2, Comp::Xz, Comp::Zstd] {
+		compress(&mtree_path, comp, text.as_bytes());
+		let data = fs::read(&mtree_path).unwrap();
+		let len = data.len();
+		let mut cuts: Vec<usize> = vec![1, 2, 10, 100];
+		cuts.extend((1..24).map(|i| len * i / 24));
+		cuts.extend((0..6).map(|_| rng.below(len)));
+		cuts.extend([1, 4, 8, 20].map(|d| len - d));
+		for n in cuts {
+			let entries = [
+				file(b".PKGINFO", PKGINFO.as_bytes()),
+				file(b".MTREE", &data[..n]),
+				file(b"usr/a", b"abc"),
+			];
+			write_pkg(&path, Comp::None, &entries);
+			assert_same(
+				&h,
+				&path,
+				&format!("{comp:?} cut at {n}/{len}"),
+			);
+			if let Ok((p, _)) = load_c(&h, &path, true).r {
+				lists.insert(p.files.files.len());
+			}
+		}
+	}
+	// the archive's list, partial and whole mtree lists
+	assert!(lists.len() >= 3, "{lists:?}");
 }

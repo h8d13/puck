@@ -18,15 +18,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "alpm-common"
-version = "0.2.2"
-dependencies = [
- "alpm-types",
- "fluent-i18n",
- "thiserror",
-]
-
-[[package]]
 name = "alpm-compress"
 version = "0.1.4"
 dependencies = [
@@ -47,9 +38,7 @@ dependencies = [
 name = "alpm-core"
 version = "0.1.0"
 dependencies = [
- "alpm-common",
  "alpm-compress",
- "alpm-mtree",
  "alpm-types",
  "base64",
  "landlock",
@@ -58,23 +47,6 @@ dependencies = [
  "reqwest",
  "rustix",
  "tar",
-]
-
-[[package]]
-name = "alpm-mtree"
-version = "0.3.4"
-dependencies = [
- "alpm-common",
- "alpm-parsers",
- "alpm-types",
- "flate2",
- "fluent-i18n",
- "log",
- "serde",
- "strum",
- "thiserror",
- "which",
- "winnow",
 ]
 
 [[package]]
@@ -2557,15 +2529,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
 dependencies = [
  "rustls-pki-types",
-]
-
-[[package]]
-name = "which"
-version = "8.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bae2f2b2b816647a1cab1acc91f5bd20812d53cb344382635ec2181940c8034f"
-dependencies = [
- "libc",
 ]
 
 [[package]]

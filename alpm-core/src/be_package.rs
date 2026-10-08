@@ -7,7 +7,7 @@
 // the archive walk follows the C loop. libarchive is replaced by
 // alpm-compress (gzip, bzip2, xz, zstd, none, picked by magic bytes like
 // libarchive's filter bidding) and its tar reader; .MTREE goes through
-// alpm-mtree's libarchive reader. .PKGINFO is read byte for byte like
+// libarchive's mtree reader (crate::mtree). .PKGINFO is read byte for byte like
 // parse_descfile, through _alpm_archive_fgets over the entry's data
 // blocks.
 //
@@ -23,7 +23,6 @@ use std::io::{self, ErrorKind, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use alpm_mtree::libarchive::{self, EntryType};
 use alpm_types::Sha256Checksum;
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
@@ -33,6 +32,7 @@ use crate::callbacks::{Callbacks, LogLevel};
 use crate::deps::dep_from_string;
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
+use crate::mtree;
 use crate::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
 	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, check_meta, parse_xdata,
@@ -338,37 +338,42 @@ pub(crate) fn tar_mode_size(entry: &Entry) -> io::Result<(u32, i64)> {
 
 // an entry of libarchive's mtree reader: "./" stripped like
 // build_filelist_from_mtree does, archive_entry_mode and _size
-fn mtree_file(e: &libarchive::Entry) -> (Vec<u8>, u32, i64) {
-	let kind = match e.entry_type {
-		EntryType::Block => AE_IFBLK,
-		EntryType::Char => AE_IFCHR,
-		EntryType::Dir => AE_IFDIR,
-		EntryType::Fifo => AE_IFIFO,
-		EntryType::File => AE_IFREG,
-		EntryType::Link => AE_IFLNK,
-	};
-	let path = e.path.as_os_str().as_bytes();
-	let path = path.strip_prefix(b"./").unwrap_or(path);
-	(path.to_vec(), kind | e.mode, e.size)
+fn mtree_file(e: &mtree::Entry) -> (&[u8], u32, i64) {
+	let path = e.path.strip_prefix(b"./").unwrap_or(&e.path);
+	(path, e.kind.filetype() | e.mode, e.size as i64)
 }
 
 // build_filelist_from_mtree: the whole list or nothing, the C keeps the
-// archive's list on failure, which includes an entry libarchive warns
-// about. a "./.INSTALL" line marks the scriptlet
+// archive's list on failure. entries before one libarchive warns about
+// still go through handle_simple_path (a "./.INSTALL" line marks the
+// scriptlet)
 fn filelist_from_mtree(
+	cb: &mut dyn Callbacks,
+	pkgfile: &[u8],
 	pkg: &mut Package,
 	entry: &mut Entry,
 ) -> Option<FileList> {
+	let head = b"error while reading mtree of package ";
+	let fail = |cb: &mut dyn Callbacks, text: &[u8]| {
+		log(cb, LogLevel::Debug, &[head, pkgfile, b": ", text, b"\n"]);
+	};
 	let data = util::content(entry).ok()?;
-	let entries = libarchive::from_reader(&data[..]).ok()?;
-	if entries.iter().any(|e| !e.warnings.is_empty()) {
-		return None;
-	}
+	let entries = match mtree::read_memory(data) {
+		Ok(entries) => entries,
+		Err(e) => {
+			fail(cb, &e.text());
+			return None;
+		}
+	};
 	let mut files = FileList::default();
 	for e in &entries {
+		if let Some(text) = &e.warning {
+			fail(cb, text);
+			return None;
+		}
 		let (path, mode, size) = mtree_file(e);
-		if !simple_path(pkg, &path) {
-			push_file(&mut files, &path, mode, size);
+		if !simple_path(pkg, path) {
+			push_file(&mut files, path, mode, size);
 		}
 	}
 	Some(files)
@@ -437,7 +442,9 @@ pub fn pkg_load_internal(
 			let msg = [b"found mtree for package ", pkgfile];
 			let msg = [&msg.concat()[..], b", getting file list\n"];
 			log(cb, LogLevel::Debug, &msg);
-			let files = filelist_from_mtree(&mut pkg, &mut entry);
+			let files = filelist_from_mtree(
+				cb, pkgfile, &mut pkg, &mut entry,
+			);
 			if files.is_some() {
 				let msg = [
 					b"finished mtree reading for ",

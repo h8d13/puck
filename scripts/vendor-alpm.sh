@@ -12,8 +12,8 @@
 set -euo pipefail
 
 crates=(
-	alpm-types alpm-parsers alpm-common
-	alpm-mtree alpm-compress
+	alpm-types alpm-parsers
+	alpm-compress
 )
 
 if [ ! -f Cargo.toml ] || [ ! -f alpm/Cargo.toml ]; then
