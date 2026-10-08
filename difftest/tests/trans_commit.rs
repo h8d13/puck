@@ -4,7 +4,9 @@
 // mirror or the cache, -U files, DOWNLOADONLY, DBONLY, packages that
 // fail the checksum or differ from their db entry (CORRUPTED_PKG yes and
 // no), a package missing from the mirror, file conflicts, no disk space,
-// replaced and conflicting packages removed by the sync commit; hooks
+// replaced and conflicting packages removed by the sync commit; signed
+// packages under each package siglevel (check_keyring and its import
+// question, INVALID_SIG/MISSING_SIG, .sig downloads, %PGPSIG%); hooks
 // (fc_ tests, re-run under fakechroot(1) by under_fakechroot). compared
 // per case: prepare and commit rc/pm_errno, data list, trans state, the
 // kept records (difftest::kept), the logfile, the root, local db and
@@ -13,8 +15,9 @@ use std::collections::BTreeMap;
 use std::ffi::c_int;
 
 use difftest::{
-	HookRec, Rng, TcCase, TcHook, TcOp, TcPkg, TcRec, TcResult, TcWorld,
-	TempRoot, c_commit, iters, rust_commit, umask_lock,
+	GpgFixture, Home, HookRec, Rng, TcCase, TcHook, TcOp, TcPkg, TcRec,
+	TcResult, TcSigKind, TcSign, TcWorld, TempRoot, c_commit, iters,
+	rust_commit, tc_sign, umask_lock,
 };
 
 const DOWNLOADONLY: c_int = 1 << 9;
@@ -71,7 +74,11 @@ fn compare(fx: &TempRoot, case: &TcCase) -> TcResult {
 	let c = c_commit(fx, case);
 	let r = rust_commit(fx, case);
 	let (sc, sr) = (show(&c), show(&r));
-	assert!(sc == sr, "{case:#?}\n{}\nC full:\n{sc}", diff(&sc, &sr));
+	assert!(
+		sc == sr,
+		"{case:#?}\n{}\nC full:\n{sc}\nRust full:\n{sr}",
+		diff(&sc, &sr)
+	);
 	assert_eq!(c.root, r.root, "root tree\n{case:#?}\n{sc}");
 	assert_eq!(c.local, r.local, "local db\n{case:#?}\n{sc}");
 	assert_eq!(c.cache, r.cache, "cache dir\n{case:#?}\n{sc}");
@@ -86,6 +93,7 @@ fn case(world: TcWorld, op: TcOp) -> TcCase {
 		checkspace: false,
 		answers: Vec::new(),
 		hooks: Vec::new(),
+		sign: None,
 	}
 }
 
@@ -216,6 +224,178 @@ fn replaces_and_conflicts_removed() {
 	assert_eq!(commit_rc(&r), Some((0, 0)), "{}", show(&r));
 }
 
+// ---- signed packages ----
+
+// ALPM_SIG_PACKAGE* bits of a db siglevel
+const SIG_PACKAGE: c_int = 1;
+const SIG_OPTIONAL: c_int = 1 << 1;
+const SIG_TRUSTALL: c_int = (1 << 2) | (1 << 3);
+
+// Never, Required and Optional, each TrustedOnly and TrustAll
+const LEVELS: [c_int; 5] = [
+	0,
+	SIG_PACKAGE,
+	SIG_PACKAGE | SIG_TRUSTALL,
+	SIG_PACKAGE | SIG_OPTIONAL,
+	SIG_PACKAGE | SIG_OPTIONAL | SIG_TRUSTALL,
+];
+
+const KINDS: [Option<TcSigKind>; 7] = [
+	None,
+	Some(TcSigKind::Key("full")),
+	Some(TcSigKind::Key("marg")),
+	Some(TcSigKind::Key("unk")),
+	Some(TcSigKind::Key("rev")),
+	Some(TcSigKind::Other),
+	Some(TcSigKind::Garbage),
+];
+
+fn signed_case(gpg: &GpgFixture, w: TcWorld, op: TcOp, level: c_int) -> TcCase {
+	let mut c = case(w, op);
+	c.sign = Some(TcSign {
+		gpgdir: gpg.home(Home::Pgp),
+		level,
+	});
+	c
+}
+
+// c of base_world signed as kind says, the .sig on the mirror or the
+// signature in the db
+fn sig_world(
+	fx: &TempRoot,
+	gpg: &GpgFixture,
+	kind: Option<TcSigKind>,
+	in_db: bool,
+) -> TcWorld {
+	let mut w = base_world();
+	let c = &mut w.sync[1];
+	if let Some(k) = kind {
+		tc_sign(fx, gpg, c, k);
+		c.sig_in_db = in_db;
+		c.sig_on_mirror = !in_db;
+	}
+	w
+}
+
+#[test]
+fn signed_levels() {
+	let gpg = GpgFixture::new("tcommit-gpg");
+	let fx = TempRoot::new("tcommit-sig");
+	let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+	for kind in KINDS {
+		for in_db in [false, true] {
+			let w = sig_world(&fx, &gpg, kind, in_db);
+			for level in LEVELS {
+				for answer in [0, 1] {
+					let mut c = signed_case(
+						&gpg,
+						w.clone(),
+						sync(&["c"]),
+						level,
+					);
+					c.answers = vec![answer];
+					let r = compare(&fx, &c);
+					let k = format!("{:?}", r.commit);
+					*seen.entry(k).or_default() += 1;
+				}
+			}
+		}
+	}
+	// a required .sig that is cached but unreadable: MISSING_SIG
+	let mut w = sig_world(&fx, &gpg, Some(TcSigKind::Key("full")), false);
+	let c = &mut w.sync[1];
+	(c.cached, c.sig_cached, c.sig_unreadable) = (true, true, true);
+	for level in LEVELS {
+		let r = compare(
+			&fx,
+			&signed_case(&gpg, w.clone(), sync(&["c"]), level),
+		);
+		*seen.entry(format!("{:?}", r.commit)).or_default() += 1;
+	}
+	// committed, PKG_INVALID_SIG (37), PKG_MISSING_SIG (38) and the
+	// failed .sig download (LIBCURL, 52) all met
+	let want = [
+		"Some((0, 0))",
+		"Some((-1, 37))",
+		"Some((-1, 38))",
+		"Some((-1, 52))",
+	];
+	for k in want {
+		assert!(seen.contains_key(k), "never {k}: {seen:?}");
+	}
+}
+
+// a key the keyring lacks: check_keyring offers it, the import fails
+// (no network), either answer fails the load
+#[test]
+fn signed_keyring() {
+	let gpg = GpgFixture::new("tcommit-gpg-key");
+	let fx = TempRoot::new("tcommit-key");
+	let stranger = Some(TcSigKind::Key("stranger"));
+	for in_db in [false, true] {
+		// the .sig downloads either way, the key comes from %PGPSIG%
+		// when set
+		let mut w = sig_world(&fx, &gpg, stranger, in_db);
+		w.sync[1].sig_on_mirror = true;
+		for level in
+			[SIG_PACKAGE, SIG_PACKAGE | SIG_OPTIONAL | SIG_TRUSTALL]
+		{
+			for answer in [0, 1] {
+				let mut c = signed_case(
+					&gpg,
+					w.clone(),
+					sync(&["c"]),
+					level,
+				);
+				c.answers = vec![answer, 1];
+				let r = compare(&fx, &c);
+				let asked = r.recs.iter().any(|x| {
+					matches!(x, TcRec::AskKey(..))
+				});
+				assert!(asked, "{}", show(&r));
+				assert_eq!(
+					commit_rc(&r).map(|x| x.0),
+					Some(-1),
+					"{}",
+					show(&r)
+				);
+			}
+		}
+	}
+	// a cached package whose .sig is not cached is fetched again with
+	// it; a .sig left in the cache is used as is
+	let mut w = sig_world(&fx, &gpg, Some(TcSigKind::Key("full")), false);
+	w.sync[1].cached = true;
+	let r = compare(
+		&fx,
+		&signed_case(&gpg, w.clone(), sync(&["c"]), SIG_PACKAGE),
+	);
+	assert_eq!(commit_rc(&r), Some((0, 0)), "{}", show(&r));
+	w.sync[1].sig_cached = true;
+	w.sync[1].on_mirror = false;
+	w.sync[1].sig_on_mirror = false;
+	let r = compare(&fx, &signed_case(&gpg, w, sync(&["c"]), SIG_PACKAGE));
+	assert_eq!(commit_rc(&r), Some((0, 0)), "{}", show(&r));
+	// required, only in the db: the .sig download fails
+	let w = sig_world(&fx, &gpg, Some(TcSigKind::Key("full")), true);
+	compare(&fx, &signed_case(&gpg, w, sync(&["c"]), SIG_PACKAGE));
+	// a bad signature before a good one: pm_errno is the last
+	// validation's (UPSTREAM.md), both reported, both questions asked
+	let mut w = sig_world(&fx, &gpg, Some(TcSigKind::Other), false);
+	tc_sign(&fx, &gpg, &mut w.sync[0], TcSigKind::Key("full"));
+	w.sync[0].sig_on_mirror = true;
+	for answers in [vec![0, 0], vec![1, 1]] {
+		let mut c = signed_case(
+			&gpg,
+			w.clone(),
+			sync(&["a", "c"]),
+			SIG_PACKAGE,
+		);
+		c.answers = answers;
+		compare(&fx, &c);
+	}
+}
+
 // ---- fuzz ----
 
 const NAMES: [&str; 4] = ["a", "b", "c", "d"];
@@ -305,6 +485,7 @@ fn gen_case(rng: &mut Rng) -> TcCase {
 		checkspace: rng.below(2) == 0,
 		answers,
 		hooks: Vec::new(),
+		sign: None,
 	}
 }
 

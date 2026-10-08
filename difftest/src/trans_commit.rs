@@ -5,8 +5,10 @@
 // cache dir), and package files for -U. a case is a transaction (sync
 // targets, sysupgrade, removals or package files) prepared and then
 // committed, with hooks from two hook dirs (they run in a chroot of the
-// root: fakechroot, a copy of /bin/sh); the Rust side runs the same on
-// an alpm_core Handle.
+// root: fakechroot, a copy of /bin/sh) and signed packages (a GpgFixture
+// keyring, the sync db's siglevel; .sig files on the mirror and in the
+// cache, %PGPSIG% in the db); the Rust side runs the same on an
+// alpm_core Handle.
 //
 // recorded on both sides in call order: log lines, events (package
 // operations, retrieve sizes, hook events and their output lines in
@@ -20,6 +22,7 @@ use std::collections::VecDeque;
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::ptr;
 use std::rc::Rc;
@@ -50,15 +53,20 @@ use crate::handle::{
 	alpm_db_get_pkg, alpm_errno, alpm_get_localdb, alpm_initialize,
 	alpm_option_add_cachedir, alpm_option_set_checkspace,
 	alpm_option_set_default_siglevel, alpm_option_set_dlcb,
-	alpm_option_set_eventcb, alpm_option_set_hookdirs,
-	alpm_option_set_local_file_siglevel, alpm_option_set_logcb,
-	alpm_option_set_logfile, alpm_option_set_progresscb,
-	alpm_option_set_questioncb, alpm_option_set_remote_file_siglevel,
-	alpm_pkg_load, alpm_register_syncdb, alpm_release, alpm_trans_init,
+	alpm_option_set_eventcb, alpm_option_set_gpgdir,
+	alpm_option_set_hookdirs, alpm_option_set_local_file_siglevel,
+	alpm_option_set_logcb, alpm_option_set_logfile,
+	alpm_option_set_progresscb, alpm_option_set_questioncb,
+	alpm_option_set_remote_file_siglevel, alpm_pkg_load,
+	alpm_register_syncdb, alpm_release, alpm_trans_init,
 	alpm_trans_release,
 };
 use crate::hook::{HookRec, c_hook_rec, hook_rec, strip_stamps};
 use crate::package::{CPkg, list_data, read_pkg, with_strs};
+use crate::signing::{
+	GPGME_PROTOCOL_OPENPGP, GpgFixture, encode_base64, gpgme_check_version,
+	gpgme_set_engine_info,
+};
 use crate::trans_prep::{
 	alpm_add_pkg, alpm_remove_pkg, alpm_sync_sysupgrade, alpm_trans_prepare,
 };
@@ -94,6 +102,33 @@ pub struct TcPkg {
 	pub mismatch: bool,
 	// %CSIZE% instead of the file's size
 	pub csize: Option<u64>,
+	// sync only: a detached signature (tc_sign), as %PGPSIG% in the
+	// db, as .sig next to the package on the mirror and in the cache
+	pub sig: Option<Vec<u8>>,
+	pub sig_in_db: bool,
+	pub sig_on_mirror: bool,
+	pub sig_cached: bool,
+	// the cached .sig at mode 0: in the cache, unreadable (MISSING_SIG)
+	pub sig_unreadable: bool,
+}
+
+// what tc_sign signs a package with
+#[derive(Clone, Copy, Debug)]
+pub enum TcSigKind {
+	// a GpgFixture signer key: "full", "marg", "unk", "stranger", ...
+	Key(&'static str),
+	// a good signature by "full" of other data
+	Other,
+	// bytes no OpenPGP parser takes
+	Garbage,
+}
+
+// the signature checks of a case: the gpgdir (GpgFixture::home) and
+// the siglevel core is registered with
+#[derive(Clone, Debug)]
+pub struct TcSign {
+	pub gpgdir: Vec<u8>,
+	pub level: c_int,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -134,6 +169,8 @@ pub struct TcCase {
 	pub answers: Vec<c_int>,
 	// none: the default hook dir (root/usr/share/libalpm/hooks/, absent)
 	pub hooks: Vec<TcHook>,
+	// none: no gpgdir, core at siglevel 0
+	pub sign: Option<TcSign>,
 }
 
 // hook dir i of the fixture, with its '/'
@@ -242,10 +279,18 @@ fn gzip(tar: &[u8], path: &Path) -> Vec<u8> {
 }
 
 fn sync_desc(p: &TcPkg, csize: u64, sum: &str) -> String {
+	let pgpsig = match (&p.sig, p.sig_in_db) {
+		(Some(sig), true) => {
+			let b64 =
+				String::from_utf8(encode_base64(sig)).unwrap();
+			format!("%PGPSIG%\n{b64}\n\n")
+		}
+		_ => String::new(),
+	};
 	format!(
 		"%FILENAME%\n{2}\n\n%NAME%\n{0}\n\n%BASE%\n{0}\n\n\
 		%VERSION%\n{1}\n\n%DESC%\nnew {0}\n\n%CSIZE%\n{3}\n\n\
-		%ISIZE%\n{4}\n\n%SHA256SUM%\n{5}\n\n%ARCH%\nx86_64\n\n\
+		%ISIZE%\n{4}\n\n%SHA256SUM%\n{5}\n\n{7}%ARCH%\nx86_64\n\n\
 		%BUILDDATE%\n1700000000\n\n%PACKAGER%\nA B <a@b.org>\n\n{6}",
 		p.name,
 		p.version,
@@ -253,8 +298,25 @@ fn sync_desc(p: &TcPkg, csize: u64, sum: &str) -> String {
 		csize,
 		p.isize,
 		sum,
-		rels(p)
+		rels(p),
+		pgpsig
 	)
+}
+
+// p's signature made once for both sides (gpg signatures carry a
+// time): over its package file as tc_write makes it
+pub fn tc_sign(fx: &TempRoot, gpg: &GpgFixture, p: &mut TcPkg, k: TcSigKind) {
+	let tmp = fx.dir().join("sign.tmp");
+	gzip(&tc_package(p), &tmp);
+	p.sig = Some(match k {
+		TcSigKind::Key(key) => gpg.sign_file(&[key], &tmp),
+		TcSigKind::Other => {
+			fs::write(&tmp, b"other data\n").unwrap();
+			gpg.sign_file(&["full"], &tmp)
+		}
+		TcSigKind::Garbage => b"\x89\x02garbage, not OpenPGP".to_vec(),
+	});
+	fs::remove_file(&tmp).unwrap();
 }
 
 // <fx>/cache/, <fx>/mirror/, <fx>/pkgs/
@@ -330,6 +392,19 @@ pub fn tc_write(fx: &TempRoot, c: &TcCase) -> Vec<Vec<u8>> {
 		if p.cached {
 			fs::write(cache.join(arch_name(p)), &data).unwrap();
 		}
+		let sigfile = format!("{}.sig", arch_name(p));
+		if let Some(sig) = &p.sig {
+			if p.sig_on_mirror {
+				fs::write(mirror.join(&sigfile), sig).unwrap();
+			}
+			if p.sig_cached {
+				let path = cache.join(&sigfile);
+				fs::write(&path, sig).unwrap();
+				if p.sig_unreadable {
+					set_mode(&path, 0);
+				}
+			}
+		}
 		// a valid digest of something else
 		let sum = match p.bad_sum {
 			true => sum.chars().rev().collect(),
@@ -364,8 +439,10 @@ pub enum TcRec {
 	Op(bool, c_int, Option<Vec<u8>>, Option<Vec<u8>>),
 	// PKG_RETRIEVE_* kind, num, total_size
 	Retrieve(c_int, usize, i64),
-	// question kind, the corrupted file and its reason
+	// question kind; the corrupted file and its reason, or the key's
+	// uid and fingerprint to import
 	Ask(c_int, Option<(Vec<u8>, c_int)>),
+	AskKey(Option<Vec<u8>>, Vec<u8>),
 	Progress(c_int, Vec<u8>, c_int, usize, usize),
 	// filename, init (optional) or completed (result)
 	Download(Vec<u8>, Result<bool, c_int>),
@@ -408,9 +485,49 @@ const EV_OP_DONE: c_int = 12;
 const EV_RETRIEVE_START: c_int = 21;
 const EV_RETRIEVE_FAILED: c_int = 23;
 const Q_CORRUPTED: c_int = 1 << 3;
+const Q_IMPORT_KEY: c_int = 1 << 6;
 
 // debug lines the port does not make: RET_ERR's and GOTO_ERR's
 const C_ONLY: [&[u8]; 2] = [b"returning error ", b"got error "];
+
+// signing.c's debug lines (gpgme internals, key lookups, signature
+// details), not ported yet (PORTING.md follow-ups): their starts
+const SIGNING_DEBUG: [&[u8]; 24] = [
+	b"checking signature for ",
+	b"could not import key, 0 results\n",
+	b"exp_timestamp: ",
+	b"fingerprint: ",
+	b"gpg error: ",
+	b"GPGME engine info: ",
+	b"GPGME version: ",
+	b"importing key\n",
+	b"key \"",
+	b"key lookup ",
+	b"key: ",
+	b"looking up key ",
+	b"missing optional signature\n",
+	b"missing required signature\n",
+	b"no signatures returned\n",
+	b"signature check failed\n",
+	b"signature is ",
+	b"signature should never be trusted\n",
+	b"signature timestamp is greater than system time.\n",
+	b"Signature verification will fail!\n",
+	b"sig path ",
+	b"status: ",
+	b"summary: ",
+	b"validity: ",
+];
+
+fn signing_debug(m: &[u8]) -> bool {
+	let found = |m: &[u8]| {
+		m.starts_with(b"key ") && m.ends_with(b" found in cache\n")
+	};
+	SIGNING_DEBUG.iter().any(|p| m.starts_with(p))
+		|| m.starts_with(b"timestamp: ")
+		|| m.ends_with(b" signatures returned\n")
+		|| found(m)
+}
 
 // the records compared: no FUNCTION lines (the lazy loads: the port
 // loads every local file list before the file conflict check, the C as
@@ -418,14 +535,20 @@ const C_ONLY: [&[u8]; 2] = [b"returning error ", b"got error "];
 // download (dload's internals)
 pub fn kept(recs: Vec<TcRec>) -> Vec<TcRec> {
 	let mut quiet = false;
-	let mut out = Vec::new();
+	let mut out: Vec<TcRec> = Vec::new();
 	for r in recs {
+		let after_sig_data = matches!(
+			out.last(),
+			Some(TcRec::Log(LOG_DEBUG, m)) if m.starts_with(b"sig data: ")
+		);
 		match &r {
 			TcRec::Retrieve(EV_RETRIEVE_START, ..) => quiet = true,
 			TcRec::Retrieve(..) => quiet = false,
 			TcRec::Log(LOG_FUNCTION, _) => continue,
 			TcRec::Log(LOG_DEBUG, m)
-				if quiet || C_ONLY
+				if quiet || signing_debug(m)
+					|| (after_sig_data
+						&& sig_unreadable(m)) || C_ONLY
 					.iter()
 					.any(|p| m.starts_with(p)) =>
 			{
@@ -436,6 +559,14 @@ pub fn kept(recs: Vec<TcRec>) -> Vec<TcRec> {
 		out.push(r);
 	}
 	out
+}
+
+// _alpm_access's line for a .sig: right after be_package's "sig data:"
+// line it is _alpm_gpgme_checksig's (signing.c), the port's checksig
+// does not log it. be_package's own check of the same path comes before
+fn sig_unreadable(m: &[u8]) -> bool {
+	let key: &[u8] = b".sig\" is not readable: ";
+	m.windows(key.len()).any(|w| w == key)
 }
 
 // the free block counts of diskspace's partition lines: the disk the
@@ -466,7 +597,24 @@ fn name_ver(p: &alpm_core::package::Package) -> Vec<u8> {
 	[n, b" ", v].concat()
 }
 
+// files of dir at mode 0 (sig_unreadable) made readable again, so
+// the tree can be read
+fn readable_again(dir: &Path) {
+	for e in fs::read_dir(dir).unwrap() {
+		let path = e.unwrap().path();
+		let m = fs::symlink_metadata(&path).unwrap();
+		if m.is_file() && m.permissions().mode() & 0o777 == 0 {
+			set_mode(&path, 0o644);
+		}
+	}
+}
+
+fn set_mode(path: &Path, mode: u32) {
+	fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
 fn snapshot_all(fx: &TempRoot) -> (AcNode, AcNode, AcNode) {
+	readable_again(&fx.dir().join("cache"));
 	(
 		tree(&fx.dir().join("root"), false),
 		tree(&fx.local(), true),
@@ -563,6 +711,15 @@ struct CQCorrupted {
 	reason: c_int,
 }
 
+// alpm_question_import_key_t
+#[repr(C)]
+struct CQImportKey {
+	kind: c_int,
+	import: c_int,
+	uid: *const c_char,
+	fingerprint: *const c_char,
+}
+
 unsafe extern "C" fn question_cb(ctx: *mut c_void, q: *mut c_void) {
 	// SAFETY: ctx is the CRec; q starts with type and answer
 	let (rec, kind) =
@@ -573,6 +730,12 @@ unsafe extern "C" fn question_cb(ctx: *mut c_void, q: *mut c_void) {
 		(c_bytes(c.filepath), c.reason)
 	});
 	rec.recs.push(TcRec::Ask(kind, detail));
+	if kind == Q_IMPORT_KEY {
+		// SAFETY: an IMPORT_KEY question, uid may be NULL
+		let k = unsafe { &*q.cast::<CQImportKey>() };
+		let uid = (!k.uid.is_null()).then(|| c_bytes(k.uid));
+		rec.recs.push(TcRec::AskKey(uid, c_bytes(k.fingerprint)));
+	}
 	let answer = rec.answers.pop_front().unwrap_or(0);
 	// SAFETY: the answer int follows the type in every question
 	unsafe { *q.cast::<c_int>().add(1) = answer };
@@ -697,8 +860,19 @@ pub fn c_commit(fx: &TempRoot, c: &TcCase) -> TcResult {
 				alpm_option_set_hookdirs(h, l)
 			});
 		}
+		let mut level = 0;
+		if let Some(sg) = &c.sign {
+			// init_gpgme points gpgme's engine at the first
+			// handle's gpgdir only, once per process
+			let dir = cstr(&sg.gpgdir);
+			gpgme_check_version(ptr::null());
+			assert_eq!(alpm_option_set_gpgdir(h, dir.as_ptr()), 0);
+			let p = GPGME_PROTOCOL_OPENPGP;
+			gpgme_set_engine_info(p, ptr::null(), dir.as_ptr());
+			level = sg.level;
+		}
 		let core = cstr(b"core");
-		let db = alpm_register_syncdb(h, core.as_ptr(), 0);
+		let db = alpm_register_syncdb(h, core.as_ptr(), level);
 		assert!(!db.is_null());
 		assert_eq!(alpm_db_add_server(db, server.as_ptr()), 0);
 		let local: *mut CDb = alpm_get_localdb(h);
@@ -866,6 +1040,16 @@ impl Callbacks for RustRec {
 			_ => None,
 		};
 		self.recs.borrow_mut().push(TcRec::Ask(q.kind(), detail));
+		if let Question::ImportKey {
+			uid, fingerprint, ..
+		} = q
+		{
+			let r = TcRec::AskKey(
+				uid.map(<[u8]>::to_vec),
+				fingerprint.to_vec(),
+			);
+			self.recs.borrow_mut().push(r);
+		}
 		q.set_answer(self.answers.pop_front().unwrap_or(0));
 	}
 
@@ -944,9 +1128,14 @@ pub fn rust_commit(fx: &TempRoot, c: &TcCase) -> TcResult {
 	if !hookdirs.is_empty() {
 		h.set_hookdirs(&hookdirs);
 	}
+	let mut level = 0;
+	if let Some(sg) = &c.sign {
+		h.set_gpgdir(&sg.gpgdir);
+		level = sg.level;
+	}
 	let server = [b"file://", &fx.path("mirror")[..]].concat();
 	{
-		let db = h.register_syncdb(b"core", 0).unwrap();
+		let db = h.register_syncdb(b"core", level).unwrap();
 		db.set_servers(&mut (), &[server]).unwrap();
 	}
 	let d = h.dbs_mut();
