@@ -125,7 +125,8 @@ script tests): meson's 338 ok / 6 expected fail, reproduced by
 `pacman/build`. Progress: 135 ok (start of the owned readers) -> 203
 (`.PKGINFO` reader, `-Sc`) -> 336 (local and sync db readers, master
 18b884f) -> 337 ok / 6 xfail / 1 fail / 0 unexpected pass (soft
-interrupt handler; unchanged by the owned mtree reader), vercmptest and the script tests included. Left:
+interrupt handler; unchanged by the owned mtree reader; confirmed on
+master 5919d19), vercmptest and the script tests included. Left:
 upgrade-download-pkg-and-sig-with-filename (`-U` URL downloads through
 HTTP redirects: "Empty reply from server"), redirect unit.
 
