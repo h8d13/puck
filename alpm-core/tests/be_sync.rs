@@ -215,5 +215,19 @@ fn validate_without_signature() {
 		SIG_DATABASE,
 	);
 	assert_eq!(r, Err(Errno::DbInvalidSig));
-	assert_eq!(lines.0, [b"repo: missing required signature\n".to_vec()]);
+	// signing.c's debug lines on the way, then the error
+	let sig = [&path[..], b".sig"].concat();
+	let expected: [&[u8]; 4] = [
+		&[
+			b"\"",
+			&sig[..],
+			b"\" is not readable: No such file or ",
+			b"directory\n",
+		]
+		.concat(),
+		&[b"sig path ", &sig[..], b" could not be opened\n"].concat(),
+		b"missing required signature\n",
+		b"repo: missing required signature\n",
+	];
+	assert_eq!(lines.0, expected);
 }

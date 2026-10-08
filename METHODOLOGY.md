@@ -115,6 +115,29 @@ binary. A milestone counts as reached only when its gate passes (CLI
 parity against C pacman, then pactest). Units are picked in milestone
 order.
 
+Real-system equivalence, rootless (`scripts/twin-root.sh`, PORTING.md
+"3b"): C pacman and the Rust binary run the same real operations on twin
+roots inside one `unshare --map-auto --map-root-user --mount --pid`
+session. uid 0 inside, the subuid range mapped (chown to any packaged
+owner, DownloadUser `alpm`), `security.capability` and `user.*` xattrs
+settable, chroot and mounts allowed, host network shared; the pid
+namespace takes gpg-agent and any stray child down with the session.
+Each side is bound in turn at one path on a tmpfs over /mnt, private to
+the session: both binaries see identical paths, and `alpm` can traverse
+them (it cannot pass a 0700 home). Inputs are made identical: the C side
+runs the setup (keyring, sync and files dbs, a `-Sw` prefetch of every
+package the steps install) and the Rust root starts as its copy; the host
+package cache is a read-only extra CacheDir. Downloads are compared in
+their own phase on empty caches. After every step: rc, stdout, stderr,
+the whole tree (type, mode, owner, size, sha256, link, mtime, nlink,
+xattrs), the local db (install dates masked), pacman.log (stamps
+normalised, offsets compared apart). mtimes are exact, except that a
+time inside a recorded run window stands for that step, so files stamped
+at run time match when the same step stamped them. Randomness is pinned
+or masked, never tolerated broadly (fixed machine-id; the java keystore
+and ldconfig's aux-cache, dates and inode numbers inside, skip content).
+No real root, and nothing outside `.tmp/` is written.
+
 ## Unit workflow
 
 - `scripts/unit-worktree.sh <name>` (clean tree, so commit first) makes

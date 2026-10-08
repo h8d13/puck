@@ -21,7 +21,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use alpm_compress::decompression::DecompressionSettings;
-use rustix::fs::{Access, AtFlags, CWD, Mode, accessat};
+use rustix::fs::{Access, Mode};
 use rustix::process::umask;
 
 use crate::callbacks::{Callbacks, Event, LogLevel, logv};
@@ -45,7 +45,7 @@ use crate::signing::{
 use crate::tar;
 use crate::util::{
 	self, ArchiveFgets, DataBlocks, Entry, PATH_MAX, S_IFDIR, S_IFMT,
-	get_fullpath, hash_sdbm, makepath, parsedate, splitname, strerror,
+	alpm_access, get_fullpath, hash_sdbm, makepath, parsedate, splitname,
 	strtoofft, until_nul,
 };
 
@@ -125,16 +125,9 @@ pub fn sync_db_validate(
 ) -> Result<bool, Errno> {
 	let path = until_nul(path);
 	// _alpm_access(R_OK) failing with ENOENT, a dangling link exists
-	let nofollow = AtFlags::SYMLINK_NOFOLLOW;
-	if let Err(e) = accessat(CWD, path, Access::READ_OK, nofollow) {
-		let why = strerror(&io::Error::from_raw_os_error(
-			e.raw_os_error(),
-		));
-		let msg = [b"\"", path, b"\" is not readable: ", &why, b"\n"];
-		cb.log(LogLevel::Debug, &msg.concat());
-		if e == rustix::io::Errno::NOENT {
-			return Ok(false);
-		}
+	let readable = alpm_access(cb, None, path, Access::READ_OK);
+	if readable == Err(rustix::io::Errno::NOENT) {
+		return Ok(false);
 	}
 	if siglevel & SIG_DATABASE == 0 {
 		return Ok(true);

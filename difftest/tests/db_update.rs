@@ -309,7 +309,10 @@ impl Pair {
 			files: snapshot(&self.cfx.dir().join("db/sync")),
 			states: c.states(),
 		};
-		let (ret, errno, rec) = self.r.update(dbs, force);
+		let (ret, errno, mut rec) = self.r.update(dbs, force);
+		if self.setup.is_some() {
+			rec.logs.retain(|(_, m)| !sandbox_only(m));
+		}
 		let (logs, rec) = norm(rec, &self.rfx, self.sorted);
 		let r = Outcome {
 			ret,
@@ -337,6 +340,17 @@ impl Pair {
 		}
 		c
 	}
+}
+
+// the debug lines of the Rust side's sandbox (sandboxuser, landlock,
+// seccomp): only it runs sandboxed, see Pair::sandboxed
+fn sandbox_only(msg: &[u8]) -> bool {
+	let heads: [&[u8]; 3] = [
+		b"option 'sandboxuser' = ",
+		b"filesystem access has been restricted to ",
+		b"successfully restricted ",
+	];
+	heads.iter().any(|h| msg.starts_with(h))
 }
 
 fn file(body: &[u8], mtime: i64) -> Reply {
