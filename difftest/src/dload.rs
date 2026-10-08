@@ -1,7 +1,7 @@
 // C side of lib/libalpm/dload.c (_alpm_download, alpm_fetch_pkgurl,
 // _alpm_dload_payload_reset) and the util.c download helpers
 // (_alpm_download_dir_setup, _alpm_remove_temporary_download_dir,
-// _alpm_filecache_find/setup), plus the scripted HTTP/1.1 server both
+// _alpm_filecache_find/setup), plus the scripted HTTP server both
 // sides download from.
 //
 // a CDload is one alpm_initialize'd handle holding the ALPM lock, with
@@ -687,6 +687,10 @@ pub enum Reply {
 	},
 	// that status with a Location
 	Redirect(u16, String),
+	// 200 with these header lines and a Content-Length
+	Headers(Vec<String>, Vec<u8>),
+	// 200 without Content-Length: the body ends with the connection
+	Unsized(Vec<u8>),
 	// these bytes as the whole response
 	Raw(Vec<u8>),
 	// close without a response
@@ -702,6 +706,7 @@ pub struct Req {
 	pub range: Option<String>,
 	pub ims: Option<String>,
 	pub agent: Option<String>,
+	pub auth: Option<String>,
 }
 
 #[derive(Default)]
@@ -712,8 +717,27 @@ struct ServerState {
 	log: Vec<Req>,
 }
 
-// HTTP/1.1 on 127.0.0.1:<random port>, a thread per connection, one
-// response per connection (Connection: close). unknown paths get 404
+// how a Server frames its connections
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Style {
+	// HTTP/1.1 with "Connection: close", one response per connection
+	Close,
+	// HTTP/1.1 without "Connection: close", closed after one response
+	// anyway: pactest's pmserve, keep-alive promised and not kept
+	Drop,
+	// HTTP/1.1 keep-alive: requests served on one connection until the
+	// client closes it, a response that cannot be framed, or 1 s idle
+	KeepAlive,
+	// HTTP/1.0 without keep-alive, one response per connection
+	Http10,
+	// KeepAlive whose kept connections die: a later request on one is
+	// read, not logged, and the connection closed without a reply (a
+	// keep-alive timeout racing the client's reuse)
+	Stale,
+}
+
+// 127.0.0.1:<random port>, a thread per connection, framed by its Style
+// (one response per connection unless KeepAlive). unknown paths get 404
 pub struct Server {
 	port: u16,
 	state: Arc<Mutex<ServerState>>,
@@ -727,8 +751,8 @@ fn find_head_end(buf: &[u8]) -> Option<usize> {
 	buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
-fn read_request(s: &mut TcpStream) -> Option<Req> {
-	s.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+fn read_request(s: &mut TcpStream, wait: Duration) -> Option<Req> {
+	s.set_read_timeout(Some(wait)).ok()?;
 	let mut buf = Vec::new();
 	let mut chunk = [0u8; 4096];
 	while find_head_end(&buf).is_none() && buf.len() < 65536 {
@@ -746,6 +770,7 @@ fn read_request(s: &mut TcpStream) -> Option<Req> {
 		range: None,
 		ims: None,
 		agent: None,
+		auth: None,
 	};
 	for l in lines {
 		let Some((k, v)) = l.split_once(':') else {
@@ -756,14 +781,22 @@ fn read_request(s: &mut TcpStream) -> Option<Req> {
 			"range" => req.range = v,
 			"if-modified-since" => req.ims = v,
 			"user-agent" => req.agent = v,
+			"authorization" => req.auth = v,
 			_ => {}
 		}
 	}
 	Some(req)
 }
 
-fn head(status: &str, extra: &[String]) -> Vec<u8> {
-	let mut h = format!("HTTP/1.1 {status}\r\nConnection: close\r\n");
+fn head(style: Style, status: &str, extra: &[String]) -> Vec<u8> {
+	let ver = match style {
+		Style::Http10 => "HTTP/1.0",
+		_ => "HTTP/1.1",
+	};
+	let mut h = format!("{ver} {status}\r\n");
+	if style == Style::Close {
+		h.push_str("Connection: close\r\n");
+	}
 	for e in extra {
 		h.push_str(e);
 		h.push_str("\r\n");
@@ -791,13 +824,17 @@ fn status_text(code: u16) -> &'static str {
 	}
 }
 
+// true when the response was framed whole and the connection can serve
+// another request
 fn respond(
 	s: &mut TcpStream,
+	style: Style,
 	req: &Req,
 	reply: Reply,
 	stalls: &AtomicUsize,
 	peak: &AtomicUsize,
-) {
+) -> bool {
+	let head = |status: &str, extra: &[String]| head(style, status, extra);
 	let r = match reply {
 		Reply::File {
 			body,
@@ -815,8 +852,7 @@ fn respond(
 						"304 Not Modified",
 						&extra,
 					);
-					let _ = s.write_all(&h);
-					return;
+					return s.write_all(&h).is_ok();
 				}
 			}
 			let from = req
@@ -877,7 +913,9 @@ fn respond(
 		}
 		Reply::Truncated { body, sent } => {
 			let extra = [format!("Content-Length: {}", body.len())];
-			[head("200 OK", &extra), body[..sent].to_vec()].concat()
+			let r = [head("200 OK", &extra), body[..sent].to_vec()];
+			let _ = s.write_all(&r.concat());
+			return false;
 		}
 		Reply::Chunked { body, cut } => {
 			let extra = ["Transfer-Encoding: chunked".to_string()];
@@ -887,9 +925,11 @@ fn respond(
 				out.extend_from_slice(c);
 				out.extend(b"\r\n");
 			}
-			if !cut {
-				out.extend(b"0\r\n\r\n");
+			if cut {
+				let _ = s.write_all(&out);
+				return false;
 			}
+			out.extend(b"0\r\n\r\n");
 			out
 		}
 		Reply::Stall {
@@ -903,17 +943,14 @@ fn respond(
 				[head("200 OK", &extra), body[..at].to_vec()]
 					.concat();
 			if s.write_all(&first).is_err() {
-				return;
+				return false;
 			}
 			let _ = s.flush();
 			let now = stalls.fetch_add(1, Ordering::SeqCst) + 1;
 			peak.fetch_max(now, Ordering::SeqCst);
 			thread::sleep(pause);
 			stalls.fetch_sub(1, Ordering::SeqCst);
-			if finish {
-				let _ = s.write_all(&body[at..]);
-			}
-			return;
+			return finish && s.write_all(&body[at..]).is_ok();
 		}
 		Reply::Redirect(code, to) => {
 			let extra = [
@@ -922,18 +959,75 @@ fn respond(
 			];
 			head(&format!("{code} {}", status_text(code)), &extra)
 		}
-		Reply::Raw(b) => b,
+		Reply::Headers(mut extra, body) => {
+			extra.push(format!("Content-Length: {}", body.len()));
+			[head("200 OK", &extra), body].concat()
+		}
+		Reply::Unsized(body) => {
+			let _ = s.write_all(
+				&[head("200 OK", &[]), body].concat(),
+			);
+			return false;
+		}
+		// framing unknown
+		Reply::Raw(b) => {
+			let _ = s.write_all(&b);
+			return false;
+		}
 		Reply::Hang(d) => {
 			thread::sleep(d);
-			return;
+			return false;
 		}
-		Reply::Close => return,
+		Reply::Close => return false,
 	};
-	let _ = s.write_all(&r);
+	s.write_all(&r).is_ok()
+}
+
+// the reply for a request, logged and counted
+fn route(st: &Mutex<ServerState>, req: &Req) -> Reply {
+	let mut g = st.lock().unwrap();
+	g.log.push(req.clone());
+	let n = g.hits.entry(req.path.clone()).or_default();
+	let i = *n;
+	*n += 1;
+	match g.routes.get(&req.path) {
+		Some(r) => r[i.min(r.len() - 1)].clone(),
+		None => Reply::Status(404, b"<html>404</html>\n".to_vec()),
+	}
+}
+
+// one connection: 5 s for the first request, 1 s for a kept-alive one
+fn serve(
+	mut s: TcpStream,
+	style: Style,
+	st: &Mutex<ServerState>,
+	stalls: &AtomicUsize,
+	peak: &AtomicUsize,
+) {
+	let mut wait = Duration::from_secs(5);
+	let mut first = true;
+	while let Some(req) = read_request(&mut s, wait) {
+		if style == Style::Stale && !first {
+			break;
+		}
+		let reply = route(st, &req);
+		let more = respond(&mut s, style, &req, reply, stalls, peak);
+		if !more || !matches!(style, Style::KeepAlive | Style::Stale) {
+			break;
+		}
+		first = false;
+		wait = Duration::from_secs(1);
+	}
+	let _ = s.flush();
+	let _ = s.shutdown(Shutdown::Both);
 }
 
 impl Server {
 	pub fn start() -> Server {
+		Server::start_styled(Style::Close)
+	}
+
+	pub fn start_styled(style: Style) -> Server {
 		let l = TcpListener::bind("127.0.0.1:0").unwrap();
 		let port = l.local_addr().unwrap().port();
 		let state = Arc::new(Mutex::new(ServerState::default()));
@@ -953,7 +1047,7 @@ impl Server {
 				if sp.load(Ordering::SeqCst) {
 					break;
 				}
-				let Ok(mut s) = conn else {
+				let Ok(s) = conn else {
 					continue;
 				};
 				let (st, act, pk) =
@@ -961,32 +1055,7 @@ impl Server {
 				let stl = stl.clone();
 				thread::spawn(move || {
 					act.fetch_add(1, Ordering::SeqCst);
-					if let Some(req) = read_request(&mut s)
-					{
-						let reply =
-							{
-								let mut g = st
-									.lock()
-									.unwrap(
-									);
-								g.log.push(req
-									.clone(
-									));
-								let n = g.hits.entry(req.path.clone()).or_default();
-								let i = *n;
-								*n += 1;
-								match g.routes.get(&req.path) {
-								Some(r) => r[i.min(r.len() - 1)].clone(),
-								None => Reply::Status(404, b"<html>404</html>\n".to_vec()),
-							}
-							};
-						respond(
-							&mut s, &req, reply,
-							&stl, &pk,
-						);
-					}
-					let _ = s.flush();
-					let _ = s.shutdown(Shutdown::Both);
+					serve(s, style, &st, &stl, &pk);
 					act.fetch_sub(1, Ordering::SeqCst);
 				});
 			}

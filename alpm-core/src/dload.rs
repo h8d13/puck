@@ -628,11 +628,6 @@ const TOO_SLOW: &str = "Operation too slow. \
 
 // the curl error for a failed request (no response)
 fn send_error(e: &reqwest::Error, url: &Url, start: Instant) -> Fail {
-	if e.is_redirect() {
-		return failed(format!(
-			"Maximum ({MAX_REDIRS}) redirects followed"
-		));
-	}
 	let ms = start.elapsed().as_millis();
 	if e.is_connect() && e.is_timeout() {
 		return failed(format!(
@@ -660,6 +655,74 @@ fn send_error(e: &reqwest::Error, url: &Url, start: Instant) -> Fail {
 		src = s.source();
 	}
 	failed(format!("Recv failure: {e}"))
+}
+
+// the schemes curl 8.22 knows besides http(s) (curl -V, Arch's build).
+// CURLPROTO_REDIR lets a redirect reach ftp and ftps (unsupported here
+// like a first url), the others are disabled; unknown ones do not parse
+const CURL_SCHEMES: &[&str] = &[
+	"dict", "file", "ftp", "ftps", "gopher", "gophers", "imap", "imaps",
+	"ipfs", "ipns", "mqtt", "mqtts", "pop3", "pop3s", "rtsp", "scp",
+	"sftp", "smtp", "smtps", "telnet", "tftp", "ws", "wss",
+];
+
+// a url this downloader can request: http(s) and a resolving host,
+// checked before every hop (reqwest's errors do not tell dns from connect)
+fn ensure_fetchable(url: &Url) -> Result<(), Fail> {
+	if !matches!(url.scheme(), "http" | "https") {
+		let m = format!("Protocol \"{}\" not supported", url.scheme());
+		return Err(failed(m));
+	}
+	let host = url.host_str().unwrap_or_default();
+	let port = url.port_or_known_default().unwrap_or(80);
+	if (host, port).to_socket_addrs().is_err() {
+		let m = format!("Could not resolve host: {host}");
+		return Err((Code::Resolve, m.into_bytes()));
+	}
+	Ok(())
+}
+
+// curl's follow: any 3xx with a non-empty Location, resolved against the
+// url it answered. None keeps the response
+fn location(resp: &Response, url: &Url) -> Option<Result<Url, Fail>> {
+	if !resp.status().is_redirection() {
+		return None;
+	}
+	let loc = header_bytes(resp, header::LOCATION)?;
+	if loc.is_empty() {
+		return None;
+	}
+	let parse = "The redirect target URL could not be parsed";
+	let next = std::str::from_utf8(loc).ok().and_then(|s| url.join(s).ok());
+	let Some(next) = next else {
+		let m = format!("{parse}: Malformed input to a URL function");
+		return Some(Err(failed(m)));
+	};
+	let scheme = next.scheme();
+	if matches!(scheme, "http" | "https" | "ftp" | "ftps") {
+		return Some(Ok(next));
+	}
+	let m = match CURL_SCHEMES.contains(&scheme) {
+		true => format!(
+			"Protocol \"{scheme}\" is disabled (in redirect)"
+		),
+		false => format!("{parse}: Unsupported URL scheme"),
+	};
+	Some(Err(failed(m)))
+}
+
+// the url a hop is sent to: userinfo of the first url only on the same
+// scheme, host and port (curl's Curl_auth_allowed_to_host)
+fn with_auth(first: &Url, url: &Url) -> Url {
+	let mut out = url.clone();
+	let same = first.scheme() == url.scheme()
+		&& first.host() == url.host()
+		&& first.port_or_known_default() == url.port_or_known_default();
+	if same && url.username().is_empty() && url.password().is_none() {
+		let _ = out.set_username(first.username());
+		let _ = out.set_password(first.password());
+	}
+	out
 }
 
 // file:// url to a path (url's rules: localhost or no host, %XX
@@ -798,35 +861,49 @@ impl Worker {
 		req
 	}
 
+	// CURLOPT_FOLLOWLOCATION with CURLOPT_MAXREDIRS: the response of the
+	// last url, every hop's code kept like the header callback does
+	fn follow(
+		&self,
+		job: &Job,
+		xfer: &mut Transfer,
+		first: Url,
+	) -> Result<Response, Fail> {
+		let start = Instant::now();
+		let mut url = first.clone();
+		let mut follows = 0;
+		loop {
+			ensure_fetchable(&url)?;
+			let req = self.request(job, &with_auth(&first, &url));
+			let resp = req.send();
+			let resp =
+				resp.map_err(|e| send_error(&e, &url, start))?;
+			xfer.respcode = i64::from(resp.status().as_u16());
+			let Some(next) = location(&resp, &url) else {
+				if url != first {
+					let eff = url.as_str().as_bytes();
+					xfer.effective_url = eff.to_vec();
+				}
+				return Ok(resp);
+			};
+			if follows == MAX_REDIRS {
+				return Err(failed(format!(
+					"Maximum ({MAX_REDIRS}) redirects followed"
+				)));
+			}
+			follows += 1;
+			url = next?;
+		}
+	}
+
 	fn http(&self, job: &mut Job, xfer: &mut Transfer) -> Result<(), Fail> {
 		self.progress(job, xfer.respcode, 0, 0)?;
 		let bad = "URL rejected: Malformed input to a URL function";
 		let s = std::str::from_utf8(&job.url)
 			.map_err(|_| failed(bad))?;
 		let url = Url::parse(s).map_err(|_| failed(bad))?;
-		if !matches!(url.scheme(), "http" | "https") {
-			let m = format!(
-				"Protocol \"{}\" not supported",
-				url.scheme()
-			);
-			return Err(failed(m));
-		}
-		// resolved first: reqwest's errors do not tell dns from connect
-		let host = url.host_str().unwrap_or_default().to_string();
-		let port = url.port_or_known_default().unwrap_or(80);
-		if (host.as_str(), port).to_socket_addrs().is_err() {
-			let m = format!("Could not resolve host: {host}");
-			return Err((Code::Resolve, m.into_bytes()));
-		}
-		let start = Instant::now();
-		let resp = self.request(job, &url).send();
-		let resp = resp.map_err(|e| send_error(&e, &url, start))?;
-		let status = i64::from(resp.status().as_u16());
-		xfer.respcode = status;
-		if resp.url() != &url {
-			xfer.effective_url =
-				resp.url().as_str().as_bytes().to_vec();
-		}
+		let resp = self.follow(job, xfer, url)?;
+		let status = xfer.respcode;
 		// Last-Modified is only read from 2xx responses
 		let mut timeofdoc = 0;
 		if (200..300).contains(&status)
@@ -1016,12 +1093,20 @@ impl Worker {
 	}
 }
 
+// no idle pool: a server that answers HTTP/1.1 without "Connection: close"
+// and then closes (pactest's server, after any response) leaves a dead
+// pooled connection, which hyper writes the next request (a redirect hop
+// or the .sig) to and fails with an empty reply. curl retries such a
+// reused connection on a fresh one when it died before any byte
+// (Curl_retry_request); reqwest cannot tell a reused connection from a
+// fresh one, so every request gets its own and no retry is ever needed
 fn build_client(settings: &Settings) -> reqwest::Result<Client> {
 	let timeout = (!settings.disable_dl_timeout).then_some(LOW_SPEED_TIME);
 	Client::builder()
 		.timeout(timeout)
 		.connect_timeout(CONNECT_TIMEOUT)
-		.redirect(Policy::limited(MAX_REDIRS))
+		.pool_max_idle_per_host(0)
+		.redirect(Policy::none())
 		.referer(false)
 		.tcp_keepalive(KEEPALIVE)
 		.tcp_keepalive_interval(KEEPALIVE)

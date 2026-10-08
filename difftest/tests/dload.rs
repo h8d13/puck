@@ -16,8 +16,9 @@ use std::time::Duration;
 use alpm_core::callbacks::{DownloadEvent, LogLevel};
 use alpm_core::dload::{DownloadState, Downloader, Payload, Settings};
 use difftest::{
-	CDload, Fetcher, Record, Recorder, Reply, Req, Rng, Server, TempRoot,
-	closed_port, iters, payload_layout_ok, test_helper, umask_lock,
+	CDload, Fetcher, Record, Recorder, Reply, Req, Rng, Server, Style,
+	TempRoot, closed_port, iters, payload_layout_ok, test_helper,
+	umask_lock,
 };
 
 const T0: i64 = 1_000_000_000;
@@ -251,7 +252,7 @@ fn payload_mirror_layout() {
 
 // a named case owning its servers
 struct Scn {
-	name: &'static str,
+	name: String,
 	servers: Vec<Server>,
 	payloads: MkPayloads,
 	setup: Box<dyn Fn(&Path)>,
@@ -261,7 +262,7 @@ struct Scn {
 
 impl Scn {
 	fn new(
-		name: &'static str,
+		name: impl Into<String>,
 		servers: Vec<Server>,
 		payloads: impl Fn(&[u8], &[Server]) -> Vec<Payload> + 'static,
 	) -> Scn {
@@ -298,7 +299,7 @@ impl Scn {
 				.collect()
 		};
 		Scn {
-			name,
+			name: name.into(),
 			servers,
 			payloads: Box::new(f),
 			setup: Box::new(no_setup),
@@ -332,7 +333,11 @@ impl Scn {
 }
 
 fn srv(routes: &[(&str, Vec<Reply>)]) -> Server {
-	let s = Server::start();
+	styled(Style::Close, routes)
+}
+
+fn styled(style: Style, routes: &[(&str, Vec<Reply>)]) -> Server {
+	let s = Server::start_styled(style);
 	for (p, r) in routes {
 		s.route(p, r.clone());
 	}
@@ -1142,15 +1147,437 @@ fn explain(c: &Outcome, r: &Outcome) -> String {
 
 #[test]
 fn fixed_cases() {
+	compare_all(scenarios());
+}
+
+fn compare_all(scns: Vec<Scn>) {
 	let mut bad = Vec::new();
-	for s in scenarios() {
+	for s in scns {
 		let (c, r) = s.run();
 		if c != r {
 			eprintln!("== {}\n{}", s.name, explain(&c, &r));
-			bad.push(s.name);
+			bad.push(s.name.clone());
 		}
 	}
 	assert!(bad.is_empty(), "mismatches: {bad:?}");
+}
+
+const STYLES: [(Style, &str); 5] = [
+	(Style::Close, "close"),
+	(Style::Drop, "drop"),
+	(Style::KeepAlive, "keep-alive"),
+	(Style::Http10, "http/1.0"),
+	(Style::Stale, "stale"),
+];
+
+fn redir(code: u16, to: &str) -> Reply {
+	Reply::Redirect(code, to.to_string())
+}
+
+fn with_sig(mut p: Payload) -> Vec<Payload> {
+	p.download_signature = true;
+	vec![p]
+}
+
+// redirects per connection style: Drop is pactest's server, where a
+// connection kept for the next hop or the .sig is already closed
+fn styled_redirects(out: &mut Vec<Scn>, style: Style, sname: &str) {
+	let b = body(3000, 4);
+	let sig = body(64, 5);
+	for code in [301, 302, 303, 307, 308] {
+		let s = styled(
+			style,
+			&[
+				(
+					"/core.db",
+					vec![redir(code, "/real/core.db")],
+				),
+				("/real/core.db", vec![file(&b)]),
+				("/real/core.db.sig", vec![file(&sig)]),
+			],
+		);
+		out.push(Scn::new(
+			format!("{sname} {code}"),
+			vec![s],
+			|d, _| with_sig(db_payload(d, "core.db", &[v("@0")])),
+		));
+	}
+	// upgrade-download-pkg-and-sig-with-filename: the .sig url comes
+	// from the effective url only when its name has .pkg (or the dbext)
+	let s = styled(
+		style,
+		&[
+			("/redir.pkg", vec![redir(303, "/redir-dest.pkg")]),
+			("/redir-dest.pkg", vec![file(&b)]),
+			("/redir-dest.pkg.sig", vec![file(&sig)]),
+			("/cdn.pkg", vec![redir(303, "/cdn-1")]),
+			("/cdn.pkg.sig", vec![redir(303, "/cdn-2")]),
+			("/cdn-1", vec![file(&b[..2000])]),
+			("/cdn-2", vec![file(&sig[..32])]),
+			("/cdn-1.sig", vec![file(&sig[..16])]),
+		],
+	);
+	out.push(Scn::new(format!("{sname} pkg sig"), vec![s], |d, _| {
+		let mut ps = with_sig(pkg_payload(
+			d,
+			"redir.pkg",
+			v("@0/redir.pkg"),
+		));
+		ps.extend(with_sig(pkg_payload(d, "cdn.pkg", v("@0/cdn.pkg"))));
+		ps
+	}));
+	let s = styled(
+		style,
+		&[
+			("/r0", vec![redir(302, "/r1")]),
+			("/r1", vec![redir(307, "r2")]),
+			("/r2", vec![redir(308, "/x/r3")]),
+			("/x/r3", vec![file(&b)]),
+		],
+	);
+	out.push(Scn::new(format!("{sname} chain"), vec![s], |d, _| {
+		vec![pkg_payload(d, "x", v("@0/r0"))]
+	}));
+	let s = styled(
+		style,
+		&[
+			("/core.db", vec![Reply::Unsized(b.clone())]),
+			("/core.db.sig", vec![Reply::Unsized(sig.clone())]),
+		],
+	);
+	out.push(Scn::new(format!("{sname} unsized"), vec![s], |d, _| {
+		with_sig(db_payload(d, "core.db", &[v("@0")]))
+	}));
+	let s = styled(style, &[("/x", vec![Reply::Unsized(b.clone())])]);
+	out.push(Scn::new(
+		format!("{sname} unsized, max"),
+		vec![s],
+		|d, _| {
+			let mut p = pkg_payload(d, "x", v("@0/x"));
+			p.max_size = 100;
+			vec![p]
+		},
+	));
+	// two files and their .sigs in a row: curl keeps the connection
+	let s = styled(
+		style,
+		&[
+			("/core.db", vec![file(&b)]),
+			("/core.db.sig", vec![file(&sig)]),
+			("/extra.db", vec![redir(302, "/real/extra.db")]),
+			("/real/extra.db", vec![file(&b[..1000])]),
+		],
+	);
+	out.push(Scn::new(
+		format!("{sname} two in a row"),
+		vec![s],
+		|d, _| {
+			let mut ps =
+				with_sig(db_payload(d, "core.db", &[v("@0")]));
+			ps.extend(with_sig(db_payload(
+				d,
+				"extra.db",
+				&[v("@0")],
+			)));
+			ps
+		},
+	));
+	let s = styled(
+		style,
+		&[
+			("/core.db", vec![redir(302, "/gone")]),
+			("/gone", vec![st(404)]),
+		],
+	);
+	let m = styled(style, &[("/core.db", vec![file(&b)])]);
+	out.push(Scn::new(
+		format!("{sname} redirect to 404, mirror"),
+		vec![s, m],
+		|d, _| vec![db_payload(d, "core.db", &[v("@0"), v("@1")])],
+	));
+}
+
+// redirect loops end at curl's 10 follows. on a Drop or Stale server
+// every hop reuses a dead connection in curl: see drop_loop_divergence
+fn redirect_loops(out: &mut Vec<Scn>, style: Style, sname: &str) {
+	let s = styled(
+		style,
+		&[
+			("/a", vec![redir(302, "/b")]),
+			("/b", vec![redir(301, "/a")]),
+		],
+	);
+	out.push(Scn::new(format!("{sname} loop"), vec![s], |d, _| {
+		vec![pkg_payload(d, "x", v("@0/a"))]
+	}));
+	let s = styled(style, &[("/s", vec![redir(303, "/s")])]);
+	out.push(Scn::new(format!("{sname} self loop"), vec![s], |d, _| {
+		vec![pkg_payload(d, "x", v("@0/s"))]
+	}));
+}
+
+// redirects to other hosts, odd redirect responses, Content-Disposition
+fn other_redirects(out: &mut Vec<Scn>) {
+	let b = body(3000, 6);
+	let sig = body(64, 7);
+	for (style, sname) in [STYLES[0], STYLES[1]] {
+		let s0 = Server::start_styled(style);
+		let s1 = styled(
+			style,
+			&[
+				("/mirror/core.db", vec![file(&b)]),
+				("/mirror/core.db.sig", vec![file(&sig)]),
+				("/blob/7", vec![file(&b)]),
+				("/blob/8", vec![file(&sig[..20])]),
+			],
+		);
+		let to = |p: &str| format!("{}{p}", s1.base());
+		s0.route("/core.db", vec![redir(302, &to("/mirror/core.db"))]);
+		s0.route("/extra.db", vec![redir(303, &to("/blob/7"))]);
+		s0.route("/extra.db.sig", vec![redir(303, &to("/blob/8"))]);
+		out.push(Scn::new(
+			format!("{sname} other host"),
+			vec![s0, s1],
+			|d, _| {
+				let mut ps = with_sig(db_payload(
+					d,
+					"core.db",
+					&[v("@0")],
+				));
+				ps.extend(with_sig(db_payload(
+					d,
+					"extra.db",
+					&[v("@0")],
+				)));
+				ps
+			},
+		));
+	}
+	let dead = format!("http://127.0.0.1:{}/core.db", closed_port());
+	let s = srv(&[("/core.db", vec![redir(302, &dead)])]);
+	let m = srv(&[("/core.db", vec![file(&b)])]);
+	out.push(Scn::new("redirect to closed port", vec![s, m], |d, _| {
+		vec![db_payload(d, "core.db", &[v("@0"), v("@1")])]
+	}));
+	let raw = |h: &str| Reply::Raw(h.as_bytes().to_vec());
+	let no_loc = "HTTP/1.1 302 Found\r\nConnection: close\r\n\
+		Content-Length: 0\r\n\r\n";
+	let s = srv(&[("/core.db", vec![raw(no_loc)])]);
+	out.push(Scn::new("redirect without location", vec![s], |d, _| {
+		vec![db_payload(d, "core.db", &[v("@0")])]
+	}));
+	let s = srv(&[(
+		"/core.db",
+		vec![redir(302, "file:///nonexistent/core.db")],
+	)]);
+	out.push(Scn::new("redirect to file://", vec![s], |d, _| {
+		vec![db_payload(d, "core.db", &[v("@0")])]
+	}));
+	// disabled and unknown schemes
+	for to in ["foo://x/core.db", "ws://nohost.invalid/", "dict://x/d"] {
+		let s = srv(&[("/core.db", vec![redir(302, to)])]);
+		out.push(Scn::new(
+			format!("redirect to {to}"),
+			vec![s],
+			|d, _| vec![db_payload(d, "core.db", &[v("@0")])],
+		));
+	}
+	let s = srv(&[(
+		"/core.db",
+		vec![redir(302, "http://nohost.invalid/core.db")],
+	)]);
+	let m = srv(&[("/core.db", vec![file(&b)])]);
+	out.push(Scn::new("redirect to unknown host", vec![s, m], |d, _| {
+		vec![db_payload(d, "core.db", &[v("@0"), v("@1")])]
+	}));
+	// 3xx codes reqwest does not follow
+	for code in [300, 304, 305, 306, 399] {
+		let s = srv(&[
+			("/core.db", vec![redir(code, "/real/core.db")]),
+			("/real/core.db", vec![file(&b)]),
+		]);
+		out.push(Scn::new(
+			format!("redirect {code}"),
+			vec![s],
+			|d, _| vec![db_payload(d, "core.db", &[v("@0")])],
+		));
+	}
+	let moved = "HTTP/1.1 301 Moved Permanently\r\nConnection: close\r\n\
+		Location: /real/core.db\r\nContent-Length: 11\r\n\r\nmoved here\n";
+	let s = srv(&[
+		("/core.db", vec![raw(moved)]),
+		("/real/core.db", vec![file(&b)]),
+	]);
+	out.push(Scn::new("redirect with a body", vec![s], |d, _| {
+		vec![db_payload(d, "core.db", &[v("@0")])]
+	}));
+	let moved10 = "HTTP/1.0 302 Found\r\nLocation: /real/core.db\r\n\
+		\r\nmoved here, no length\n";
+	let s = srv(&[
+		("/core.db", vec![raw(moved10)]),
+		("/real/core.db", vec![file(&b)]),
+	]);
+	out.push(Scn::new("http/1.0 redirect, unsized", vec![s], |d, _| {
+		vec![db_payload(d, "core.db", &[v("@0")])]
+	}));
+	// libalpm ignores Content-Disposition: names come from the url
+	let cd = |n: &str| {
+		vec![format!(
+			"Content-Disposition: attachment; filename=\"{n}\""
+		)]
+	};
+	let s = styled(
+		Style::Drop,
+		&[
+			("/cd.pkg", vec![redir(303, "/cdn-3")]),
+			("/cd.pkg.sig", vec![redir(303, "/cdn-4")]),
+			(
+				"/cdn-3",
+				vec![Reply::Headers(cd("alt.pkg"), b.clone())],
+			),
+			(
+				"/cdn-4",
+				vec![Reply::Headers(
+					cd("alt.pkg.sig"),
+					sig.clone(),
+				)],
+			),
+			(
+				"/core.db",
+				vec![Reply::Headers(cd("x.db"), b.clone())],
+			),
+			(
+				"/core.db.sig",
+				vec![Reply::Headers(cd("y"), sig.clone())],
+			),
+		],
+	);
+	out.push(Scn::new("content-disposition", vec![s], |d, _| {
+		let mut ps = with_sig(pkg_payload(d, "cd.pkg", v("@0/cd.pkg")));
+		ps.extend(with_sig(db_payload(d, "core.db", &[v("@0")])));
+		ps
+	}));
+}
+
+#[test]
+fn redirect_cases() {
+	let mut out = Vec::new();
+	for (style, sname) in STYLES {
+		styled_redirects(&mut out, style, sname);
+		if !matches!(style, Style::Drop | Style::Stale) {
+			redirect_loops(&mut out, style, sname);
+		}
+	}
+	other_redirects(&mut out);
+	compare_all(out);
+}
+
+// pinned divergence: curl counts a reconnect for every hop that reused a
+// connection the server had closed, without reset between hops
+// (Curl_retry_request, at most 5), so on a server that promises
+// keep-alive and closes, the 6th same-host hop fails. the port never
+// reuses a connection and follows all 10
+#[test]
+fn drop_loop_divergence() {
+	let s = styled(
+		Style::Drop,
+		&[
+			("/a", vec![redir(302, "/b")]),
+			("/b", vec![redir(301, "/a")]),
+		],
+	);
+	let scn = Scn::new("drop loop", vec![s], |d, _| {
+		vec![pkg_payload(d, "x", v("@0/a"))]
+	});
+	let (c, r) = scn.run();
+	let tail = |o: &Outcome| {
+		let m = String::from_utf8_lossy(&o.logs[0].1).into_owned();
+		(o.requests.len(), m.split(" : ").nth(1).map(str::to_string))
+	};
+	let died = "Connection died, tried 5 times before giving up\n";
+	let max = "Maximum (10) redirects followed\n";
+	assert_eq!(tail(&c), (6, Some(died.to_string())));
+	assert_eq!(tail(&r), (11, Some(max.to_string())));
+	assert_eq!((c.ret, c.files.len()), (r.ret, r.files.len()));
+}
+
+// Rust only (curl's CURLAUTH_ANY waits for a 401): url credentials go
+// along a redirect on the same scheme, host and port, not elsewhere
+#[test]
+fn redirect_auth() {
+	let b = body(500, 8);
+	let other = srv(&[("/core.db", vec![file(&b)])]);
+	let s = srv(&[
+		("/same", vec![redir(302, "/core.db")]),
+		("/core.db", vec![file(&b)]),
+		(
+			"/away",
+			vec![redir(302, &format!("{}/core.db", other.base()))],
+		),
+	]);
+	let creds = |p: &str| {
+		format!("http://u:p%40ss@127.0.0.1:{}{p}", s.port())
+			.into_bytes()
+	};
+	let fx = TempRoot::new("dload-auth");
+	let dir = dir_bytes(fx.dir());
+	let mut ps = vec![
+		pkg_payload(&dir, "a", creds("/same")),
+		pkg_payload(&dir, "b", creds("/away")),
+	];
+	let settings = Settings::default();
+	let mut state = DownloadState::default();
+	let mut rec = Recorder::default();
+	let mut dl = Downloader {
+		settings: &settings,
+		state: &mut state,
+		cb: &mut rec,
+		fetch: None,
+		sandbox: None,
+	};
+	assert_eq!(dl.download(&mut ps, &dir, &dir), Ok(true));
+	let auth = |s: &Server| {
+		s.requests()
+			.into_iter()
+			.map(|q| (q.path, q.auth))
+			.collect::<Vec<_>>()
+	};
+	// base64("u:p@ss")
+	let basic = Some("Basic dTpwQHNz".to_string());
+	let want = vec![
+		("/same".to_string(), basic.clone()),
+		("/core.db".to_string(), basic.clone()),
+		("/away".to_string(), basic),
+	];
+	assert_eq!(auth(&s), want);
+	assert_eq!(auth(&other), vec![("/core.db".to_string(), None)]);
+}
+
+// pinned divergence: a chunked HTTP/1.0 response is decoded by curl and
+// a parse error to hyper (RFC 9112 6.1: faulty framing), no hyper option
+// allows it
+#[test]
+fn http10_chunked_divergence() {
+	let b = body(3000, 9);
+	let s = styled(
+		Style::Http10,
+		&[(
+			"/core.db",
+			vec![Reply::Chunked {
+				body: b.clone(),
+				cut: false,
+			}],
+		)],
+	);
+	let scn = Scn::new("http/1.0 chunked", vec![s], |d, _| {
+		vec![db_payload(d, "core.db", &[v("@0")])]
+	});
+	let (c, r) = scn.run();
+	assert_eq!((c.ret, c.logs.len()), (0, 0));
+	assert_eq!(c.files[0].1, b);
+	assert_eq!((r.ret, r.files.len()), (-1, 0));
+	let m = String::from_utf8_lossy(&r.logs[0].1).into_owned();
+	assert!(m.contains(" : Recv failure: "), "{m}");
 }
 
 // the fetchcb path: payloads over cache servers/servers or one url, a
@@ -1331,77 +1758,140 @@ fn fetch_pkgurl_cases() {
 			true,
 		),
 	];
-	let both = cases.iter().flat_map(|c| [(c, false), (c, true)]);
-	for ((name, urls, level, cached), sandboxed) in both {
-		let (level, cached) = (*level, *cached);
-		let _umask = umask_lock();
-		let fx = TempRoot::new("dload-pkgurl");
-		let side = |tag: &str| {
-			let base = fx.dir().join(tag);
-			fs::create_dir(&base).unwrap();
-			let cache = base.join("cache");
-			if cached {
-				fs::create_dir(&cache).unwrap();
-				fs::write(
-					cache.join("c-1-1-any.pkg.tar.zst"),
-					b"cached",
-				)
-				.unwrap();
-			}
-			vec![
-				dir_bytes(&base.join("missing")),
-				dir_bytes(&cache),
-			]
-		};
-		let (cdirs, rdirs) = (side("c"), side("r"));
-		let c = {
-			let mut h = CDload::new(&fx);
-			h.set_remote_file_siglevel(level);
-			for d in &cdirs {
-				h.add_cachedir(d);
-			}
-			let (ret, errno, got, rec) = h.fetch_pkgurl(urls);
-			let dirs = h.cachedirs();
-			pkgurl_outcome(
-				ret,
-				errno,
-				got,
-				rec,
-				dirs,
-				&fx.dir().join("c"),
-				&s,
-			)
-		};
-		let r = {
-			let settings = Settings::default();
-			let mut state = DownloadState::default();
-			let mut rec = Recorder::default();
-			let mut helper = test_helper(b"root", false, false);
-			let mut dl = Downloader {
-				settings: &settings,
-				state: &mut state,
-				cb: &mut rec,
-				fetch: None,
-				sandbox: sandboxed.then_some(&mut helper as _),
-			};
-			let mut dirs = rdirs.clone();
-			let (ret, errno, got) =
-				match dl.fetch_pkgurl(&mut dirs, level, urls) {
-					Ok(g) => (0, 0, g),
-					Err(e) => (-1, e as c_int, Vec::new()),
-				};
-			pkgurl_outcome(
-				ret,
-				errno,
-				got,
-				rec.0,
-				dirs,
-				&fx.dir().join("r"),
-				&s,
-			)
-		};
-		assert_eq!(c, r, "case {name}, sandboxed {sandboxed}");
+	// each case plain and through the sandbox helper (pretend root)
+	for (name, urls, level, cached) in cases {
+		for sandboxed in [false, true] {
+			compare_pkgurl(
+				&s, name, &urls, level, cached, sandboxed,
+			);
+		}
 	}
+}
+
+// upgrade-download-pkg-and-sig-with-filename's map per connection style:
+// 303s to the same names and cdn-style names, Content-Disposition, a 404
+#[test]
+fn fetch_pkgurl_redirects() {
+	let cd = |n: &str, b: &str| {
+		let h = format!(
+			"Content-Disposition: attachment; filename=\"{n}\""
+		);
+		Reply::Headers(vec![h], b.as_bytes().to_vec())
+	};
+	let txt = |b: &str| file(b.as_bytes());
+	let routes = [
+		("/simple.pkg", vec![txt("simple")]),
+		("/simple.pkg.sig", vec![cd("simple.sig-alt", "simple.sig")]),
+		("/cd.pkg", vec![cd("cd-alt.pkg", "cd")]),
+		("/cd.pkg.sig", vec![txt("cd.sig")]),
+		("/redir.pkg", vec![redir(303, "/redir-dest.pkg")]),
+		("/redir-dest.pkg", vec![txt("redir-dest")]),
+		("/redir-dest.pkg.sig", vec![txt("redir-dest.sig")]),
+		("/redir-cdn.pkg", vec![redir(303, "/cdn-1")]),
+		("/redir-cdn.pkg.sig", vec![redir(303, "/cdn-2")]),
+		("/cdn-1", vec![txt("redir-dest")]),
+		("/cdn-2", vec![txt("redir-dest.sig")]),
+		("/cd-redir-cdn.pkg", vec![redir(303, "/cdn-3")]),
+		("/cd-redir-cdn.pkg.sig", vec![redir(303, "/cdn-4")]),
+		("/cdn-3", vec![cd("cdn-alt.pkg", "cdn-alt")]),
+		("/cdn-4", vec![cd("cdn-alt.pkg.sig", "cdn-alt.sig")]),
+	];
+	let paths = [
+		"/simple.pkg",
+		"/cd.pkg",
+		"/redir.pkg",
+		"/redir-cdn.pkg",
+		"/cd-redir-cdn.pkg",
+		"/404",
+	];
+	for (style, sname) in STYLES {
+		let s = styled(style, &routes);
+		let urls: Vec<Vec<u8>> =
+			paths.iter().map(|p| s.url(p)).collect();
+		for level in [0, 1, 3] {
+			let name = format!("{sname} level {level}");
+			compare_pkgurl(&s, &name, &urls, level, false, false);
+			let name = format!("{sname} level {level}, no 404");
+			let ok = &urls[..urls.len() - 1];
+			compare_pkgurl(&s, &name, ok, level, false, false);
+		}
+	}
+}
+
+// one alpm_fetch_pkgurl call per side, from fresh cachedirs ("missing"
+// does not exist, "cache" holds c-1-1-any.pkg.tar.zst when cached)
+fn compare_pkgurl(
+	s: &Server,
+	name: &str,
+	urls: &[Vec<u8>],
+	level: c_int,
+	cached: bool,
+	sandboxed: bool,
+) {
+	let _umask = umask_lock();
+	let fx = TempRoot::new("dload-pkgurl");
+	let side = |tag: &str| {
+		let base = fx.dir().join(tag);
+		fs::create_dir(&base).unwrap();
+		let cache = base.join("cache");
+		if cached {
+			fs::create_dir(&cache).unwrap();
+			fs::write(
+				cache.join("c-1-1-any.pkg.tar.zst"),
+				b"cached",
+			)
+			.unwrap();
+		}
+		vec![dir_bytes(&base.join("missing")), dir_bytes(&cache)]
+	};
+	let (cdirs, rdirs) = (side("c"), side("r"));
+	let c = {
+		let mut h = CDload::new(&fx);
+		h.set_remote_file_siglevel(level);
+		for d in &cdirs {
+			h.add_cachedir(d);
+		}
+		let (ret, errno, got, rec) = h.fetch_pkgurl(urls);
+		let dirs = h.cachedirs();
+		pkgurl_outcome(
+			ret,
+			errno,
+			got,
+			rec,
+			dirs,
+			&fx.dir().join("c"),
+			s,
+		)
+	};
+	let r = {
+		let settings = Settings::default();
+		let mut state = DownloadState::default();
+		let mut rec = Recorder::default();
+		let mut helper = test_helper(b"root", false, false);
+		let mut dl = Downloader {
+			settings: &settings,
+			state: &mut state,
+			cb: &mut rec,
+			fetch: None,
+			sandbox: sandboxed.then_some(&mut helper as _),
+		};
+		let mut dirs = rdirs.clone();
+		let (ret, errno, got) =
+			match dl.fetch_pkgurl(&mut dirs, level, urls) {
+				Ok(g) => (0, 0, g),
+				Err(e) => (-1, e as c_int, Vec::new()),
+			};
+		pkgurl_outcome(
+			ret,
+			errno,
+			got,
+			rec.0,
+			dirs,
+			&fx.dir().join("r"),
+			s,
+		)
+	};
+	assert_eq!(c, r, "case {name}, sandboxed {sandboxed}");
 }
 
 // alpmtmp.XXXXXX names are random on both sides
@@ -1888,15 +2378,28 @@ fn fuzz_scn(rng: &mut Rng) -> Scn {
 	let bodies: Vec<Vec<u8>> = (0..npay)
 		.map(|i| body(fuzz_len(rng, 20000), i as u8))
 		.collect();
+	// KeepAlive left out: its 1 s idle close per run
+	let styles = [Style::Close, Style::Drop, Style::Http10];
+	let picks: Vec<Style> =
+		(0..nmirrors).map(|_| styles[rng.below(3)]).collect();
 	let servers: Vec<Server> =
-		(0..nmirrors).map(|_| Server::start()).collect();
+		picks.iter().map(|&st| Server::start_styled(st)).collect();
 	let bases: Vec<String> = servers.iter().map(Server::base).collect();
 	for (m, s) in servers.iter().enumerate() {
 		let other = (nmirrors > 1)
 			.then(|| bases[(m + 1) % nmirrors].as_str());
 		for (i, b) in bodies.iter().enumerate() {
 			let p = format!("/{}", names[i]);
-			s.route(&p, vec![fuzz_reply(rng, b, other, &p)]);
+			let r = match (picks[m], fuzz_reply(rng, b, other, &p))
+			{
+				// see http10_chunked_divergence
+				(
+					Style::Http10,
+					Reply::Chunked { body, .. },
+				) => Reply::Unsized(body),
+				(_, r) => r,
+			};
+			s.route(&p, vec![r]);
 			let sig = match rng.below(4) {
 				0 => st(404),
 				1 => file(&body(fuzz_len(rng, 20000), 7)),
