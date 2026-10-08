@@ -13,8 +13,8 @@ use alpm_core::callbacks::{Callbacks, LogLevel};
 use alpm_core::error::Errno;
 use alpm_core::util::{unpack, unpack_single};
 use difftest::{
-	COMPS, Comp, Node, Rng, TarNode, TempRoot, c_unpack, force_remove,
-	iters, snapshot, umask_lock, ustar_nodes, write_db,
+	COMPS, Comp, FILTERED, Node, Rng, TarNode, TempRoot, c_unpack,
+	force_remove, iters, snapshot, umask_lock, ustar_nodes, write_db,
 };
 
 fn fs_iters() -> usize {
@@ -491,7 +491,7 @@ fn compressed_cuts() {
 	let mut rng = Rng::new(0x0c07_5eed);
 	let raw = tar(&big_package());
 	let mut outcomes = std::collections::BTreeSet::new();
-	for comp in [Comp::Gzip, Comp::Bzip2, Comp::Xz, Comp::Zstd] {
+	for comp in FILTERED {
 		let data = compressed(comp, &raw);
 		for (i, n) in cuts(data.len(), &mut rng).into_iter().enumerate()
 		{

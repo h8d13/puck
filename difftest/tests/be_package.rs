@@ -7,23 +7,20 @@
 // cached packages give counts
 use std::ffi::c_int;
 use std::fs;
-use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use alpm_compress::compression::{
-	Bzip2CompressionLevel, CompressionEncoder, CompressionSettings,
-	GzipCompressionLevel, XzCompressionLevel, ZstdCompressionLevel,
-	ZstdThreads,
-};
 use alpm_core::be_package::{
 	Error, changelog, pkg_load, pkg_load_level, pkg_validate_internal,
 };
 use alpm_core::callbacks::{Callbacks, LogLevel};
 use alpm_core::package::Package;
 use alpm_core::signing::Keyring;
-use difftest::{CPkgHandle, Rng, iters, pax_record};
+use difftest::{
+	COMPS, CPkgHandle, Comp, FILTERED, Rng, compress_bytes, iters,
+	pax_record,
+};
 
 // alpm_loglevel_t and message of each log line
 type CLogs = Vec<(c_int, Vec<u8>)>;
@@ -524,43 +521,9 @@ fn ustar(entries: &[Entry]) -> Vec<u8> {
 	out
 }
 
-#[derive(Clone, Copy, Debug)]
-enum Comp {
-	None,
-	Gzip,
-	Bzip2,
-	Xz,
-	Zstd,
-}
-
-const COMPS: [Comp; 5] =
-	[Comp::None, Comp::Gzip, Comp::Bzip2, Comp::Xz, Comp::Zstd];
-
 // fast levels, the fuzz writes thousands of archives
 fn compress(path: &Path, comp: Comp, data: &[u8]) {
-	let settings = match comp {
-		Comp::None => CompressionSettings::None,
-		Comp::Gzip => CompressionSettings::Gzip {
-			compression_level: GzipCompressionLevel::new(1)
-				.unwrap(),
-		},
-		Comp::Bzip2 => CompressionSettings::Bzip2 {
-			compression_level: Bzip2CompressionLevel::new(1)
-				.unwrap(),
-		},
-		Comp::Xz => CompressionSettings::Xz {
-			compression_level: XzCompressionLevel::new(0).unwrap(),
-		},
-		Comp::Zstd => CompressionSettings::Zstd {
-			compression_level: ZstdCompressionLevel::new(1)
-				.unwrap(),
-			threads: ZstdThreads::new(1),
-		},
-	};
-	let f = fs::File::create(path).unwrap();
-	let mut enc = CompressionEncoder::new(f, &settings).unwrap();
-	enc.write_all(data).unwrap();
-	enc.finish().unwrap();
+	fs::write(path, compress_bytes(comp, data, true)).unwrap();
 }
 
 fn write_pkg(path: &Path, comp: Comp, entries: &[Entry]) {
@@ -2078,10 +2041,9 @@ fn fixed_files() {
 	.unwrap();
 	pin(&h, &path, "two gzip members", ["same", "same"]);
 
-	// gzip inside gzip: libarchive stacks filters, alpm-compress one
-	compress(&a, Comp::Gzip, &tar);
-	compress(&path, Comp::Gzip, &fs::read(&a).unwrap());
-	pin(&h, &path, "gzip in gzip", ["rust open"; 2]);
+	// gzip inside gzip: libarchive stacks filters, so does the port
+	compress(&path, Comp::GzipInGzip, &tar);
+	pin(&h, &path, "gzip in gzip", ["same"; 2]);
 }
 
 // a package over several of libarchive's 64/128 KiB filter blocks, with
@@ -2125,7 +2087,7 @@ fn compressed_cuts() {
 	let tar = ustar(&big_package());
 	let mut rng = Rng::new(0x0c07_5eed);
 	let mut errnos = std::collections::BTreeSet::new();
-	for comp in [Comp::Gzip, Comp::Bzip2, Comp::Xz, Comp::Zstd] {
+	for comp in FILTERED {
 		compress(&path, comp, &tar);
 		let data = fs::read(&path).unwrap();
 		let len = data.len();
@@ -2150,8 +2112,8 @@ fn compressed_cuts() {
 	assert!(errnos.len() >= 3, "{errnos:?}");
 }
 
-// lz4 and lzma (.tar.lz4 is a makepkg PKGEXT): libarchive reads them,
-// alpm-compress has no decoder. through the system tools when present
+// lz4 and lzma written by the system tools when present (lz4's own
+// framing, xz's lzma_alone), not libarchive's writers
 #[test]
 fn fixed_other_compressions() {
 	let fx = Fixture::new();
@@ -2181,8 +2143,7 @@ fn fixed_other_compressions() {
 		assert!(o.status.success(), "{tool}: {}", lossy(&o.stderr));
 		let path = fx.pkg(out);
 		fs::write(&path, o.stdout).unwrap();
-		// read as a plain tar, the first header fails
-		pin(&h, &path, tool, ["rust open"; 2]);
+		pin(&h, &path, tool, ["same"; 2]);
 	}
 }
 
@@ -2373,7 +2334,7 @@ fn mtree_cuts() {
 		);
 	}
 	let mut lists = std::collections::BTreeSet::new();
-	for comp in [Comp::Gzip, Comp::Bzip2, Comp::Xz, Comp::Zstd] {
+	for comp in FILTERED {
 		compress(&mtree_path, comp, text.as_bytes());
 		let data = fs::read(&mtree_path).unwrap();
 		let len = data.len();

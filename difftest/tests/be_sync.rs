@@ -17,8 +17,8 @@ use alpm_core::callbacks::{Callbacks, LogLevel};
 use alpm_core::handle::Handle;
 use alpm_core::package::Package;
 use difftest::{
-	CHandle, COMPS, CSyncDb, Comp, Rng, TarEntry, TempRoot, c_sync_db_load,
-	iters, section, tar_dir, tar_file, ustar, write_db,
+	CHandle, COMPS, CSyncDb, Comp, FILTERED, Rng, TarEntry, TempRoot,
+	c_sync_db_load, iters, section, tar_dir, tar_file, ustar, write_db,
 };
 
 // one db per iteration, a C handle each: far slower than string fuzz
@@ -1103,7 +1103,7 @@ fn compressed_cuts() {
 	let tar = ustar(&big_db());
 	let mut rng = Rng::new(0x0c07_5eed);
 	let mut errnos = std::collections::BTreeSet::new();
-	for comp in [Comp::Gzip, Comp::Bzip2, Comp::Xz, Comp::Zstd] {
+	for comp in FILTERED {
 		let fx = TempRoot::new("be-sync");
 		let p = fx.sync_file("t", ".db");
 		write_db(&p, comp, &tar);

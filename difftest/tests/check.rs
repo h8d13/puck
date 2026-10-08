@@ -10,14 +10,10 @@
 // its error text), and on the real local db's mtree files
 use std::fmt::Write as _;
 use std::fs;
-use std::io::Write;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use alpm_compress::compression::{
-	CompressionEncoder, CompressionSettings, GzipCompressionLevel,
-};
 use alpm_core::be_local::{
 	INFRQ_ALL, LocalDb, MtreeEntry, MtreeError, MtreeType, read_mtree,
 };
@@ -25,7 +21,8 @@ use alpm_core::handle::Handle;
 use alpm_core::package::Package;
 use alpm_types::Sha256Checksum;
 use difftest::{
-	CCheck, CMtreeEntry, CheckWorld, Rng, iters, set_mtime_nofollow,
+	CCheck, CMtreeEntry, CheckWorld, Comp, FILTERED, Rng, compress_bytes,
+	iters, set_mtime_nofollow,
 };
 use pacman_cli::check::{HandleEnv, check_pkg_fast, check_pkg_full};
 use pacman_cli::conf::{ColStr, Config};
@@ -113,21 +110,7 @@ const DESC: &str = "%NAME%\n{name}\n\n%VERSION%\n{version}\n\n\
 	%SIZE%\n42\n\n%VALIDATION%\npgp\n\n";
 
 fn gzip(data: &[u8]) -> Vec<u8> {
-	let settings = CompressionSettings::Gzip {
-		compression_level: GzipCompressionLevel::default(),
-	};
-	let path = std::env::temp_dir().join(format!(
-		"difftest-check-gz-{}-{:?}",
-		std::process::id(),
-		std::thread::current().id()
-	));
-	let f = fs::File::create(&path).unwrap();
-	let mut enc = CompressionEncoder::new(f, &settings).unwrap();
-	enc.write_all(data).unwrap();
-	enc.finish().unwrap();
-	let out = fs::read(&path).unwrap();
-	fs::remove_file(&path).unwrap();
-	out
+	compress_bytes(Comp::Gzip, data, false)
 }
 
 // one local db entry: files text (%FILES%/%BACKUP% body), the mtree file
@@ -437,22 +420,6 @@ fn lossy(b: &[u8]) -> String {
 
 fn line(path: &str, props: &str) -> String {
 	format!("{path} {props}\n")
-}
-
-// data compressed with one of alpm-compress's encoders
-fn compress(settings: &CompressionSettings, data: &[u8]) -> Vec<u8> {
-	let path = std::env::temp_dir().join(format!(
-		"difftest-check-c-{}-{:?}",
-		std::process::id(),
-		std::thread::current().id()
-	));
-	let file = fs::File::create(&path).unwrap();
-	let mut enc = CompressionEncoder::new(file, settings).unwrap();
-	enc.write_all(data).unwrap();
-	enc.finish().unwrap();
-	let out = fs::read(&path).unwrap();
-	fs::remove_file(&path).unwrap();
-	out
 }
 
 // libarchive's mtree reader against the port's on odd inputs (plain and
@@ -792,24 +759,19 @@ fn mtree_odd_inputs() {
 			assert_same_read(&c, &r, &|| format!("{name} gz={gz}"));
 		}
 	}
-	// libarchive takes any filter, the port the ones alpm-compress knows
+	// every filter pacman reads, stacked ones too
 	let text = format!("{set}{}", f("./a"));
-	for settings in [
-		CompressionSettings::Xz {
-			compression_level: Default::default(),
-		},
-		CompressionSettings::Zstd {
-			compression_level: Default::default(),
-			threads: Default::default(),
-		},
-		CompressionSettings::Bzip2 {
-			compression_level: Default::default(),
-		},
-	] {
-		let data = compress(&settings, text.as_bytes());
+	for comp in FILTERED {
+		let data = compress_bytes(comp, text.as_bytes(), false);
 		let (c, r) = read_both(&data);
-		assert_eq!(c_read(&c), Read::Entries(1, 1), "{settings:?}");
-		assert_same_read(&c, &r, &|| format!("{settings:?}"));
+		assert_eq!(c_read(&c), Read::Entries(1, 1), "{comp:?}");
+		assert_same_read(&c, &r, &|| format!("{comp:?}"));
+	}
+	// a filter whose program is missing fails the open
+	for magic in [&b"\x89LZO\x00\r\n\x1a\n"[..], b"LRZI\x00\x06"] {
+		let data = [magic, text.as_bytes()].concat();
+		let (c, r) = read_both(&data);
+		assert_same_read(&c, &r, &|| format!("{magic:?}"));
 	}
 	// gzip members are read one after the other
 	let parts = [format!("{set}{}", f("./a")), f("./b")];
@@ -841,22 +803,8 @@ fn mtree_cuts() {
 		));
 	}
 	let mut seen = std::collections::BTreeSet::new();
-	for settings in [
-		CompressionSettings::Gzip {
-			compression_level: Default::default(),
-		},
-		CompressionSettings::Xz {
-			compression_level: Default::default(),
-		},
-		CompressionSettings::Zstd {
-			compression_level: Default::default(),
-			threads: Default::default(),
-		},
-		CompressionSettings::Bzip2 {
-			compression_level: Default::default(),
-		},
-	] {
-		let data = compress(&settings, text.as_bytes());
+	for comp in FILTERED {
+		let data = compress_bytes(comp, text.as_bytes(), false);
 		let len = data.len();
 		let mut cuts: Vec<usize> = vec![1, 2, 10, 100];
 		cuts.extend((1..32).map(|i| len * i / 32));
@@ -864,7 +812,7 @@ fn mtree_cuts() {
 		cuts.extend([1, 4, 8, 9, 12, 20, 64].map(|d| len - d));
 		for n in cuts {
 			let (c, r) = read_both(&data[..n]);
-			let what = || format!("{settings:?} cut at {n}/{len}");
+			let what = || format!("{comp:?} cut at {n}/{len}");
 			assert_same_read(&c, &r, &what);
 			seen.insert(format!("{:?}", c_read(&c)));
 		}

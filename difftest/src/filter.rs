@@ -8,11 +8,17 @@
 //
 // also libarchive's write filters, for streams no Rust encoder writes
 // (compress, lzma, lzip, lz4 frames as bsdtar writes them)
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CStr, CString, OsString, c_char, c_int, c_void};
+use std::fs;
+use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::os::unix::ffi::OsStringExt;
+use std::path::{Path, PathBuf};
+
+use alpm_core::filter::{Code, open_file, open_memory};
 use std::ptr;
 
+use crate::TempRoot;
 use crate::check::archive_error_string;
 
 // archive.h
@@ -239,4 +245,131 @@ pub fn c_filter_write(name: &str, options: &str, data: &[u8]) -> Vec<u8> {
 	}
 	buf.truncate(used);
 	buf
+}
+
+// libarchive's texts the port's filters produce too
+const TEXTS: [&[u8]; 12] = [
+	b"Invalid compressed data",
+	b"Lzma library error",
+	b"Lzma decompression failed",
+	b"Lzip: ",
+	b"truncated input",
+	b"lz4 ",
+	b"malformed lz4 data",
+	b"Malformed lz4 data",
+	b"truncated lz4 input",
+	b"Invalid sequence",
+	b"Child process exited",
+	b"Input requires too many filters",
+];
+
+// ARCHIVE_FILTER_* of a code
+fn c_code(code: Code) -> c_int {
+	match code {
+		Code::None => 0,
+		Code::Gzip => 1,
+		Code::Bzip2 => 2,
+		Code::Compress => 3,
+		Code::Lzma => 5,
+		Code::Xz => 6,
+		Code::Lzip => 9,
+		Code::Lrzip => 10,
+		Code::Lzop => 11,
+		Code::Grzip => 12,
+		Code::Lz4 => 13,
+		Code::Zstd => 14,
+	}
+}
+
+// what one side gave, texts the port lacks cut to their presence
+#[derive(Debug, PartialEq, Eq)]
+pub struct FilterOutcome {
+	pub open_error: Option<Vec<u8>>,
+	pub data: Vec<u8>,
+	pub read_error: Option<Vec<u8>>,
+	pub code: Option<c_int>,
+}
+
+// a text the port does not reproduce becomes its mere presence
+fn norm(t: Option<Vec<u8>>) -> Option<Vec<u8>> {
+	t.map(|t| match TEXTS.iter().any(|k| t.starts_with(k)) {
+		true => t,
+		false => b"(other)".to_vec(),
+	})
+}
+
+fn from_c(c: CFiltered) -> FilterOutcome {
+	let opened = c.open_error.is_none();
+	FilterOutcome {
+		open_error: norm(c.open_error),
+		data: c.data,
+		read_error: norm(c.read_error),
+		code: opened.then_some(c.code),
+	}
+}
+
+fn from_port(r: std::io::Result<alpm_core::filter::Filter>) -> FilterOutcome {
+	let mut f = match r {
+		Ok(f) => f,
+		Err(e) => {
+			return FilterOutcome {
+				open_error: norm(Some(e
+					.to_string()
+					.into_bytes())),
+				data: Vec::new(),
+				read_error: None,
+				code: None,
+			};
+		}
+	};
+	let code = c_code(f.code());
+	let mut data = Vec::new();
+	let r = f.read_to_end(&mut data);
+	FilterOutcome {
+		open_error: None,
+		data,
+		read_error: norm(r.err().map(|e| e.to_string().into_bytes())),
+		code: Some(code),
+	}
+}
+
+fn short(d: &[u8]) -> String {
+	let n = d.len().min(48);
+	format!("{} bytes {:02x?}", d.len(), &d[..n])
+}
+
+// one input through libarchive's filters and the port's, in memory: the
+// C's outcome, asserted equal
+pub fn filter_compare(what: &str, input: &[u8]) -> FilterOutcome {
+	if std::env::var_os("FILTER_TRACE").is_some() {
+		eprintln!("{what}");
+	}
+	let c = from_c(c_filter_memory(input));
+	let r = from_port(open_memory(input.to_vec()));
+	assert!(
+		c == r,
+		"{what}: {}\nC    {:?} {} data {}\nport {:?} {} data {}",
+		short(input),
+		c.open_error.as_ref().map(|t| String::from_utf8_lossy(t)),
+		String::from_utf8_lossy(c.read_error.as_deref().unwrap_or(b"")),
+		c.data.len(),
+		r.open_error.as_ref().map(|t| String::from_utf8_lossy(t)),
+		String::from_utf8_lossy(r.read_error.as_deref().unwrap_or(b"")),
+		r.data.len(),
+	);
+	c
+}
+
+// the same from a file read in 8 KiB blocks, like _alpm_open_archive
+pub fn filter_compare_file(what: &str, input: &[u8]) {
+	let t = TempRoot::new("filter-file");
+	let p = PathBuf::from(OsString::from_vec(t.path("in")));
+	fs::write(&p, input).unwrap();
+	let c = from_c(c_filter_file(&p, 8192));
+	let r = from_port(open_file(fs::File::open(&p).unwrap(), 8192));
+	assert!(
+		c == r,
+		"{what} (file): {}\nC {c:?}\nport {r:?}",
+		short(input)
+	);
 }
