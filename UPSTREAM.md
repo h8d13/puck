@@ -668,6 +668,11 @@ declarations. No existing MR found for it.
   730-736). **real (rare)**; `.sig` over 16384 bytes refused **packager**
 - the package is fully loaded and freed once per unknown key
   (be_package.c:744-748). **real**, cost only
+- two debug lines report `gpg_err` after it was left at
+  GPG_ERR_NO_ERROR, "gpg error: Success": a keyserver import whose
+  result is not 0 (signing.c:424-425, the import's own code is not
+  shown) and a WKD lookup that found a key other than the wanted one
+  (signing.c:284-294). **none**, the debug text only
 - every helper failure, corrupt `.sig` included, reports PKG_INVALID_SIG
   (be_package.c:341). **real**, message only
 

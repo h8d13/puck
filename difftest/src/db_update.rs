@@ -6,9 +6,8 @@
 // downloads, the import key answer and the sync dbs (name, siglevel,
 // servers, usage). CUpdate builds it on a C handle with recording
 // log/event/question/download callbacks, RUpdate on an alpm_core Handle
-// with an UpdRecorder. kept logs: errors, warnings and be_sync's own
-// debug lines (other debug lines carry __FILE__/__LINE__ or are
-// dload/gpgme internals the port does not log).
+// with an UpdRecorder. kept logs: all but FUNCTION ones, RET_ERR/
+// GOTO_ERR's (__FILE__/__LINE__) and dload's internal debug lines.
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
@@ -19,6 +18,7 @@ use alpm_core::callbacks::{
 	Callbacks, DownloadEvent, Event, LogLevel, Question,
 };
 use alpm_core::handle::Handle;
+use alpm_core::signing::key_in_keychain;
 use pacman_cli::conf::Config;
 
 use crate::callback::{cb_download, cb_event, cb_log};
@@ -28,7 +28,8 @@ use crate::fixtures::TempRoot;
 use crate::handle::*;
 use crate::package::{CPkg, list_data, read_pkg};
 use crate::signing::{
-	GPGME_PROTOCOL_OPENPGP, gpgme_check_version, gpgme_set_engine_info,
+	_alpm_key_in_keychain, GPGME_PROTOCOL_OPENPGP, c_only,
+	gpgme_check_version, gpgme_set_engine_info,
 };
 use crate::sync_ro::{
 	CRun, FrontHandle, gen_pkgs, pacman_sync, run_op, sync_tar,
@@ -47,19 +48,33 @@ unsafe extern "C" {
 const QUESTION_IMPORT_KEY: c_int = 1 << 6;
 const EVENT_DATABASE_MISSING: c_int = 27;
 
-// be_sync's debug lines, compared like errors and warnings
-const DEBUG_KEPT: [&[u8]; 3] = [
-	b"failed to validate db: ",
-	b"failed to sync dbs: ",
-	b"database dir '",
+// dload.c's internal debug lines, not ported yet (PORTING.md follow-up
+// "dload's internal debug lines"): the parts that tell them
+const DLOAD_DEBUG: [&[u8]; 10] = [
+	b": url is ",
+	b": maxsize ",
+	b": using time condition ",
+	b": tempfile found, attempting continuation from ",
+	b": no more servers to retry\n",
+	b": retrying from ",
+	b" returned result ",
+	b": response code ",
+	b": file met time condition\n",
+	b": opened tempfile for download: ",
 ];
 
+fn dload_debug(msg: &[u8]) -> bool {
+	let has = |p: &[u8]| msg.windows(p.len()).any(|w| w == p);
+	msg.starts_with(b"curl_download_internal return code is ")
+		|| msg.starts_with(b"failed retrieving file '")
+		|| DLOAD_DEBUG.iter().any(|p| has(p))
+}
+
+// debug lines but RET_ERR/GOTO_ERR's and dload's internals
 fn kept(level: LogLevel, msg: &[u8]) -> bool {
 	match level {
 		LogLevel::Error | LogLevel::Warning => true,
-		LogLevel::Debug => {
-			DEBUG_KEPT.iter().any(|p| msg.starts_with(p))
-		}
+		LogLevel::Debug => !c_only(msg) && !dload_debug(msg),
 		LogLevel::Function => false,
 	}
 }
@@ -352,6 +367,13 @@ impl CUpdate {
 			}
 		}
 		u.engine();
+		if u.gpgdir.is_some() {
+			// init_gpgme now (once per process), its lines go
+			// with the setup's; the Rust side does the same
+			let init = cstr(b"init");
+			// SAFETY: live handle, valid string
+			unsafe { _alpm_key_in_keychain(u.h, init.as_ptr()) };
+		}
 		for d in &s.dbs {
 			u.register(d);
 		}
@@ -485,6 +507,7 @@ impl RUpdate {
 		h.set_default_siglevel(s.default_siglevel).unwrap();
 		if let Some(g) = &s.gpgdir {
 			h.set_gpgdir(g);
+			key_in_keychain(h.keyring_mut(), &mut (), b"init");
 		}
 		for d in &s.dbs {
 			h.register_syncdb(d.name.as_bytes(), d.siglevel)
