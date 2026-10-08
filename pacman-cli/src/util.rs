@@ -1,8 +1,11 @@
 // port of src/pacman/util.c: display helpers, the table engine and
 // transaction summary, --print-format, optdepend lists, the prompts,
-// rmrf, pm_printf, check_syncdbs, getcols and trans_init/trans_release
+// rmrf, pm_printf (with the PACMAN_DEBUG stamp), check_syncdbs, getcols
+// and trans_init/trans_release
 //
-// functions that print in the C append the same bytes to `out` instead.
+// functions that print in the C append the same bytes to `out` instead;
+// Output::flush hands them to the process where the C would have them
+// on the terminal (before a prompt reads, before libalpm calls back).
 // inputs are byte strings as the C would see them, cut at the first nul.
 //
 // display width follows glibc in a UTF-8 locale. pacman runs under the
@@ -22,6 +25,7 @@ use std::os::unix::ffi::OsStrExt;
 use alpm_core::db::Db;
 use alpm_core::deps::{Depend, dep_compute_string, find_satisfier};
 use alpm_core::handle::Handle;
+use alpm_core::log::utc_now;
 use alpm_core::package::{Package, PkgFrom, pkg_cmp, pkg_find};
 use alpm_core::trans::{
 	InitError, trans_init as alpm_trans_init,
@@ -32,28 +36,90 @@ use pacman_common::util_common::{safe_fgets, strtrim};
 use unicode_width::UnicodeWidthChar;
 
 pub use crate::conf::ColStr;
-use crate::conf::{Config, LOG_ERROR, LOG_WARNING};
+use crate::conf::{Config, LOG_DEBUG, LOG_ERROR, LOG_FUNCTION, LOG_WARNING};
 use crate::pacman::{PM_OP_SYNC, PM_OP_UPGRADE};
 
-// what the C writes to stdout and stderr
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+// what the C writes to stdout and stderr. sink is where flush sends it
+// (the binary's std streams), None keeps it buffered (tests, callers
+// that read it back); equality is on the bytes
+#[derive(Clone, Debug, Default)]
 pub struct Output {
 	pub stdout: Vec<u8>,
 	pub stderr: Vec<u8>,
+	pub sink: Option<fn(&mut Output)>,
 }
 
-// pm_printf(level, ...) to stderr: logmask filter, then the prefix
-pub fn pm_printf(err: &mut Vec<u8>, config: &Config, level: u16, msg: &[u8]) {
+impl PartialEq for Output {
+	fn eq(&self, other: &Output) -> bool {
+		self.stdout == other.stdout && self.stderr == other.stderr
+	}
+}
+
+impl Eq for Output {}
+
+impl Output {
+	// fflush(stdout), fflush(stderr): the sink takes the bytes
+	pub fn flush(&mut self) {
+		if let Some(sink) = self.sink {
+			sink(self);
+		}
+	}
+}
+
+// time(NULL)
+pub fn now_secs() -> i64 {
+	utc_now().secs
+}
+
+// PACMAN_DEBUG (set by the meson build): pm_vfprintf puts "[%H:%M:%S] "
+// before every message while debug logging is on. localtime needs the
+// zone database, safe std has none: the stamp is UTC (TZ=UTC in the C)
+pub fn debug_stamp(secs: i64) -> Vec<u8> {
+	let s = secs.rem_euclid(86400);
+	let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
+	format!("[{h:02}:{m:02}:{s:02}] ").into_bytes()
+}
+
+// pm_vasprintf: the message with its level prefix, None when logmask
+// filters the level. no PACMAN_DEBUG stamp on this path
+pub fn pm_vasprintf(
+	config: &Config,
+	level: u16,
+	msg: &[u8],
+) -> Option<Vec<u8>> {
 	if config.logmask & level == 0 {
-		return;
+		return None;
 	}
 	let c = &config.colstr;
 	let prefix: &[&[u8]] = match level {
 		LOG_ERROR => &[c.err, b"error: ", c.nocolor],
-		_ => &[c.warn, b"warning: ", c.nocolor],
+		LOG_WARNING => &[c.warn, b"warning: ", c.nocolor],
+		LOG_DEBUG => &[b"debug: "],
+		LOG_FUNCTION => &[b"function: "],
+		_ => &[],
 	};
-	err.extend(prefix.concat());
-	err.extend_from_slice(msg);
+	Some([&prefix.concat()[..], msg].concat())
+}
+
+// pm_vfprintf: pm_vasprintf with the PACMAN_DEBUG stamp of now
+pub fn pm_vfprintf(
+	config: &Config,
+	level: u16,
+	msg: &[u8],
+	now: i64,
+) -> Option<Vec<u8>> {
+	let line = pm_vasprintf(config, level, msg)?;
+	if config.logmask & LOG_DEBUG == 0 {
+		return Some(line);
+	}
+	Some([debug_stamp(now), line].concat())
+}
+
+// pm_printf(level, ...) to stderr
+pub fn pm_printf(err: &mut Vec<u8>, config: &Config, level: u16, msg: &[u8]) {
+	if let Some(line) = pm_vfprintf(config, level, msg, now_secs()) {
+		err.extend_from_slice(&line);
+	}
 }
 
 // check_syncdbs: 1 without sync dbs when need_repos, or when check_valid
@@ -1254,17 +1320,19 @@ fn display_repo_list(
 }
 
 // select_display: "<n>) name" numbered across the list, one block per
-// run of packages from the same db. the C needs a db per package and a
-// non-empty list (strcmp/printf of NULL); "" and nothing here
+// run of packages from the same db, each package with the name of its db
+// (alpm_pkg_get_db; Package keeps no db, callers pair them). the C needs
+// a db per package and a non-empty list (strcmp/printf of NULL); None
+// is "" and an empty list prints nothing here
 pub fn select_display(
 	out: &mut Vec<u8>,
 	colstr: &ColStr,
-	pkgs: &[DbPkg],
+	pkgs: &[(Option<&[u8]>, &Package)],
 	cols: u16,
 ) {
-	fn name<'a>(p: &DbPkg<'a>) -> &'a [u8] {
-		until_nul(p.db.map_or(&[][..], Db::name))
-	}
+	let name = |p: &(Option<&[u8]>, &Package)| -> Vec<u8> {
+		until_nul(p.0.unwrap_or_default()).to_vec()
+	};
 	let Some(first) = pkgs.first() else {
 		return;
 	};
@@ -1272,25 +1340,44 @@ pub fn select_display(
 	let mut list = Vec::new();
 	for (nth, p) in (1..).zip(pkgs) {
 		if name(p) != dbname {
-			display_repo_list(out, colstr, dbname, &list, cols);
+			display_repo_list(out, colstr, &dbname, &list, cols);
 			list.clear();
 			dbname = name(p);
 		}
 		let mut entry = format!("{nth}) ").into_bytes();
-		entry.extend_from_slice(p.pkg.name_bytes());
+		entry.extend_from_slice(p.1.name_bytes());
 		list.push(entry);
 	}
-	display_repo_list(out, colstr, dbname, &list, cols);
+	display_repo_list(out, colstr, &dbname, &list, cols);
 }
 
-// stdin of the prompts and the terminal state they look at: a terminal
-// stdin echoes the answer itself, a terminal stdout gets the cursor
-// shown while reading. tcflush of a terminal stdin (flush_term_input)
-// needs termios, not ported: typeahead is kept
+// the process the prompts and callbacks look at: stdin, whether stdin
+// and stdout are terminals (a terminal stdin echoes the answer itself, a
+// terminal stdout gets the cursor shown while reading), getcols() and
+// the clocks (get_time_ms: CLOCK_MONOTONIC_COARSE in ms; time(NULL) for
+// the PACMAN_DEBUG stamp). tcflush of a terminal stdin
+// (flush_term_input) needs termios, not ported: typeahead is kept
 pub struct Term<R> {
 	pub stdin: R,
 	pub stdin_tty: bool,
 	pub stdout_tty: bool,
+	pub cols: fn() -> u16,
+	pub now_ms: fn() -> i64,
+	pub now_secs: fn() -> i64,
+}
+
+impl<R> Term<R> {
+	// no terminal size (getcols 0), clocks at 0: what prompts alone need
+	pub fn new(stdin: R, stdin_tty: bool, stdout_tty: bool) -> Self {
+		Term {
+			stdin,
+			stdin_tty,
+			stdout_tty,
+			cols: || 0,
+			now_ms: || 0,
+			now_secs: || 0,
+		}
+	}
 }
 
 const CURSOR_HIDE_ANSICODE: &[u8] = b"\x1b[?25l";
@@ -1310,16 +1397,18 @@ pub fn console_cursor_show(out: &mut Vec<u8>, stdout_tty: bool) {
 	}
 }
 
-// safe_fgets_stdin: one safe_fgets with the cursor shown. a read error
+// safe_fgets_stdin: one safe_fgets with the cursor shown, what was
+// printed flushed first (the C's fflush before reading). a read error
 // is the C's NULL
 pub fn safe_fgets_stdin<R: BufRead>(
-	out: &mut Vec<u8>,
+	out: &mut Output,
 	term: &mut Term<R>,
 	size: usize,
 ) -> Option<Vec<u8>> {
-	console_cursor_show(out, term.stdout_tty);
+	console_cursor_show(&mut out.stdout, term.stdout_tty);
+	out.flush();
 	let line = safe_fgets(&mut term.stdin, size).ok().flatten();
-	console_cursor_hide(out, term.stdout_tty);
+	console_cursor_hide(&mut out.stdout, term.stdout_tty);
 	line
 }
 
@@ -1474,7 +1563,7 @@ const RESPONSE_INCR: usize = 64;
 
 // fgets into buf at off, at most size - 1 bytes and a nul
 fn read_into<R: BufRead>(
-	out: &mut Vec<u8>,
+	out: &mut Output,
 	term: &mut Term<R>,
 	buf: &mut [u8],
 	off: usize,
@@ -1514,7 +1603,7 @@ pub fn multiselect_question<R: BufRead>(
 			s.push(b'\n');
 			return 0;
 		}
-		if !read_into(&mut out.stdout, term, &mut buf, 0, len) {
+		if !read_into(out, term, &mut buf, 0, len) {
 			return -1;
 		}
 		while buf[len - 1] == 0 && buf[len - 2] != b'\n' {
@@ -1523,13 +1612,7 @@ pub fn multiselect_question<R: BufRead>(
 			buf[len - 1] = 1;
 			let off = len - RESPONSE_INCR - 1;
 			let size = RESPONSE_INCR + 1;
-			if !read_into(
-				&mut out.stdout,
-				term,
-				&mut buf,
-				off,
-				size,
-			) {
+			if !read_into(out, term, &mut buf, off, size) {
 				return -1;
 			}
 		}
@@ -1566,9 +1649,7 @@ pub fn select_question<R: BufRead>(
 			break;
 		}
 		let size = 32;
-		if let Some(line) =
-			safe_fgets_stdin(&mut out.stdout, term, size)
-		{
+		if let Some(line) = safe_fgets_stdin(out, term, size) {
 			let response = strtrim(&line);
 			if !response.is_empty() {
 				let err = &mut out.stderr;
@@ -1647,7 +1728,7 @@ fn question<R: BufRead>(
 		s.push(b'\n');
 		return preset;
 	}
-	let Some(line) = safe_fgets_stdin(&mut out.stdout, term, 32) else {
+	let Some(line) = safe_fgets_stdin(out, term, 32) else {
 		return false;
 	};
 	let response = strtrim(&line);

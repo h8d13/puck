@@ -75,11 +75,7 @@ fn config(rng: &mut Rng) -> Config {
 
 // stdin as a pipe, stdout no terminal: what the C sees under difftest
 fn term(input: &[u8]) -> Term<&[u8]> {
-	Term {
-		stdin: input,
-		stdin_tty: false,
-		stdout_tty: false,
-	}
+	Term::new(input, false, false)
 }
 
 fn check_io(what: &str, c: (i32, CIo), r: (i32, Output, usize)) {
@@ -924,7 +920,12 @@ fn select_display_blocks() {
 		let cols = cols(&mut rng);
 		let c = fx.world.select_display(&cfg, &pkgs, cols);
 		let mut out = Vec::new();
-		select_display(&mut out, &cfg.colstr, &fx.db_pkgs(&pkgs), cols);
+		let db_pkgs = fx.db_pkgs(&pkgs);
+		let pairs: Vec<(Option<&[u8]>, &Package)> = db_pkgs
+			.iter()
+			.map(|p| (p.db.map(|d| d.name()), p.pkg))
+			.collect();
+		select_display(&mut out, &cfg.colstr, &pairs, cols);
 		assert_eq!(show(&c.stdout), show(&out), "{pkgs:?} cols {cols}");
 	}
 }
