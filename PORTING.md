@@ -510,8 +510,8 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   `Mounts`.
 - `query`: lazy loads mirror the C per getter (filters first, display
   after); `QueryEnv` carries `getcols()` and `PATH`; `-Qkk` loads files
-  up front. `sync`/`files` display copies of cache entries (one db
-  borrowed at a time).
+  up front. `sync`/`files` show cache entries in place (`Handle::dbs_mut`,
+  -Si splits the sync dbs around the shown one).
 - `signing`: gpg(1) driven as gpgme's engine-gpg does (same binary,
   `--homedir`, status lines, colon listings); the signature goes over
   stdin, the file by path after a first read; only error/warning logs go
@@ -684,7 +684,7 @@ Follow-ups raised by port units:
 | rustix `process`/`termios` features: handle->user, getcols tty width, flush_term_input | handle, cliutil2 | done (`use-libc` backend for fakeroot, METHODOLOGY.md); pty difftest |
 | local time offset for log stamps (UTC today) | handle | todo |
 | shared helpers into util: `llstat`, `strerror`, `PATH_MAX` once; frontend `pm_printf`/`Output`/`check_syncdbs`/`getcols` | conflict, diskspace, query, sync | done |
-| `Handle` split borrow of local + sync caches (resolver and displays clone caches today) | deps, sync | in progress (integration) |
+| `Handle` split borrow of local + sync caches (resolver and displays clone caches today) | deps, sync | done: -Si/-Sii and -Dk/-Dkk borrow in place (peak RSS on the real local + core/extra/vrch dbs: -Si 133 -> 88 MiB, -Sii 137 -> 89, -Dk 57 -> 36, -Dkk 124 -> 76; wall equal within noise); the resolver's `TransPkg`s stay owned copies by design (Notes) |
 | XferCommand via a sandbox helper exec mode (`alpm_sandbox_setup_child` from conf.c) | sandbox | done: `conf::XferCommand`, `sandbox::SandboxExec` |
 | conf difftest abort under long TMPDIR | sandbox, dbwrite reports | done: C one-byte heap overflow in `escape_chars` (UPSTREAM.md), fixture avoids it |
 | `alpm_extract_keyid` wired into -Sii/-Qii `sig_keys` | sync | todo (ported in signing) |

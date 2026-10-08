@@ -14,9 +14,12 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use alpm_core::be_local::{INFRQ_DESC, INFRQ_FILES};
+use alpm_core::callbacks::Callbacks;
 use alpm_core::conflict::checkconflicts;
 use alpm_core::db::Db;
-use alpm_core::deps::{DbPkgs, DepsEnv, checkdeps, dep_compute_string};
+use alpm_core::deps::{
+	DbPkgs, DepsEnv, DepsOpts, checkdeps, dep_compute_string,
+};
 use alpm_core::error::Errno;
 use alpm_core::handle::Handle;
 use alpm_core::package::{Package, PkgReason};
@@ -112,19 +115,19 @@ fn change_install_reason(
 }
 
 // check_db_missing_deps: alpm_checkdeps(handle, NULL, NULL, pkglist, 0),
-// every depend of pkglist satisfied within pkglist or assumeinstalled
+// every depend of pkglist satisfied within pkglist or assumeinstalled.
+// local is the loaded local cache, None the C's NULL list
 fn check_db_missing_deps(
 	config: &Config,
-	handle: &mut Handle,
-	pkglist: &[Package],
+	opts: DepsOpts,
+	local: Option<&PkgHash<Package>>,
+	pkglist: &[&Package],
+	cb: &mut dyn Callbacks,
 	o: &mut Output,
 ) -> i32 {
-	let upgrade: Vec<&Package> = pkglist.iter().collect();
-	let dbs = handle.dbs_mut();
 	let empty = PkgHash::new(0).expect("empty table");
-	let local = dbs.local.as_deref().and_then(Db::loaded_pkgcache);
 	let env = DepsEnv {
-		opts: dbs.opts,
+		opts,
 		// no transaction: ALPM_TRANS_FLAG_NODEPVERSION unset
 		nodepversion: false,
 		local: DbPkgs {
@@ -133,7 +136,7 @@ fn check_db_missing_deps(
 		},
 		sync: &[],
 	};
-	let missing = checkdeps(&env, &[], &[], &upgrade, false, dbs.cb);
+	let missing = checkdeps(&env, &[], &[], pkglist, false, cb);
 	for miss in &missing {
 		let depstring = dep_compute_string(&miss.depend);
 		let msg: [&[u8]; 5] = [
@@ -202,12 +205,11 @@ fn check_db_local_files(
 // check_db_local_package_conflicts: alpm_checkconflicts on pkglist
 fn check_db_local_package_conflicts(
 	config: &Config,
-	handle: &mut Handle,
-	pkglist: &[Package],
+	pkglist: &[&Package],
+	cb: &mut dyn Callbacks,
 	o: &mut Output,
 ) -> i32 {
-	let pkgs: Vec<&Package> = pkglist.iter().collect();
-	let conflicts = checkconflicts(&pkgs, handle.callbacks());
+	let conflicts = checkconflicts(pkglist, cb);
 	for c in &conflicts {
 		let msg: [&[u8]; 5] = [
 			b"'",
@@ -227,11 +229,11 @@ fn check_db_local_package_conflicts(
 // an empty name counts as a file, the C reads the byte before it
 fn check_db_local_filelist_conflicts(
 	config: &Config,
-	pkglist: &[Package],
+	pkglist: &[&Package],
 	o: &mut Output,
 ) -> i32 {
 	let mut all: Vec<(&[u8], &Package)> = Vec::new();
-	for pkg in pkglist {
+	for &pkg in pkglist {
 		for f in &pkg.files.files {
 			let name = until_nul(&f.name);
 			if name.last() != Some(&b'/') {
@@ -261,17 +263,19 @@ fn check_db_local_filelist_conflicts(
 	ret
 }
 
-// the local cache with the sections of inforeq loaded, copied out. a
-// cache that does not load is the C's NULL list
-fn local_pkgs(handle: &mut Handle, inforeq: i32) -> Vec<Package> {
-	let dbs = handle.dbs_mut();
-	let Some(db) = dbs.local else {
-		return Vec::new();
-	};
-	match db.load_all(dbs.dbext, dbs.cb, inforeq) {
-		Ok(cache) => cache.iter().cloned().collect(),
-		Err(_) => Vec::new(),
-	}
+// the local cache with the sections of inforeq loaded, borrowed in
+// place. a cache that does not load is the C's NULL list
+fn local_cache<'h>(
+	local: Option<&'h mut Db>,
+	dbext: &[u8],
+	cb: &mut dyn Callbacks,
+	inforeq: i32,
+) -> Option<&'h PkgHash<Package>> {
+	local?.load_all(dbext, cb, inforeq).ok()
+}
+
+fn list(cache: Option<&PkgHash<Package>>) -> Vec<&Package> {
+	cache.map(|c| c.iter().collect()).unwrap_or_default()
 }
 
 // check_db_local: the file check first, it stops everything else
@@ -280,24 +284,30 @@ fn check_db_local(config: &Config, handle: &mut Handle, o: &mut Output) -> i32 {
 	if ret != 0 {
 		return ret;
 	}
-	let pkglist = local_pkgs(handle, INFRQ_DESC);
-	let mut ret = check_db_missing_deps(config, handle, &pkglist, o);
-	ret += check_db_local_package_conflicts(config, handle, &pkglist, o);
-	let pkglist = local_pkgs(handle, INFRQ_FILES);
-	ret + check_db_local_filelist_conflicts(config, &pkglist, o)
+	let dbs = handle.dbs_mut();
+	let cache = local_cache(dbs.local, dbs.dbext, dbs.cb, INFRQ_DESC);
+	let pkglist = list(cache);
+	let (opts, cb) = (dbs.opts, dbs.cb);
+	let mut ret =
+		check_db_missing_deps(config, opts, cache, &pkglist, cb, o);
+	ret += check_db_local_package_conflicts(config, &pkglist, cb, o);
+	let dbs = handle.dbs_mut();
+	let cache = local_cache(dbs.local, dbs.dbext, dbs.cb, INFRQ_FILES);
+	ret + check_db_local_filelist_conflicts(config, &list(cache), o)
 }
 
 // check_db_sync: the dependencies of every sync package, all dbs joined
 // in registration order
 fn check_db_sync(config: &Config, handle: &mut Handle, o: &mut Output) -> i32 {
 	let dbs = handle.dbs_mut();
-	let mut pkglist: Vec<Package> = Vec::new();
+	let mut pkglist: Vec<&Package> = Vec::new();
 	for db in dbs.sync {
 		if let Ok(cache) = db.pkgcache(dbs.dbext, dbs.cb) {
-			pkglist.extend(cache.iter().cloned());
+			pkglist.extend(cache.iter());
 		}
 	}
-	check_db_missing_deps(config, handle, &pkglist, o)
+	let local = dbs.local.as_deref().and_then(Db::loaded_pkgcache);
+	check_db_missing_deps(config, dbs.opts, local, &pkglist, dbs.cb, o)
 }
 
 // pacman_database: -Dk (op_q_check 1) or -Dkk, then the reason change
