@@ -10,16 +10,17 @@
 // the db file name carries no compression suffix.
 //
 // sync_db_validate without the status bits db.c keeps: the missing file
-// and the signature check (signing.rs). not ported: alpm_db_update
-// (dload), get_sync_dir. populate on a db file that does not exist is
-// NotFound.
+// and the signature check (signing.rs). alpm_db_update with get_sync_dir:
+// downloads through dload.rs, validation through Db::validate. populate
+// on a db file that does not exist is NotFound.
 
 use std::collections::HashMap;
-use std::ffi::c_int;
+use std::ffi::{OsStr, c_int};
 use std::fmt::Display;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read, Seek};
 use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::str::FromStr;
 
 use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
@@ -28,10 +29,15 @@ use alpm_repo_db::desc::{RepoDescFile, RepoDescFileV2};
 use alpm_repo_db::files::RepoFiles;
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
-use crate::callbacks::{Callbacks, LogLevel};
+use crate::callbacks::{Callbacks, Event, LogLevel};
+use crate::db::{DB_USAGE_SYNC, Db};
 use crate::deps::{Depend, dep_from_string};
+use crate::dload::{
+	Downloader, Payload, Settings, remove_temporary_download_dir,
+};
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
+use crate::handle::{Handle, SyncParts};
 use crate::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
 	PKG_VALIDATION_SIGNATURE, Package, PkgFrom,
@@ -41,11 +47,16 @@ use crate::signing::{
 	Keyring, SIG_DATABASE, SIG_DATABASE_MARGINAL_OK, SIG_DATABASE_OPTIONAL,
 	SIG_DATABASE_UNKNOWN_OK, check_pgp_helper, process_siglist,
 };
-use crate::util::{fnmatch, hash_sdbm, splitname, strerror, until_nul};
+use crate::util::{
+	fnmatch, get_fullpath, hash_sdbm, makepath, splitname, strerror,
+	until_nul,
+};
 
 // limits.h on linux
 const NAME_MAX: usize = 255;
 const PATH_MAX: usize = 4096;
+// hard upper limit of a db download
+const DB_MAX_SIZE: i64 = 128 * 1024 * 1024;
 
 // why an entry made the db invalid
 #[derive(Debug)]
@@ -157,6 +168,181 @@ pub fn sync_db_validate(
 			return Err(Errno::DbInvalidSig);
 		}
 	}
+}
+
+// get_sync_dir: "<dbpath>sync/", made when stat(2) fails, a non-directory
+// there unlinked first. Err is ALPM_ERR_SYSTEM
+fn get_sync_dir(
+	dbpath: &[u8],
+	cb: &mut dyn Callbacks,
+) -> Result<Vec<u8>, Errno> {
+	let syncpath = [until_nul(dbpath), b"sync/"].concat();
+	let p = Path::new(OsStr::from_bytes(&syncpath));
+	match fs::metadata(p) {
+		Err(_) => {
+			let msg = [
+				b"database dir '",
+				&syncpath[..],
+				b"' does not exist, creating it\n",
+			];
+			cb.log(LogLevel::Debug, &msg.concat());
+			makepath(&syncpath).map_err(|_| Errno::System)?;
+		}
+		Ok(m) if !m.is_dir() => {
+			let msg = [
+				b"removing invalid file: ",
+				&syncpath[..],
+				b"\n",
+			];
+			cb.log(LogLevel::Warning, &msg.concat());
+			fs::remove_file(p).map_err(|_| Errno::System)?;
+			makepath(&syncpath).map_err(|_| Errno::System)?;
+		}
+		Ok(_) => {}
+	}
+	Ok(syncpath)
+}
+
+fn downloader<'a>(
+	parts: &'a mut SyncParts<'_>,
+	settings: &'a Settings,
+) -> Downloader<'a> {
+	Downloader {
+		settings,
+		state: &mut *parts.download,
+		cb: &mut *parts.cb,
+		fetch: parts.fetch.as_deref_mut().map(|f| f as _),
+		// sandbox.c plugs in here (_alpm_use_sandbox: root, a sandbox
+		// user, a restriction enabled), like for fetch_pkgurl
+		sandbox: None,
+	}
+}
+
+// the download payload of a db: "<treename><dbext>" from its servers
+// into tmp, its .sig as the siglevel asks
+fn db_payload(
+	db: &Db,
+	dbext: &[u8],
+	siglevel: c_int,
+	force: bool,
+	tmp: &[u8],
+) -> Payload {
+	let name = [db.name(), until_nul(dbext)].concat();
+	let mut p = Payload::default();
+	p.servers = db.servers().to_vec();
+	p.destfile_name = Some(get_fullpath(tmp, &name, b""));
+	p.tempfile_name = get_fullpath(tmp, &name, b".part");
+	p.filepath = Some(name.clone());
+	p.remote_name = name;
+	p.force = force;
+	p.unlink_on_fail = true;
+	p.download_signature = siglevel & SIG_DATABASE != 0;
+	p.signature_optional = siglevel & SIG_DATABASE_OPTIONAL != 0;
+	p.max_size = DB_MAX_SIZE;
+	p
+}
+
+// alpm_db_update once the lock is held: payloads, the download between
+// the DB_RETRIEVE events, then every db's cache dropped and its status
+// validated anew. a failed validation is Err, the errno of the last one
+fn update_locked(
+	handle: &mut Handle,
+	settings: &Settings,
+	dbs: &[usize],
+	force: bool,
+	syncpath: &[u8],
+	tmp: &[u8],
+) -> Result<bool, Errno> {
+	let dbext = handle.dbext().to_vec();
+	let default = handle.default_siglevel();
+	let mut parts = handle.sync_parts();
+	let mut payloads = Vec::new();
+	let mut synced = Vec::new();
+	for &i in dbs {
+		let db = &parts.dbs[i];
+		if db.usage() & DB_USAGE_SYNC == 0 {
+			continue;
+		}
+		if db.servers().is_empty() {
+			return Err(Errno::ServerNone);
+		}
+		// an invalid db is fetched again: a db and signature that do
+		// not match may be fixed upstream
+		let dbforce = force || db.valid().is_err();
+		let level = db.siglevel(default);
+		payloads.push(db_payload(db, &dbext, level, dbforce, tmp));
+		synced.push(i);
+	}
+	if payloads.is_empty() {
+		return Ok(true);
+	}
+	parts.cb.event(&Event::DbRetrieveStart);
+	let ret = downloader(&mut parts, settings).download(
+		&mut payloads,
+		syncpath,
+		tmp,
+	);
+	if ret.is_err() {
+		parts.cb.event(&Event::DbRetrieveFailed);
+		return ret;
+	}
+	parts.cb.event(&Event::DbRetrieveDone);
+	let mut failed = None;
+	for i in synced {
+		let db = &mut parts.dbs[i];
+		db.free_pkgcache();
+		let res = db.validate(default, parts.keyring, parts.cb);
+		if let Err(e) = res {
+			let msg =
+				[b"failed to validate db: ", db.name(), b"\n"];
+			parts.cb.log(LogLevel::Debug, &msg.concat());
+			failed = Some(e);
+		}
+	}
+	failed.map_or(ret, Err)
+}
+
+// alpm_db_update: the sync dbs at positions dbs of handle.syncdbs() (used
+// for syncing) downloaded into "<dbpath>sync/", with If-Modified-Since
+// unless force or the db is invalid. Ok(true) something was downloaded
+// (C 0), Ok(false) every db was up to date (C 1), Err the pm_errno of
+// the failure (C -1). an empty dbs is the C's NULL list: Err(Errno::Ok),
+// the C leaves pm_errno as it was. the C's umask(0022) for the call is
+// left out (rustix "process"), files get the process umask
+pub fn db_update(
+	handle: &mut Handle,
+	dbs: &[usize],
+	force: bool,
+) -> Result<bool, Errno> {
+	if dbs.is_empty() {
+		return Err(Errno::Ok);
+	}
+	let dbpath = handle.dbpath().to_vec();
+	let syncpath = get_sync_dir(&dbpath, handle.callbacks())?;
+	let settings = handle.dload_settings();
+	let mut parts = handle.sync_parts();
+	let tmp = downloader(&mut parts, &settings)
+		.download_dir_setup(&syncpath)?;
+	let ret = match handle.lock() {
+		Ok(()) => update_locked(
+			handle, &settings, dbs, force, &syncpath, &tmp,
+		),
+		Err(_) => Err(Errno::HandleLock),
+	};
+	handle.handle_unlock();
+	if let Err(e) = ret {
+		let msg = [
+			b"failed to sync dbs: ",
+			e.strerror().as_bytes(),
+			b"\n",
+		];
+		handle.callbacks().log(LogLevel::Debug, &msg.concat());
+	}
+	// a sandbox download dir left by an early error (the C keeps it)
+	if tmp != syncpath {
+		remove_temporary_download_dir(&tmp);
+	}
+	ret
 }
 
 // _sync_get_validation, what alpm_pkg_get_validation computes on first
