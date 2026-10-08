@@ -31,8 +31,9 @@ use alpm_core::error::Errno;
 use alpm_core::handle::Handle;
 use alpm_core::package::{
 	DbCaches, Package, PkgFrom, PkgReason, compute_optionalfor,
-	compute_requiredby, pkg_compare_versions, pkg_should_ignore,
+	compute_requiredby, pkg_should_ignore,
 };
+use alpm_core::sync::sync_get_new_version;
 use alpm_core::util::{compute_md5sum, fnmatch, until_nul};
 use pacman_common::util_common::{PATH_MAX, mbasename, mdirname};
 
@@ -259,22 +260,6 @@ fn locality(handle: &mut Handle, pkg: &Package) -> u16 {
 	}
 }
 
-// alpm_sync_get_new_version: the first sync db holding a package of
-// that name decides. its version and the db's usage when it is newer
-fn new_version(handle: &mut Handle, pkg: &Package) -> Option<(Vec<u8>, c_int)> {
-	let dbs = handle.dbs_mut();
-	for db in dbs.sync {
-		let usage = db.usage();
-		let Ok(spkg) = db.get_pkg(dbs.dbext, dbs.cb, pkg.name_bytes())
-		else {
-			continue;
-		};
-		let newer = pkg_compare_versions(spkg, pkg).is_gt();
-		return newer.then(|| (version(spkg).to_vec(), usage));
-	}
-	None
-}
-
 // is_unrequired: nothing depends on pkg, at level 1 nothing optionally
 // either
 fn is_unrequired(handle: &mut Handle, pkg: &Package, level: u16) -> bool {
@@ -299,7 +284,7 @@ fn filter(c: &Config, handle: &mut Handle, pkg: &Package) -> bool {
 	{
 		return false;
 	}
-	if c.op_q_upgrade != 0 && new_version(handle, pkg).is_none() {
+	if c.op_q_upgrade != 0 && sync_get_new_version(handle, pkg).is_none() {
 		return false;
 	}
 	true
@@ -316,9 +301,11 @@ fn plain_line(c: &Config, handle: &mut Handle, pkg: &Package) -> Vec<u8> {
 	let mut out = cat(&[cs.title, name, b" ", cs.version, ver, cs.nocolor]);
 	// filter made sure there is a newer version
 	if c.op_q_upgrade != 0
-		&& let Some((newver, usage)) = new_version(handle, pkg)
+		&& let Some((i, newpkg)) = sync_get_new_version(handle, pkg)
 	{
-		out.extend(cat(&[b" -> ", cs.version, &newver, cs.nocolor]));
+		let usage = handle.syncdbs()[i].usage();
+		let newver = version(&newpkg);
+		out.extend(cat(&[b" -> ", cs.version, newver, cs.nocolor]));
 		if pkg_should_ignore(handle, pkg)
 			|| usage & DB_USAGE_UPGRADE == 0
 		{
