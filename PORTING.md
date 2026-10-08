@@ -122,11 +122,9 @@ Gate: upstream's full meson suite against the Rust binaries,
 `scripts/upstream-suite.sh` (pactest's 341 tests, vercmptest and the two
 script tests): meson's 338 ok / 6 expected fail, reproduced by
 `pacman/build`. Rust with the owned readers (`.PKGINFO`, local and sync
-db): 336 ok / 6 xfail / 2 fail / 0 unexpected pass, vercmptest and the
+db): 337 ok / 6 xfail / 1 fail / 0 unexpected pass, vercmptest and the
 script tests included. Left: scriptlet-signal-handling (signals are not
-caught, SIGINT during a scriptlet ends pacman with 130) and
-upgrade-download-pkg-and-sig-with-filename (`-U` URL downloads through
-HTTP redirects: "Empty reply from server").
+caught, SIGINT during a scriptlet ends pacman with 130).
 
 ### 4. Drop-in
 
@@ -493,8 +491,20 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   over 5 s for 10 s), curl 8.22 error texts copied where libalpm prints
   them (others reqwest's), no netrc, Basic auth from URL userinfo only,
   HTTP/1.1, no ftp://, rustls with the platform verifier, reqwest's proxy
-  env handling, reqwest's normalised URL after a redirect, Last-Modified
-  in RFC 1123/850/asctime forms only.
+  env handling, the url crate's normalised URL after a redirect,
+  Last-Modified in RFC 1123/850/asctime forms only. Redirects are
+  followed by hand like curl's FOLLOWLOCATION (any 3xx with a Location,
+  10 follows, http(s) only, curl's texts for disabled/unknown schemes,
+  connect/resolve errors naming the hop, url credentials kept on the
+  same scheme/host/port). No connection is reused (no idle pool): a
+  server answering HTTP/1.1 without `Connection: close` and then closing
+  (pactest's) left hyper a dead pooled connection for the next hop or
+  .sig, "Empty reply from server"; curl retries such a reused connection
+  on a fresh one, reqwest cannot tell reused from fresh. Pinned in the
+  dload difftest: on such a server curl gives up after 5 reconnects per
+  transfer, so a same-host redirect loop ends in "Connection died, tried
+  5 times before giving up" where the port follows all 10; chunked
+  HTTP/1.0 responses are decoded by curl and a parse error to hyper.
 - `unpack`: names joined to the prefix and modes set by chmod with the
   umask fixed at 022, the process cwd and umask are never touched. A
   directory entry carrying data is skipped by size (libarchive stops
