@@ -341,12 +341,15 @@ fn local_db_pkgpath() {
 		version: Some(b"1-1".to_vec()),
 		..Package::default()
 	};
-	assert_eq!(db.mtree(&pkg).unwrap().len(), 3);
+	assert_eq!(db.mtree(&pkg, &mut ()).unwrap().len(), 3);
 	let other = Package {
 		version: Some(b"2-1".to_vec()),
 		..pkg
 	};
-	assert!(matches!(db.mtree(&other), Err(MtreeError::Missing)));
+	assert!(matches!(
+		db.mtree(&other, &mut ()),
+		Err(MtreeError::Missing)
+	));
 }
 
 // <tmp>/alpm-core-mtree-<pid>-<name>/, removed on drop
