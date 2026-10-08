@@ -561,7 +561,10 @@ fn pax_case(members: &[Member], listed: Listed) -> AcCase {
 		if let Some(body) = &m.pax {
 			c.tail.extend(ext_member(b'x', body));
 		}
-		c.tail.extend(ustar_entries(&[m.node.clone()], ac_owner()));
+		c.tail.extend(ustar_entries(
+			std::slice::from_ref(&m.node),
+			ac_owner(),
+		));
 	}
 	c
 }
@@ -628,7 +631,7 @@ fn pax_names() {
 	let t = find(&r, &[b"d", &lp[2..]]);
 	assert!(matches!(t, Some(AcNode::File(_, 3, d, _)) if d == b"data"));
 	// GNU long names before or after the pax header: the later wins
-	let longname = [&lp[..], b"\0"].concat();
+	let longname = [lp, b"\0"].concat();
 	for (tag, order) in [("ac-pax-gnu-l", true), ("ac-pax-gnu-x", false)] {
 		let mut c = pax_case(&[], &[(lp, "file"), (b"other", "file")]);
 		let l = ext_member(b'L', &longname);

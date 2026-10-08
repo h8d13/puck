@@ -23,7 +23,7 @@ use alpm_core::be_package::{
 use alpm_core::callbacks::{Callbacks, LogLevel};
 use alpm_core::package::Package;
 use alpm_core::signing::Keyring;
-use difftest::{CPkgHandle, Rng, iters};
+use difftest::{CPkgHandle, Rng, iters, pax_record};
 
 // alpm_loglevel_t and message of each log line
 type CLogs = Vec<(c_int, Vec<u8>)>;
@@ -1605,6 +1605,15 @@ fn fuzz_pkginfo() {
 	assert!(loaded * 4 > n, "{loaded} of {n} loaded");
 }
 
+// a pax 'x' member with these records, for the entry after it
+fn pax(records: &[(&str, &[u8])]) -> Entry {
+	let body: Vec<u8> = records
+		.iter()
+		.flat_map(|(k, v)| pax_record(k.as_bytes(), v))
+		.collect();
+	entry(b"pax", 0o644, Kind::Raw(b'x', body))
+}
+
 fn mtree_of(fx: &Fixture, text: &str) -> Entry {
 	file(b".MTREE", &gzip(fx, text.as_bytes()))
 }
@@ -1974,6 +1983,49 @@ fn fixed_archive() {
 					&format!("{MTREE_HEAD}{}", f("z")),
 				),
 				file(b"b", b"abc"),
+			],
+			["same", "same"],
+		),
+		// pax headers: the name and size the walk sees, a record
+		// libarchive warns about
+		(
+			"pax path pkginfo",
+			vec![
+				pax(&[("path", b".PKGINFO")]),
+				file(b"other", PKGINFO.as_bytes()),
+				file(b"a", b"x"),
+			],
+			["same", "same"],
+		),
+		(
+			"pax size",
+			vec![
+				info.clone(),
+				pax(&[("size", b"1")]),
+				file(b"a", b"abc"),
+				file(b"b", b"x"),
+			],
+			["same", "same"],
+		),
+		(
+			"pax malformed",
+			vec![
+				info.clone(),
+				entry(
+					b"x",
+					0o644,
+					Kind::Raw(b'x', b"abc\n".to_vec()),
+				),
+				file(b"a", b"abc"),
+			],
+			["same", "same"],
+		),
+		(
+			"pax first",
+			vec![
+				pax(&[("mtime", b"1x")]),
+				info.clone(),
+				file(b"a", b"abc"),
 			],
 			["same", "same"],
 		),
