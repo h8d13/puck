@@ -7,6 +7,7 @@ use alpm_core::callbacks::{
 };
 use alpm_core::deps::dep_from_string;
 use alpm_core::package::Package;
+use alpm_core::util::hash_sdbm;
 use pacman_cli::callback::{Frontend, Lookup};
 use pacman_cli::conf::{Config, LOG_DEBUG, LOG_ERROR, LOG_WARNING};
 use pacman_cli::util::{Output, Term};
@@ -34,6 +35,8 @@ fn term(input: &[u8]) -> Term<Cursor<Vec<u8>>> {
 
 fn pkg(name: &str, optdeps: &[&str]) -> Package {
 	Package {
+		// depcmp looks at the hash first
+		name_hash: hash_sdbm(name.as_bytes()),
 		name: Some(name.as_bytes().to_vec()),
 		version: Some(b"1-1".to_vec()),
 		optdepends: optdeps

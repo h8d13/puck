@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use difftest::c_uname_machine;
 use difftest::{
 	Preset, Rng, c_config_new, c_glob, c_parseconfig, c_setup, iters,
-	rust_setup,
+	rust_setup, umask_lock,
 };
 use pacman_cli::conf::{
 	Config, Host, LOG_DEBUG, LOG_ERROR, LOG_WARNING, Msg, PM_COLOR_OFF,
@@ -814,6 +814,8 @@ fn system_config() {
 fn setup_compare(tree: &Tree, conf: &str, preset: &Preset) -> i32 {
 	tree.write("setup.conf", conf.as_bytes());
 	let file = [tree.path(), b"/setup.conf".to_vec()].concat();
+	// alpm_initialize may create db/local through _alpm_makepath_mode
+	let _umask = umask_lock();
 	let mut c = c_setup(&file, preset);
 	// a failing setup leaves the C config->handle half set up, the
 	// port returns no handle
