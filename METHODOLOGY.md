@@ -159,7 +159,9 @@ No real root, and nothing outside `.tmp/` is written.
   waiter's own command line contains `<text>`, so pgrep always finds
   it and the loop never ends (six such loops ran for hours). Wait on a
   sentinel the run writes (`cmd; echo "rc=$?" >> log`, then
-  `until grep -q '^rc=' log`), or run it in the foreground.
+  `until grep -q '^rc=' log`), or run it in the foreground. Give every
+  wait a deadline (`timeout 3600 sh -c 'until ...'`): a log removed by
+  cleanup otherwise leaves the loop spinning forever.
 - Mutation checks that can loop (a removed loop exit, a dropped push)
   run under the same caps. `TEST_TIMEOUT=<s>` may be raised for long
   fuzz runs (2M iterations); `TEST_MEM_KB` is never raised.
