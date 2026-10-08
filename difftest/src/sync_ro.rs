@@ -156,7 +156,8 @@ impl CRun {
 	}
 }
 
-// the config_t fields sync.c and files.c read, besides handle and colstr
+// the config_t fields sync.c, files.c and database.c read, besides handle
+// and colstr
 #[derive(Clone, Copy)]
 struct Flags {
 	quiet: u16,
@@ -170,6 +171,8 @@ struct Flags {
 	op_f_regex: u16,
 	op_f_machinereadable: u16,
 	group: u16,
+	op_q_check: u16,
+	flags: c_int,
 }
 
 impl Flags {
@@ -186,6 +189,8 @@ impl Flags {
 			op_f_regex: c.op_f_regex,
 			op_f_machinereadable: c.op_f_machinereadable,
 			group: c.group,
+			op_q_check: c.op_q_check,
+			flags: c.flags,
 		}
 	}
 
@@ -205,6 +210,8 @@ impl Flags {
 			op_f_regex: c.op_f_regex,
 			op_f_machinereadable: c.op_f_machinereadable,
 			group: c.group,
+			op_q_check: c.op_q_check,
+			flags: c.flags,
 		};
 		c.quiet = self.quiet;
 		c.logmask = self.logmask;
@@ -217,6 +224,8 @@ impl Flags {
 		c.op_f_regex = self.op_f_regex;
 		c.op_f_machinereadable = self.op_f_machinereadable;
 		c.group = self.group;
+		c.op_q_check = self.op_q_check;
+		c.flags = self.flags;
 		old
 	}
 }

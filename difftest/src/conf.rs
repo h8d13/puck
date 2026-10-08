@@ -102,7 +102,7 @@ pub(crate) struct ConfigC {
 	pub(crate) group: u16,
 	noask: u16,
 	ask: c_uint,
-	flags: c_int,
+	pub(crate) flags: c_int,
 	siglevel: c_int,
 	localfilesiglevel: c_int,
 	remotefilesiglevel: c_int,

@@ -1,6 +1,7 @@
 // port of pacman src/pacman, the pacman frontend
 pub mod check;
 pub mod conf;
+pub mod database;
 pub mod deptest;
 pub mod files;
 pub mod getopt;
