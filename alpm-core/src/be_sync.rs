@@ -31,7 +31,7 @@ use crate::dload::{
 };
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
-use crate::filter::{Code, Filter};
+use crate::filter::Code;
 use crate::handle::{Handle, SyncParts};
 use crate::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
@@ -42,10 +42,11 @@ use crate::signing::{
 	Keyring, SIG_DATABASE, SIG_DATABASE_MARGINAL_OK, SIG_DATABASE_OPTIONAL,
 	SIG_DATABASE_UNKNOWN_OK, check_pgp_helper, process_siglist,
 };
+use crate::tar;
 use crate::util::{
-	self, ArchiveFgets, DataBlocks, Entry, PATH_MAX, alpm_access,
-	get_fullpath, hash_sdbm, makepath, parsedate, splitname, strtoofft,
-	until_nul,
+	self, ArchiveFgets, DataBlocks, Entry, PATH_MAX, S_IFDIR, S_IFMT,
+	alpm_access, get_fullpath, hash_sdbm, makepath, parsedate, splitname,
+	strtoofft, until_nul,
 };
 
 // hard upper limit of a db download
@@ -360,12 +361,11 @@ fn bytes_per_package(code: Code) -> u64 {
 	}
 }
 
-// _alpm_open_archive plus estimate_package_count, and the data block
-// size of the entries
+// _alpm_open_archive plus estimate_package_count
 fn open_archive(
 	path: &[u8],
 	dbext: &[u8],
-) -> Result<(tar::Archive<Filter>, u64, u64), Error> {
+) -> Result<(tar::Reader, u64), Error> {
 	let archive = util::open_archive(path).map_err(|e| match e.kind() {
 		ErrorKind::NotFound => Error::NotFound,
 		_ => Error::Open(e),
@@ -376,8 +376,7 @@ fn open_archive(
 	if dbext == b".files" {
 		est /= 4;
 	}
-	let block = archive.block_size();
-	Ok((archive.reader, est, block))
+	Ok((archive.reader, est))
 }
 
 // _alpm_validate_filename, its failure logged
@@ -416,9 +415,9 @@ struct Lines<'e, 'a> {
 }
 
 impl<'e, 'a> Lines<'e, 'a> {
-	fn new(entry: &'e mut Entry<'a>, block: u64) -> Self {
+	fn new(entry: &'e mut Entry<'a>) -> Self {
 		Lines {
-			f: ArchiveFgets::new(DataBlocks::new(entry, block)),
+			f: ArchiveFgets::new(DataBlocks::new(entry)),
 			line: Vec::new(),
 		}
 	}
@@ -483,8 +482,6 @@ struct Walk<'a> {
 	// db->treename and handle->logcb
 	treename: &'a [u8],
 	cb: &'a mut dyn Callbacks,
-	// util::Archive::block_size
-	block: u64,
 }
 
 fn invalid(entry: &[u8], reason: Reason) -> Error {
@@ -568,7 +565,7 @@ impl Walk<'_> {
 			logv(self.cb, LogLevel::Debug, &parts);
 			return Ok(());
 		}
-		let mut lines = Lines::new(entry, self.block);
+		let mut lines = Lines::new(entry);
 		let r = self.read_data(i, &mut lines);
 		// the filename check returns without this line
 		if r.as_ref().is_err_and(|r| !matches!(r, Reason::Filename)) {
@@ -737,9 +734,8 @@ impl Walk<'_> {
 // when the archive breaks later; a broken archive with good entries so
 // far is an archive error.
 //
-// logs through cb the C's lines of the walk; the archive error line
-// carries the port's text where the C has libarchive's, the open
-// failures of _alpm_open_archive are not logged
+// logs through cb the C's lines of the walk; the open failures of
+// _alpm_open_archive are not logged
 pub fn populate(
 	path: &[u8],
 	dbext: &[u8],
@@ -748,7 +744,7 @@ pub fn populate(
 ) -> Result<PkgHash<Package>, Error> {
 	let path = until_nul(path);
 	logv(cb, LogLevel::Debug, &[b"opening archive ", path, b"\n"]);
-	let (mut archive, est, block) = open_archive(path, until_nul(dbext))?;
+	let (archive, est) = open_archive(path, until_nul(dbext))?;
 	let mut cache = PkgHash::new(est as u32).ok_or(Error::Memory)?;
 
 	let mut walk = Walk {
@@ -756,25 +752,18 @@ pub fn populate(
 		index: HashMap::new(),
 		treename,
 		cb,
-		block,
 	};
 	let mut first_invalid = None;
 	let mut broken = None;
-	let entries = archive.entries().map_err(Error::Archive)?;
-	for (i, entry) in entries.enumerate() {
+	for entry in archive.entries() {
 		let mut entry = match entry {
 			Ok(e) => e,
-			// libarchive picks the format while opening: a first header
-			// no reader takes is an open failure, like be_package
-			Err(e) if i == 0 => return Err(Error::Open(e)),
 			Err(e) => {
 				broken = Some(e);
 				break;
 			}
 		};
-		// libarchive types a regular entry ending in '/' a directory
-		let is_dir = entry.header().entry_type().is_dir();
-		if is_dir || entry.path_bytes().last() == Some(&b'/') {
+		if entry.mode() & S_IFMT == S_IFDIR {
 			continue;
 		}
 		if let Err(reason) = walk.read_entry(&mut entry) {

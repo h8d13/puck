@@ -45,6 +45,8 @@ Every finding states who controls the input that triggers it:
 | `alpm_db_update` fails with `ALPM_ERR_OK` | real |
 | `%BACKUP%` written with a `(null)` hash | real |
 | stale `.sig` kept after a sync | real (rare) |
+| a pax header warning ends the extraction quietly | packager |
+| default-only ACL installs a directory with mode 0 (libarchive) | real (rare) |
 | minor sections | per bullet |
 
 ## `_alpm_filelist_pathcmp` compares signed `char`
@@ -759,6 +761,12 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
   upgrade (add.c:508, remove.c:718). **api**
 - the -1 check after `_alpm_remove_single_package` is dead, it always
   returns 0 (add.c:508-511). **none**
+- a pax header libarchive answers with ARCHIVE_WARN (a malformed record,
+  a name the locale cannot take, an ACL parse error, an xattr name past
+  128 bytes) ends the extraction loop quietly (add.c:550/564): the files
+  after it are missing, the db lists them, the commit succeeds. The load
+  never sees that header, it stops one entry after `.MTREE`.
+  **packager** (difftest add_commit `pax_*`)
 
 ## `sighandler.c` minor
 
@@ -1031,6 +1039,52 @@ maintainer of this repo, not from here.
 
 # libarchive findings
 
+`archive_read_support_format_tar.c` and `archive_write_disk_posix.c` at
+libarchive 3.8.9, met while translating the tar reader
+(`alpm-core::tar`) and the extraction (`add.rs`). Confirmed against the
+C in difftest add_commit unless said otherwise.
+
+- `SCHILY.acl.default` alone sets perm_is_set with the ACL's mode, 0
+  (`pax_attribute_SCHILY_acl`'s "Workaround: Force perm_is_set()"):
+  with ARCHIVE_EXTRACT_PERM the directory is created mode 0000. bsdtar
+  writes exactly that record for a directory with a default ACL and an
+  access ACL equal to its mode, and makepkg does not pass `--no-acls`:
+  a package built under a tree with default ACLs installs unusable
+  directories. **real (rare)**
+- the hard link size heuristic (header_common) calls
+  `archive_read_format_tar_bid` while the hard link's own header is
+  still unconsumed, so it judges that header, not the next one: in a
+  ustar archive a '1' entry's size is dropped exactly when its own
+  header says "ustar\0" "00". **none** (bsdtar writes hard links with
+  size 0)
+- `pax_time` applies a '-' to the seconds only: "-1.5" is -1 s + 0.5 s.
+  **packager**
+- pax uid/gid are int64 and cast to uid_t/gid_t at fchown: 4294967296
+  gives 0, root when pacman extracts as root. **packager** (the
+  packager sets ids anyway)
+- a sparse map covering less than the stored data: read_data's end
+  consumes the rest, but entry_bytes_remaining keeps its value and the
+  next header's skip consumes it again, so that header is read from
+  inside the archive and the walk ends. **packager**
+- write_data_block with a block past the file size (a sparse block
+  offset beyond realsize) computes the size as size_t of a negative
+  number and hands write(2) memory past the block until it faults; the
+  file is truncated back at finish, "Write failed". **packager**, from
+  source only (not exercised: the C would write heap memory)
+- set_xattrs refuses `xfsroot.*` but warns only if another attribute's
+  call failed too. **none**
+- pax records whose ARCHIVE_WARN sets no error (an unknown hdrcharset,
+  a negative number, an overlong fflags, a long SCHILY.xattr name)
+  leave archive_error_string NULL, logged as "(null)" by be_package and
+  be_sync. **packager**
+- in the C locale a UTF-8 pax path with non-ASCII bytes cannot be
+  converted (iconv to ASCII) and the header returns ARCHIVE_WARN; in a
+  UTF-8 locale decomposed names are composed to NFC, which then differ
+  from the `.MTREE` file list ("file not found in file list"). makepkg's
+  `LANG=C bsdtar` writes such names with hdrcharset=BINARY, the only one
+  in a 2559-package cache (go) is. **packager** (pinned:
+  `under_c_locale`, `pax_composed_divergence`)
+
 `archive_read_support_format_mtree.c` at libarchive 3.8.9, met while
 translating it (`alpm-core::mtree`). Same practice labels, judged by
 what pacman reads (bsdtar's `.MTREE`, copied as the local `mtree`).
@@ -1168,7 +1222,8 @@ pacman's formats. Same practice labels, judged against real databases.
   (`util::Filter`). **none**
 - alpm-compress `TarballReader` only wraps a `CompressionDecoder` (built
   from a `File`): a tarball cannot be read through another `Read` layer
-  or from memory, so the port uses the tar crate directly. **api**
+  or from memory, so the port reads tar itself (`alpm-core::tar`).
+  **api**
 - alpm-compress bzip2 uses `BzDecoder::new`, single stream (bzip2 0.6.1
   `multi: false`); libarchive reads concatenated streams (pbzip2
   output). From source, not exercised. **packager** (makepkg's

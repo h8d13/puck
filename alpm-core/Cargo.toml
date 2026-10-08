@@ -16,7 +16,6 @@ lz4_flex.workspace = true
 pacman-common = { path = "../pacman-common" }
 reqwest.workspace = true
 rustix.workspace = true
-tar.workspace = true
 twox-hash.workspace = true
 zstd.workspace = true
 

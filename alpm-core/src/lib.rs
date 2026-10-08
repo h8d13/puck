@@ -29,6 +29,7 @@ pub mod sandbox_fs;
 pub mod sandbox_syscalls;
 pub mod signing;
 pub mod sync;
+pub mod tar;
 pub mod trans;
 pub mod util;
 pub mod version;
