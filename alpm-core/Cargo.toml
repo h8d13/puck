@@ -14,6 +14,8 @@ pacman-common = { path = "../pacman-common" }
 reqwest.workspace = true
 rustix.workspace = true
 tar.workspace = true
+# localtime(3) offsets for log stamps (METHODOLOGY.md)
+time = { workspace = true, features = ["local-offset"] }
 
 [lints]
 workspace = true

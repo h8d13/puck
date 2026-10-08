@@ -278,31 +278,11 @@ pub(crate) unsafe fn c_hook_rec(event: *mut c_void) -> Option<HookRec> {
 	Some(rec)
 }
 
-// "[%FT%T%z] " leaders of alpm_logaction dropped, wherever they sit (a
-// line cut at a nul runs into the next entry)
+// alpm_logaction's leaders as their zone, "[+zzzz]": the clock moves
+// between the C's run and the port's (whole commits), the zone is
+// compared. handle_opts' stamped finds them
 pub fn strip_stamps(log: &[u8]) -> Vec<u8> {
-	// [2026-10-08T01:43:00+0200]
-	const SHAPE: &[u8] = b"[dddd-dd-ddTdd:dd:dd+dddd] ";
-	let fits = |w: &[u8]| {
-		w.iter().zip(SHAPE).all(|(&c, &s)| match s {
-			b'd' => c.is_ascii_digit(),
-			b'+' => c == b'+' || c == b'-',
-			_ => c == s,
-		})
-	};
-	let mut out = Vec::new();
-	let mut i = 0;
-	while i < log.len() {
-		if log.len() - i >= SHAPE.len()
-			&& fits(&log[i..i + SHAPE.len()])
-		{
-			i += SHAPE.len();
-			continue;
-		}
-		out.push(log[i]);
-		i += 1;
-	}
-	out
+	crate::handle_opts::stamped(log).text
 }
 
 // what one C call gave: return value, callbacks, logfile text without

@@ -16,10 +16,9 @@ use alpm_core::util::hash_sdbm;
 use difftest::{
 	CACHED, CIo, CORE_SERVER, Pty, Rng, UtilWorld, c_colon_printf,
 	c_multiselect_question, c_question, c_rmrf, c_select_question, iters,
-	run_tty_probe, widths_agree,
+	run_tty_probe, utc_date, widths_agree,
 };
 use pacman_cli::conf::Config;
-use pacman_cli::package::format_date_utc;
 use pacman_cli::pacman::{
 	PM_OP_QUERY, PM_OP_REMOVE, PM_OP_SYNC, PM_OP_UPGRADE,
 };
@@ -795,7 +794,7 @@ fn print_packages_formats() {
 			&cfg,
 			&fx.db_pkgs(&pkgs),
 			dirs,
-			format_date_utc,
+			utc_date,
 		);
 		assert_eq!(
 			(show(&c.stdout), show(&c.stderr)),

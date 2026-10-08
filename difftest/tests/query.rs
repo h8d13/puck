@@ -19,7 +19,7 @@ use alpm_core::handle::Handle;
 use alpm_types::{Md5Checksum, Sha256Checksum};
 use difftest::{
 	CQuery, Comp, QueryWorld, Rng, TempRoot, iters, section, tar_dir,
-	tar_file, ustar, write_db,
+	tar_file, tz_utc, ustar, write_db,
 };
 use pacman_cli::conf::{ColStr, Config, ConfigRepo};
 use pacman_cli::deptest::pacman_deptest;
@@ -620,6 +620,8 @@ fn rust_query(
 	env: &QueryEnv,
 ) -> CQuery {
 	let mut o = Output::default();
+	// -Qi dates in the C side's zone
+	tz_utc();
 	let ret = pacman_query(cfg, &mut w.r, env, targets, &mut o);
 	CQuery {
 		ret,

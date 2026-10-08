@@ -1,10 +1,12 @@
 // port of lib/libalpm/log.c: alpm_logaction, the logfile and syslog
 // lines. _alpm_log is Callbacks::log with the message formatted.
 //
-// the C stamps lines with localtime(time(NULL)); safe std has no local
-// time zone, so the clock is the handle's (Clock: unix time and UTC
-// offset), UTC by default. messages come formatted (the C takes fmt +
-// va_list). vsyslog(3) is rebuilt on std's unix socket: glibc's default
+// the C stamps lines with localtime(time(NULL)): the offset comes from
+// glibc's localtime_r through time's local-offset (METHODOLOGY.md), so
+// TZ, /etc/localtime and the zone's rules at that second are the C's.
+// glibc reads TZ at the first call of the process where the C's
+// localtime rereads it every time; nothing here changes the environment.
+// messages come formatted (the C takes fmt + va_list). vsyslog(3) is rebuilt on std's unix socket: glibc's default
 // openlog (no ident, LOG_USER, no LOG_PID) to /dev/log, datagram first
 // then stream, a failed send drops the line (no LOG_CONS).
 
@@ -15,6 +17,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::net::{UnixDatagram, UnixStream};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use time::{OffsetDateTime, UtcOffset};
 
 use crate::dload::{MONTHS, civil_from_days};
 use crate::error::Errno;
@@ -37,15 +41,27 @@ pub struct LogTime {
 	pub utcoff: i32,
 }
 
-pub type Clock = fn() -> LogTime;
-
-// time(NULL) in UTC
-pub fn utc_now() -> LogTime {
-	let secs = match SystemTime::now().duration_since(UNIX_EPOCH) {
+// time(NULL)
+pub fn now_secs() -> i64 {
+	match SystemTime::now().duration_since(UNIX_EPOCH) {
 		Ok(d) => d.as_secs() as i64,
 		Err(e) => -(e.duration().as_secs() as i64),
-	};
-	LogTime { secs, utcoff: 0 }
+	}
+}
+
+// localtime(&secs)->tm_gmtoff. None outside the years time holds (-9999
+// to 9999), where glibc still answers
+pub fn local_offset(secs: i64) -> Option<i32> {
+	let t = OffsetDateTime::from_unix_timestamp(secs).ok()?;
+	let off = UtcOffset::local_offset_at(t).ok()?;
+	Some(off.whole_seconds())
+}
+
+// localtime(time(NULL)); UTC in the years local_offset cannot take
+pub fn local_now() -> LogTime {
+	let secs = now_secs();
+	let utcoff = local_offset(secs).unwrap_or(0);
+	LogTime { secs, utcoff }
 }
 
 // the broken-down local time: year, month, day, hour, minute, second
@@ -56,13 +72,14 @@ fn local(t: LogTime) -> (i64, i64, i64, i64, i64, i64) {
 	(y, m, d, rem / 3600, rem / 60 % 60, rem % 60)
 }
 
-// _alpm_log_leader: "[%FT%T%z] [prefix] "
+// _alpm_log_leader: "[%FT%T%z] [prefix] ". glibc's %F is "%Y-%m-%d",
+// the year unpadded
 pub fn leader(t: LogTime, prefix: &[u8]) -> Vec<u8> {
 	let (y, mo, d, h, mi, s) = local(t);
 	let sign = if t.utcoff < 0 { '-' } else { '+' };
 	let off = t.utcoff.unsigned_abs();
 	let stamp = format!(
-		"[{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}{sign}{:02}{:02}] [",
+		"[{y}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}{sign}{:02}{:02}] [",
 		off / 3600,
 		off / 60 % 60
 	);
@@ -118,26 +135,13 @@ impl Syslog {
 	}
 }
 
-// handle->logfile, logstream and usesyslog with the clock they stamp by
-#[derive(Debug)]
+// handle->logfile, logstream and usesyslog
+#[derive(Debug, Default)]
 pub struct Logger {
 	logfile: Option<Vec<u8>>,
 	stream: Option<File>,
 	usesyslog: c_int,
 	syslog: Option<Syslog>,
-	clock: Clock,
-}
-
-impl Default for Logger {
-	fn default() -> Self {
-		Logger {
-			logfile: None,
-			stream: None,
-			usesyslog: 0,
-			syslog: None,
-			clock: utc_now,
-		}
-	}
 }
 
 impl Logger {
@@ -161,14 +165,6 @@ impl Logger {
 	// the C's closelog runs at handle release only
 	pub fn set_usesyslog(&mut self, usesyslog: c_int) {
 		self.usesyslog = usesyslog;
-	}
-
-	pub fn set_clock(&mut self, clock: Clock) {
-		self.clock = clock;
-	}
-
-	pub fn now(&self) -> LogTime {
-		(self.clock)()
 	}
 
 	// open(logfile, O_WRONLY|O_APPEND|O_CREAT|O_CLOEXEC, 0644)
@@ -196,7 +192,7 @@ impl Logger {
 
 	// vsyslog: connects on first use, one reconnect when a send fails
 	fn syslog(&mut self, msg: &[u8]) {
-		let packet = syslog_message(self.now(), &progname(), msg);
+		let packet = syslog_message(local_now(), &progname(), msg);
 		for _ in 0..2 {
 			if self.syslog.is_none() {
 				self.syslog = Syslog::connect().ok();
@@ -234,7 +230,7 @@ impl Logger {
 			b"" => &b"UNKNOWN"[..],
 			p => p,
 		};
-		let line = [&leader((self.clock)(), prefix)[..], msg].concat();
+		let line = [&leader(local_now(), prefix)[..], msg].concat();
 		let blksize = f.metadata().map_or(4096, |m| m.blksize());
 		if f.write_all(&line).is_err() && line.len() as u64 > blksize {
 			ret = Err(Errno::System);

@@ -28,7 +28,9 @@ use std::sync::atomic::AtomicBool;
 use alpm_core::db::Db;
 use alpm_core::deps::{Depend, dep_compute_string, find_satisfier};
 use alpm_core::handle::Handle;
-use alpm_core::log::utc_now;
+use alpm_core::log::local_offset;
+// time(NULL)
+pub use alpm_core::log::now_secs;
 use alpm_core::package::{Package, PkgFrom, pkg_cmp, pkg_find};
 use alpm_core::trans::{
 	InitError, trans_init as alpm_trans_init,
@@ -70,16 +72,11 @@ impl Output {
 	}
 }
 
-// time(NULL)
-pub fn now_secs() -> i64 {
-	utc_now().secs
-}
-
 // PACMAN_DEBUG (set by the meson build): pm_vfprintf puts "[%H:%M:%S] "
-// before every message while debug logging is on. localtime needs the
-// zone database, safe std has none: the stamp is UTC (TZ=UTC in the C)
+// of localtime before every message while debug logging is on
 pub fn debug_stamp(secs: i64) -> Vec<u8> {
-	let s = secs.rem_euclid(86400);
+	let local = secs + i64::from(local_offset(secs).unwrap_or(0));
+	let s = local.rem_euclid(86400);
 	let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
 	format!("[{h:02}:{m:02}:{s:02}] ").into_bytes()
 }

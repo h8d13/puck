@@ -14,7 +14,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use difftest::{Rng, iters};
+use difftest::{Rng, Stamped, iters, stamped};
 use pacman_cli::conf::Config;
 use pacman_cli::getopt::{HasArg, LongOpt};
 use pacman_cli::pacman::{Io, LONGOPTS, Process, main_args, parseargs};
@@ -80,24 +80,11 @@ fn reopen_tty() -> Result<(), i32> {
 	}
 }
 
-// drops the "[HH:MM:SS] " PACMAN_DEBUG puts before pm_printf lines
-// while debug logging is on
-fn strip_timestamps(err: &[u8]) -> Vec<u8> {
-	let mut out = Vec::new();
-	for line in err.split_inclusive(|&c| c == b'\n') {
-		let stamped = line.len() >= 11
-			&& line[0] == b'[' && line[3] == b':'
-			&& line[6] == b':' && line[9] == b']'
-			&& line[10] == b' ';
-		out.extend_from_slice(if stamped { &line[11..] } else { line });
-	}
-	out
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Outcome {
 	out: String,
-	err: String,
+	// PACMAN_DEBUG stamps within CLOCK_SLACK
+	err: Stamped,
 	status: i32,
 }
 
@@ -136,7 +123,7 @@ fn run_c(
 	let o = child.wait_with_output().unwrap();
 	Outcome {
 		out: lossy(&o.stdout),
-		err: lossy(&strip_timestamps(&o.stderr)),
+		err: stamped(&o.stderr),
 		status: o.status.code().expect("C pacman killed by a signal"),
 	}
 }
@@ -149,6 +136,7 @@ fn run_rust(
 	let mut argv = argv.to_vec();
 	let mut io = Io {
 		posixly_correct: posix,
+		debug_stamps: true,
 		..Io::default()
 	};
 	// /dev/null is not a terminal: stdin always reads, empty for None
@@ -160,7 +148,7 @@ fn run_rust(
 	let r = main_args(&mut argv, process, &mut io);
 	let out = Outcome {
 		out: lossy(&io.out),
-		err: lossy(&io.err),
+		err: stamped(&io.err),
 		status: r.as_ref().map_or_else(|&c| c, |_| 0),
 	};
 	(out, r.is_ok())
@@ -212,7 +200,7 @@ fn compare(
 		show(argv),
 		stdin.map(lossy)
 	);
-	(c.status, c.err)
+	(c.status, lossy(&c.err.text))
 }
 
 fn args(fx: &Fixture, a: &[&str]) -> Vec<Vec<u8>> {

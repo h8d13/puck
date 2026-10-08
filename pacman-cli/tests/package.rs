@@ -48,6 +48,11 @@ impl PkgEnv for Env {
 		None
 	}
 
+	// TZ=UTC, whatever the test's zone
+	fn format_date(&mut self, t: i64) -> Option<Vec<u8>> {
+		format_date_at(t, 0)
+	}
+
 	fn sig_keys(&mut self, _: &Package, _: &[u8]) -> Vec<Vec<u8>> {
 		Vec::new()
 	}
@@ -100,7 +105,7 @@ fn line<'a>(out: &'a str, title: &str) -> Option<&'a str> {
 
 #[test]
 fn dates() {
-	let d = |t| String::from_utf8(format_date_utc(t).unwrap()).unwrap();
+	let d = |t| String::from_utf8(format_date_at(t, 0).unwrap()).unwrap();
 	assert_eq!(d(0), "Thu Jan  1 00:00:00 1970");
 	assert_eq!(d(1_700_000_000), "Tue Nov 14 22:13:20 2023");
 	assert_eq!(d(-1), "Wed Dec 31 23:59:59 1969");
@@ -110,9 +115,9 @@ fn dates() {
 	// the years time covers
 	assert_eq!(d(253_402_300_799), "Fri Dec 31 23:59:59 9999");
 	assert_eq!(d(-377_705_116_800), "Mon Jan  1 00:00:00 -9999");
-	assert_eq!(format_date_utc(253_402_300_800), None);
-	assert_eq!(format_date_utc(-377_705_116_801), None);
-	assert_eq!(format_date_utc(i64::MAX), None);
+	assert_eq!(format_date_at(253_402_300_800, 0), None);
+	assert_eq!(format_date_at(-377_705_116_801, 0), None);
+	assert_eq!(format_date_at(i64::MAX, 0), None);
 }
 
 #[test]

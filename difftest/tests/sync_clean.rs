@@ -16,14 +16,13 @@ use std::path::Path;
 use alpm_core::handle::Handle;
 use difftest::{
 	CleanWorld, Comp, Node, Rng, c_pacman_sync_clean, iters, snapshot,
-	umask_lock, write_package,
+	umask_lock, utc_date, write_package,
 };
 use pacman_cli::callback::Frontend;
 use pacman_cli::conf::{
 	ColStr, Config, LOG_DEBUG, LOG_ERROR, LOG_WARNING, PM_CLEAN_KEEPCUR,
 	PM_CLEAN_KEEPINST,
 };
-use pacman_cli::package::format_date_utc;
 use pacman_cli::pacman::PM_OP_SYNC;
 use pacman_cli::sync::{Deferred, pacman_sync, sync_clean};
 use pacman_cli::util::{Output, Term, Ui};
@@ -80,7 +79,7 @@ fn rust_run(w: &CleanWorld, cfg: &Config, input: &[u8]) -> Run {
 			term: &mut term,
 			cols: 0,
 			out: &mut out,
-			format_date: &format_date_utc,
+			format_date: &utc_date,
 			explicit_adds: Vec::new(),
 			explicit_removes: Vec::new(),
 		};

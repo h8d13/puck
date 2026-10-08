@@ -24,7 +24,7 @@ use crate::db::{Db, SIG_USE_DEFAULT};
 use crate::deps::{DepMod, Depend};
 use crate::dload::{DownloadState, Downloader, Sandbox, Settings};
 use crate::error::Errno;
-use crate::log::{Clock, Logger};
+use crate::log::Logger;
 use crate::package::{DbCaches, Package};
 use crate::sandbox::handle_sandbox;
 use crate::signing::Keyring;
@@ -372,11 +372,6 @@ impl Handle {
 		msg: &[u8],
 	) -> Result<(), Errno> {
 		self.logger.logaction(prefix, msg)
-	}
-
-	// the clock logfile and syslog lines are stamped with
-	pub fn set_log_clock(&mut self, clock: Clock) {
-		self.logger.set_clock(clock);
 	}
 
 	// alpm_option_get_logfile

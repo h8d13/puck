@@ -70,6 +70,7 @@ follows the wider ALPM workspace, then parity:
 | landlock (`sandbox_fs.c`) | `landlock` crate | the Landlock maintainers' binding |
 | seccomp (`sandbox_syscalls.c`) | `libseccomp` crate | binding to the same C library pacman links |
 | lock file | `OpenOptions::create_new` | safe std (O_CREAT\|O_EXCL) |
+| local time (log stamps, PACMAN_DEBUG, `%c` dates) | `time` `local-offset`: `UtcOffset::local_offset_at`, glibc's `localtime_r` `tm_gmtoff` | precedent crate (ALPM's simplelog enables it); the offset is glibc's own, so TZ, `/etc/localtime`, POSIX rules and DST edges match by construction (tz-probe difftest). since time 0.3.37 it no longer refuses multithreaded processes; what is left is getenv(TZ) racing a setenv in another thread, which needs `unsafe` here. glibc reads TZ once per process for `localtime_r`, the C's `localtime` rereads it: same in a process that leaves its environment alone. a TZif reader was not taken: it would reimplement what glibc answers |
 | signal handlers (`sighandler.c`) | `signal-hook` 0.4: self-pipe `Signals` read by a thread, `flag::register_conditional_default` | std/rustix have no safe handler API, no ALPM crate installs one; the established binding (its registry also backs tokio's signals). the handler only writes to the pipe or reads a flag, the C handler's work runs on the thread |
 
 No `unsafe` outside difftest: when something seems to need it, look for the

@@ -19,11 +19,11 @@ use alpm_core::util::hash_sdbm;
 use alpm_types::Md5Checksum;
 use difftest::{
 	CShown, PkgWorld, Rng, SYNC_DBS, c_print_groups, c_strftime_c,
-	encode_base64, iters, random_sig, sig_packet, widths_agree,
+	encode_base64, iters, random_sig, sig_packet, utc_date, widths_agree,
 };
 use pacman_cli::package::{
 	FileProbe, PkgEnv, dump_pkg_backups, dump_pkg_files, dump_pkg_full,
-	dump_pkg_search, format_date_utc, print_groups, print_installed,
+	dump_pkg_search, print_groups, print_installed,
 };
 use pacman_cli::util::{ColStr, SigResult};
 
@@ -370,6 +370,11 @@ impl PkgEnv for Env<'_> {
 		Some(SYNC_DBS[self.db].as_bytes().to_vec())
 	}
 
+	// the C side's TZ=UTC
+	fn format_date(&mut self, t: i64) -> Option<Vec<u8>> {
+		utc_date(t)
+	}
+
 	fn sig_keys(&mut self, _: &Package, _: &[u8]) -> Vec<Vec<u8>> {
 		self.keys.clone()
 	}
@@ -433,7 +438,7 @@ enum DateClass {
 
 #[track_caller]
 fn date_class(t: i64) -> DateClass {
-	let (c, r) = (c_strftime_c(t), format_date_utc(t));
+	let (c, r) = (c_strftime_c(t), utc_date(t));
 	let class = match (&c, &r) {
 		(Some(_), Some(_)) => DateClass::Same,
 		(Some(_), None) => DateClass::OnlyC,
@@ -479,10 +484,7 @@ fn date_fixed() {
 	for (t, want) in cases {
 		assert_eq!(date_class(t), want, "{t}");
 	}
-	assert_eq!(
-		format_date_utc(0).unwrap(),
-		b"Thu Jan  1 00:00:00 1970".to_vec()
-	);
+	assert_eq!(utc_date(0).unwrap(), b"Thu Jan  1 00:00:00 1970".to_vec());
 }
 
 // time's range and the localtime limits, found on the C, plus one past

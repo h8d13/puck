@@ -10,19 +10,20 @@
 // messages and titles are the untranslated msgids, gettext is not ported.
 //
 // dates: the C formats with strftime("%c") on localtime(), so the output
-// follows LC_TIME and TZ. format_date_utc is that for LC_TIME=C.UTF-8
-// (and C) with TZ=UTC; PkgEnv::format_date is where another time zone or
-// locale plugs in.
+// follows LC_TIME and TZ. format_date is that for LC_TIME=C.UTF-8 (and
+// C) in the local zone (alpm_core::log::local_offset); PkgEnv::format_date
+// is where a fixed zone or another locale plugs in.
 
 use alpm_core::deps::{Depend, dep_compute_string, find_satisfier};
 use alpm_core::error::Errno;
+use alpm_core::log::local_offset;
 use alpm_core::package::{
 	DbCaches, PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
 	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, PkgReason,
 	compute_optionalfor, compute_requiredby,
 };
 use alpm_core::util::until_nul;
-use time::OffsetDateTime;
+use time::{OffsetDateTime, UtcOffset};
 
 use crate::util::{
 	ColStr, SigResult, humanize_size, indentprint, list_display,
@@ -71,7 +72,7 @@ pub trait PkgEnv: DbCaches {
 	fn error(&mut self, msg: &[u8]);
 	// strftime("%c", localtime(&t)); None where localtime fails
 	fn format_date(&mut self, t: i64) -> Option<Vec<u8>> {
-		format_date_utc(t)
+		format_date(t)
 	}
 }
 
@@ -164,13 +165,20 @@ impl Titles {
 	}
 }
 
-// strftime("%c", localtime(&t)) with TZ=UTC in the C.UTF-8 (or C) locale:
-// "%a %b %e %H:%M:%S %Y", the English names cut to 3 letters. %Y is the
-// plain year, no padding, '-' for years before 1. None outside the years
-// time covers (-9999 to 9999), where glibc localtime goes on to tm_year
-// (year - 1900) past int
-pub fn format_date_utc(t: i64) -> Option<Vec<u8>> {
+// strftime("%c", localtime(&t)) in the C.UTF-8 (or C) locale
+pub fn format_date(t: i64) -> Option<Vec<u8>> {
+	format_date_at(t, local_offset(t)?)
+}
+
+// strftime("%c") of t in a zone utcoff seconds east of UTC, C.UTF-8 (or
+// C) locale: "%a %b %e %H:%M:%S %Y", the English names cut to 3 letters.
+// %Y is the plain year, no padding, '-' for years before 1. None outside
+// the years time covers (-9999 to 9999), where glibc localtime goes on to
+// tm_year (year - 1900) past int
+pub fn format_date_at(t: i64, utcoff: i32) -> Option<Vec<u8>> {
+	let off = UtcOffset::from_whole_seconds(utcoff).ok()?;
 	let d = OffsetDateTime::from_unix_timestamp(t).ok()?;
+	let d = d.checked_to_offset(off)?;
 	let s = format!(
 		"{:.3} {:.3} {:>2} {:02}:{:02}:{:02} {}",
 		d.weekday(),

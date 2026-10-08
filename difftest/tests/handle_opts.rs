@@ -1,13 +1,15 @@
 // alpm_core::{handle, log} against handle.c and log.c: the option
 // setters/getters (results, pm_errno, debug lines, whole state after each
 // step) on fixture roots, the lock between a C and a Rust handle on one
-// dbpath, alpm_logaction's file output (timestamps stripped, their format
-// compared against strftime separately) and its errors, the
-// DATABASE_MISSING event.
+// dbpath, alpm_logaction's file output (stamps within CLOCK_SLACK of
+// each other, their format against strftime separately, local time in
+// every zone through tz-probe) and its errors, the DATABASE_MISSING
+// event.
 use std::cell::RefCell;
 use std::ffi::c_int;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
+use std::process::Command;
 use std::rc::Rc;
 
 use alpm_core::callbacks::{Callbacks, Event, LogLevel};
@@ -17,7 +19,7 @@ use alpm_core::handle::Handle;
 use alpm_core::log::{LogTime, leader, syslog_message};
 use difftest::{
 	COpts, DirList, FlagOpt, IntOpt, OptsRecord, Rng, TempRoot,
-	c_strftime_at, iters,
+	c_strftime_at, iters, stamped,
 };
 
 // what the Rust callbacks saw, shared with the test
@@ -446,7 +448,7 @@ fn unlock_missing_and_stuck() {
 	rm(&lockfile);
 	assert!(b.r.handle_unlock());
 	b.compare_record("missing lock");
-	assert_eq!(strip_stamps(&read(&clog)), strip_stamps(&read(&rlog)));
+	assert_eq!(stamped(&read(&clog)), stamped(&read(&rlog)));
 	assert!(read(&rlog).ends_with(
 		&[b"warning: lock file missing ", &lockfile[..], b"\n"]
 			.concat()
@@ -490,7 +492,7 @@ fn unlock_missing_and_stuck() {
 	fs::set_permissions(&db, fs::Permissions::from_mode(0o755)).unwrap();
 	rm(&lockfile);
 	b.compare_record("stuck handle_unlock");
-	assert_eq!(strip_stamps(&read(&clog)), strip_stamps(&read(&rlog)));
+	assert_eq!(stamped(&read(&clog)), stamped(&read(&rlog)));
 }
 
 // the lockfile's directory is made first
@@ -517,31 +519,6 @@ fn lock_makes_dir() {
 fn read(path: &[u8]) -> Vec<u8> {
 	use std::os::unix::ffi::OsStrExt;
 	fs::read(std::ffi::OsStr::from_bytes(path)).unwrap_or_default()
-}
-
-// "[YYYY-MM-DDTHH:MM:SS+ZZZZ]" anywhere becomes "[T]", each one checked
-// for that shape
-fn strip_stamps(s: &[u8]) -> Vec<u8> {
-	const SHAPE: &[u8] = b"[dddd-dd-ddTdd:dd:dd+dddd]";
-	let fits = |w: &[u8]| {
-		w.iter().zip(SHAPE).all(|(&c, &p)| match p {
-			b'd' => c.is_ascii_digit(),
-			b'+' => c == b'+' || c == b'-',
-			p => c == p,
-		})
-	};
-	let mut out = Vec::new();
-	let mut i = 0;
-	while i < s.len() {
-		if s.len() - i >= SHAPE.len() && fits(&s[i..i + SHAPE.len()]) {
-			out.extend_from_slice(b"[T]");
-			i += SHAPE.len();
-			continue;
-		}
-		out.push(s[i]);
-		i += 1;
-	}
-	out
 }
 
 const PREFIXES: [Option<&[u8]>; 5] = [
@@ -590,7 +567,7 @@ fn logaction_fuzz() {
 		for name in names {
 			let c = read(&b.fx.path(&format!("c/{name}")));
 			let r = read(&b.fx.path(&format!("r/{name}")));
-			let (c, r) = (strip_stamps(&c), strip_stamps(&r));
+			let (c, r) = (stamped(&c), stamped(&r));
 			assert_eq!(c, r, "case {case} {name}");
 		}
 	}
@@ -642,7 +619,8 @@ fn logaction_errors() {
 fn stamp_format() {
 	let mut rng = Rng::new(0x57a);
 	for _ in 0..iters() {
-		let secs = (rng.next_u64() % (1 << 35)) as i64 - (1 << 31);
+		// years -6700 to 10700: %F's unpadded and negative years
+		let secs = (rng.next_u64() % (1 << 39)) as i64 - (1 << 38);
 		let utcoff = rng.below(28 * 3600 + 1) as i32 - 14 * 3600;
 		let t = LogTime { secs, utcoff };
 		let stamp = c_strftime_at(secs, utcoff, c"[%FT%T%z] [");
@@ -656,6 +634,58 @@ fn stamp_format() {
 			"{t:?}"
 		);
 	}
+}
+
+// the zones local time is checked in: no TZ (/etc/localtime), empty
+// (UTC), DST both ways and at :30, offsets at :30/:45, Chatham's +1345,
+// Casablanca's Ramadan shifts, Lord Howe's 30 min DST, POSIX rule and
+// offset strings, a file path and an unknown name (UTC to glibc)
+const ZONES: [Option<&str>; 16] = [
+	None,
+	Some(""),
+	Some("UTC"),
+	Some("Europe/Brussels"),
+	Some(":Europe/Dublin"),
+	Some("America/New_York"),
+	Some("America/St_Johns"),
+	Some("America/Sao_Paulo"),
+	Some("Asia/Kathmandu"),
+	Some("Pacific/Chatham"),
+	Some("Africa/Casablanca"),
+	Some("Australia/Lord_Howe"),
+	Some("EST5EDT,M3.2.0,M11.1.0"),
+	Some("<+0330>-3:30"),
+	Some("/usr/share/zoneinfo/Asia/Tokyo"),
+	Some("Nowhere/Zone"),
+];
+
+// alpm_core::log::local_offset, the leader, the syslog header, the
+// PACMAN_DEBUG stamp and -Qi's %c date against localtime(3) in each
+// zone: tz-probe runs once per TZ (glibc reads it once a process)
+#[test]
+fn local_time_zones() {
+	let mut edges = 0;
+	for tz in ZONES {
+		let mut cmd = Command::new(env!("CARGO_BIN_EXE_tz-probe"));
+		cmd.env_clear().env("LC_ALL", "C");
+		if let Some(tz) = tz {
+			cmd.env("TZ", tz);
+		}
+		let o = cmd.output().unwrap();
+		let out = String::from_utf8_lossy(&o.stdout);
+		let err = String::from_utf8_lossy(&o.stderr);
+		assert!(o.status.success(), "TZ={tz:?}\n{out}{err}");
+		let last = out.lines().last().unwrap_or_default();
+		println!("TZ={tz:?}: {last}");
+		let n: Vec<usize> = last
+			.split(' ')
+			.filter_map(|w| w.parse().ok())
+			.collect();
+		assert!(n.len() == 2 && n[0] >= 5000, "TZ={tz:?}: {last}");
+		edges += n[1];
+	}
+	// the DST zones' rules were read (tzdata present)
+	assert!(edges > 1000, "{edges} transitions");
 }
 
 // registration: a missing db file sends DATABASE_MISSING with its name,
