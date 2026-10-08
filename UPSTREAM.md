@@ -40,6 +40,7 @@ Every finding states who controls the input that triggers it:
 | `_alpm_filelist_intersection` empty names | none |
 | `rawstr.c` no callers | none |
 | `alpm_db_update` fails with `ALPM_ERR_OK` | real |
+| `%BACKUP%` written with a `(null)` hash | real |
 | stale `.sig` kept after a sync | real (rare) |
 | minor sections | per bullet |
 
@@ -570,6 +571,40 @@ place, the new db is checked against it and turns invalid.
 
 - port: same behaviour
 - difftest: `signatures` ("optional missing")
+
+## `%BACKUP%` written with a `(null)` hash
+
+Practice: **real**. 15/804 entries in a real local db carry it.
+
+be_local.c:1118 prints `%s` of `backup->hash`, NULL when the package had
+no md5 for that file; glibc writes `(null)`. The reader then keeps
+`(null)` as the hash string.
+
+- port: writes `(null)` like the C, the reader maps it back
+- difftest: `be_local_write`
+
+## local db writing and `_alpm_unpack` minor
+
+- no write error checked in `_alpm_local_db_write` (`fprintf`/`fputs`
+  984-1130, `fclose` 845/906/926): a full disk leaves a short desc/files
+  and returns 0. **env**
+- `umask` around prepare/write (be_local.c:941/984) and `umask(0022)` +
+  `chdir(prefix)` in `_alpm_unpack` (util.c:351/360) are process-wide.
+  **env** (threaded API users)
+- `alpm_pkg_set_reason` has no range check, writes `%u` of any value;
+  the reader logs "unknown install reason" (be_local.c:1179-1196, 1038).
+  **api**
+- `archive_read_extract(..., 0)` without SECURE_NODOTDOT /
+  NOABSOLUTEPATHS / SYMLINKS (util.c:407): absolute or `..` entries land
+  outside the prefix. The only caller filters to `.INSTALL` (trans.c:379).
+  **none**, cheap hardening
+- `archive_read_extract2` turns header/write failures into ARCHIVE_WARN:
+  an `.INSTALL` that cannot be created gives a warning, `_alpm_unpack`
+  returns 0, `grep()` fails to open it and the scriptlet is skipped with
+  retval 0 (util.c:407-418, trans.c:379/392). **env**
+- libarchive reads a directory entry's data (type '5', or a regular
+  entry ending in '/') as the next header, ending extraction quietly with
+  success. **packager**
 
 ## `be_sync.c` minor
 

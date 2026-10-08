@@ -37,11 +37,21 @@ create() {
 		git -C "$wt/$sub" checkout -q "$sha"
 	done
 	mkdir -p "$wt/.cargo" "$wt/.tmp"
+	# low job and test-thread counts: several units build at once on one
+	# machine, full test runs are serialised by scripts/cargo-test.sh
 	cat > "$wt/.cargo/config.toml" <<-EOF
 		# unit worktree, not committed (see .gitignore)
+		[build]
+		jobs = 2
+
 		[env]
 		PACMAN_BUILD = "$root/pacman/build"
 		TMPDIR = "$wt/.tmp"
+		RUST_TEST_THREADS = "2"
+
+		# memory and time caps per test binary
+		[target.'cfg(all())']
+		runner = ["$root/scripts/test-runner.sh"]
 	EOF
 	echo "$wt (branch unit/$name from $from)"
 }
@@ -64,8 +74,9 @@ if [ "$#" = 0 ]; then
 	echo "usage: $0 <name>... | --remove <name>..." >&2
 	exit 2
 fi
-if [ -n "$(git status --porcelain)" ]; then
-	echo "working tree not clean: commit first" >&2
+# an explicit REF says which commit to take, local edits are not wanted
+if [ "$from" = HEAD ] && [ -n "$(git status --porcelain)" ]; then
+	echo "working tree not clean: commit first (or --from REF)" >&2
 	exit 1
 fi
 mkdir -p "$base"
