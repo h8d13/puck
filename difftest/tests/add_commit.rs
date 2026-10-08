@@ -1120,6 +1120,7 @@ fn under_c_locale() {
 	}
 	let exe = std::env::current_exe().unwrap();
 	let out = std::process::Command::new(exe)
+		.current_dir(child_cwd())
 		.args(["cl_", "--test-threads=1"])
 		.env(AC_C_LOCALE, "1")
 		.output()
@@ -1342,6 +1343,7 @@ fn under_fakeroot() {
 	}
 	let exe = std::env::current_exe().unwrap();
 	let out = std::process::Command::new("fakeroot")
+		.current_dir(child_cwd())
 		.arg(exe)
 		.args(["fr_", "--test-threads=1", "--nocapture"])
 		.env(FR_CHILD, "1")
@@ -1431,6 +1433,13 @@ fn fr_real_packages() {
 	}
 }
 
+// a cwd for child runs: the C chdir()s the whole process into a case's
+// root during a commit, a child spawned then would inherit a cwd that is
+// removed afterwards
+fn child_cwd() -> std::path::PathBuf {
+	std::env::temp_dir()
+}
+
 // get_install_time: each SOURCE_DATE_EPOCH value in a child run of
 // sde_child (the environment is process wide)
 const SDE_CHILD: &str = "DIFFTEST_SDE_CHILD";
@@ -1451,7 +1460,8 @@ fn source_date_epoch() {
 		("18446744073709551616", false),
 	] {
 		let mut cmd = std::process::Command::new(&exe);
-		cmd.args(["sde_child", "--exact", "--test-threads=1"])
+		cmd.current_dir(child_cwd())
+			.args(["sde_child", "--exact", "--test-threads=1"])
 			.env(SDE_CHILD, "1")
 			.env("SOURCE_DATE_EPOCH", value);
 		if exact {
@@ -1736,6 +1746,7 @@ fn under_fakechroot() {
 	}
 	let exe = std::env::current_exe().unwrap();
 	let out = std::process::Command::new("fakechroot")
+		.current_dir(child_cwd())
 		.arg(exe)
 		.args(["fc_", "--test-threads=1"])
 		.env(FC_CHILD, "1")

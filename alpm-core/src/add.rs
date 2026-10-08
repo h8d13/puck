@@ -512,7 +512,8 @@ impl Writer<'_> {
 	// restore_entry
 	fn restore(&mut self) -> Result<(), ExtractError> {
 		let name = resolve(self.disk.root, &self.name);
-		let is_dir = matches!(self.obj, Object::Dir);
+		// the entry's type bits, a hard link may carry a directory's
+		let is_dir = self.mode & S_IFMT == S_IFDIR;
 		if !is_dir {
 			// ARCHIVE_EXTRACT_UNLINK
 			match fs::remove_file(os(&name)) {
