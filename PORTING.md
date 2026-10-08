@@ -72,12 +72,15 @@ already downloaded sync dbs.
 | frontend package display (`package.c`) | done |
 | db search, `DbCaches` for `Handle`, `query.c` (-Q*), `deptest.c` (-T) | done |
 | read-only `sync.c` (-Si, -Sl, -Sg) and `files.c` (-F, -Fl, -Fx) | done |
-| `database.c` (-D, -Dk, -Dkk), db.c/backend log lines | done (dispatch arm at the frontend merge) |
-| `-Ss`, `setup_libalpm`, main dispatch, `pacman` binary | todo |
+| `database.c` (-D, -Dk, -Dkk), db.c/backend log lines | done |
+| `-Ss`, `setup_libalpm`, main dispatch, `pacman` binary | done |
 
 Gate: `scripts/cli-parity.sh` between C `pacman` and the Rust binary with
 the same `--root`/`--dbpath`/`--config` on generated test roots and a
 read-only copy of a real system db; byte-identical stdout, stderr, exit.
+Fixtures (`scripts/cli-parity-fixtures.sh`, -D runs under fakeroot with
+the written db compared): 533/535, the two left are `--debug` in the
+default-SigLevel world (signing debug lines, GOTO_ERR's C file:line).
 
 ### 2. Sync databases (`-Sy`)
 
@@ -486,8 +489,10 @@ Follow-ups raised by port units:
 | sandbox in `be_sync::downloader` (like `fetch_pkgurl`) | dbupdate | todo |
 | `umask(0022)` around `alpm_db_update` (rustix process) | dbupdate | todo |
 | one `logv(cb, ...)` helper (copies in hook.rs, deps.rs, trans.rs, util's `log_parts`) | integrate2 | in progress: `callbacks::logv`, used by db, be_local, be_sync |
-| `-D` dispatch arm: `pacman_database(config, handle, targets, &mut o)` | m1close | at the frontend merge |
-| setup_libalpm's server adds through `Handle::dbs_mut()` (`Db::add_server` takes the callbacks) | m1close | at the frontend merge |
+| `-D` dispatch arm: `pacman_database(config, handle, targets, &mut o)` | m1close | done |
+| setup_libalpm's server adds through `Handle::dbs_mut()` (`Db::add_server` takes the callbacks) | m1close | done |
+| query: -Qk/-Qkk lazy loads per package like the C (-Qkk loads files up front), op stderr flushed per package so callback lines interleave; then drop cli_binary's empty files lists | m1close | todo |
+| signing debug lines (`_alpm_access` "is not readable", "sig path ... could not be opened", "missing required signature") | m1close | todo |
 | difftest C log callbacks (deps_graph, dload, diskspace, db_update) onto `handle::record_log` | m1close | todo |
 | `DepsEnv` without `&Handle` (assumeinstalled, ignore lists), so checkdeps logs without swapping the callbacks | m1close | todo |
 | difftest: `read_deps` pub(crate) (drops conflict's `CDepend`), `SyncWorld` into fixtures.rs | conflict, sync | todo |
