@@ -1,4 +1,5 @@
 // port of pacman's lib/libalpm, safe rust only
+pub mod add;
 pub mod backup;
 pub mod base64;
 pub mod be_local;
@@ -20,10 +21,12 @@ pub mod log;
 pub mod package;
 pub mod pkghash;
 pub mod regex;
+pub mod remove;
 pub mod sandbox;
 pub mod sandbox_fs;
 pub mod sandbox_syscalls;
 pub mod signing;
+pub mod sync;
 pub mod trans;
 pub mod util;
 pub mod version;

@@ -263,7 +263,10 @@ fn find_name<'a>(pkgs: &[&'a Package], name: &[u8]) -> Option<&'a Package> {
 // alpm_list_diff with _alpm_pkg_cmp: both sides merge sorted by name
 // (stable), an equal name cancels one entry on each side. the result is
 // in name order
-fn list_diff<'a>(lhs: &[&'a Package], rhs: &[&Package]) -> Vec<&'a Package> {
+pub fn list_diff<'a>(
+	lhs: &[&'a Package],
+	rhs: &[&Package],
+) -> Vec<&'a Package> {
 	let mut left = lhs.to_vec();
 	left.sort_by(|a, b| pkg_cmp(a, b));
 	let mut right = rhs.to_vec();

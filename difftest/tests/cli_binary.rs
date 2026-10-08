@@ -171,6 +171,7 @@ fn owner_pkg(w: &SyncWorld) {
 // the command lines of one world: (label, args before the path options)
 fn commands(w: &SyncWorld) -> Vec<Vec<String>> {
 	let sync = w.pkg_names().first().copied().unwrap_or("nope");
+	let last = w.pkg_names().last().copied().unwrap_or("nope");
 	let root = w.fx.dir().join("root").display().to_string();
 	let owned = format!("{root}/usr/bin/owned");
 	let repo = w.repos.first().copied().unwrap_or("core");
@@ -248,6 +249,23 @@ fn commands(w: &SyncWorld) -> Vec<Vec<String>> {
 		vec!["-Fyl"],
 		vec!["-S", sync],
 		vec!["-Sc"],
+		// transactions as far as --print goes, no root needed
+		vec!["-Sp", sync],
+		vec!["-S", "--print", sync],
+		vec!["-Sp", "--print-format", "%n %v %r %s", sync],
+		vec!["-Sp", "nope"],
+		vec!["-Sp", sync, "owner"],
+		vec!["-Sp", last],
+		vec!["-Sp", sync, last],
+		vec!["-Spd", sync],
+		vec!["-Spdd", sync],
+		vec!["-Sup"],
+		vec!["-Rp", "owner"],
+		vec!["-R", "--print", "owner"],
+		vec!["-Rp", "nope"],
+		vec!["-Rps", "owner"],
+		vec!["-Rpc", "owner"],
+		vec!["-Up", "nope.pkg.tar.zst"],
 		vec!["-R", "owner"],
 		vec!["-U", "x.pkg.tar"],
 		vec!["-Fy"],
@@ -323,7 +341,8 @@ fn world(
 		if verbose {
 			let mark =
 				if diff.is_none() { "equal" } else { "DIFF" };
-			println!("{mark:5}  {label}");
+			let (o, e) = (cr.out.len(), cr.err.len());
+			println!("{mark:5}  {label}  [{} {o}/{e}]", cr.status);
 		}
 		out.push((label, diff.is_none(), diff));
 	}
@@ -381,7 +400,8 @@ fn known(label: &str) -> bool {
 #[test]
 fn parity() {
 	let mut rng = Rng::new(0xc11);
-	// a world with every repo valid first, then random ones
+	// a world with every repo valid first, then random ones (the second
+	// keeps the default SigLevel: unsigned dbs fail)
 	let mut worlds = Vec::new();
 	loop {
 		let w = SyncWorld::generate(&mut rng, "cli-main");
@@ -401,7 +421,7 @@ fn parity() {
 	let (mut equal, mut total) = (0, 0);
 	for (i, w) in worlds.iter().enumerate() {
 		println!("== world {i}\n{}", w.log);
-		let level = (i != 0).then_some("Never");
+		let level = (i != 1).then_some("Never");
 		for (label, ok, diff) in world(w, level, true) {
 			total += 1;
 			equal += usize::from(ok);

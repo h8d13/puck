@@ -1,7 +1,7 @@
 // port of src/pacman/util.c: display helpers, the table engine and
 // transaction summary, --print-format, optdepend lists, the prompts,
-// rmrf, pm_printf (with the PACMAN_DEBUG stamp), check_syncdbs and
-// getcols
+// rmrf, pm_printf (with the PACMAN_DEBUG stamp), check_syncdbs, getcols
+// and trans_init/trans_release
 //
 // functions that print in the C append the same bytes to `out` instead;
 // Output::flush hands them to the process where the C would have them
@@ -27,7 +27,11 @@ use alpm_core::deps::{Depend, dep_compute_string, find_satisfier};
 use alpm_core::handle::Handle;
 use alpm_core::log::utc_now;
 use alpm_core::package::{Package, PkgFrom, pkg_cmp, pkg_find};
-use alpm_core::util::until_nul;
+use alpm_core::trans::{
+	InitError, trans_init as alpm_trans_init,
+	trans_release as alpm_trans_release,
+};
+use alpm_core::util::{strerror, until_nul};
 use pacman_common::util_common::{safe_fgets, strtrim};
 use unicode_width::UnicodeWidthChar;
 
@@ -1761,4 +1765,97 @@ pub fn noyes<R: BufRead>(
 	msg: &[u8],
 ) -> bool {
 	question(out, config, term, false, msg)
+}
+
+// trans_init_error: the init failure, for a lock failure its errno and
+// a hint when the lock file exists
+pub fn trans_init_error(
+	out: &mut Output,
+	config: &Config,
+	handle: &Handle,
+	err: &InitError,
+) {
+	let msg = [
+		b"failed to init transaction (",
+		err.errno().strerror().as_bytes(),
+		b")\n",
+	];
+	pm_printf(&mut out.stderr, config, LOG_ERROR, &msg.concat());
+	let InitError::Lock(e) = err else {
+		return;
+	};
+	let msg = [b"could not lock database: ", &strerror(e)[..], b"\n"];
+	pm_printf(&mut out.stderr, config, LOG_ERROR, &msg.concat());
+	let lockfile = handle.lockfile();
+	if fs::metadata(OsStr::from_bytes(lockfile)).is_ok() {
+		out.stderr.extend_from_slice(
+			b"  if you're sure a package manager is not already\n  \
+			running, you can remove ",
+		);
+		out.stderr.extend_from_slice(lockfile);
+		out.stderr.push(b'\n');
+	}
+}
+
+// trans_init: check_syncdbs (result ignored, its errors printed), then
+// alpm_trans_init. false is the C's -1
+pub fn trans_init(
+	out: &mut Output,
+	config: &Config,
+	handle: &mut Handle,
+	flags: c_int,
+	check_valid: bool,
+) -> bool {
+	check_syncdbs(&mut out.stderr, config, handle, false, check_valid);
+	match alpm_trans_init(handle, flags) {
+		Ok(()) => true,
+		Err(e) => {
+			trans_init_error(out, config, handle, &e);
+			false
+		}
+	}
+}
+
+// trans_release: false (C -1) when there is no transaction
+pub fn trans_release(
+	out: &mut Output,
+	config: &Config,
+	handle: &mut Handle,
+) -> bool {
+	let Err(e) = alpm_trans_release(handle) else {
+		return true;
+	};
+	let msg = [
+		b"failed to release transaction (",
+		e.strerror().as_bytes(),
+		b")\n",
+	];
+	pm_printf(&mut out.stderr, config, LOG_ERROR, &msg.concat());
+	false
+}
+
+// what the transaction front ends (sync.c, remove.c, upgrade.c) use
+// besides the handle
+pub struct Ui<'a, R> {
+	pub config: &'a Config,
+	pub term: &'a mut Term<R>,
+	// getcols()
+	pub cols: u16,
+	pub out: &'a mut Output,
+	// strftime("%c", localtime()) for --print-format %b
+	pub format_date: &'a dyn Fn(i64) -> Option<Vec<u8>>,
+	// config->explicit_adds/explicit_removes
+	pub explicit_adds: Vec<Package>,
+	pub explicit_removes: Vec<Package>,
+}
+
+// how a transaction front end ended, up to where the C calls
+// alpm_trans_commit
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Prepared {
+	// the C return value, the transaction released
+	Done(i32),
+	// confirmed: the C commits now. the prepared transaction stays in
+	// the handle, commit and trans_release are the caller's
+	Commit,
 }

@@ -52,10 +52,10 @@ fn inner_dedups_by_name_pair() {
 	let a = pkg("a", &["b", "a"], &[]);
 	let b = pkg("b", &["a>=2"], &[]);
 	let b2 = pkg("b", &["a"], &[]);
-	let got = innerconflicts(&[&a, &b, &b2]);
+	let got = innerconflicts(&[&a, &b, &b2], &mut ());
 	assert_eq!(pairs(&got), [(&b"a"[..], &b"b"[..]), (b"b", b"a")]);
 	assert_eq!(got[1].reason, dep_from_string(b"a"));
-	assert_eq!(checkconflicts(&[&a, &b, &b2]), got);
+	assert_eq!(checkconflicts(&[&a, &b, &b2], &mut ()), got);
 }
 
 #[test]
@@ -64,7 +64,7 @@ fn outer_checks_both_directions() {
 	let t = pkg("t", &[], &[]);
 	let u = pkg("u", &["x"], &[]);
 	// t replaces the local t, so only x takes part
-	let got = outerconflicts(&db, &[&t, &u]);
+	let got = outerconflicts(&db, &[&t, &u], &mut ());
 	assert_eq!(pairs(&got), [(&b"u"[..], &b"x"[..]), (b"t", b"x")]);
 }
 

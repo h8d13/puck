@@ -11,11 +11,11 @@
 // parseconfig, `run` the whole of main on a util::Term: setup_libalpm,
 // the operation, cleanup, the exit status.
 //
-// operations write into an Output that goes to the Term when they
-// return, the callbacks write to the Term directly: a libalpm log line
-// comes before the operation's own stderr even where the C interleaves
-// them. not ported operations (-R, -U, -D, -Sc, -Sy, -Fy, sync
-// transactions) report an error and fail. signals: std has no handler
+// operations and the callbacks write into Outputs flushed to one sink
+// (the binary's std streams) where the C flushes. not ported: -D, -Sc
+// and the commit of a transaction (-S, -R, -U run up to it, --print
+// completes) report an error and fail. the prompts of a transaction
+// and of the callbacks read stdin through separate buffers. signals: std has no handler
 // API; SIGINT/SIGHUP kill the process (the C's soft handler exits
 // 128 + signal without a transaction, the same status), no SIGSEGV
 // cursor restore, no SIGWINCH (getcols is not cached anyway).
@@ -39,11 +39,15 @@ use crate::conf::{
 use crate::deptest::pacman_deptest;
 use crate::files::pacman_files;
 use crate::getopt::{Getopt, HasArg, LongOpt};
+use crate::package::format_date_utc;
 use crate::query::{QueryEnv, pacman_query};
-use crate::sync::{Unported, pacman_sync};
+use crate::remove::pacman_remove;
+use crate::sync::{Unported, pacman_sync, sync_trans};
+use crate::upgrade::pacman_upgrade;
 use crate::util::{
-	Output, Term, arg_to_string, console_cursor_hide, console_cursor_show,
-	debug_stamp, getcols, list_display, now_secs, pm_printf,
+	Output, Prepared, Term, Ui, arg_to_string, console_cursor_hide,
+	console_cursor_show, debug_stamp, getcols, list_display, now_secs,
+	pm_printf, trans_release,
 };
 
 // alpm_version() of the reference build (meson LIB_VERSION)
@@ -62,22 +66,14 @@ pub const PKG_LOCALITY_NATIVE: u16 = 1;
 pub const PKG_LOCALITY_FOREIGN: u16 = 1 << 1;
 
 // alpm.h alpm_transflag_t, as stored in config->flags
-pub const TRANS_FLAG_NODEPS: i32 = 1;
-pub const TRANS_FLAG_NOSAVE: i32 = 1 << 2;
-pub const TRANS_FLAG_NODEPVERSION: i32 = 1 << 3;
-pub const TRANS_FLAG_CASCADE: i32 = 1 << 4;
-pub const TRANS_FLAG_RECURSE: i32 = 1 << 5;
-pub const TRANS_FLAG_DBONLY: i32 = 1 << 6;
-pub const TRANS_FLAG_NOHOOKS: i32 = 1 << 7;
-pub const TRANS_FLAG_ALLDEPS: i32 = 1 << 8;
-pub const TRANS_FLAG_DOWNLOADONLY: i32 = 1 << 9;
-pub const TRANS_FLAG_NOSCRIPTLET: i32 = 1 << 10;
-pub const TRANS_FLAG_NOCONFLICTS: i32 = 1 << 11;
-pub const TRANS_FLAG_NEEDED: i32 = 1 << 13;
-pub const TRANS_FLAG_ALLEXPLICIT: i32 = 1 << 14;
-pub const TRANS_FLAG_UNNEEDED: i32 = 1 << 15;
-pub const TRANS_FLAG_RECURSEALL: i32 = 1 << 16;
-pub const TRANS_FLAG_NOLOCK: i32 = 1 << 17;
+pub use alpm_core::trans::{
+	TRANS_FLAG_ALLDEPS, TRANS_FLAG_ALLEXPLICIT, TRANS_FLAG_CASCADE,
+	TRANS_FLAG_DBONLY, TRANS_FLAG_DOWNLOADONLY, TRANS_FLAG_NEEDED,
+	TRANS_FLAG_NOCONFLICTS, TRANS_FLAG_NODEPS, TRANS_FLAG_NODEPVERSION,
+	TRANS_FLAG_NOHOOKS, TRANS_FLAG_NOLOCK, TRANS_FLAG_NOSAVE,
+	TRANS_FLAG_NOSCRIPTLET, TRANS_FLAG_RECURSE, TRANS_FLAG_RECURSEALL,
+	TRANS_FLAG_UNNEEDED,
+};
 
 // conf.h long option codes, getopt returns them for the long names
 pub const OP_LONG_FLAG_MIN: i32 = 1000;
@@ -1590,45 +1586,66 @@ fn unported(err: &mut Vec<u8>, config: &Config, what: &str) -> i32 {
 	1
 }
 
+// how a transaction front end ended: its status, or for a confirmed
+// transaction the commit this port does not have yet (reported, the
+// transaction released, status 1)
+fn finish<R: BufRead>(ui: &mut Ui<R>, handle: &mut Handle, p: Prepared) -> i32 {
+	match p {
+		Prepared::Done(ret) => ret,
+		Prepared::Commit => {
+			let what = "committing the transaction";
+			let ret = unported(&mut ui.out.stderr, ui.config, what);
+			trans_release(ui.out, ui.config, handle);
+			ret
+		}
+	}
+}
+
 // the operation of config.op on handle: the exit status
-fn dispatch(
-	out: &mut Output,
-	config: &Config,
+fn dispatch<R: BufRead>(
+	ui: &mut Ui<R>,
 	handle: &mut Handle,
 	targets: &[Vec<u8>],
-	cols: u16,
 ) -> i32 {
+	let (config, cols) = (ui.config, ui.cols);
 	match config.op {
 		PM_OP_DATABASE => {
-			unported(&mut out.stderr, config, "--database")
+			unported(&mut ui.out.stderr, config, "--database")
 		}
-		PM_OP_REMOVE => unported(&mut out.stderr, config, "--remove"),
-		PM_OP_UPGRADE => unported(&mut out.stderr, config, "--upgrade"),
+		PM_OP_REMOVE => {
+			let p = pacman_remove(ui, handle, targets);
+			finish(ui, handle, p)
+		}
+		PM_OP_UPGRADE => {
+			let p = pacman_upgrade(ui, handle, targets);
+			finish(ui, handle, p)
+		}
 		PM_OP_QUERY => {
 			let path =
 				std::env::var_os("PATH").map(|p| p.into_vec());
 			let env = QueryEnv { cols, path };
-			pacman_query(config, handle, &env, targets, out)
+			pacman_query(config, handle, &env, targets, ui.out)
 		}
 		PM_OP_SYNC => {
-			match pacman_sync(config, handle, targets, cols, out) {
+			match pacman_sync(config, handle, targets, cols, ui.out)
+			{
 				Ok(ret) => ret,
 				Err(Unported::Clean) => unported(
-					&mut out.stderr,
+					&mut ui.out.stderr,
 					config,
 					"--clean",
 				),
 				Err(Unported::Transaction) => {
-					let what = "installing or upgrading packages";
-					unported(&mut out.stderr, config, what)
+					let p = sync_trans(ui, handle, targets);
+					finish(ui, handle, p)
 				}
 			}
 		}
-		PM_OP_DEPTEST => pacman_deptest(handle, targets, out),
-		PM_OP_FILES => pacman_files(config, handle, targets, out),
+		PM_OP_DEPTEST => pacman_deptest(handle, targets, ui.out),
+		PM_OP_FILES => pacman_files(config, handle, targets, ui.out),
 		_ => {
 			let msg = b"no operation specified (use -h for help)\n";
-			pm_printf(&mut out.stderr, config, LOG_ERROR, msg);
+			pm_printf(&mut ui.out.stderr, config, LOG_ERROR, msg);
 			1
 		}
 	}
@@ -1644,7 +1661,7 @@ pub fn run<R: BufRead + 'static>(
 	new_term: impl Fn() -> Term<R>,
 	sink: Option<fn(&mut Output)>,
 ) -> i32 {
-	let term = new_term();
+	let mut term = new_term();
 	let mut out = Output {
 		sink,
 		..Output::default()
@@ -1668,9 +1685,16 @@ pub fn run<R: BufRead + 'static>(
 					.concat();
 				let _ = handle.logaction(b"PACMAN", &msg);
 			}
-			let cols = (term.cols)();
-			dispatch(&mut out, &config, &mut handle, &targets, cols)
-				& 0xff
+			let mut ui = Ui {
+				config: &config,
+				cols: (term.cols)(),
+				term: &mut term,
+				out: &mut out,
+				format_date: &format_date_utc,
+				explicit_adds: Vec::new(),
+				explicit_removes: Vec::new(),
+			};
+			dispatch(&mut ui, &mut handle, &targets) & 0xff
 		}
 	};
 	console_cursor_show(&mut out.stdout, term.stdout_tty);
