@@ -751,6 +751,20 @@ Found through the conf difftest aborting only with longer TMPDIR paths.
 - `select_display` NULL handling (1427-1440), `target_cmp` returns 0/1
   (1043), `parseindex("")` is 0 (1447-1448). **none**
 
+## `callback.c` minor
+
+- `bar->eta = (total_size - sync_xfered) / rate` converts a negative
+  double to unsigned (callback.c:940), undefined: whenever the size is
+  unknown (no Content-Length) or ETA > UINT_MAX; x86_64 wraps ("--:--"),
+  aarch64 saturates ("00:00"). `(off_t)bar->rate` (851) same class.
+  **real**, display only. The port reproduces x86_64.
+- "name (n/m)" buffer sized by the digits of `howmany`, a larger
+  `downloaded` count is cut ("Total (10/4") (806-810). **none**
+- singular SELECT_PROVIDER line lacks the plural's ':' (521-522); libalpm
+  only asks with more than one provider. **none**
+- `parseindex` stores strtol's long in an int: "4294967298" selects entry
+  2 (util.c). **real (rare)**, user input
+
 ## `src/pacman/conf.c` minor
 
 - CacheServer `file://` URLs do not get the sysroot, Server ones do
@@ -774,6 +788,17 @@ Found through the conf difftest aborting only with longer TMPDIR paths.
 - `section->name` dangles after an include with a header, only ever
   NULL-checked (conf.c:1282, 1300); `replace_server_vars` reads the
   global instead of its parameter (conf.c:823). **none**
+- `register_repo`'s result is ignored (conf.c:964-966): a section that
+  fails to register (duplicate, `[local]`, a '/' in the name) is reported
+  and pacman carries on. **local**
+- "Failed to pass %s entry to libalpm" lacks its newline (conf.c:1005),
+  `--assume-installed 'foo>1'` reaches it and exits 255. **real**,
+  cosmetic
+- `'sandboxuser' (%s) does not exist` debug log lacks its newline
+  (handle.c:617). **none**
+- `_getumask` (umask(0) then restore) is not thread safe (dload.c:69-72),
+  concurrent calls chmod 0666. **api** (threaded users; the dload difftest
+  flake)
 
 To be written up and reported through pacman's usual channels by the
 maintainer of this repo, not from here.
