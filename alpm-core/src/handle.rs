@@ -79,6 +79,15 @@ pub struct Handle {
 	trans: Option<Trans>,
 }
 
+// Handle::sync_parts
+pub(crate) struct SyncParts<'h> {
+	pub(crate) keyring: &'h mut Keyring,
+	pub(crate) download: &'h mut DownloadState,
+	pub(crate) cb: &'h mut dyn Callbacks,
+	pub(crate) fetch: Option<&'h mut dyn Fetch>,
+	pub(crate) dbs: &'h mut [Db],
+}
+
 impl fmt::Debug for Handle {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("Handle")
@@ -248,6 +257,26 @@ impl Handle {
 	// handle->trans = trans, the old one returned
 	pub fn set_trans(&mut self, trans: Option<Trans>) -> Option<Trans> {
 		std::mem::replace(&mut self.trans, trans)
+	}
+
+	// set_callbacks giving the old set back, for a caller that swaps
+	// them for one call
+	pub fn replace_callbacks(
+		&mut self,
+		cb: Box<dyn Callbacks>,
+	) -> Box<dyn Callbacks> {
+		std::mem::replace(&mut self.cb, cb)
+	}
+
+	// what alpm_db_update works on at once, borrowed apart
+	pub(crate) fn sync_parts(&mut self) -> SyncParts<'_> {
+		SyncParts {
+			keyring: &mut self.keyring,
+			download: &mut self.download,
+			cb: &mut *self.cb,
+			fetch: self.fetch.as_deref_mut().map(|f| f as _),
+			dbs: &mut self.dbs_sync,
+		}
 	}
 
 	// alpm_option_set_fetchcb, None is the built-in downloader

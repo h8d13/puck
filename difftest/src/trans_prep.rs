@@ -45,6 +45,7 @@ use crate::handle::{
 	alpm_trans_release,
 };
 use crate::package::{CPkg, field, list_data, with_strs};
+use crate::sync_ro::pacman_sync;
 use crate::{CList, Rng, alpm_list_add, alpm_list_free, c_free, cstr};
 use crate::{deps_graph, vsnprintf};
 
@@ -653,7 +654,6 @@ unsafe extern "C" {
 	) -> c_int;
 	fn alpm_trans_interrupt(handle: *mut c_void) -> c_int;
 	fn alpm_trans_get_flags(handle: *mut c_void) -> c_int;
-	fn pacman_sync(targets: *mut CList) -> c_int;
 	fn pacman_remove(targets: *mut CList) -> c_int;
 	fn pacman_upgrade(targets: *mut CList) -> c_int;
 }

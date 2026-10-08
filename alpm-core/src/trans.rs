@@ -152,7 +152,8 @@ pub fn runscriptlet(
 	};
 	let scriptfn = [&tmpdir[..], b"/.INSTALL"].concat();
 	let mut ok = if is_archive {
-		unpack_single(h, filepath, &tmpdir, b".INSTALL")
+		unpack_single(h.callbacks(), filepath, &tmpdir, b".INSTALL")
+			.is_ok()
 	} else if let Err(e) = copyfile(filepath, &scriptfn) {
 		logv(
 			h.callbacks(),

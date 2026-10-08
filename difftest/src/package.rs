@@ -137,7 +137,7 @@ unsafe extern "C" {
 	fn alpm_pkg_get_arch(pkg: *mut CPkg) -> *const c_char;
 	fn alpm_pkg_get_size(pkg: *mut CPkg) -> i64;
 	fn alpm_pkg_get_isize(pkg: *mut CPkg) -> i64;
-	fn alpm_pkg_get_reason(pkg: *mut CPkg) -> c_int;
+	pub(crate) fn alpm_pkg_get_reason(pkg: *mut CPkg) -> c_int;
 	pub(crate) fn alpm_pkg_get_validation(pkg: *mut CPkg) -> c_int;
 	fn alpm_pkg_get_licenses(pkg: *mut CPkg) -> *mut CList;
 	fn alpm_pkg_get_groups(pkg: *mut CPkg) -> *mut CList;

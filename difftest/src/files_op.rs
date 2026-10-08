@@ -9,7 +9,7 @@ use crate::CList;
 use crate::sync_ro::{CRun, FrontHandle, run_op};
 
 unsafe extern "C" {
-	fn pacman_files(targets: *mut CList) -> c_int;
+	pub(crate) fn pacman_files(targets: *mut CList) -> c_int;
 }
 
 // pacman_files(targets) on fh. C precondition: no -Fy (downloads)

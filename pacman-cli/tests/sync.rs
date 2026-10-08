@@ -81,9 +81,14 @@ fn no_repos() {
 #[test]
 fn dispatch() {
 	let (_tmp, mut h) = Tmp::new("dispatch", &["core"]);
+	// -y on a repo without servers: alpm_db_update refuses it
+	let (r, o, e) = run(&mut h, |c| c.op_s_sync = 1, &[]);
+	assert_eq!(r, Ok(1));
+	assert_eq!(o, ":: Synchronizing package databases...\n");
 	assert_eq!(
-		run(&mut h, |c| c.op_s_sync = 1, &[]).0,
-		Err(Unported::Refresh)
+		e,
+		"error: failed to synchronize all databases (no servers \
+		 configured for repository)\n"
 	);
 	assert_eq!(
 		run(&mut h, |c| c.op_s_search = 1, &[]).0,

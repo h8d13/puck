@@ -220,3 +220,96 @@ pub fn c_test_checksum(
 	// SAFETY: valid C strings or NULL for expected, read only
 	unsafe { _alpm_test_checksum(p.as_ptr(), crate::opt_ptr(&e), kind) }
 }
+
+// _alpm_unpack: the extraction runs on a handle over root/dbpath (for
+// logging and pm_errno); the C chdir()s into prefix and back, the CHandle
+// holds the ALPM lock meanwhile
+pub struct CUnpack {
+	pub rc: c_int,
+	pub errno: c_int,
+	// every _alpm_log call: level, formatted message
+	pub logs: Vec<(c_int, Vec<u8>)>,
+}
+
+unsafe extern "C" {
+	fn _alpm_unpack(
+		handle: *mut c_void,
+		path: *const c_char,
+		prefix: *const c_char,
+		list: *mut CList,
+		breakfirst: c_int,
+	) -> c_int;
+}
+
+unsafe extern "C" fn unpack_log_cb(
+	ctx: *mut c_void,
+	level: c_int,
+	fmt: *const c_char,
+	args: *mut c_void,
+) {
+	let mut buf = [0 as c_char; 8192];
+	// SAFETY: fmt and args come from _alpm_log, args consumed once
+	let n = unsafe {
+		crate::vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args)
+	};
+	assert!(n >= 0 && (n as usize) < buf.len(), "log message cut");
+	// SAFETY: vsnprintf wrote a nul-terminated string into buf
+	let msg = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }.to_bytes();
+	// SAFETY: ctx is the logs Vec of the c_unpack running this call
+	let logs = unsafe { &mut *ctx.cast::<Vec<(c_int, Vec<u8>)>>() };
+	logs.push((level, msg.to_vec()));
+}
+
+pub fn c_unpack(
+	root: &[u8],
+	dbpath: &[u8],
+	path: &[u8],
+	prefix: &[u8],
+	list: Option<&[Vec<u8>]>,
+	breakfirst: bool,
+) -> CUnpack {
+	let h = crate::db::CHandle::new(root, dbpath).expect("fixture handle");
+	let mut logs: Vec<(c_int, Vec<u8>)> = Vec::new();
+	let ctx: *mut Vec<(c_int, Vec<u8>)> = &mut logs;
+	// SAFETY: h is live, ctx outlives every call made on h below
+	unsafe {
+		crate::handle::alpm_option_set_logcb(
+			h.raw(),
+			Some(unpack_log_cb),
+			ctx.cast(),
+		)
+	};
+	let (path, prefix) = (cstr(path), cstr(prefix));
+	let owned: Vec<_> =
+		list.unwrap_or_default().iter().map(|s| cstr(s)).collect();
+	let mut clist = ptr::null_mut();
+	for s in &owned {
+		// SAFETY: clist is NULL or built by alpm_list_add, data stays
+		// owned by `owned`
+		clist = unsafe {
+			alpm_list_add(clist, s.as_ptr().cast_mut().cast())
+		};
+	}
+	// SAFETY: valid C strings, clist holds them for the call; the C
+	// restores the cwd before returning
+	let (rc, errno) = h.call(|| unsafe {
+		_alpm_unpack(
+			h.raw(),
+			path.as_ptr(),
+			prefix.as_ptr(),
+			clist,
+			c_int::from(breakfirst),
+		)
+	});
+	// SAFETY: nodes malloc'd by alpm_list_add, data not owned by the list
+	unsafe { alpm_list_free(clist) };
+	// SAFETY: h is live, the callback is dropped before logs goes
+	unsafe {
+		crate::handle::alpm_option_set_logcb(
+			h.raw(),
+			None,
+			ptr::null_mut(),
+		)
+	};
+	CUnpack { rc, errno, logs }
+}

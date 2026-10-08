@@ -17,7 +17,7 @@ use alpm_core::callbacks::{DownloadEvent, LogLevel};
 use alpm_core::dload::{DownloadState, Downloader, Payload, Settings};
 use difftest::{
 	CDload, Fetcher, Record, Recorder, Reply, Req, Rng, Server, TempRoot,
-	closed_port, iters, payload_layout_ok,
+	closed_port, iters, payload_layout_ok, umask_lock,
 };
 
 const T0: i64 = 1_000_000_000;
@@ -161,8 +161,10 @@ fn dir_bytes(p: &Path) -> Vec<u8> {
 	[p.as_os_str().as_bytes(), b"/"].concat()
 }
 
-// runs C then Rust, each into its own fresh dir
+// runs C then Rust, each into its own fresh dir. file modes follow the
+// umask the C's _getumask briefly sets to 0
 fn run(case: &Case) -> (Outcome, Outcome) {
+	let _umask = umask_lock();
 	let fx = TempRoot::new("dload");
 	let (cd, rd) = (fx.dir().join("c"), fx.dir().join("r"));
 	for d in [&cd, &rd] {
@@ -1234,6 +1236,7 @@ fn fetchcb_fuzz() {
 	let dir = dir_bytes(fx.dir());
 	for i in 0..(iters() / 100).max(200) {
 		let (table, mk) = fetch_case(&mut rng);
+		let _umask = umask_lock();
 		let mut h = CDload::new(&fx);
 		h.set_fetch(Some(script(table.clone())));
 		let (cret, cerr, crec) = h.download(&mk(&dir), &dir, &dir);
@@ -1328,6 +1331,7 @@ fn fetch_pkgurl_cases() {
 		),
 	];
 	for (name, urls, level, cached) in cases {
+		let _umask = umask_lock();
 		let fx = TempRoot::new("dload-pkgurl");
 		let side = |tag: &str| {
 			let base = fx.dir().join(tag);
@@ -1466,6 +1470,8 @@ fn pkgurl_outcome(
 // _alpm_filecache_find/_setup and the dir helpers on odd cachedirs
 #[test]
 fn filecache_and_dirs() {
+	// _alpm_makepath runs under umask(0)
+	let _umask = umask_lock();
 	let fx = TempRoot::new("dload-cache");
 	let mk = |tag: &str| {
 		let b = fx.dir().join(tag);
