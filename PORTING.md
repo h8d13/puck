@@ -105,7 +105,7 @@ in the milestone 1 gate and equal.
 | deps resolution (`deps.c` rest + `graph.c`), `conflict.c`, `diskspace.c` | done |
 | `hook.c`, scriptlets (`_alpm_runscriptlet`), `_alpm_run_chroot`, `_alpm_ldconfig` | done (on unified callbacks, take `&mut Handle`) |
 | transaction prepare phase (`trans.c` model, `alpm_add/remove_pkg`, sysupgrade, sync/remove prepare, frontend prepare) | done |
-| transaction commit phase (downloads, validation, add.c, remove.c, hooks, db writes) | todo (after the prepare phase) |
+| transaction commit phase (downloads, validation, add.c, remove.c, hooks, db writes) | in progress (remove.c per package done) |
 | sandbox (landlock/seccomp, download helper) | done |
 | local db writing | done |
 
@@ -229,7 +229,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `lib/libalpm/trans.c` | 452 | `alpm-core::trans` (partial: no commit) | model, init/release/interrupt/getters, prepare dispatch, check_arch, sort: difftest `trans_prep` op sequences vs C (2000 cases, results, data lists, logs, events, questions, trans afterwards); _alpm_runscriptlet + grep: difftest under fakechroot |
 | `lib/libalpm/sync.c` | 1360 | `alpm-core::sync` (partial: no load/check/commit) | get_new_version, sysupgrade (literal, replacers), find_group_pkgs, compute_download_size, `_alpm_sync_prepare`, dbs_satisfier: difftest `trans_prep` |
 | `lib/libalpm/add.c` | 718 | `alpm-core::add` (partial) | alpm_add_pkg: difftest `trans_prep`; commit side in progress |
-| `lib/libalpm/remove.c` | 798 | `alpm-core::remove` (partial) | alpm_remove_pkg, `_alpm_remove_prepare` (cascade, recurse, unneeded, optdepend events): difftest `trans_prep`; commit side pending |
+| `lib/libalpm/remove.c` | 798 | `alpm-core::remove` (all but `_alpm_remove_packages`) | alpm_remove_pkg, `_alpm_remove_prepare` (cascade, recurse, unneeded, optdepend events): difftest `trans_prep`; `_alpm_remove_single_package` with can_remove_file, shift_pacsave, unlink_file, should_skip_file, remove_package_files, dir_is_mountpoint: difftest `remove_commit` on fixture roots and local dbs (files, dirs, symlinks, /proc mountpoint, read-only dirs, .pacsave rotations, other owners, NoUpgrade, skip_remove, NOSAVE/DBONLY/NOSCRIPTLET, upgrade path; trees, local db, cache, logs, events, progress, logfile, pm_errno), scriptlets under fakechroot, 2M fuzz |
 | `lib/libalpm/hook.c` | 679 | `alpm-core::hook` | parse/validate, dir scan and masking, triggers, Depends, AbortOnFail, NeedsTargets, run: difftest fuzz on root "/" and runs under fakechroot |
 | `lib/libalpm/sandbox*.c` | 608 | `alpm-core::{sandbox,sandbox_fs,sandbox_syscalls}` | restrict_writes_to (8 variants incl. injected landlock failures), syscalls_filter (list parsed from the C, raw syscall probes): errno per probe in spawned children vs C; callback pipe writer + parent loop: byte-stream fuzz; helper download vs C _alpm_download; uid switch: unit tests (root) |
 | regcomp/regexec (glibc, used by db.c, remove.c, files.c) | - | `alpm-core::regex` | difftest fuzz vs glibc (C.UTF-8, 4 flag sets) on agreeing characters; classes/towupper via std, divergence per class counted |
@@ -455,6 +455,19 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
   Request over stdin, callbacks over stdout in the C pipe format.
   no_new_privs comes before landlock (needed unprivileged); getpwnam via
   `getent passwd`; parent sends SIGKILL after the loop (C: SIGTERM).
+- `remove` commit side: `remove_single_package(h, oldpkg, newpkg,
+  targ_count, pkg_count)` reads flags and skip_remove from `h.trans()`,
+  oldpkg is the `trans.remove` dup (every section loaded), newpkg's files
+  sorted. Returns the dropped remove_package_files result: `Ok(failed
+  files)`, `Err(PkgCantRemove)` is the pm_errno the C leaves on the
+  upgrade path only (the removal path's `alpm_pkg_has_scriptlet` resets
+  it). The debug lines of `_alpm_files_in_directory`, `_alpm_access` and
+  `_alpm_db_remove_pkgfromcache` are logged in remove.rs. A backup entry
+  without a hash counts as modified (C: strcmp on NULL); a `.pacsave.N`
+  number read past the end of the name is 0. `path too long` branches
+  are unreachable through the C's local db reader (lines over 1023 bytes
+  split), the EROFS branch of can_remove_file needs a read-only mount:
+  neither is difftested.
 
 Follow-ups raised by port units:
 
