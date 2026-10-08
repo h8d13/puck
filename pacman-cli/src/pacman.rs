@@ -1,27 +1,54 @@
-// port of src/pacman/pacman.c: command line parsing, usage and version
+// port of src/pacman/pacman.c: command line parsing, usage, version and
+// main
 //
 // the C fills the global `config` and the static pm_targets list and
 // exits through cleanup() on --help, --version and conflicting options.
 // here parseargs fills a `Config`, returns the targets, and Err carries
 // the exit status instead (0 after --help/--version). stdout and stderr
-// are buffered in `Io`, pm_printf goes through it with the config as it
-// is at that moment (colstr, logmask). messages are the untranslated
-// msgids. `main_args` is main() from parseargs up to parseconfig, the
-// part before setup_libalpm; operations are not dispatched.
+// of parsing are buffered in `Io`, pm_printf goes through it with the
+// config as it is at that moment (colstr, logmask). messages are the
+// untranslated msgids. `main_args` is main() from parseargs up to
+// parseconfig, `run` the whole of main on a util::Term: setup_libalpm,
+// the operation, cleanup, the exit status.
+//
+// operations and the callbacks write into Outputs flushed to one sink
+// (the binary's std streams) where the C flushes. not ported: -D, -Sc
+// and the commit of a transaction (-S, -R, -U run up to it, --print
+// completes) report an error and fail. the prompts of a transaction
+// and of the callbacks read stdin through separate buffers. signals: std has no handler
+// API; SIGINT/SIGHUP kill the process (the C's soft handler exits
+// 128 + signal without a transaction, the same status), no SIGSEGV
+// cursor restore, no SIGWINCH (getcols is not cached anyway).
 use std::ffi::OsStr;
 use std::fs;
-use std::io;
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use alpm_core::PACKAGE_VERSION;
+use alpm_core::handle::Handle;
 use alpm_core::util::strerror;
 use pacman_common::util_common::{PATH_MAX, mbasename};
 
+use crate::callback::Frontend;
 use crate::conf::{
-	ConfError, Config, Host, LOG_DEBUG, LOG_ERROR, LOG_FUNCTION, Msg,
-	PM_COLOR_OFF, PM_COLOR_ON, PM_OP_MAIN, format_msg,
+	ConfError, Config, Host, LOG_DEBUG, LOG_ERROR, LOG_FUNCTION,
+	LOG_WARNING, Msg, PM_COLOR_OFF, PM_COLOR_ON, PM_OP_MAIN, format_msg,
 };
+use crate::deptest::pacman_deptest;
+use crate::files::pacman_files;
 use crate::getopt::{Getopt, HasArg, LongOpt};
+use crate::package::format_date_utc;
+use crate::query::{QueryEnv, pacman_query};
+use crate::remove::pacman_remove;
+use crate::sync::{Unported, pacman_sync, sync_trans};
+use crate::upgrade::pacman_upgrade;
+use crate::util::{
+	Output, Prepared, Term, Ui, arg_to_string, console_cursor_hide,
+	console_cursor_show, debug_stamp, getcols, list_display, now_secs,
+	pm_printf, trans_release,
+};
 
 // alpm_version() of the reference build (meson LIB_VERSION)
 pub const LIB_VERSION: &str = "16.0.1";
@@ -39,21 +66,14 @@ pub const PKG_LOCALITY_NATIVE: u16 = 1;
 pub const PKG_LOCALITY_FOREIGN: u16 = 1 << 1;
 
 // alpm.h alpm_transflag_t, as stored in config->flags
-pub const TRANS_FLAG_NODEPS: i32 = 1;
-pub const TRANS_FLAG_NOSAVE: i32 = 1 << 2;
-pub const TRANS_FLAG_NODEPVERSION: i32 = 1 << 3;
-pub const TRANS_FLAG_CASCADE: i32 = 1 << 4;
-pub const TRANS_FLAG_RECURSE: i32 = 1 << 5;
-pub const TRANS_FLAG_DBONLY: i32 = 1 << 6;
-pub const TRANS_FLAG_NOHOOKS: i32 = 1 << 7;
-pub const TRANS_FLAG_ALLDEPS: i32 = 1 << 8;
-pub const TRANS_FLAG_DOWNLOADONLY: i32 = 1 << 9;
-pub const TRANS_FLAG_NOSCRIPTLET: i32 = 1 << 10;
-pub const TRANS_FLAG_NOCONFLICTS: i32 = 1 << 11;
-pub const TRANS_FLAG_NEEDED: i32 = 1 << 13;
-pub const TRANS_FLAG_ALLEXPLICIT: i32 = 1 << 14;
-pub const TRANS_FLAG_UNNEEDED: i32 = 1 << 15;
-pub const TRANS_FLAG_RECURSEALL: i32 = 1 << 16;
+pub use alpm_core::trans::{
+	TRANS_FLAG_ALLDEPS, TRANS_FLAG_ALLEXPLICIT, TRANS_FLAG_CASCADE,
+	TRANS_FLAG_DBONLY, TRANS_FLAG_DOWNLOADONLY, TRANS_FLAG_NEEDED,
+	TRANS_FLAG_NOCONFLICTS, TRANS_FLAG_NODEPS, TRANS_FLAG_NODEPVERSION,
+	TRANS_FLAG_NOHOOKS, TRANS_FLAG_NOLOCK, TRANS_FLAG_NOSAVE,
+	TRANS_FLAG_NOSCRIPTLET, TRANS_FLAG_RECURSE, TRANS_FLAG_RECURSEALL,
+	TRANS_FLAG_UNNEEDED,
+};
 
 // conf.h long option codes, getopt returns them for the long names
 pub const OP_LONG_FLAG_MIN: i32 = 1000;
@@ -203,18 +223,37 @@ pub const LONGOPTS: &[LongOpt] = &[
 ];
 
 // the process side of parsing: buffered stdout/stderr and the probes
-// the C makes (isatty(stdout), getenv("POSIXLY_CORRECT") in getopt)
+// the C makes (isatty(stdout), getenv("POSIXLY_CORRECT") in getopt).
+// debug_stamps puts the PACMAN_DEBUG stamp before messages while debug
+// logging is on
 #[derive(Clone, Debug, Default)]
 pub struct Io {
 	pub out: Vec<u8>,
 	pub err: Vec<u8>,
 	pub stdout_tty: bool,
 	pub posixly_correct: bool,
+	pub debug_stamps: bool,
+}
+
+// a pm_printf message with the PACMAN_DEBUG stamp when asked for
+fn stamped(
+	config: &Config,
+	msg: &Msg,
+	stamps: bool,
+	now: i64,
+) -> Option<Vec<u8>> {
+	let s = format_msg(config, msg)?;
+	let debug = config.logmask & LOG_DEBUG != 0;
+	if !stamps || !debug || *msg == Msg::DbUpgradeHint {
+		return Some(s);
+	}
+	Some([debug_stamp(now), s].concat())
 }
 
 impl Host for Io {
 	fn log(&mut self, config: &Config, msg: &Msg) {
-		if let Some(s) = format_msg(config, msg) {
+		let stamps = self.debug_stamps;
+		if let Some(s) = stamped(config, msg, stamps, now_secs()) {
 			self.err.extend_from_slice(&s);
 		}
 	}
@@ -1417,4 +1456,248 @@ pub fn main_args<F: FnOnce() -> Result<(), i32>>(
 	config.parseconfig(&file, io)
 		.map_err(|e: ConfError| e.ret & 0xff)?;
 	Ok((config, targets))
+}
+
+// the binary's stdin, buffered here: a held lock would block the next
+// Term (callbacks are re-installed after setup)
+pub type StdIn = io::BufReader<io::Stdin>;
+
+// CLOCK_MONOTONIC_COARSE counts from boot, so a fresh bar's zero sync
+// time is long past: the offset keeps that
+fn monotonic_ms() -> i64 {
+	static START: OnceLock<Instant> = OnceLock::new();
+	let ms = START.get_or_init(Instant::now).elapsed().as_millis();
+	i64::try_from(ms)
+		.unwrap_or(i64::MAX)
+		.saturating_add(1 << 30)
+}
+
+// the binary's process: std's stdin, the terminal probes, getcols and
+// the clocks
+pub fn std_term() -> Term<StdIn> {
+	Term {
+		stdin: io::BufReader::new(io::stdin()),
+		stdin_tty: io::stdin().is_terminal(),
+		stdout_tty: io::stdout().is_terminal(),
+		cols: getcols,
+		now_ms: monotonic_ms,
+		now_secs,
+	}
+}
+
+// Output::sink of the binary: stdout, then stderr, written through.
+// write errors are dropped like the unchecked C stdio calls
+pub fn std_sink(o: &mut Output) {
+	let mut out = io::stdout();
+	let _ = out.write_all(&std::mem::take(&mut o.stdout));
+	let _ = out.flush();
+	let _ = io::stderr().write_all(&std::mem::take(&mut o.stderr));
+}
+
+// pm_printf of conf.c messages into an Output
+struct OutHost<'a> {
+	out: &'a mut Output,
+	now_secs: fn() -> i64,
+}
+
+impl Host for OutHost<'_> {
+	fn log(&mut self, config: &Config, msg: &Msg) {
+		let now = (self.now_secs)();
+		if let Some(s) = stamped(config, msg, true, now) {
+			self.out.stderr.extend_from_slice(&s);
+		}
+	}
+}
+
+// main() up to the operation: Err is cleanup(ret). the parse output
+// goes out before anything else is printed
+fn setup<R: BufRead + 'static>(
+	argv: &mut [Vec<u8>],
+	process: Process<'_, impl FnOnce() -> Result<(), i32>>,
+	io: &mut Io,
+	out: &mut Output,
+	new_term: &impl Fn() -> Term<R>,
+) -> Result<(Config, Vec<Vec<u8>>, Handle), i32> {
+	let parsed = main_args(argv, process, io);
+	out.stdout.append(&mut io.out);
+	out.stderr.append(&mut io.err);
+	out.flush();
+	let (mut config, targets) = parsed?;
+	let sink = out.sink;
+	let frontend = |config: &Config| {
+		let mut f = Frontend::new(config.clone(), new_term());
+		f.out.sink = sink;
+		Box::new(f)
+	};
+	let cb = frontend(&config);
+	let now_secs = cb.term.now_secs;
+	let mut host = OutHost { out, now_secs };
+	let handle = config.setup_libalpm(&mut host, cb);
+	out.flush();
+	let mut handle = handle.map_err(|e| e.ret & 0xff)?;
+	// noask is meant to be non-interactive
+	if config.noask != 0 {
+		config.noconfirm = 1;
+	}
+	if config.print != 0 && config.op_s_clean == 0 {
+		config.noconfirm = 1;
+		config.flags |= TRANS_FLAG_NOCONFLICTS | TRANS_FLAG_NOLOCK;
+		// errors only
+		config.logmask &= !LOG_WARNING;
+	}
+	// the callbacks read the config as it is from here on
+	handle.set_callbacks(frontend(&config));
+	Ok((config, targets, handle))
+}
+
+// the -v lines before the operation
+fn verbose(
+	out: &mut Vec<u8>,
+	config: &Config,
+	handle: &Handle,
+	targets: &[Vec<u8>],
+) {
+	let join = |dirs: &[Vec<u8>]| -> Vec<u8> {
+		dirs.iter().flat_map(|d| [&d[..], b"  "].concat()).collect()
+	};
+	let null = |s: Option<&[u8]>| s.unwrap_or(b"(null)").to_vec();
+	let conf = config.configfile.as_deref();
+	let lines: [(&[u8], Vec<u8>); 8] = [
+		(b"Root      : ", handle.root().to_vec()),
+		(b"Conf File : ", null(conf)),
+		(b"DB Path   : ", handle.dbpath().to_vec()),
+		(b"Cache Dirs: ", join(handle.cachedirs())),
+		(b"Hook Dirs : ", join(handle.hookdirs())),
+		(b"Lock File : ", handle.lockfile().to_vec()),
+		(b"Log File  : ", null(handle.logfile())),
+		(b"GPG Dir   : ", null(handle.gpgdir())),
+	];
+	for (title, value) in lines {
+		out.extend_from_slice(&[title, &value[..], b"\n"].concat());
+	}
+	let title = b"Targets   :";
+	list_display(out, Some(title), targets, 0, &config.colstr);
+}
+
+// a branch this port does not have yet: reported, status 1
+fn unported(err: &mut Vec<u8>, config: &Config, what: &str) -> i32 {
+	let msg = format!("{what} is not supported by this port yet\n");
+	pm_printf(err, config, LOG_ERROR, msg.as_bytes());
+	1
+}
+
+// how a transaction front end ended: its status, or for a confirmed
+// transaction the commit this port does not have yet (reported, the
+// transaction released, status 1)
+fn finish<R: BufRead>(ui: &mut Ui<R>, handle: &mut Handle, p: Prepared) -> i32 {
+	match p {
+		Prepared::Done(ret) => ret,
+		Prepared::Commit => {
+			let what = "committing the transaction";
+			let ret = unported(&mut ui.out.stderr, ui.config, what);
+			trans_release(ui.out, ui.config, handle);
+			ret
+		}
+	}
+}
+
+// the operation of config.op on handle: the exit status
+fn dispatch<R: BufRead>(
+	ui: &mut Ui<R>,
+	handle: &mut Handle,
+	targets: &[Vec<u8>],
+) -> i32 {
+	let (config, cols) = (ui.config, ui.cols);
+	match config.op {
+		PM_OP_DATABASE => {
+			unported(&mut ui.out.stderr, config, "--database")
+		}
+		PM_OP_REMOVE => {
+			let p = pacman_remove(ui, handle, targets);
+			finish(ui, handle, p)
+		}
+		PM_OP_UPGRADE => {
+			let p = pacman_upgrade(ui, handle, targets);
+			finish(ui, handle, p)
+		}
+		PM_OP_QUERY => {
+			let path =
+				std::env::var_os("PATH").map(|p| p.into_vec());
+			let env = QueryEnv { cols, path };
+			pacman_query(config, handle, &env, targets, ui.out)
+		}
+		PM_OP_SYNC => {
+			match pacman_sync(config, handle, targets, cols, ui.out)
+			{
+				Ok(ret) => ret,
+				Err(Unported::Clean) => unported(
+					&mut ui.out.stderr,
+					config,
+					"--clean",
+				),
+				Err(Unported::Transaction) => {
+					let p = sync_trans(ui, handle, targets);
+					finish(ui, handle, p)
+				}
+			}
+		}
+		PM_OP_DEPTEST => pacman_deptest(handle, targets, ui.out),
+		PM_OP_FILES => pacman_files(config, handle, targets, ui.out),
+		_ => {
+			let msg = b"no operation specified (use -h for help)\n";
+			pm_printf(&mut ui.out.stderr, config, LOG_ERROR, msg);
+			1
+		}
+	}
+}
+
+// main(): the exit status (cleanup(ret) exits with ret & 0xff).
+// new_term gives the process to each Frontend, sink is where output
+// goes (std_sink for the binary)
+pub fn run<R: BufRead + 'static>(
+	argv: &mut [Vec<u8>],
+	process: Process<'_, impl FnOnce() -> Result<(), i32>>,
+	io: &mut Io,
+	new_term: impl Fn() -> Term<R>,
+	sink: Option<fn(&mut Output)>,
+) -> i32 {
+	let mut term = new_term();
+	let mut out = Output {
+		sink,
+		..Output::default()
+	};
+	console_cursor_hide(&mut out.stdout, term.stdout_tty);
+	let ret = match setup(argv, process, io, &mut out, &new_term) {
+		Err(ret) => ret,
+		Ok((config, targets, mut handle)) => {
+			if config.verbose > 0 {
+				verbose(
+					&mut out.stdout,
+					&config,
+					&handle,
+					&targets,
+				);
+			}
+			if needs_root(&config) {
+				let cl =
+					arg_to_string(argv).unwrap_or_default();
+				let msg = [&b"Running '"[..], &cl, b"'\n"]
+					.concat();
+				let _ = handle.logaction(b"PACMAN", &msg);
+			}
+			let mut ui = Ui {
+				config: &config,
+				cols: (term.cols)(),
+				term: &mut term,
+				out: &mut out,
+				format_date: &format_date_utc,
+				explicit_adds: Vec::new(),
+				explicit_removes: Vec::new(),
+			};
+			dispatch(&mut ui, &mut handle, &targets) & 0xff
+		}
+	};
+	console_cursor_show(&mut out.stdout, term.stdout_tty);
+	out.flush();
+	ret
 }

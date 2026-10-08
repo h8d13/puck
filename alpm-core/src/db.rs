@@ -459,6 +459,11 @@ impl Db {
 		}
 	}
 
+	// DB_STATUS_MISSING: a sync db whose file was absent at registration
+	pub fn is_missing(&self) -> bool {
+		self.status == Status::Missing
+	}
+
 	// db->ops->populate, dbext is handle->dbext now. sync: a failure
 	// to open the file or a bad entry makes the db invalid for good, an
 	// archive error does not

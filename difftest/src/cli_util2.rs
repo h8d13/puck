@@ -42,7 +42,7 @@ use crate::{
 };
 
 unsafe extern "C" {
-	static mut stdin: *mut CFile;
+	pub(crate) static mut stdin: *mut CFile;
 
 	fn display_targets();
 	fn print_packages(packages: *const CList);
@@ -152,7 +152,12 @@ unsafe fn take_buf(buf: *mut c_char, size: usize) -> Vec<u8> {
 
 // runs f with config set from cfg, COLUMNS = cols, the streams captured
 // and stdin reading input
-fn run(cfg: &Config, cols: u16, input: &[u8], f: impl FnOnce()) -> CIo {
+pub(crate) fn run(
+	cfg: &Config,
+	cols: u16,
+	input: &[u8],
+	f: impl FnOnce(),
+) -> CIo {
 	init();
 	let _guard = FRONTEND.lock().unwrap_or_else(|e| e.into_inner());
 	let cs = &cfg.colstr;
@@ -214,6 +219,7 @@ fn run(cfg: &Config, cols: u16, input: &[u8], f: impl FnOnce()) -> CIo {
 			out: Output {
 				stdout: take_buf(obuf, osize),
 				stderr: take_buf(ebuf, esize),
+				sink: None,
 			},
 			consumed: usize::try_from(consumed).unwrap(),
 		}

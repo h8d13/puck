@@ -5,8 +5,9 @@
 // a fresh config_new in `config`, swaps `stderr` for an open_memstream
 // and `stdout` for a FILE whose isatty answer is chosen (Color probes
 // it). parseconfig itself ends in setup_libalpm (alpm_initialize on the
-// configured root): the wrapper runs its first half instead, which is
-// exported, parseconfigfile + setdefaults + the "finished parsing" trace.
+// configured root): c_parseconfig runs its first half instead, which is
+// exported, parseconfigfile + setdefaults + the "finished parsing" trace;
+// c_setup runs all of it on fixture roots and reads the handle back.
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::ptr;
 use std::sync::OnceLock;
@@ -18,8 +19,10 @@ use crate::{
 };
 
 use pacman_cli::conf::{ColStr, Config, ConfigRepo};
+use pacman_cli::util::Output;
 
 // colstr_t of conf.h
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub(crate) struct ColStrC {
 	pub(crate) colon: *const c_char,
@@ -55,9 +58,9 @@ pub(crate) struct ConfigC {
 	version: u16,
 	help: u16,
 	pub(crate) noconfirm: u16,
-	noprogressbar: u16,
+	pub(crate) noprogressbar: u16,
 	pub(crate) logmask: u16,
-	print: u16,
+	pub(crate) print: u16,
 	checkspace: u16,
 	usesyslog: u16,
 	color: u16,
@@ -100,8 +103,8 @@ pub(crate) struct ConfigC {
 	pub(crate) op_f_machinereadable: u16,
 
 	pub(crate) group: u16,
-	noask: u16,
-	ask: c_uint,
+	pub(crate) noask: u16,
+	pub(crate) ask: c_uint,
 	pub(crate) flags: c_int,
 	siglevel: c_int,
 	localfilesiglevel: c_int,
@@ -110,11 +113,11 @@ pub(crate) struct ConfigC {
 	localfilesiglevel_mask: c_int,
 	remotefilesiglevel_mask: c_int,
 
-	chomp: u16,
+	pub(crate) chomp: u16,
 	pub(crate) verbosepkglists: u16,
 	parallel_downloads: c_uint,
 	cleanmethod: u16,
-	holdpkg: *mut CList,
+	pub(crate) holdpkg: *mut CList,
 	ignorepkg: *mut CList,
 	ignoregrp: *mut CList,
 	assumeinstalled: *mut CList,
@@ -161,6 +164,7 @@ unsafe extern "C" {
 	fn enable_colors(colors: c_int);
 	fn parseconfigfile(file: *const c_char) -> c_int;
 	fn setdefaults(c: *mut ConfigC) -> c_int;
+	fn parseconfig(file: *const c_char) -> c_int;
 	fn pm_printf(level: c_int, format: *const c_char, ...) -> c_int;
 
 	fn fdopen(fd: c_int, mode: *const c_char) -> *mut File;
@@ -190,6 +194,11 @@ pub struct Preset {
 	pub logmask: u16,
 	// what isatty(fileno(stdout)) answers
 	pub tty: bool,
+	// the operation (Files picks the .files dbext in setup_libalpm),
+	// 0 keeps config_new's
+	pub op: u16,
+	// --assume-installed
+	pub assumeinstalled: Vec<Vec<u8>>,
 }
 
 impl Preset {
@@ -203,6 +212,10 @@ impl Preset {
 		c.logfile.clone_from(&self.logfile);
 		c.sandboxuser.clone_from(&self.sandboxuser);
 		c.logmask = self.logmask;
+		if self.op != 0 {
+			c.op = self.op;
+		}
+		c.assumeinstalled.clone_from(&self.assumeinstalled);
 		if self.color != 0 {
 			c.color = self.color;
 			c.enable_colors(self.color);
@@ -540,5 +553,305 @@ pub fn c_glob(pattern: &[u8]) -> Result<Vec<Vec<u8>>, i32> {
 			.collect();
 		globfree(&mut g);
 		Ok(out)
+	}
+}
+
+// what setup_libalpm leaves in a handle, read through the getters
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandleSnap {
+	pub root: Vec<u8>,
+	pub dbpath: Vec<u8>,
+	pub dbext: Vec<u8>,
+	pub logfile: Option<Vec<u8>>,
+	pub gpgdir: Option<Vec<u8>>,
+	pub lockfile: Vec<u8>,
+	pub hookdirs: Vec<Vec<u8>>,
+	pub cachedirs: Vec<Vec<u8>>,
+	pub overwrite_files: Vec<Vec<u8>>,
+	pub siglevels: [i32; 3],
+	pub architectures: Vec<Vec<u8>>,
+	pub checkspace: i32,
+	pub usesyslog: i32,
+	pub sandboxuser: Option<Vec<u8>>,
+	pub disable_sandbox: [i32; 2],
+	pub ignorepkgs: Vec<Vec<u8>>,
+	pub ignoregroups: Vec<Vec<u8>>,
+	pub noupgrades: Vec<Vec<u8>>,
+	pub noextracts: Vec<Vec<u8>>,
+	pub disable_dl_timeout: i32,
+	pub parallel_downloads: i32,
+	pub assumeinstalled: Vec<Vec<u8>>,
+	// name, siglevel (getter), usage, servers, cache servers
+	pub dbs: Vec<SnapDb>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapDb {
+	pub name: Vec<u8>,
+	pub siglevel: i32,
+	pub usage: i32,
+	pub servers: Vec<Vec<u8>>,
+	pub cache_servers: Vec<Vec<u8>>,
+}
+
+impl HandleSnap {
+	pub fn of(h: &alpm_core::handle::Handle) -> HandleSnap {
+		let dep_strs = h
+			.assumeinstalled()
+			.iter()
+			.map(alpm_core::deps::dep_compute_string)
+			.collect();
+		let dbs = h
+			.syncdbs()
+			.iter()
+			.map(|d| SnapDb {
+				name: d.name().to_vec(),
+				siglevel: d.siglevel(h.default_siglevel()),
+				usage: d.usage(),
+				servers: d.servers().to_vec(),
+				cache_servers: d.cache_servers().to_vec(),
+			})
+			.collect();
+		HandleSnap {
+			root: h.root().to_vec(),
+			dbpath: h.dbpath().to_vec(),
+			dbext: h.dbext().to_vec(),
+			logfile: h.logfile().map(<[u8]>::to_vec),
+			gpgdir: h.gpgdir().map(<[u8]>::to_vec),
+			lockfile: h.lockfile().to_vec(),
+			hookdirs: h.hookdirs().to_vec(),
+			cachedirs: h.cachedirs().to_vec(),
+			overwrite_files: h.overwrite_files().to_vec(),
+			siglevels: [
+				h.default_siglevel(),
+				h.local_file_siglevel(),
+				h.remote_file_siglevel(),
+			],
+			architectures: h.architectures().to_vec(),
+			checkspace: h.checkspace(),
+			usesyslog: h.usesyslog(),
+			sandboxuser: h.sandboxuser().map(<[u8]>::to_vec),
+			disable_sandbox: [
+				i32::from(h.disable_sandbox_filesystem()),
+				i32::from(h.disable_sandbox_syscalls()),
+			],
+			ignorepkgs: h.ignorepkgs().to_vec(),
+			ignoregroups: h.ignoregroups().to_vec(),
+			noupgrades: h.noupgrades().to_vec(),
+			noextracts: h.noextracts().to_vec(),
+			disable_dl_timeout: i32::from(h.disable_dl_timeout()),
+			parallel_downloads: h.parallel_downloads() as i32,
+			assumeinstalled: dep_strs,
+			dbs,
+		}
+	}
+}
+
+// SAFETY (callers): h is a live handle
+unsafe fn c_snap(h: *mut c_void) -> HandleSnap {
+	use crate::handle::*;
+	use crate::package::{read_deps, read_strs};
+	let s = |p: *const c_char| -> Option<Vec<u8>> {
+		// SAFETY: getters return NULL or strings owned by the handle
+		(!p.is_null()).then(|| {
+			unsafe { CStr::from_ptr(p) }.to_bytes().to_vec()
+		})
+	};
+	// SAFETY: h is live (see above), the lists belong to it
+	unsafe {
+		let dbs =
+			crate::package::list_data(alpm_get_syncdbs(h))
+				.into_iter()
+				.map(|d| {
+					let d = d.cast::<crate::handle::CDb>();
+					let mut usage = 0;
+					alpm_db_get_usage(d, &mut usage);
+					SnapDb {
+					name: s(alpm_db_get_name(d)).unwrap_or_default(),
+					siglevel: alpm_db_get_siglevel(d),
+					usage,
+					servers: read_strs(alpm_db_get_servers(d)),
+					cache_servers: read_strs(
+						alpm_db_get_cache_servers(d),
+					),
+				}
+				})
+				.collect();
+		let deps = read_deps(alpm_option_get_assumeinstalled(h));
+		HandleSnap {
+			root: s(alpm_option_get_root(h)).unwrap_or_default(),
+			dbpath: s(alpm_option_get_dbpath(h))
+				.unwrap_or_default(),
+			dbext: s(alpm_option_get_dbext(h)).unwrap_or_default(),
+			logfile: s(alpm_option_get_logfile(h)),
+			gpgdir: s(alpm_option_get_gpgdir(h)),
+			lockfile: s(alpm_option_get_lockfile(h))
+				.unwrap_or_default(),
+			hookdirs: read_strs(alpm_option_get_hookdirs(h)),
+			cachedirs: read_strs(alpm_option_get_cachedirs(h)),
+			overwrite_files: read_strs(
+				alpm_option_get_overwrite_files(h),
+			),
+			siglevels: [
+				alpm_option_get_default_siglevel(h),
+				alpm_option_get_local_file_siglevel(h),
+				alpm_option_get_remote_file_siglevel(h),
+			],
+			architectures: read_strs(
+				alpm_option_get_architectures(h),
+			),
+			checkspace: alpm_option_get_checkspace(h),
+			usesyslog: alpm_option_get_usesyslog(h),
+			sandboxuser: s(alpm_option_get_sandboxuser(h)),
+			disable_sandbox: [
+				alpm_option_get_disable_sandbox_filesystem(h),
+				alpm_option_get_disable_sandbox_syscalls(h),
+			],
+			ignorepkgs: read_strs(alpm_option_get_ignorepkgs(h)),
+			ignoregroups: read_strs(alpm_option_get_ignoregroups(
+				h,
+			)),
+			noupgrades: read_strs(alpm_option_get_noupgrades(h)),
+			noextracts: read_strs(alpm_option_get_noextracts(h)),
+			disable_dl_timeout: alpm_option_get_disable_dl_timeout(
+				h,
+			),
+			parallel_downloads: alpm_option_get_parallel_downloads(
+				h,
+			),
+			assumeinstalled: deps
+				.iter()
+				.map(alpm_core::deps::dep_compute_string)
+				.collect(),
+			dbs,
+		}
+	}
+}
+
+// parseconfig + setup_libalpm, one side
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SetupRun {
+	pub ret: i32,
+	pub handle: Option<HandleSnap>,
+	pub stderr: Vec<u8>,
+}
+
+// the whole C parseconfig (setup_libalpm included, the frontend
+// callbacks installed) on a fresh config, the handle read back and
+// released. C preconditions: no XferCommand (fetchcb would be set), no
+// UseSyslog (nothing logs here, but the handle would open syslog)
+pub fn c_setup(file: &[u8], preset: &Preset) -> SetupRun {
+	let _guard = FRONTEND.lock().unwrap_or_else(|e| e.into_inner());
+	let _alpm = crate::handle::ALPM
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+	let f = cstr(file);
+	let (mut buf, mut size) = (ptr::null_mut(), 0usize);
+	let assume: Vec<_> =
+		preset.assumeinstalled.iter().map(|a| cstr(a)).collect();
+	// SAFETY: as c_parseconfig. the handle setup_libalpm stores in the
+	// fresh config is read and released before config_free; the
+	// assume-installed strings are strdup'd into the config's list
+	unsafe {
+		let c = config_new();
+		assert!(!c.is_null());
+		let old = config;
+		config = c;
+		set_str(&mut (*c).sysroot, &preset.sysroot);
+		set_str(&mut (*c).rootdir, &preset.rootdir);
+		set_str(&mut (*c).dbpath, &preset.dbpath);
+		set_str(&mut (*c).gpgdir, &preset.gpgdir);
+		set_str(&mut (*c).logfile, &preset.logfile);
+		set_str(&mut (*c).sandboxuser, &preset.sandboxuser);
+		(*c).logmask = preset.logmask;
+		if preset.op != 0 {
+			(*c).op = preset.op;
+		}
+		for a in &assume {
+			(*c).assumeinstalled = crate::alpm_list_add(
+				(*c).assumeinstalled,
+				strdup(a.as_ptr()).cast(),
+			);
+		}
+		let mem = open_memstream(&mut buf, &mut size);
+		assert!(!mem.is_null());
+		let (real_out, real_err) = (stdout, stderr);
+		fflush(real_out);
+		fflush(real_err);
+		stderr = mem;
+		stdout = mem;
+		let ret = parseconfig(f.as_ptr());
+		fflush(mem);
+		stdout = real_out;
+		stderr = real_err;
+		fclose(mem);
+		let out = std::slice::from_raw_parts(buf.cast::<u8>(), size);
+		let out = strip_timestamps(out);
+		c_free(buf.cast());
+		let h = (*c).handle;
+		let handle = (!h.is_null()).then(|| c_snap(h));
+		if !h.is_null() {
+			crate::handle::alpm_release(h);
+			(*c).handle = ptr::null_mut();
+		}
+		config_free(c);
+		config = old;
+		SetupRun {
+			ret,
+			handle,
+			stderr: out,
+		}
+	}
+}
+
+thread_local! {
+	// one stderr for the conf.c messages and the callbacks, in order
+	static SETUP_ERR: std::cell::RefCell<Vec<u8>> =
+		const { std::cell::RefCell::new(Vec::new()) };
+}
+
+// Output::sink of the Rust setup's callbacks
+fn setup_sink(o: &mut Output) {
+	let mut b = std::mem::take(&mut o.stdout);
+	b.append(&mut o.stderr);
+	SETUP_ERR.with(|e| e.borrow_mut().extend(b));
+}
+
+struct SetupHost;
+
+impl pacman_cli::conf::Host for SetupHost {
+	fn log(&mut self, cfg: &Config, msg: &pacman_cli::conf::Msg) {
+		if let Some(s) = pacman_cli::conf::format_msg(cfg, msg) {
+			SETUP_ERR.with(|e| e.borrow_mut().extend(s));
+		}
+	}
+
+	fn stdout_is_tty(&mut self) -> bool {
+		false
+	}
+}
+
+// the same on the port: Config::parseconfig, then setup_libalpm with the
+// frontend callbacks
+pub fn rust_setup(file: &[u8], preset: &Preset) -> SetupRun {
+	SETUP_ERR.with(|e| e.borrow_mut().clear());
+	let mut cfg = preset.config();
+	let mut host = SetupHost;
+	let res = cfg.parseconfig(file, &mut host).and_then(|()| {
+		let term = pacman_cli::util::Term::new(&b""[..], false, false);
+		let mut cb =
+			pacman_cli::callback::Frontend::new(cfg.clone(), term);
+		cb.out.sink = Some(setup_sink);
+		cfg.setup_libalpm(&mut host, Box::new(cb))
+	});
+	let (ret, handle) = match res {
+		Ok(h) => (0, Some(HandleSnap::of(&h))),
+		Err(e) => (e.ret, None),
+	};
+	let err = SETUP_ERR.with(|e| std::mem::take(&mut *e.borrow_mut()));
+	SetupRun {
+		ret,
+		handle,
+		stderr: err,
 	}
 }

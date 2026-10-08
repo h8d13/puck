@@ -5,11 +5,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use pacman_cli::conf::{
-	ColStr, Config, DB_USAGE_ALL, DB_USAGE_SYNC, Host, LOG_DEBUG,
-	LOG_ERROR, LOG_WARNING, Msg, PM_CLEAN_KEEPCUR, PM_CLEAN_KEEPINST,
-	PM_COLOR_ON, SIG_DATABASE, SIG_DATABASE_OPTIONAL, SIG_PACKAGE,
-	SIG_PACKAGE_MARGINAL_OK, SIG_PACKAGE_UNKNOWN_OK, SIG_USE_DEFAULT,
-	format_msg, glob, merge_siglevel, prepend_dir,
+	ColStr, Config, DB_USAGE_ALL, DB_USAGE_SEARCH, DB_USAGE_SYNC, Host,
+	LOG_DEBUG, LOG_ERROR, LOG_WARNING, Msg, PM_CLEAN_KEEPCUR,
+	PM_CLEAN_KEEPINST, PM_COLOR_ON, SIG_DATABASE, SIG_DATABASE_OPTIONAL,
+	SIG_PACKAGE, SIG_PACKAGE_MARGINAL_OK, SIG_PACKAGE_UNKNOWN_OK,
+	SIG_USE_DEFAULT, format_msg, glob, merge_siglevel, prepend_dir,
 };
 
 struct Dir(PathBuf);
@@ -277,4 +277,39 @@ fn glob_order() {
 	assert_eq!(prepend_dir(Some(b"/r/"), b"//x"), b("/r/x"));
 	assert_eq!(prepend_dir(Some(b""), b"x"), b("/x"));
 	assert_eq!(prepend_dir(None, b"/x"), b("/x"));
+}
+
+// setup_libalpm: config to handle, repos registered in order, a refused
+// one reported and skipped, the repo list dropped
+#[test]
+fn setup_libalpm_handle() {
+	let d = Dir::new("setup");
+	fs::create_dir_all(d.0.join("root")).unwrap();
+	fs::create_dir_all(d.0.join("db/sync")).unwrap();
+	let conf = "[options]\nIgnorePkg = a\nParallelDownloads = 4\n\
+		[core]\nServer = http://m/$repo/\nUsage = Search\n\
+		[local]\n[extra]\n";
+	let f = d.write("pacman.conf", conf);
+	let mut c = Config::new();
+	c.op = 8;
+	c.rootdir = Some(b(&format!("{}/root", d.s())));
+	c.dbpath = Some(b(&format!("{}/db", d.s())));
+	c.logfile = Some(b(&format!("{}/log", d.s())));
+	c.gpgdir = Some(b(&format!("{}/gpg", d.s())));
+	let mut log = Log::default();
+	c.parseconfig(&f, &mut log).unwrap();
+	let h = c.setup_libalpm(&mut log, Box::new(())).unwrap();
+	assert!(c.repos.is_empty());
+	assert_eq!(h.dbext(), b".files");
+	assert_eq!(h.ignorepkgs(), &[b("a")]);
+	assert_eq!(h.parallel_downloads(), 4);
+	let names: Vec<&[u8]> = h.syncdbs().iter().map(|d| d.name()).collect();
+	assert_eq!(names, [&b"core"[..], b"extra"]);
+	assert_eq!(h.syncdbs()[0].servers(), &[b("http://m/core")]);
+	assert_eq!(h.syncdbs()[0].usage(), DB_USAGE_SEARCH);
+	assert_eq!(
+		String::from_utf8_lossy(&log.out),
+		"error: could not register 'local' database \
+		(database already registered)\n"
+	);
 }

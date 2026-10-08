@@ -8,7 +8,7 @@
 // line (C file and line) is not logged, the option setters' own debug
 // lines are. NULL arguments belong to the C ABI layer. alpm_release is
 // Drop. not ported: handle->user (getuid needs rustix "process"),
-// transactions, the curl multi handle (reqwest clients are per call).
+// the curl multi handle (reqwest clients are per call).
 use std::ffi::{OsStr, c_int, c_uint};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -25,6 +25,7 @@ use crate::error::Errno;
 use crate::log::{Clock, Logger};
 use crate::package::{DbCaches, Package};
 use crate::signing::Keyring;
+use crate::trans::Trans;
 use crate::util::{
 	CALLER_PREFIX, PATH_MAX, fnmatch_patterns, hash_sdbm, makepath,
 	until_nul,
@@ -74,6 +75,8 @@ pub struct Handle {
 	db_local: Option<Db>,
 	// registration order
 	dbs_sync: Vec<Db>,
+	// handle->trans, None is NULL
+	trans: Option<Trans>,
 }
 
 // Handle::sync_parts
@@ -222,6 +225,7 @@ impl Handle {
 			fetch: None,
 			db_local: Some(local),
 			dbs_sync: Vec::new(),
+			trans: None,
 		})
 	}
 
@@ -236,6 +240,33 @@ impl Handle {
 
 	pub fn callbacks(&mut self) -> &mut dyn Callbacks {
 		&mut *self.cb
+	}
+
+	// f with the callbacks lent out next to the handle, for calls that
+	// read the handle while they log, ask or send events. the handle's
+	// own logging inside f goes nowhere
+	pub fn with_callbacks<R>(
+		&mut self,
+		f: impl FnOnce(&mut Handle, &mut dyn Callbacks) -> R,
+	) -> R {
+		let mut cb = std::mem::replace(&mut self.cb, Box::new(()));
+		let r = f(self, &mut *cb);
+		self.cb = cb;
+		r
+	}
+
+	// handle->trans
+	pub fn trans(&self) -> Option<&Trans> {
+		self.trans.as_ref()
+	}
+
+	pub fn trans_mut(&mut self) -> Option<&mut Trans> {
+		self.trans.as_mut()
+	}
+
+	// handle->trans = trans, the old one returned
+	pub fn set_trans(&mut self, trans: Option<Trans>) -> Option<Trans> {
+		std::mem::replace(&mut self.trans, trans)
 	}
 
 	// set_callbacks giving the old set back, for a caller that swaps

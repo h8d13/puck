@@ -69,7 +69,7 @@ pub struct Setup {
 
 // alpm_depend_t, alpm.h
 #[repr(C)]
-struct CDepend {
+pub(crate) struct CDepend {
 	name: *mut c_char,
 	version: *mut c_char,
 	desc: *mut c_char,
@@ -152,7 +152,7 @@ fn depmod_from_c(m: c_int) -> DepMod {
 	}
 }
 
-fn read_dep(d: *const CDepend) -> Depend {
+pub(crate) fn read_dep(d: *const CDepend) -> Depend {
 	// SAFETY: d is a live alpm_depend_t owned by the C
 	let c = unsafe { &*d };
 	Depend {
@@ -165,7 +165,7 @@ fn read_dep(d: *const CDepend) -> Depend {
 }
 
 // copies a depmissing list out, frees entries and nodes
-fn take_misses(list: *mut CList) -> Vec<DepMissing> {
+pub(crate) fn take_misses(list: *mut CList) -> Vec<DepMissing> {
 	let out = list_data(list)
 		.into_iter()
 		.map(|p| {

@@ -4,11 +4,10 @@
 //
 // config->handle is the Handle passed in. output goes into an Output like
 // query.rs, pm_printf filtered by the config's logmask; messages are the
-// untranslated msgids. trans_init(0, 0)/trans_release around the reason
-// change come down to the db lock: check_syncdbs(0, 0) checks nothing and
-// no transaction call follows. the C getters' lazy loads happen up front
+// untranslated msgids. the C getters' lazy loads happen up front
 // (desc before the dependency and conflict checks, files before the file
-// list check); checkdeps logs through the handle's callbacks.
+// list check); checkdeps and checkconflicts log through the handle's
+// callbacks.
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
@@ -26,7 +25,7 @@ use alpm_core::util::{strerror, until_nul};
 
 use crate::conf::{Config, LOG_ERROR};
 use crate::pacman::{TRANS_FLAG_ALLDEPS, TRANS_FLAG_ALLEXPLICIT};
-use crate::util::{Output, pm_printf};
+use crate::util::{Output, pm_printf, trans_init, trans_release};
 
 fn os(path: &[u8]) -> &Path {
 	Path::new(OsStr::from_bytes(path))
@@ -39,31 +38,6 @@ fn error(o: &mut Output, config: &Config, parts: &[&[u8]]) {
 // access(path, F_OK): stat follows symlinks the same way
 fn exists(path: &[u8]) -> bool {
 	fs::metadata(os(path)).is_ok()
-}
-
-// trans_init(0, 0): alpm_trans_init takes the lock, trans_init_error
-// reports a failure. false is the C's -1
-fn trans_init(config: &Config, handle: &mut Handle, o: &mut Output) -> bool {
-	let Err(e) = handle.lock() else {
-		return true;
-	};
-	let msg = b"failed to init transaction (unable to lock database)\n";
-	error(o, config, &[msg]);
-	error(
-		o,
-		config,
-		&[b"could not lock database: ", &strerror(&e), b"\n"],
-	);
-	let lockfile = handle.lockfile().to_vec();
-	if exists(&lockfile) {
-		o.stderr.extend_from_slice(&[
-			b"  if you're sure a package manager is not already\n",
-			&b"  running, you can remove "[..],
-			&lockfile,
-			b"\n",
-		].concat());
-	}
-	false
 }
 
 // change_install_reason: 0 when every target got the reason
@@ -87,7 +61,8 @@ fn change_install_reason(
 		error(o, config, &[msg]);
 		return 1;
 	};
-	if !trans_init(config, handle, o) {
+	// lock database
+	if !trans_init(o, config, handle, 0, false) {
 		return 1;
 	}
 	let mut ret = 0;
@@ -129,9 +104,10 @@ fn change_install_reason(
 			);
 		}
 	}
-	// trans_release: alpm_trans_release cannot fail with a transaction,
-	// _alpm_handle_unlock only warns
-	handle.handle_unlock();
+	// unlock database
+	if !trans_release(o, config, handle) {
+		return 1;
+	}
 	ret
 }
 
@@ -143,22 +119,22 @@ fn check_db_missing_deps(
 	pkglist: &[Package],
 	o: &mut Output,
 ) -> i32 {
-	let mut cb = handle.replace_callbacks(Box::new(()));
-	let empty = PkgHash::new(0).expect("empty table");
-	let local = handle.localdb().and_then(Db::loaded_pkgcache);
-	let env = DepsEnv {
-		handle,
-		// no transaction: ALPM_TRANS_FLAG_NODEPVERSION unset
-		nodepversion: false,
-		local: DbPkgs {
-			usage: 0,
-			cache: local.unwrap_or(&empty),
-		},
-		sync: &[],
-	};
 	let upgrade: Vec<&Package> = pkglist.iter().collect();
-	let missing = checkdeps(&env, &[], &[], &upgrade, false, &mut *cb);
-	drop(handle.replace_callbacks(cb));
+	let missing = handle.with_callbacks(|handle, cb| {
+		let empty = PkgHash::new(0).expect("empty table");
+		let local = handle.localdb().and_then(Db::loaded_pkgcache);
+		let env = DepsEnv {
+			handle,
+			// no transaction: ALPM_TRANS_FLAG_NODEPVERSION unset
+			nodepversion: false,
+			local: DbPkgs {
+				usage: 0,
+				cache: local.unwrap_or(&empty),
+			},
+			sync: &[],
+		};
+		checkdeps(&env, &[], &[], &upgrade, false, cb)
+	});
 	for miss in &missing {
 		let depstring = dep_compute_string(&miss.depend);
 		let msg: [&[u8]; 5] = [
@@ -227,11 +203,12 @@ fn check_db_local_files(
 // check_db_local_package_conflicts: alpm_checkconflicts on pkglist
 fn check_db_local_package_conflicts(
 	config: &Config,
+	handle: &mut Handle,
 	pkglist: &[Package],
 	o: &mut Output,
 ) -> i32 {
 	let pkgs: Vec<&Package> = pkglist.iter().collect();
-	let conflicts = checkconflicts(&pkgs);
+	let conflicts = checkconflicts(&pkgs, handle.callbacks());
 	for c in &conflicts {
 		let msg: [&[u8]; 5] = [
 			b"'",
@@ -306,7 +283,7 @@ fn check_db_local(config: &Config, handle: &mut Handle, o: &mut Output) -> i32 {
 	}
 	let pkglist = local_pkgs(handle, INFRQ_DESC);
 	let mut ret = check_db_missing_deps(config, handle, &pkglist, o);
-	ret += check_db_local_package_conflicts(config, &pkglist, o);
+	ret += check_db_local_package_conflicts(config, handle, &pkglist, o);
 	let pkglist = local_pkgs(handle, INFRQ_FILES);
 	ret + check_db_local_filelist_conflicts(config, &pkglist, o)
 }

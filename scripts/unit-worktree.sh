@@ -37,11 +37,21 @@ create() {
 		git -C "$wt/$sub" checkout -q "$sha"
 	done
 	mkdir -p "$wt/.cargo" "$wt/.tmp"
+	# low job and test-thread counts: several units build at once on one
+	# machine, full test runs are serialised by scripts/cargo-test.sh
 	cat > "$wt/.cargo/config.toml" <<-EOF
 		# unit worktree, not committed (see .gitignore)
+		[build]
+		jobs = 2
+
 		[env]
 		PACMAN_BUILD = "$root/pacman/build"
 		TMPDIR = "$wt/.tmp"
+		RUST_TEST_THREADS = "2"
+
+		# memory and time caps per test binary
+		[target.'cfg(all())']
+		runner = ["$root/scripts/test-runner.sh"]
 	EOF
 	echo "$wt (branch unit/$name from $from)"
 }
