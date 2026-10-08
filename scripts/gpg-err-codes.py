@@ -5,10 +5,12 @@
 import re
 import sys
 
+# "<code>\t<GPG_ERR_NAME>\t<text>" rows, the rest is comments
+row = re.compile(r"^(\d+)\t+(GPG_ERR_\w+)\t+(.*)$")
 rows = []
 with open(sys.argv[1]) as f:
 	for line in f:
-		m = re.match(r"^(\d+)\t+(GPG_ERR_\w+)\t+(.*)$", line.rstrip("\n"))
+		m = row.match(line.rstrip("\n"))
 		if m:
 			rows.append((int(m.group(1)), m.group(3)))
 
