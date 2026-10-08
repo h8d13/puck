@@ -137,7 +137,7 @@ impl Name {
     /// The subset of special characters that are allowed as first character of a [`Name`].
     const SPECIAL_FIRST_CHARS: [char; 3] = ['_', '@', '+'];
     /// The set of characters allowed anywhere in a [`Name`], **except** as first character.
-    pub(crate) const NEVER_FIRST_CHAR: [char; 5] = ['_', '@', '+', '-', '.'];
+    const NEVER_FIRST_CHAR: [char; 5] = ['_', '@', '+', '-', '.'];
 
     /// Create a new `Name`
     pub fn new(name: &str) -> Result<Self, Error> {

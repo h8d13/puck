@@ -335,7 +335,8 @@ pub(crate) unsafe extern "C" fn record_log(
 	fmt: *const c_char,
 	args: *mut c_void,
 ) {
-	let mut buf = [0 as c_char; 4096];
+	// sync db lines reach 512 KiB (be_sync's unknown key line)
+	let mut buf = vec![0 as c_char; 1 << 20];
 	// SAFETY: fmt and args are the format and va_list of this
 	// _alpm_log call, used once; buf is writable for its length
 	let n = unsafe {

@@ -1,1 +1,0 @@
-alpm-repo-descv2.5.md

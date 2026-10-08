@@ -12,8 +12,7 @@
 set -euo pipefail
 
 crates=(
-	alpm-types alpm-parsers alpm-common
-	alpm-db alpm-repo-db
+	alpm-types alpm-parsers
 	alpm-compress
 )
 

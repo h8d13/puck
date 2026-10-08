@@ -8,12 +8,9 @@ use std::{
 use alpm_parsers::prelude::*;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
-use winnow::{
-    combinator::{alt, not, terminated},
-    token::one_of,
-};
+use winnow::combinator::alt;
 
-use crate::{Error, Name, PackageRelation, SonameV1, SonameV2};
+use crate::{Error, PackageRelation, SonameV1, SonameV2};
 
 /// Provides either a [`PackageRelation`], a [`SonameV1`] or a [`SonameV2`].
 ///
@@ -63,8 +60,6 @@ impl AlpmParser for RelationOrSoname {
     ///
     /// First attempts to recognize a [`SonameV2`], then a [`SonameV1`] and if that fails, falls
     /// back to recognizing a [`PackageRelation`].
-    /// A shared object name is only recognized if no further characters of a package relation
-    /// follow it, so that e.g. `foo.sound` or `example.so>=1.0` are package relations.
     /// Depending on recognized type, a [`RelationOrSoname`] is created accordingly.
     ///
     /// # Errors
@@ -72,21 +67,11 @@ impl AlpmParser for RelationOrSoname {
     /// Returns an error if `input` does not begin with a valid
     /// [`SonameV2`], [`SonameV1`] or [`PackageRelation`].
     fn parser<'a>(input: &mut Input<'a>) -> PResult<'a, Self> {
-        // The soname parsers stop after the `.so` suffix or the architecture, so backtrack if
-        // a name or comparison character follows (e.g. `foo.so` in `foo.sound`).
-        let soname_end = || {
-            not(one_of((
-                |c: char| c.is_ascii_alphanumeric(),
-                Name::NEVER_FIRST_CHAR,
-                ['<', '>', '='],
-            )))
-        };
-
         // Implement a custom `winnow::combinator::alt`, as all type parsers are built in
         // such a way that they return errors on unexpected input instead of backtracking.
         alt((
-            terminated(SonameV2::parser, soname_end()).map(RelationOrSoname::SonameV2),
-            terminated(SonameV1::parser, soname_end()).map(RelationOrSoname::SonameV1),
+            SonameV2::parser.map(RelationOrSoname::SonameV2),
+            SonameV1::parser.map(RelationOrSoname::SonameV1),
             PackageRelation::parser.map(RelationOrSoname::Relation),
         ))
         .layer("alpm-package-relation or alpm-sonamev1 or alpm-sonamev2")
@@ -197,23 +182,6 @@ mod tests {
     #[case(
         "example>=1.0.0",
         RelationOrSoname::Relation(PackageRelation::new("example".parse().unwrap(), ">=1.0.0".parse().ok()))
-    )]
-    // Package names that start like a shared object name
-    #[case(
-        "foo.sound",
-        RelationOrSoname::Relation(PackageRelation::new("foo.sound".parse().unwrap(), None))
-    )]
-    #[case(
-        "d1.so62r",
-        RelationOrSoname::Relation(PackageRelation::new("d1.so62r".parse().unwrap(), None))
-    )]
-    #[case(
-        "example.so>=1.0.0",
-        RelationOrSoname::Relation(PackageRelation::new("example.so".parse().unwrap(), ">=1.0.0".parse().ok()))
-    )]
-    #[case(
-        "example.so=1.0.0-1",
-        RelationOrSoname::Relation(PackageRelation::new("example.so".parse().unwrap(), "=1.0.0-1".parse().ok()))
     )]
     #[case(
         "lib:example.so.1",

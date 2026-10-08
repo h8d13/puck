@@ -1,6 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["alpm-core", "pacman-common", "pacman-cli", "vercmp", "difftest"]
+members = [
+	"alpm-core",
+	"pacman-common",
+	"pacman-cli",
+	"testpkg",
+	"vercmp",
+	"difftest",
+]
 # submodules: C reference and ALPM (its own workspace)
 exclude = ["pacman", "alpm", "vendor"]
 
@@ -14,11 +21,8 @@ license = "GPL-2.0-or-later"
 # vendor/patches, scripts/vendor-alpm.sh), used instead of re-porting
 # what they already implement
 [workspace.dependencies]
-alpm-common = { path = "vendor/alpm/alpm-common" }
 alpm-compress = { path = "vendor/alpm/alpm-compress" }
-alpm-db = { path = "vendor/alpm/alpm-db" }
 alpm-parsers = { path = "vendor/alpm/alpm-parsers" }
-alpm-repo-db = { path = "vendor/alpm/alpm-repo-db" }
 alpm-types = { path = "vendor/alpm/alpm-types" }
 # crates ALPM itself depends on, same versions
 base64 = "0.23.0"

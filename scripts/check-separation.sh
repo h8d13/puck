@@ -2,7 +2,7 @@
 # keep port source, unit tests and equivalence testing apart (METHODOLOGY.md)
 # usage: scripts/check-separation.sh   (from the repo root, exit 1 on findings)
 
-port_crates=(alpm-core pacman-common pacman-cli vercmp)
+port_crates=(alpm-core pacman-common pacman-cli testpkg vercmp)
 
 fail=0
 report() {

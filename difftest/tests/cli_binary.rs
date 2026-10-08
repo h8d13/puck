@@ -194,8 +194,6 @@ fn owner_pkg(w: &SyncWorld) {
 		section("VERSION", &one("1.0-1")),
 		section("BASE", &one("owner")),
 		section("DESC", &one("owns files")),
-		// alpm-db wants a URL (PORTING.md, ALPM divergences)
-		section("URL", &one("https://example.org/owner")),
 		section("ARCH", &one("x86_64")),
 		section("BUILDDATE", &one("1700000000")),
 		section("INSTALLDATE", &one("1700000001")),

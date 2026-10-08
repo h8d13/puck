@@ -98,35 +98,6 @@ impl VersionRequirement {
             .is_compatible_with(other_version.cmp(&self.version))
     }
 
-    /// Returns `true` if the requirement is satisfied by the given package version, following
-    /// libalpm's dependency check.
-    ///
-    /// Delegates to [`Version::vercmp`], so the pkgrel is only compared if both the requirement
-    /// and `ver` have one.
-    /// Unlike [`VersionRequirement::is_satisfied_by`], a version without pkgrel satisfies a
-    /// requirement with one if the rest of the version satisfies it.
-    ///
-    /// ## Examples
-    ///
-    /// ```
-    /// use std::str::FromStr;
-    ///
-    /// use alpm_types::{Version, VersionRequirement};
-    ///
-    /// # fn main() -> Result<(), alpm_types::Error> {
-    /// let requirement = VersionRequirement::from_str(">=1.5-3")?;
-    ///
-    /// assert!(requirement.is_satisfied_by_vercmp(&Version::from_str("1.5")?));
-    /// assert!(!requirement.is_satisfied_by_vercmp(&Version::from_str("1.5-2")?));
-    /// assert!(!requirement.is_satisfied_by_vercmp(&Version::from_str("1.0")?));
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn is_satisfied_by_vercmp(&self, ver: &Version) -> bool {
-        self.comparison
-            .is_compatible_with(ver.vercmp_ordering(&self.version))
-    }
-
     /// Checks whether another [`VersionRequirement`] forms an intersection with this one.
     ///
     /// The intersection operation `∩` on versions simply checks if there is _any_ possible set of
@@ -616,29 +587,6 @@ mod tests {
         let requirement = VersionRequirement::from_str(requirement).unwrap();
         let version = Version::from_str(version).unwrap();
         assert_eq!(requirement.is_satisfied_by(&version), result);
-    }
-
-    /// Check [`VersionRequirement::is_satisfied_by_vercmp`] where the pkgrel is present on one
-    /// side only, against [`VersionRequirement::is_satisfied_by`].
-    #[rstest]
-    #[case(">=1.5-3", "1.5", true, false)]
-    #[case(">=1.5-3", "1.5-2", false, false)]
-    #[case(">=1.5-3", "1.6", true, true)]
-    #[case("<1.5-3", "1.5", false, true)]
-    #[case("=1.5-3", "1.5", true, false)]
-    #[case("=1.5", "1.5-3", true, true)]
-    #[case("=0:1.5", "1.5-3", true, true)]
-    fn version_requirement_satisfied_vercmp(
-        #[case] requirement: &str,
-        #[case] version: &str,
-        #[case] vercmp: bool,
-        #[case] cmp: bool,
-    ) -> Result<(), Error> {
-        let requirement = VersionRequirement::from_str(requirement)?;
-        let version = Version::from_str(version)?;
-        assert_eq!(requirement.is_satisfied_by_vercmp(&version), vercmp);
-        assert_eq!(requirement.is_satisfied_by(&version), cmp);
-        Ok(())
     }
 
     #[rstest]
