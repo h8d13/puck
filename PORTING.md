@@ -105,7 +105,7 @@ in the milestone 1 gate and equal.
 | deps resolution (`deps.c` rest + `graph.c`), `conflict.c`, `diskspace.c` | done |
 | `hook.c`, scriptlets (`_alpm_runscriptlet`), `_alpm_run_chroot`, `_alpm_ldconfig` | done (on unified callbacks, take `&mut Handle`) |
 | transaction prepare phase (`trans.c` model, `alpm_add/remove_pkg`, sysupgrade, sync/remove prepare, frontend prepare) | done |
-| transaction commit phase (downloads, validation, add.c, remove.c, hooks, db writes) | in progress (remove.c per package done) |
+| transaction commit phase (downloads, validation, add.c, remove.c, hooks, db writes) | in progress (remove.c and add.c per package done) |
 | sandbox (landlock/seccomp, download helper) | done |
 | local db writing | done |
 
@@ -228,7 +228,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `lib/libalpm/diskspace.c` | 514 | `alpm-core::diskspace` | check_diskspace, check_downloadspace (+ mount list, fsinfo, match, sizes, check_mountpoint): difftest on fixture roots and root "/" (every log/progress line, f_bavail pinned from the C trace); getmntent parser vs glibc |
 | `lib/libalpm/trans.c` | 452 | `alpm-core::trans` (partial: no commit) | model, init/release/interrupt/getters, prepare dispatch, check_arch, sort: difftest `trans_prep` op sequences vs C (2000 cases, results, data lists, logs, events, questions, trans afterwards); _alpm_runscriptlet + grep: difftest under fakechroot |
 | `lib/libalpm/sync.c` | 1360 | `alpm-core::sync` (partial: no load/check/commit) | get_new_version, sysupgrade (literal, replacers), find_group_pkgs, compute_download_size, `_alpm_sync_prepare`, dbs_satisfier: difftest `trans_prep` |
-| `lib/libalpm/add.c` | 718 | `alpm-core::add` (partial) | alpm_add_pkg: difftest `trans_prep`; commit side in progress |
+| `lib/libalpm/add.c` | 718 | `alpm-core::add` (all but the `_alpm_upgrade_packages` loop) | alpm_add_pkg: difftest `trans_prep`; commit_single_pkg with extract_single_file, extract_db_file, perform_extraction (archive_write_disk with OWNER/PERM/TIME/UNLINK/SECURE_SYMLINKS), try_rename, get_install_time, and the per-package step of `_alpm_upgrade_packages`: difftest `add_commit` vs C `_alpm_upgrade_packages` on one-package transactions (backup md5 states, .pacnew, NoUpgrade/NoExtract, dir/file/symlink changes, modes, SUID/SGID, root-owned entries, hard links, db files, DBONLY, reasons, truncated packages, SOURCE_DATE_EPOCH children; trees with archive mtimes, local db, logs, events, progress, logfile, rc, pm_errno), scriptlets under fakechroot, 2M fuzz |
 | `lib/libalpm/remove.c` | 798 | `alpm-core::remove` (all but `_alpm_remove_packages`) | alpm_remove_pkg, `_alpm_remove_prepare` (cascade, recurse, unneeded, optdepend events): difftest `trans_prep`; `_alpm_remove_single_package` with can_remove_file, shift_pacsave, unlink_file, should_skip_file, remove_package_files, dir_is_mountpoint: difftest `remove_commit` on fixture roots and local dbs (files, dirs, symlinks, /proc mountpoint, read-only dirs, .pacsave rotations, other owners, NoUpgrade, skip_remove, NOSAVE/DBONLY/NOSCRIPTLET, upgrade path; trees, local db, cache, logs, events, progress, logfile, pm_errno), scriptlets under fakechroot, 2M fuzz |
 | `lib/libalpm/hook.c` | 679 | `alpm-core::hook` | parse/validate, dir scan and masking, triggers, Depends, AbortOnFail, NeedsTargets, run: difftest fuzz on root "/" and runs under fakechroot |
 | `lib/libalpm/sandbox*.c` | 608 | `alpm-core::{sandbox,sandbox_fs,sandbox_syscalls}` | restrict_writes_to (8 variants incl. injected landlock failures), syscalls_filter (list parsed from the C, raw syscall probes): errno per probe in spawned children vs C; callback pipe writer + parent loop: byte-stream fuzz; helper download vs C _alpm_download; uid switch: unit tests (root) |
@@ -468,6 +468,24 @@ Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
   are unreachable through the C's local db reader (lines over 1023 bytes
   split), the EROFS branch of can_remove_file needs a read-only mount:
   neither is difftested.
+- `add` commit side: `commit_single_pkg(h, t, pkg_current, pkg_count)`
+  and `upgrade_package` (any Err is TransAbort, the driver then marks
+  the transaction interrupted and skips ldconfig) take a `TransPkg` the
+  driver moved out of `trans.add`; flags come from `h.trans()`.
+  archive_write_disk is translated for pacman's flags with a writer per
+  entry (a directory's mode and times fixed up right after it), names
+  absolute, hard link targets joined to root instead of chdir(root),
+  umask taken as 0022 (modes come out exact either way), euid from
+  /proc/self/status. Not restored: xattrs and pax time/id records (out of
+  reach of `TarballEntry`), lchmod is a no-op like glibc's on symlinks.
+  libarchive's texts are copied; a short entry is "Truncated tar archive
+  detected while reading data", other read errors show the port's text.
+  Progress: an unfiltered tar's position is the entry's data start
+  (exactly what libarchive consumed), a compressed one's is what the
+  decoder read from the fd (equal for packages read in one go, coarser
+  otherwise). The pm_errno a successful upgrade leaves from
+  remove_single_package (PkgCantRemove) is not kept. The db.c/be_local
+  log lines around prepare, write and the cache add are logged in add.rs.
 
 Follow-ups raised by port units:
 
@@ -514,6 +532,9 @@ Follow-ups raised by port units:
 | difftest: `read_deps` pub(crate) (drops conflict's `CDepend`), `SyncWorld` into fixtures.rs | conflict, sync | todo |
 | be_sync: a non-archive db must fail at open (DB_OPEN, db invalid) like libarchive, not LIBARCHIVE | query | done |
 | `%DATA%` in repo dbs, gzip multi-member, `Packager` default, backup `(null)` | db readers | ALPM side, see `UPSTREAM.md` |
+| xattrs and pax mtime/uid/gid on extraction: alpm-compress `TarballEntry` needs a `raw_mut` (pax_extensions takes `&mut`) | addcommit | todo |
+| one geteuid/getuid helper (add.rs `euid`, sandbox `System::uid` read /proc/self/status) or rustix `process` | addcommit | todo |
+| `_alpm_upgrade_packages` loop over trans.add, interrupted state, ldconfig | addcommit | with alpm_trans_commit |
 
 Divergences below are corrected in vendored ALPM where listed in "ALPM
 patches for parity" (`vendor/patches/` 0101-0109, 0201-0207, 0301-0305);
