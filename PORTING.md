@@ -123,8 +123,8 @@ Gate: upstream's full meson suite against the Rust binaries,
 script tests): meson's 338 ok / 6 expected fail, reproduced by
 `pacman/build`. Progress: 135 ok (start of the owned readers) -> 203
 (`.PKGINFO` reader, `-Sc`) -> 336 ok / 6 xfail / 2 fail / 0 unexpected
-pass (local and sync db readers, dbreaders branch; master confirmation
-pending), vercmptest and the script tests included. Left: scriptlet-signal-handling (signals are not
+pass (local and sync db readers; confirmed on master 18b884f, full
+cargo test green), vercmptest and the script tests included. Left: scriptlet-signal-handling (signals are not
 caught, SIGINT during a scriptlet ends pacman with 130) and
 upgrade-download-pkg-and-sig-with-filename (`-U` URL downloads through
 HTTP redirects: "Empty reply from server"). Units: signals, redirect.
@@ -152,11 +152,14 @@ reader patches and crate dependencies go once nothing uses them.
 | sync db desc/files | be_sync.c `sync_db_read`, `_alpm_archive_fgets` | `alpm-core::be_sync` | 0301-0305, alpm-repo-db | done |
 | `.PKGINFO` | be_package.c `parse_descfile` | `alpm-core::be_package` | 0501-0506, alpm-pkginfo, alpm-package, alpm-buildinfo | done |
 | `.MTREE` / local mtree | libarchive mtree reader (as pacman uses it) | `alpm-core::mtree` | 0401-0411, alpm-mtree | todo |
-| alpm-types patches | port uses alpm-types only for `Checksum`/`digests::{Md5, Sha256}` (be_local, be_package, util); no patched type is used | - | 0101-0109; alpm-types itself if checksums go to md-5/sha2 directly | todo (after mtree) |
+| alpm-types patches | port uses alpm-types only for `Checksum`/`digests::{Md5, Sha256}` (be_local, be_package, util); no patched type is used | - | 0101-0109 removed (0101, 0102, 0105-0107 kept as upstream reports); alpm-types itself if checksums go to md-5/sha2 directly | patches done; crate todo (after mtree) |
 
 Kept and to report upstream: 0551 (gzip members), 0552 (content
-sniffing), and any 01xx/04xx fix that is an ALPM bug on its own terms
-(0401 `PartialEq`, 0403 mtree gzip members, 0411 `Error::Parse` display).
+sniffing), and real ALPM bugs whose patch is no longer applied, kept as
+text in `vendor/upstream-reports/` (0101/0102 version ordering against
+pacman's vercmp, 0105 `Unknown Packager`, 0106 relation backtracking,
+0107 empty xdata value; 0401, 0403, 0411 once the mtree reader is
+owned). UPSTREAM.md "ALPM findings" describes each.
 
 ## Dependencies
 
@@ -166,7 +169,7 @@ makes them; METHODOLOGY.md has the rules.
 | Crate | Used by | Why | Since |
 |---|---|---|---|
 | alpm-compress (vendored, 0551, 0552) | util `Filter`, be_sync, be_local, add | the decoders (gzip/bzip2/xz/zstd) under libarchive's block filter | start |
-| alpm-types (vendored, 0101-0109 unused) | be_local, be_package, util | `Checksum` md5/sha256 only | start; patches to drop |
+| alpm-types (vendored, no patches) | be_local, be_package, util, difftest | `Checksum` md5/sha256 only | start; 0101-0109 dropped |
 | alpm-mtree (vendored, 0401-0411) | be_package, be_local | mtree reader | start; mtree unit replaces it |
 | alpm-common, alpm-parsers (vendored) | none directly | dependencies of alpm-types/alpm-mtree | start |
 | tar 0.4 | util `Filter` + `tar::Archive` | tar headers (ALPM's own tar dependency) | compress unit |
@@ -177,28 +180,20 @@ makes them; METHODOLOGY.md has the rules.
 
 Removed, with their patches: alpm-db (0201-0207), alpm-repo-db
 (0301-0305), alpm-pkginfo (0501-0506), alpm-package, alpm-buildinfo.
-The vendored tree went from 10 crates / 40 patches to 5 / 22.
+The vendored tree went from 10 crates / 40 patches to 5 / 13; alpm-types
+patches 0101-0109 dropped (no patched type left in use), five kept as
+upstream reports.
 
 ## ALPM patches for parity
 
-Ranges: 01xx alpm-types, 04xx alpm-mtree, 055x alpm-compress (02xx
-alpm-db, 03xx alpm-repo-db and 05xx alpm-pkginfo gone with their owned
-readers). The reader patches
+Ranges: 04xx alpm-mtree, 055x alpm-compress (01xx alpm-types, 02xx
+alpm-db, 03xx alpm-repo-db and 05xx alpm-pkginfo gone: owned readers,
+unused types). The reader patches
 below leave with their owned reader (table above); new patches are real
 ALPM bugs only. pacman bugs in `UPSTREAM.md` are not copied.
 
 | Crate | Divergence to correct | Seen on real data | State |
 |---|---|---|---|
-| alpm-types | `Url` normalised (trailing '/', lowercase, dot segments): keep original text | local 82/804, sync 1330/15334, cache 134/1250 | 0104 (`as_original_str`) |
-| alpm-types | `Packager` rejects `Unknown Packager`, `<a@b.c>` | local 1/804 | 0105 (`email()` now `Option`) |
-| alpm-types | `RelationOrSoname` rejects `foo.sound`, `d1.so62r` (no backtracking) | no | 0106 |
-| alpm-types | `ExtraDataEntry` empty value swallows next line | no | 0107 |
-| alpm-types | `Version` Ord: explicit epoch 0 > none, one-sided pkgrel counted; `is_satisfied_by` with pkgrel | no | 0101, 0102 (`vercmp`, `is_satisfied_by_vercmp`; Ord stays total) |
-| alpm-types | `OptionalDependency` description split at ':'+whitespace, trimmed, empty -> None | no | 0108 (changes 4 upstream test expectations) |
-| alpm-types | pkgrel printed without leading zeros | no | 0103 |
-| alpm-types | `%DESC%`/pkgdesc whitespace normalised | no | 0109 (`as_original_str`) |
-| alpm-types | arch `ANY` and checksums lowercased | no | open: enum/bytes types, case kept only with a type redesign |
-| alpm-types | xdata `a = b` trimmed, `%REASON%` other than 0/1 (no `Unknown` variant), `size = +5`, text dates | no | todo |
 | alpm-mtree | entries sorted by path instead of file order; duplicates not merged | 386/804 | 0404, 0405 (`alpm_mtree::libarchive` reader) |
 | alpm-mtree | `mode` 3-4 digits (docs 3-5), required time/mode/uid/gid/sha256/link, char/block/fifo, unknown keywords, `size` on dirs/links, `\#`, `size=+5`, `/unset all`, v1 relative paths | rare (mode) | 0402, 0406-0410 |
 | alpm-mtree | `PathType` lacks `PartialEq`; gzip helper reads one member; `Error::Parse` display broken | api | 0401, 0403, 0411 |
@@ -225,7 +220,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `pacman-cli::getopt` | clap (ALPM CLIs) | kept: ops are combinable short flags anywhere (`-yS`, `pkg -S`), letters change meaning per op (two-pass parse), glibc error texts and ambiguity list, permuted argv/optind, POSIXLY_CORRECT; clap offers none of these |
 | `backup::split_backup`, `package::parse_xdata` | `alpm-db`, alpm-types `ExtraData` | translated again for the owned db readers (bytes, NULL hash, the C's '=' split) |
 | md5/sha256 | `md-5`, `sha2` | uses the crates |
-| `version::vercmp`, `deps::dep_from_string` | alpm-types versions/relations | kept: ALPM takes validated values only, pacman compares/parses arbitrary strings (CLI, `vercmp`, -T); ALPM vs C difftest done (`alpm_types_vs_c`) |
+| `version::vercmp`, `deps::dep_from_string` | alpm-types versions/relations | kept: ALPM takes validated values only, pacman compares/parses arbitrary strings (CLI, `vercmp`, -T); alpm-types' versions are no longer used anywhere |
 | `pacman-common::ini` | alpm-parsers `custom_ini` | kept: `key=value` only, no sections/Include |
 | `be_sync` compression sniffing | `alpm-compress` | done: `from_magic` (patch 0552), one `util::open_archive` for be_sync, be_package and unpack |
 | `util::fnmatch`, `regex`, getopt, conf glob | none (ALPM CLIs use clap, no getopt_long semantics) | kept |
@@ -234,9 +229,9 @@ Hand-written parts checked against ALPM and the crates it depends on.
 
 | pacman part | ALPM crate | Plan |
 |---|---|---|
-| `version.c` vercmp | `alpm-types` version comparison | keep port (pacman compares arbitrary strings), difftest ALPM vs C on versions ALPM parses |
-| `deps.c` dep strings | `alpm-types` relations | same as above |
-| xdata, base64, checksums | `alpm-types` (`ExtraData`, base64, md-5/sha2) | use ALPM / its crates, no hand-written hashes |
+| `version.c` vercmp | `alpm-types` version comparison | translated (pacman compares arbitrary strings) |
+| `deps.c` dep strings | `alpm-types` relations | translated |
+| xdata, base64, checksums | `alpm-types` (`ExtraData`, base64, md-5/sha2) | xdata translated with the readers; base64 crate; checksums via alpm-types `Checksum` |
 | `be_local.c` desc/files | `alpm-db` | done: owned reader translated from the C, alpm-db dropped |
 | `be_sync.c` | `alpm-repo-db` | done: owned reader translated from the C, alpm-repo-db dropped |
 | `be_package.c` | `alpm-package`, `alpm-compress`, `alpm-pkginfo`, `alpm-mtree` | alpm-compress decoders; `.PKGINFO` reader translated (done), mtree reader to translate |
@@ -647,10 +642,10 @@ Follow-ups raised by port units:
 | xattrs and pax mtime/uid/gid on extraction: alpm-compress `TarballEntry` needs a `raw_mut` (pax_extensions takes `&mut`) | addcommit | todo |
 | one geteuid/getuid helper (add.rs `euid`, sandbox `System::uid` read /proc/self/status) or rustix `process` | addcommit | in progress (process unit) |
 | `_alpm_upgrade_packages` loop over trans.add, interrupted state, ldconfig | addcommit | with alpm_trans_commit |
+| test generators still limited to what alpm-db/alpm-repo-db/alpm-pkginfo accepted (db_search.rs, diskspace.rs, check.rs, be_local_write.rs, sync_clean.rs, be_package.rs "per the alpm-pkginfo spec"): widen to what the C reads, drop the comments | stale sweep | todo |
 
-Divergences below are corrected in vendored ALPM where listed in "ALPM
-patches for parity" (`vendor/patches/` 0101-0109);
-rows still here are the remaining ones.
+Divergences below are the remaining ones; the ALPM parser and type
+divergences left with the owned readers.
 
 ## Divergences from pacman (precedent crates)
 
@@ -658,8 +653,6 @@ rows still here are the remaining ones.
 |---|---|
 | dates before -9999 or after 9999: C formats, port prints "None" | `-Qi`/`-Si` display only |
 | wcwidth: unassigned code points -1 in glibc, 1/2/0 in unicode-width (814641), 84 marks zero width in unicode-width, 8 ambiguous (U+3248-324F), 3 special rules | `string_length`/wrapping differ for such text; the C returns `(size_t)-1` for unassigned |
-| alpm-types `Version` ordering: explicit epoch 0 > no epoch, one-sided pkgrel counted | only where ALPM types are compared; pacman logic uses the vercmp port |
-| `.PKGINFO` relations read through alpm-types print form: pkgrel leading zeros dropped, optdepends description trimmed / split at ':' + any whitespace | `-Qip` display of such relations |
 
 ## Divergences from pacman (ALPM parsers)
 

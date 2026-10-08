@@ -150,6 +150,10 @@ order.
   difftest; rustc only flags duplicates whose signatures differ)
 - `DIFFTEST_ITERS=2000000 scripts/cargo-test.sh -p difftest --test <cfile>`
 - mutation check done
+- nothing left without an owner: files, tests, patches, scripts, crate
+  dependencies, generator limits and doc rows that only existed for what
+  the unit replaced are removed in the same unit (a dropped crate takes
+  its patches, its pins and the comments explaining its limits)
 - `PORTING.md` row(s) and notes updated
 - upstream findings listed separately in the report, each with its
   practice class from `UPSTREAM.md` (real, packager, local, api, env,

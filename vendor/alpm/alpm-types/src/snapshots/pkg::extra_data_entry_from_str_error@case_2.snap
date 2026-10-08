@@ -1,12 +1,12 @@
 ---
 source: alpm-types/src/pkg.rs
 ---
-error: invalid extra data key
+error: invalid extra data value
  | 
- | 
- | ^ expected a UTF-8 string, followed by an equals (`=`) character.
+ | key=
+ | ~~~~^ expected a UTF-8 string
  | 
  = while parsing:
-   extra-data entry: ()
-   → invalid extra data key
-   → expected a UTF-8 string, followed by an equals (`=`) character.
+   extra-data entry: (key=)
+   → invalid extra data value
+   → expected a UTF-8 string

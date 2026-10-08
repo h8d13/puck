@@ -763,10 +763,8 @@ impl LocalDb {
 // writing side: _alpm_local_db_prepare, _alpm_local_db_write,
 // _alpm_local_db_remove and alpm_pkg_set_reason
 //
-// desc and files are written by a translation of the C writer, not by
-// alpm-db's Display: alpm-db writes validated values only, always writes
-// sections pacman leaves out and orders and sorts differently (see
-// PORTING.md). fields go through %s, so each is cut at its first nul. the
+// desc and files are written by a translation of the C writer. fields go
+// through %s, so each is cut at its first nul. the
 // C sets the umask (0000 for prepare, 0022 for write) around its mkdir and
 // fopen; the port gives the same modes by chmod. logging is not modelled
 
