@@ -1,13 +1,18 @@
 // pacman_cli::conf against src/pacman/conf.c: random config trees under
 // /tmp parsed by both, compared on return value, stderr and the whole
-// config_t. glob(3) compared directly on the same trees
+// config_t. glob(3) compared directly on the same trees. setup_libalpm:
+// the handle both build from a config (every option getter, the sync
+// dbs with siglevel, usage and servers), return value and stderr
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 
 use difftest::c_uname_machine;
-use difftest::{Preset, Rng, c_config_new, c_glob, c_parseconfig, iters};
+use difftest::{
+	Preset, Rng, c_config_new, c_glob, c_parseconfig, c_setup, iters,
+	rust_setup, umask_lock,
+};
 use pacman_cli::conf::{
 	Config, Host, LOG_DEBUG, LOG_ERROR, LOG_WARNING, Msg, PM_COLOR_OFF,
 	PM_COLOR_ON, format_msg, glob,
@@ -591,6 +596,7 @@ fn preset(rng: &mut Rng, tree: &Tree) -> Preset {
 		color: [0, 0, 0, 0, PM_COLOR_OFF, PM_COLOR_ON][rng.below(6)],
 		logmask: [7, 7, 7, 3, 1, 0][rng.below(6)],
 		tty: rng.below(2) == 0,
+		..Preset::default()
 	}
 }
 
@@ -801,5 +807,173 @@ fn system_config() {
 			..debug_preset()
 		};
 		assert_eq!(compare(&tree, &main, &preset), 0);
+	}
+}
+
+// one config through parseconfig + setup_libalpm on both sides
+fn setup_compare(tree: &Tree, conf: &str, preset: &Preset) -> i32 {
+	tree.write("setup.conf", conf.as_bytes());
+	let file = [tree.path(), b"/setup.conf".to_vec()].concat();
+	// alpm_initialize may create db/local through _alpm_makepath_mode
+	let _umask = umask_lock();
+	let mut c = c_setup(&file, preset);
+	// a failing setup leaves the C config->handle half set up, the
+	// port returns no handle
+	if c.ret != 0 {
+		c.handle = None;
+	}
+	let r = rust_setup(&file, preset);
+	assert!(
+		c == r,
+		"{conf}\n{preset:?}\nC  {:?} {}\n{:?}\nRS {:?} {}\n{:?}",
+		c.ret,
+		show(&c.stderr),
+		c.handle,
+		r.ret,
+		show(&r.stderr),
+		r.handle
+	);
+	c.ret
+}
+
+fn setup_preset(tree: &Tree, logmask: u16) -> Preset {
+	let at = |rel: &str| {
+		Some([tree.path(), rel.as_bytes().to_vec()].concat())
+	};
+	Preset {
+		rootdir: at("/root"),
+		dbpath: at("/root/db"),
+		gpgdir: at("/gpg"),
+		logfile: at("/log/pacman.log"),
+		logmask,
+		..Preset::default()
+	}
+}
+
+fn setup_tree(tag: &str) -> Tree {
+	let tree = Tree::new(tag, false);
+	fs::create_dir_all(tree.root.join("root/db/sync")).unwrap();
+	// a db file that exists: no "does not exist" warning for core
+	fs::write(tree.root.join("root/db/sync/core.db"), "").unwrap();
+	tree
+}
+
+#[test]
+fn setup_fixed() {
+	let tree = setup_tree("setup-fixed");
+	let opts = "[options]\nArchitecture = x86_64 auto\n\
+		CacheDir = /c1/ /c2\nHookDir = /h\nCheckSpace\n\
+		ParallelDownloads = 3\nDisableDownloadTimeout\n\
+		DisableSandboxSyscalls\nIgnorePkg = a b\nIgnoreGroup = g\n\
+		NoUpgrade = etc/x\nNoExtract = usr/share/doc/*\n\
+		SigLevel = Required DatabaseOptional\n\
+		LocalFileSigLevel = Optional\nRemoteFileSigLevel = Never\n";
+	let cases: Vec<String> = vec![
+		"[options]\n".into(),
+		format!("{opts}[core]\nServer = http://a/$repo/os/$arch/\n\
+			CacheServer = file:///srv/$repo\nUsage = Sync Search\n\
+			SigLevel = PackageNever\n[extra]\nServer = /\n\
+			Server = http://b//\nUsage = Install\n"),
+		"[options]\n[core]\n[core]\n[local]\n[extra]\n".into(),
+		"[options]\nDownloadUser = root\n[core]\n".into(),
+		"[options]\nDownloadUser = no-such-user-x\n[core]\n".into(),
+		"[options]\nDisableSandbox\n[a]\n[b]\nServer = x\n".into(),
+		"[options]\nDBPath = /nonexistent-dir\n".into(),
+		"[options]\nRootDir = /nonexistent-root\n".into(),
+	];
+	for logmask in [LOG_ERROR | LOG_WARNING, LOG_ERROR, 0] {
+		for conf in &cases {
+			for op in [4, 8] {
+				let mut p = setup_preset(&tree, logmask);
+				p.op = op;
+				if conf.contains("DBPath")
+					|| conf.contains("RootDir")
+				{
+					p.dbpath = None;
+					p.rootdir = None;
+				}
+				setup_compare(&tree, conf, &p);
+			}
+		}
+	}
+	for assume in [
+		&["foo"][..],
+		&["foo=1", "bar"],
+		&["foo>1"],
+		&["a: d"],
+		&["x<2", "y"],
+	] {
+		let mut p = setup_preset(&tree, LOG_ERROR | LOG_WARNING);
+		p.assumeinstalled =
+			assume.iter().map(|a| a.as_bytes().to_vec()).collect();
+		setup_compare(&tree, "[options]\n[core]\n", &p);
+	}
+}
+
+#[test]
+fn setup_fuzz() {
+	let tree = setup_tree("setup-fuzz");
+	let mut rng = Rng::new(0x5e7);
+	let lines = [
+		"Architecture = x86_64",
+		"Architecture = auto i686",
+		"CacheDir = /c",
+		"CacheDir = /d/",
+		"HookDir = /h1",
+		"CheckSpace",
+		"UseDelta",
+		"ParallelDownloads = 5",
+		"DisableDownloadTimeout",
+		"DisableSandbox",
+		"DisableSandboxFilesystem",
+		"IgnorePkg = p q",
+		"IgnoreGroup = g",
+		"NoUpgrade = etc/*",
+		"NoExtract = !usr/a usr/*",
+		"SigLevel = Never",
+		"SigLevel = Optional TrustAll",
+		"SigLevel = PackageRequired DatabaseTrustedOnly",
+		"LocalFileSigLevel = Never",
+		"RemoteFileSigLevel = Required",
+		"DownloadUser = root",
+		"DownloadUser = nobody-not-here",
+		"GPGDir = /g",
+		"LogFile = /l/log",
+	];
+	let repo_lines = [
+		"Server = http://m/$repo/$arch",
+		"Server = file:///r/$repo/",
+		"CacheServer = http://cache/",
+		"Usage = Sync",
+		"Usage = Search Upgrade",
+		"Usage = All",
+		"SigLevel = Optional",
+		"SigLevel = DatabaseNever PackageTrustAll",
+		"Server = /",
+	];
+	let names = ["core", "extra", "local", "core", "x-y", "multilib"];
+	for _ in 0..(iters() / 1000).max(50) {
+		let mut conf = String::from("[options]\n");
+		for _ in 0..rng.below(8) {
+			conf.push_str(lines[rng.below(lines.len())]);
+			conf.push('\n');
+		}
+		for _ in 0..rng.below(4) {
+			conf.push_str(&format!("[{}]\n", names[rng.below(6)]));
+			for _ in 0..rng.below(4) {
+				conf.push_str(
+					repo_lines[rng.below(repo_lines.len())],
+				);
+				conf.push('\n');
+			}
+		}
+		let logmask = [3, 3, 1, 0][rng.below(4)];
+		let mut p = setup_preset(&tree, logmask);
+		p.op = [4, 5, 8][rng.below(3)];
+		if rng.below(4) == 0 {
+			p.assumeinstalled =
+				vec![b"v=1".to_vec(), b"w".to_vec()];
+		}
+		setup_compare(&tree, &conf, &p);
 	}
 }

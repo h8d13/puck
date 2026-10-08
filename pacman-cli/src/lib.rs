@@ -1,4 +1,5 @@
 // port of pacman src/pacman, the pacman frontend
+pub mod callback;
 pub mod check;
 pub mod conf;
 pub mod deptest;

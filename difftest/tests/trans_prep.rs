@@ -960,11 +960,7 @@ fn rust_front(
 	input: &[u8],
 ) -> (Prepared, Output, usize) {
 	let mut out = Output::default();
-	let mut term = Term {
-		stdin: Cursor::new(input.to_vec()),
-		stdin_tty: false,
-		stdout_tty: false,
-	};
+	let mut term = Term::new(Cursor::new(input.to_vec()), false, false);
 	let r = {
 		let mut ui = Ui {
 			config: cfg,

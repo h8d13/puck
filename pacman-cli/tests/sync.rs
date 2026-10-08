@@ -90,10 +90,7 @@ fn dispatch() {
 		"error: failed to synchronize all databases (no servers \
 		 configured for repository)\n"
 	);
-	assert_eq!(
-		run(&mut h, |c| c.op_s_search = 1, &[]).0,
-		Err(Unported::Search)
-	);
+	assert!(run(&mut h, |c| c.op_s_search = 1, &[]).0.is_ok());
 	assert_eq!(run(&mut h, |_| {}, &["a"]).0, Err(Unported::Transaction));
 	assert_eq!(
 		run(&mut h, |c| c.op_s_upgrade = 1, &[]).0,

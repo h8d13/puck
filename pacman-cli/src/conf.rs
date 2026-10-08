@@ -1,11 +1,12 @@
 // port of src/pacman/conf.c: the config model and config file parsing
 //
 // the C config_t is the global `config`, here an owned `Config` passed by
-// &mut. setup_libalpm, register_repo and the XferCommand download callback
-// need an alpm handle and are not ported: parseconfig stops after
-// setdefaults and keeps the resolved repos in `Config::repos` (the C
-// registers them, then frees the list). explicit_adds/explicit_removes
-// (alpm_pkg_t lists) and the handle are not modelled.
+// &mut. parseconfig stops after setdefaults and keeps the resolved repos
+// in `Config::repos`; setup_libalpm (the C's last step of parseconfig)
+// is separate and returns the Handle instead of setting config->handle,
+// registering the repos and dropping the list like the C. the XferCommand
+// download callback (fetchcb) is not ported. explicit_adds/removes
+// (alpm_pkg_t lists) are not modelled.
 //
 // pm_printf goes through `Host::log` with the config as it is at that
 // moment (logmask, colstr), `format_msg` renders it like pm_vfprintf
@@ -20,10 +21,15 @@ use std::io::{self, IsTerminal};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
+use alpm_core::callbacks::Callbacks;
+use alpm_core::deps::dep_from_string;
+use alpm_core::error::Errno;
+use alpm_core::handle::Handle;
 use alpm_core::util::{fnmatch, strerror};
 use pacman_common::ini::{Ini, parse_ini};
 use pacman_common::util_common::{PATH_MAX, wordsplit};
 
+use crate::pacman::PM_OP_FILES;
 use crate::util::strreplace;
 
 // meson config.h of the reference build
@@ -276,6 +282,28 @@ pub enum Msg {
 		key: Vec<u8>,
 		section: Vec<u8>,
 	},
+	// setup_libalpm and register_repo
+	InitFailed {
+		root: Vec<u8>,
+		dbpath: Vec<u8>,
+		err: Errno,
+	},
+	// fprintf(stderr) after a DB_VERSION failure, no prefix or logmask
+	DbUpgradeHint,
+	RegisterFailed {
+		name: Vec<u8>,
+		err: Errno,
+	},
+	ServerFailed {
+		cache: bool,
+		db: Vec<u8>,
+		url: Vec<u8>,
+		err: Errno,
+	},
+	DownloadUser {
+		user: Vec<u8>,
+	},
+	AssumeInstalled,
 	// debug traces, kept as their formatted text
 	Debug(Vec<u8>),
 }
@@ -392,6 +420,49 @@ impl Msg {
 				section,
 				b"' not recognized.\n",
 			]),
+			Msg::InitFailed { root, dbpath, err } => cat(&[
+				b"failed to initialize alpm library:\n(root: ",
+				root,
+				b", dbpath: ",
+				dbpath,
+				b")\n",
+				err.strerror().as_bytes(),
+				b"\n",
+			]),
+			Msg::DbUpgradeHint => b"try running pacman-db-upgrade\n".to_vec(),
+			Msg::RegisterFailed { name, err } => cat(&[
+				b"could not register '",
+				name,
+				b"' database (",
+				err.strerror().as_bytes(),
+				b")\n",
+			]),
+			Msg::ServerFailed {
+				cache,
+				db,
+				url,
+				err,
+			} => cat(&[
+				b"could not add ",
+				if *cache { b"cache server" } else { b"server" },
+				b" URL to database '",
+				db,
+				b"': ",
+				url,
+				b" (",
+				err.strerror().as_bytes(),
+				b")\n",
+			]),
+			Msg::DownloadUser { user } => cat(&[
+				b"problem setting DownloadUser '",
+				user,
+				b"' (user does not exist)\n",
+			]),
+			// no newline in the C either
+			Msg::AssumeInstalled => {
+				b"Failed to pass assume-installed entry to libalpm"
+					.to_vec()
+			}
 			Msg::Debug(s) => s.clone(),
 		}
 	}
@@ -399,6 +470,9 @@ impl Msg {
 
 // pm_vfprintf to a buffer: None when logmask filters the level
 pub fn format_msg(config: &Config, msg: &Msg) -> Option<Vec<u8>> {
+	if *msg == Msg::DbUpgradeHint {
+		return Some(msg.text());
+	}
 	let level = msg.level();
 	if config.logmask & level == 0 {
 		return None;
@@ -669,6 +743,93 @@ impl Config {
 		Ok(())
 	}
 
+	// setup_libalpm: the handle for this config with cb as its
+	// callbacks, the repos registered (and dropped from the config). Err
+	// is the C return value. the C fails on logfile, gpgdir and hookdirs
+	// only for NULL or out of memory, the default siglevel only for
+	// exactly SIG_USE_DEFAULT (unchecked), parallel downloads only for 0
+	// (setdefaults never leaves it there): not reported here either
+	pub fn setup_libalpm<H: Host>(
+		&mut self,
+		host: &mut H,
+		cb: Box<dyn Callbacks>,
+	) -> Result<Handle, ConfError> {
+		let debug = |s: &[u8]| Msg::Debug(s.to_vec());
+		host.log(self, &debug(b"setup_libalpm called\n"));
+		let root = self.rootdir.clone().unwrap_or_default();
+		let dbpath = self.dbpath.clone().unwrap_or_default();
+		let mut handle = match Handle::initialize(&root, &dbpath) {
+			Ok(h) => h,
+			Err(err) => {
+				let msg = Msg::InitFailed { root, dbpath, err };
+				host.log(self, &msg);
+				if err == Errno::DbVersion {
+					host.log(self, &Msg::DbUpgradeHint);
+				}
+				return Err(ConfError { ret: -1, msg });
+			}
+		};
+		handle.set_callbacks(cb);
+		if self.op == PM_OP_FILES {
+			handle.set_dbext(b".files");
+		}
+		handle.set_logfile(self.logfile.as_deref().unwrap_or_default());
+		handle.set_gpgdir(self.gpgdir.as_deref().unwrap_or_default());
+		for dir in &self.hookdirs {
+			handle.add_hookdir(dir);
+		}
+		handle.set_cachedirs(&self.cachedirs);
+		handle.set_overwrite_files(&self.overwrite_files);
+		let _ = handle.set_default_siglevel(self.siglevel);
+		handle.set_local_file_siglevel(self.localfilesiglevel);
+		handle.set_remote_file_siglevel(self.remotefilesiglevel);
+		// a repo that does not register is reported and skipped
+		for repo in &self.repos {
+			register_repo(self, &mut handle, host, repo);
+		}
+		handle.set_architectures(&self.architectures);
+		handle.set_checkspace(i32::from(self.checkspace));
+		handle.set_usesyslog(i32::from(self.usesyslog));
+		if !handle.set_sandboxuser(self.sandboxuser.as_deref()) {
+			let user = self.sandboxuser.clone().unwrap_or_default();
+			let msg = Msg::DownloadUser { user };
+			host.log(self, &msg);
+			return Err(ConfError { ret: 1, msg });
+		}
+		handle.set_disable_sandbox_filesystem(
+			self.disable_sandbox_filesystem,
+		);
+		handle.set_disable_sandbox_syscalls(
+			self.disable_sandbox_syscalls,
+		);
+		handle.set_ignorepkgs(&self.ignorepkg);
+		handle.set_ignoregroups(&self.ignoregrp);
+		handle.set_noupgrades(&self.noupgrade);
+		handle.set_noextracts(&self.noextract);
+		handle.set_disable_dl_timeout(self.disable_dl_timeout);
+		let _ = handle.set_parallel_downloads(self.parallel_downloads);
+		for entry in &self.assumeinstalled {
+			let dep = dep_from_string(entry);
+			// printf("%s", NULL) is "(null)" in glibc
+			let ver = dep.version.as_deref().unwrap_or(b"(null)");
+			let line = cat(&[
+				b"parsed assume installed: ",
+				&dep.name,
+				b" ",
+				ver,
+				b"\n",
+			]);
+			host.log(self, &Msg::Debug(line));
+			if handle.add_assumeinstalled(&dep).is_err() {
+				let msg = Msg::AssumeInstalled;
+				host.log(self, &msg);
+				return Err(ConfError { ret: -1, msg });
+			}
+		}
+		self.repos.clear();
+		Ok(handle)
+	}
+
 	// replace_server_list_vars over repo i's cache servers or servers,
 	// stops at the first entry that fails
 	fn replace_server_list_vars(&mut self, i: usize, cache: bool) -> Step {
@@ -717,6 +878,48 @@ impl Config {
 			}
 		}
 	}
+}
+
+// register_repo: the sync db with its usage and servers, false (C 1)
+// at the first failure, reported
+fn register_repo<H: Host>(
+	config: &Config,
+	handle: &mut Handle,
+	host: &mut H,
+	repo: &ConfigRepo,
+) -> bool {
+	let db = match handle.register_syncdb(&repo.name, repo.siglevel) {
+		Ok(db) => db,
+		Err(err) => {
+			let name = repo.name.clone();
+			host.log(config, &Msg::RegisterFailed { name, err });
+			return false;
+		}
+	};
+	let usage = format!("setting usage of {} for ", repo.usage);
+	let line = cat(&[usage.as_bytes(), &repo.name, b" repository\n"]);
+	host.log(config, &Msg::Debug(line));
+	db.set_usage(repo.usage);
+	let lists = [(true, &repo.cache_servers), (false, &repo.servers)];
+	for (cache, urls) in lists {
+		for url in urls {
+			let added = match cache {
+				true => db.add_cache_server(url),
+				false => db.add_server(url),
+			};
+			if let Err(err) = added {
+				let msg = Msg::ServerFailed {
+					cache,
+					db: db.name().to_vec(),
+					url: url.clone(),
+					err,
+				};
+				host.log(config, &msg);
+				return false;
+			}
+		}
+	}
+	true
 }
 
 // replace_server_vars: $arch first (first Architecture), then $repo

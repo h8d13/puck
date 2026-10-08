@@ -21,6 +21,7 @@ use alpm_core::callbacks::{
 use alpm_core::handle::Handle;
 use pacman_cli::conf::Config;
 
+use crate::callback::{cb_download, cb_event, cb_log};
 use crate::cli_util::init;
 use crate::files_op::pacman_files;
 use crate::fixtures::TempRoot;
@@ -41,19 +42,6 @@ unsafe extern "C" {
 		force: c_int,
 	) -> c_int;
 	// src/pacman/callback.c, what setup_libalpm installs
-	fn cb_log(
-		ctx: *mut c_void,
-		level: c_int,
-		fmt: *const c_char,
-		args: *mut c_void,
-	);
-	fn cb_event(ctx: *mut c_void, event: *mut c_void);
-	fn cb_download(
-		ctx: *mut c_void,
-		filename: *const c_char,
-		event: c_int,
-		data: *mut c_void,
-	);
 }
 
 const QUESTION_IMPORT_KEY: c_int = 1 << 6;
@@ -594,9 +582,10 @@ pub fn c_pacman_sync_refresh<S: AsRef<[u8]>>(
 	fh: &FrontHandle,
 	cfg: &Config,
 	targets: &[S],
+	cols: u16,
 ) -> CRun {
 	assert!(cfg.op_s_sync != 0 && cfg.op_s_clean == 0);
-	run_op(fh, cfg, 0, targets, pacman_sync)
+	run_op(fh, cfg, cols, targets, pacman_sync)
 }
 
 // pacman_files(targets) with -Fy
@@ -604,7 +593,8 @@ pub fn c_pacman_files_refresh<S: AsRef<[u8]>>(
 	fh: &FrontHandle,
 	cfg: &Config,
 	targets: &[S],
+	cols: u16,
 ) -> CRun {
 	assert!(cfg.op_s_sync != 0);
-	run_op(fh, cfg, 0, targets, pacman_files)
+	run_op(fh, cfg, cols, targets, pacman_files)
 }

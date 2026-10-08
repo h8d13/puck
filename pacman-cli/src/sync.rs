@@ -1,8 +1,8 @@
 // port of src/pacman/sync.c: -Si/-Sii (sync_info), -Sl (sync_list),
-// -Sg/-Sgg (sync_group), -Sy/-Syy (util.c's sync_syncdbs, shared with
-// -Fy), the pacman_sync dispatch up to them, util.c's check_syncdbs they
-// rely on, and the transaction of -S/-Su up to the commit (sync_trans,
-// sync_prepare_execute, also run by -U)
+// -Sg/-Sgg (sync_group), -Ss (sync_search), -Sy/-Syy (util.c's
+// sync_syncdbs, shared with -Fy), the pacman_sync dispatch up to them,
+// util.c's check_syncdbs they rely on, and the transaction of -S/-Su up
+// to the commit (sync_trans, sync_prepare_execute, also run by -U)
 //
 // the C prints to stdout and through pm_printf to stderr, both go into an
 // Output. config is the C global, handle config->handle; cols is what
@@ -11,28 +11,22 @@
 // local db and every sync db cache, which Handle only lends out one at a
 // time. messages are the untranslated msgids.
 //
-// what -Sy prints comes from the frontend callbacks (callback.c) during
-// alpm_db_update. callback.rs is not on this base: SyncCallbacks stands
-// in for the parts -Sy reaches and is swapped into the handle for the
-// call. it draws no progress bars, the display is --noprogressbar's (or
-// a pipe's) whatever the terminal.
+// what -Sy prints during alpm_db_update comes from the handle's
+// callbacks (callback.rs); out is flushed (Output::flush) before, so the
+// header goes out first.
 //
 // not ported, returned as Unported where pacman_sync reaches them: -Sc
 // (trans_init takes the db lock, then interactive prompts and unlinks
-// in the cache dirs) and -Ss (db search). the transaction is sync_trans,
-// which ends in Prepared::Commit where the C calls alpm_trans_commit;
-// pacman_sync still returns Unported::Transaction for it until the
-// dispatch takes a Ui.
+// in the cache dirs). the transaction is sync_trans, which ends in
+// Prepared::Commit where the C calls alpm_trans_commit; pacman_sync
+// returns Unported::Transaction for it, the dispatch runs sync_trans.
 
-use std::cell::RefCell;
 use std::fs::File;
 use std::io::BufRead;
 use std::os::unix::ffi::OsStrExt;
-use std::rc::Rc;
 
 use alpm_core::add::add_pkg;
 use alpm_core::be_sync::{db_update, get_validation};
-use alpm_core::callbacks::{Callbacks, DownloadEvent, LogLevel};
 use alpm_core::db::{DB_USAGE_INSTALL, Db};
 use alpm_core::deps::{DepMissing, DepMod, dep_compute_string};
 use alpm_core::error::Errno;
@@ -45,10 +39,10 @@ use alpm_core::trans::{
 };
 use alpm_core::util::until_nul;
 
-use crate::conf::{
-	Config, LOG_DEBUG, LOG_ERROR, LOG_FUNCTION, LOG_WARNING, cat,
+use crate::conf::{Config, LOG_ERROR, LOG_WARNING, cat};
+use crate::package::{
+	FileProbe, PkgEnv, dump_pkg_full, dump_pkg_search, print_installed,
 };
-use crate::package::{FileProbe, PkgEnv, dump_pkg_full, print_installed};
 use crate::util::{
 	DbPkg, Output, Prepared, SigResult, TransTargets, Ui, check_syncdbs,
 	colon_printf, display_targets, multiselect_question, pm_printf,
@@ -60,8 +54,6 @@ use crate::util::{
 pub enum Unported {
 	// -Sc/-Scc: sync_cleancache, sync_cleandb_all
 	Clean,
-	// -Ss: sync_search
-	Search,
 	// sync_trans: -S <targets>, -Su
 	Transaction,
 }
@@ -386,6 +378,54 @@ pub fn sync_list<S: AsRef<[u8]>>(
 	ret
 }
 
+// sync_search: dump_pkg_search with the installed marker on every sync
+// db, the whole cache without targets. 0 when any db showed something,
+// a bad regex stops at its db
+pub fn sync_search<S: AsRef<[u8]>>(
+	config: &Config,
+	handle: &mut Handle,
+	targets: &[S],
+	cols: u16,
+	out: &mut Output,
+) -> i32 {
+	let dbext = handle.dbext().to_vec();
+	let (local, syncs) = handle.dbs_mut();
+	let lcache = local.and_then(|l| l.pkgcache(&dbext).ok());
+	let find = |name: &[u8]| lcache.and_then(|c| c.find(name));
+	let mut found = 0;
+	for db in syncs.iter_mut() {
+		let name = db.name().to_vec();
+		let results: Vec<&Package> = if targets.is_empty() {
+			cache_list(db, &dbext)
+		} else {
+			match db.search(&dbext, targets) {
+				Ok(r) => r,
+				Err(e) => {
+					let why = e.strerror().as_bytes();
+					let msg = [
+						&b"search failed: "[..],
+						why,
+						b"\n",
+					];
+					error(out, config, &msg);
+					return 1;
+				}
+			}
+		};
+		let shown = dump_pkg_search(
+			&mut out.stdout,
+			&name,
+			&results,
+			Some(&find),
+			config.quiet != 0,
+			cols,
+			&config.colstr,
+		);
+		found += i32::from(shown);
+	}
+	i32::from(found == 0)
+}
+
 // pacman_sync: the read-only operations, Err for the branches not ported
 // (in the order the C reaches them). Ok is the C return value
 pub fn pacman_sync<S: AsRef<[u8]>>(
@@ -408,7 +448,7 @@ pub fn pacman_sync<S: AsRef<[u8]>>(
 		return Ok(1);
 	}
 	if config.op_s_search != 0 {
-		return Err(Unported::Search);
+		return Ok(sync_search(config, handle, targets, cols, out));
 	}
 	if config.group != 0 {
 		return Ok(sync_group(
@@ -436,62 +476,6 @@ pub fn pacman_sync<S: AsRef<[u8]>>(
 	Err(Unported::Transaction)
 }
 
-// pm_vfprintf/pm_vasprintf to stderr: logmask filter, the level's prefix
-fn log_line(err: &mut Vec<u8>, config: &Config, level: u16, msg: &[u8]) {
-	let prefix: &[u8] = match level {
-		LOG_ERROR | LOG_WARNING => {
-			return pm_printf(err, config, level, msg);
-		}
-		LOG_DEBUG => b"debug: ",
-		LOG_FUNCTION => b"function: ",
-		_ => b"",
-	};
-	if config.logmask & level != 0 {
-		err.extend(cat(&[prefix, msg]));
-	}
-}
-
-// clean_filename: cut at the first ".pkg", else ".db", else ".files"
-fn clean_filename(name: &[u8]) -> &[u8] {
-	let find = |n: &[u8]| name.windows(n.len()).position(|w| w == n);
-	let cut = find(b".pkg")
-		.or_else(|| find(b".db"))
-		.or_else(|| find(b".files"));
-	&name[..cut.unwrap_or(name.len())]
-}
-
-// the callback.c handlers alpm_db_update reaches: cb_log, cb_download
-// without progress bars. cb_event prints nothing for it (the
-// DATABASE_MISSING warning is off under -y); cb_log's buffering between
-// DB_RETRIEVE_START and DONE/FAILED only orders stderr against stdout,
-// which go to separate buffers here
-struct SyncCallbacks {
-	config: Config,
-	out: Rc<RefCell<Output>>,
-}
-
-impl Callbacks for SyncCallbacks {
-	fn log(&mut self, level: LogLevel, msg: &[u8]) {
-		if msg.is_empty() {
-			return;
-		}
-		let err = &mut self.out.borrow_mut().stderr;
-		log_line(err, &self.config, level as u16, msg);
-	}
-
-	fn download(&mut self, filename: &[u8], event: DownloadEvent) {
-		// no progress for signature files
-		if filename.ends_with(b".sig") {
-			return;
-		}
-		if let DownloadEvent::Init { .. } = event {
-			let name = clean_filename(filename);
-			let line = cat(&[b" ", name, b" downloading...\n"]);
-			self.out.borrow_mut().stdout.extend(line);
-		}
-	}
-}
-
 // sync_syncdbs(level, every sync db): alpm_db_update, forced from -yy.
 // false (C 0) when it failed, after the error line
 pub fn sync_syncdbs(
@@ -500,16 +484,12 @@ pub fn sync_syncdbs(
 	level: u16,
 	out: &mut Output,
 ) -> bool {
-	let shared = Rc::new(RefCell::new(std::mem::take(out)));
-	let cb = SyncCallbacks {
-		config: config.clone(),
-		out: shared.clone(),
-	};
-	let old = handle.replace_callbacks(Box::new(cb));
+	// what is buffered goes out first, the callbacks print now. the C
+	// also resets multibar_move_completed_up here: only a package
+	// download sets it, which this port does not have yet
+	out.flush();
 	let dbs: Vec<usize> = (0..handle.syncdbs().len()).collect();
 	let ret = db_update(handle, &dbs, level >= 2);
-	drop(handle.replace_callbacks(old));
-	*out = shared.take();
 	if let Err(e) = ret {
 		let msg = [
 			b"failed to synchronize all databases (",
@@ -633,7 +613,9 @@ fn process_group<R: BufRead>(
 	let msg = [what.as_bytes(), cs.groups, group, cs.title, b":\n"];
 	colon_printf(&mut ui.out.stdout, cs, &msg.concat());
 	let shown: Vec<DbPkg> = pkgs.iter().map(|t| db_pkg(h, t)).collect();
-	select_display(&mut ui.out.stdout, cs, &shown, ui.cols);
+	let pairs: Vec<(Option<&[u8]>, &Package)> =
+		shown.iter().map(|p| (p.db.map(Db::name), p.pkg)).collect();
+	select_display(&mut ui.out.stdout, cs, &pairs, ui.cols);
 	let mut array = vec![false; count];
 	if multiselect_question(ui.out, ui.config, ui.term, &mut array) != 0 {
 		return 1;

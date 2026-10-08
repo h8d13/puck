@@ -13,6 +13,7 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU16, Ordering};
 
 use alpm_core::callbacks::{DownloadEvent, LogLevel};
 use alpm_core::db::{DB_USAGE_ALL, DB_USAGE_SEARCH, SIG_DATABASE};
@@ -24,10 +25,11 @@ use difftest::{
 	Rng, Server, TempRoot, UpdRecord, UpdSetup, c_pacman_files_refresh,
 	c_pacman_sync_refresh, front_handle, iters, sync_db,
 };
+use pacman_cli::callback::Frontend;
 use pacman_cli::conf::{ColStr, Config};
 use pacman_cli::files::pacman_files;
 use pacman_cli::sync::pacman_sync;
-use pacman_cli::util::Output;
+use pacman_cli::util::{Output, Term};
 
 const T0: i64 = 1_000_000_000;
 const DAY: i64 = 86_400;
@@ -824,9 +826,31 @@ fn fuzz() {
 	assert!(steps >= n, "only {steps} steps compared");
 }
 
-// -Sy/-Syy/-Fy through pacman_sync/pacman_files: the C with the
-// frontend's own callbacks, the Rust with SyncCallbacks. no progress bars
-// (COLUMNS=0, a pipe)
+// -Sy/-Syy/-Fy through pacman_sync/pacman_files, both with the
+// frontend's callbacks (callback.c, pacman_cli::callback::Frontend):
+// without progress bars (COLUMNS=0, a pipe) and with them (COLUMNS set,
+// --noprogressbar off; CLOCK_MONOTONIC_COARSE stays at the difftest's
+// fake 0 on both sides, so only the final stats draw). the Rust op and
+// its callbacks write through one sink, in order like the C streams
+thread_local! {
+	static SINK: std::cell::RefCell<Output> =
+		std::cell::RefCell::new(Output::default());
+}
+
+fn sink(o: &mut Output) {
+	SINK.with(|s| {
+		let mut s = s.borrow_mut();
+		s.stdout.append(&mut o.stdout);
+		s.stderr.append(&mut o.stderr);
+	});
+}
+
+static FRONT_COLS: AtomicU16 = AtomicU16::new(0);
+
+fn front_cols() -> u16 {
+	FRONT_COLS.load(Ordering::SeqCst)
+}
+
 struct Front {
 	cfx: TempRoot,
 	rfx: TempRoot,
@@ -848,10 +872,17 @@ impl Front {
 		}
 	}
 
-	fn rust_handle(&self) -> Handle {
+	fn rust_handle(&self, cfg: &Config) -> Handle {
 		let fx = &self.rfx;
 		let mut h =
 			Handle::initialize(&fx.root(), &fx.dbpath()).unwrap();
+		let term = Term {
+			cols: front_cols,
+			..Term::new(&b""[..], false, false)
+		};
+		let mut cb = Frontend::new(cfg.clone(), term);
+		cb.out.sink = Some(sink);
+		h.set_callbacks(Box::new(cb));
 		h.set_dbext(&self.dbext);
 		for (r, list) in FRONT_REPOS.iter().zip(&self.servers) {
 			let db = h.register_syncdb(r.as_bytes(), 0).unwrap();
@@ -864,7 +895,18 @@ impl Front {
 
 	// one op on fresh handles over the two roots
 	fn run(&self, srv: &Server, cfg: &Config, files: bool) -> CRun {
+		self.run_cols(srv, cfg, files, 0)
+	}
+
+	fn run_cols(
+		&self,
+		srv: &Server,
+		cfg: &Config,
+		files: bool,
+		cols: u16,
+	) -> CRun {
 		srv.reset();
+		FRONT_COLS.store(cols, Ordering::SeqCst);
 		let c = {
 			let fh = front_handle(
 				&self.cfx,
@@ -874,23 +916,33 @@ impl Front {
 			);
 			let none: [&[u8]; 0] = [];
 			match files {
-				true => c_pacman_files_refresh(&fh, cfg, &none),
-				false => c_pacman_sync_refresh(&fh, cfg, &none),
+				true => c_pacman_files_refresh(
+					&fh, cfg, &none, cols,
+				),
+				false => c_pacman_sync_refresh(
+					&fh, cfg, &none, cols,
+				),
 			}
 		};
 		let creq = requests(&[srv]);
-		let mut h = self.rust_handle();
-		let mut out = Output::default();
+		let mut h = self.rust_handle(cfg);
+		let mut out = Output {
+			sink: Some(sink),
+			..Output::default()
+		};
 		let none: [&[u8]; 0] = [];
 		let ret = match files {
 			true => pacman_files(cfg, &mut h, &none, &mut out),
 			false => pacman_sync(cfg, &mut h, &none, 0, &mut out)
 				.unwrap(),
 		};
+		out.flush();
+		drop(h);
+		let all = SINK.with(|s| std::mem::take(&mut *s.borrow_mut()));
 		let r = CRun {
 			ret,
-			stdout: out.stdout,
-			stderr: out.stderr,
+			stdout: all.stdout,
+			stderr: all.stderr,
 		};
 		let rreq = requests(&[srv]);
 		if let Some(d) = c.diff(&r) {
@@ -968,4 +1020,36 @@ fn frontend() {
 	let mut cfg = front_cfg(1, false);
 	cfg.op_q_list = 1;
 	ff.run(&srv, &cfg, true);
+
+	// progress bars: one per db, the final line of each, "is up to
+	// date" on a second refresh, "failed to download" when every mirror
+	// fails
+	let (core1, _) = sync_db(44, false);
+	srv.route("/m1/core.db", vec![file(&core1, T0)]);
+	srv.route("/m1/extra.db", vec![file(&extra0, T0)]);
+	let fb = Front::new(b".db", vec![m1s(&srv), m1s(&srv)]);
+	for cols in [80, 120, 50] {
+		let mut cfg = front_cfg(1, cols == 120);
+		cfg.noprogressbar = 0;
+		let o = fb.run_cols(&srv, &cfg, false, cols);
+		assert!(has(&o.stdout, b" core"), "{o:?}");
+		let o = fb.run_cols(&srv, &cfg, false, cols);
+		assert!(has(&o.stdout, b"is up to date"), "{o:?}");
+		let mut cfg = front_cfg(2, false);
+		cfg.noprogressbar = 0;
+		fb.run_cols(&srv, &cfg, false, cols);
+	}
+	srv.route("/m1/extra.db", vec![not_found()]);
+	let mut cfg = front_cfg(2, false);
+	cfg.noprogressbar = 0;
+	let o = fb.run_cols(&srv, &cfg, false, 80);
+	assert!(has(&o.stdout, b"failed to download"), "{o:?}");
+}
+
+fn m1s(srv: &Server) -> Vec<Vec<u8>> {
+	vec![srv.url("/m1")]
+}
+
+fn has(hay: &[u8], needle: &[u8]) -> bool {
+	hay.windows(needle.len()).any(|w| w == needle)
 }

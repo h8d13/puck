@@ -501,7 +501,8 @@ declarations. No existing MR found for it.
   `*data` after the local fallback recovers (deps.c:836, 845-846); sync.c
   later appends `alpm_conflict_t` to the same list and the frontend reads
   every entry as a conflict (sync.c:552, 624; src/pacman/sync.c:789-790).
-  **packager** (crafted repo metadata)
+  **packager** (crafted repo metadata); seen live in 4/2000 trans_prep
+  fuzz cases
 - deps: NODEPVERSION overwrites `depend->mod` in place on cached packages
   and the report loses the version constraint (deps.c:330-381) **api**;
   pm_errno after a failed `_alpm_resolvedeps` can be OK (309, 811, 839),
@@ -605,6 +606,25 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
 - libarchive reads a directory entry's data (type '5', or a regular
   entry ending in '/') as the next header, ending extraction quietly with
   success. **packager**
+
+## transaction prepare minor
+
+- targets are the sync cache objects, mutated in place (sync.c:188-189,
+  492, add.c:105, removes, oldpkg): a reason set in one prepare survives
+  into the next transaction on the same handle, a target dropped to
+  unresolvable comes back with its old removes. **api** (long-lived
+  handles; pacman exits after one transaction)
+- duplicate-filename check `strcmp`s NULL filenames (sync.c:474), a sync
+  entry without %FILENAME%. **packager**
+- replace check reads the union as a db for a file target (sync.c:173),
+  always "cannot replace", right by accident. **none**
+- `_alpm_pkg_dup` returns 1 on a failed force-load (package.c:580-586),
+  callers test `== -1`: `alpm_remove_pkg` succeeds with pm_errno set
+  (remove.c:75, 104). **local**
+- "nothing to do" leaves the transaction initialized (trans.c:122-125), a
+  later commit fails TRANS_NOT_PREPARED. **api**
+- `alpm_trans_init` accepts any flag mix (trans.c:45-67); `if(data)` after
+  `ASSERT(data != NULL)` (trans.c:115, 129). **none**
 
 ## `be_sync.c` minor
 
@@ -731,6 +751,20 @@ Found through the conf difftest aborting only with longer TMPDIR paths.
 - `select_display` NULL handling (1427-1440), `target_cmp` returns 0/1
   (1043), `parseindex("")` is 0 (1447-1448). **none**
 
+## `callback.c` minor
+
+- `bar->eta = (total_size - sync_xfered) / rate` converts a negative
+  double to unsigned (callback.c:940), undefined: whenever the size is
+  unknown (no Content-Length) or ETA > UINT_MAX; x86_64 wraps ("--:--"),
+  aarch64 saturates ("00:00"). `(off_t)bar->rate` (851) same class.
+  **real**, display only. The port reproduces x86_64.
+- "name (n/m)" buffer sized by the digits of `howmany`, a larger
+  `downloaded` count is cut ("Total (10/4") (806-810). **none**
+- singular SELECT_PROVIDER line lacks the plural's ':' (521-522); libalpm
+  only asks with more than one provider. **none**
+- `parseindex` stores strtol's long in an int: "4294967298" selects entry
+  2 (util.c). **real (rare)**, user input
+
 ## `src/pacman/conf.c` minor
 
 - CacheServer `file://` URLs do not get the sysroot, Server ones do
@@ -754,6 +788,17 @@ Found through the conf difftest aborting only with longer TMPDIR paths.
 - `section->name` dangles after an include with a header, only ever
   NULL-checked (conf.c:1282, 1300); `replace_server_vars` reads the
   global instead of its parameter (conf.c:823). **none**
+- `register_repo`'s result is ignored (conf.c:964-966): a section that
+  fails to register (duplicate, `[local]`, a '/' in the name) is reported
+  and pacman carries on. **local**
+- "Failed to pass %s entry to libalpm" lacks its newline (conf.c:1005),
+  `--assume-installed 'foo>1'` reaches it and exits 255. **real**,
+  cosmetic
+- `'sandboxuser' (%s) does not exist` debug log lacks its newline
+  (handle.c:617). **none**
+- `_getumask` (umask(0) then restore) is not thread safe (dload.c:69-72),
+  concurrent calls chmod 0666. **api** (threaded users; the dload difftest
+  flake)
 
 To be written up and reported through pacman's usual channels by the
 maintainer of this repo, not from here.

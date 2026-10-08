@@ -160,6 +160,7 @@ impl CRun {
 #[derive(Clone, Copy)]
 struct Flags {
 	quiet: u16,
+	noprogressbar: u16,
 	logmask: u16,
 	op_q_list: u16,
 	op_s_clean: u16,
@@ -176,6 +177,7 @@ impl Flags {
 	fn of(c: &Config) -> Flags {
 		Flags {
 			quiet: c.quiet,
+			noprogressbar: c.noprogressbar,
 			logmask: c.logmask,
 			op_q_list: c.op_q_list,
 			op_s_clean: c.op_s_clean,
@@ -195,6 +197,7 @@ impl Flags {
 		let c = unsafe { &mut *config };
 		let old = Flags {
 			quiet: c.quiet,
+			noprogressbar: c.noprogressbar,
 			logmask: c.logmask,
 			op_q_list: c.op_q_list,
 			op_s_clean: c.op_s_clean,
@@ -207,6 +210,7 @@ impl Flags {
 			group: c.group,
 		};
 		c.quiet = self.quiet;
+		c.noprogressbar = self.noprogressbar;
 		c.logmask = self.logmask;
 		c.op_q_list = self.op_q_list;
 		c.op_s_clean = self.op_s_clean;
@@ -313,14 +317,16 @@ pub(crate) fn run_op<S: AsRef<[u8]>>(
 	}
 }
 
-// pacman_sync reaches only -Sg, -Si, -Sl or the "no targets" error with
-// these flags: no -Sc (trans_init, cache dirs), -Sy (downloads), -Ss
-// (left to the search port) or sync_trans
+// pacman_sync reaches only -Ss, -Sg, -Si, -Sl or the "no targets" error
+// with these flags: no -Sc (trans_init, cache dirs), -Sy (downloads) or
+// sync_trans
 pub fn sync_read_only<S>(cfg: &Config, targets: &[S]) -> bool {
-	let op = cfg.group != 0 || cfg.op_s_info != 0 || cfg.op_q_list != 0;
+	let op = cfg.group != 0
+		|| cfg.op_s_info != 0
+		|| cfg.op_q_list != 0
+		|| cfg.op_s_search != 0;
 	cfg.op_s_clean == 0
 		&& cfg.op_s_sync == 0
-		&& cfg.op_s_search == 0
 		&& (op || (targets.is_empty() && cfg.op_s_upgrade == 0))
 }
 
