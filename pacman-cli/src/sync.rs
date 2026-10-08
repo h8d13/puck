@@ -1,7 +1,8 @@
-// port of the read-only part of src/pacman/sync.c: -Si/-Sii (sync_info),
-// -Sl (sync_list), -Sg/-Sgg (sync_group), -Sy/-Syy (util.c's
-// sync_syncdbs, shared with -Fy), the pacman_sync dispatch up to them,
-// and util.c's check_syncdbs they rely on
+// port of src/pacman/sync.c: -Si/-Sii (sync_info), -Sl (sync_list),
+// -Sg/-Sgg (sync_group), -Sy/-Syy (util.c's sync_syncdbs, shared with
+// -Fy), the pacman_sync dispatch up to them, util.c's check_syncdbs they
+// rely on, and the transaction of -S/-Su up to the commit (sync_trans,
+// sync_prepare_execute, also run by -U)
 //
 // the C prints to stdout and through pm_printf to stderr, both go into an
 // Output. config is the C global, handle config->handle; cols is what
@@ -18,25 +19,41 @@
 //
 // not ported, returned as Unported where pacman_sync reaches them: -Sc
 // (trans_init takes the db lock, then interactive prompts and unlinks
-// in the cache dirs), -Ss (db search) and the transaction of
-// -S <targets>/-Su.
+// in the cache dirs) and -Ss (db search). the transaction is sync_trans,
+// which ends in Prepared::Commit where the C calls alpm_trans_commit;
+// pacman_sync still returns Unported::Transaction for it until the
+// dispatch takes a Ui.
 
 use std::cell::RefCell;
+use std::fs::File;
+use std::io::BufRead;
+use std::os::unix::ffi::OsStrExt;
 use std::rc::Rc;
 
+use alpm_core::add::add_pkg;
 use alpm_core::be_sync::{db_update, get_validation};
 use alpm_core::callbacks::{Callbacks, DownloadEvent, LogLevel};
-use alpm_core::db::Db;
+use alpm_core::db::{DB_USAGE_INSTALL, Db};
+use alpm_core::deps::{DepMissing, DepMod, dep_compute_string};
 use alpm_core::error::Errno;
 use alpm_core::handle::Handle;
-use alpm_core::package::{DbCaches, Package};
+use alpm_core::package::{DbCaches, Package, pkg_find};
+use alpm_core::sync::{dbs_satisfier, find_group_pkgs, sync_sysupgrade};
+use alpm_core::trans::{
+	PrepareData, PrepareError, TransPkg, trans_get_add, trans_get_remove,
+	trans_prepare,
+};
 use alpm_core::util::until_nul;
 
 use crate::conf::{
 	Config, LOG_DEBUG, LOG_ERROR, LOG_FUNCTION, LOG_WARNING, cat,
 };
 use crate::package::{FileProbe, PkgEnv, dump_pkg_full, print_installed};
-use crate::util::{Output, SigResult, check_syncdbs, pm_printf};
+use crate::util::{
+	DbPkg, Output, Prepared, SigResult, TransTargets, Ui, check_syncdbs,
+	colon_printf, display_targets, multiselect_question, pm_printf,
+	print_packages, select_display, trans_init, trans_release, yesno,
+};
 
 // a pacman_sync/pacman_files branch this port does not have yet
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -516,4 +533,405 @@ pub(crate) fn refresh(
 	out.stdout.extend(cat(&[c.colon, head, c.nocolor]));
 	let _ = handle.logaction(b"PACMAN", b"synchronizing package lists\n");
 	sync_syncdbs(config, handle, config.op_s_sync, out)
+}
+
+// pacman.h
+const PACMAN_CALLER_PREFIX: &[u8] = b"PACMAN";
+
+pub(crate) fn warning(out: &mut Output, config: &Config, msg: &[&[u8]]) {
+	pm_printf(&mut out.stderr, config, LOG_WARNING, &cat(msg));
+}
+
+fn opt(s: &Option<Vec<u8>>) -> &[u8] {
+	s.as_deref().map_or(b"(null)", until_nul)
+}
+
+// the db a transaction package came from, alpm_pkg_get_db
+pub(crate) fn db_pkg<'a>(h: &'a Handle, t: &'a TransPkg) -> DbPkg<'a> {
+	DbPkg {
+		pkg: &t.pkg,
+		db: t.db.and_then(|i| h.syncdbs().get(i)),
+	}
+}
+
+// the local db cache as loaded, empty when it is not
+pub(crate) fn local_list(h: &Handle) -> Vec<&Package> {
+	let cache = h.localdb().and_then(Db::loaded_pkgcache);
+	cache.map(|c| c.iter().collect()).unwrap_or_default()
+}
+
+// get_db: position of the sync db of that name
+fn get_db(h: &Handle, dbname: &[u8]) -> Option<usize> {
+	h.syncdbs().iter().position(|db| db.name() == dbname)
+}
+
+// process_pkg: an explicit target, 1 when alpm_add_pkg refused it
+fn process_pkg<R>(ui: &mut Ui<R>, h: &mut Handle, t: TransPkg) -> i32 {
+	if let Err(e) = add_pkg(h, t.pkg.clone(), t.db) {
+		let msg = [
+			b"'",
+			opt(&t.pkg.name),
+			b"': ",
+			e.strerror().as_bytes(),
+		];
+		error(ui.out, ui.config, &[&msg.concat(), b"\n"]);
+		return 1;
+	}
+	ui.explicit_adds.push(t.pkg);
+	0
+}
+
+// group_exists
+fn group_exists(h: &mut Handle, dbs: &[usize], name: &[u8]) -> bool {
+	let dbext = h.dbext().to_vec();
+	dbs.iter().any(|&i| {
+		let db = &mut h.syncdbs_mut()[i];
+		matches!(db.get_group(&dbext, name), Ok(Some(_)))
+	})
+}
+
+// process_group: the members of a group as targets, picked by
+// multiselect_question unless --print. an empty group that exists is
+// fine, after an earlier error only the name is checked
+fn process_group<R: BufRead>(
+	ui: &mut Ui<R>,
+	h: &mut Handle,
+	dbs: &[usize],
+	group: &[u8],
+	error_seen: bool,
+) -> i32 {
+	let pkgs = find_group_pkgs(h, dbs, group);
+	if pkgs.is_empty() {
+		if group_exists(h, dbs, group) {
+			return 0;
+		}
+		error(
+			ui.out,
+			ui.config,
+			&[b"target not found: ", group, b"\n"],
+		);
+		return 1;
+	}
+	if error_seen {
+		return 0;
+	}
+	if ui.config.print != 0 {
+		for t in pkgs {
+			if process_pkg(ui, h, t) == 1 {
+				return 1;
+			}
+		}
+		return 0;
+	}
+	let cs = &ui.config.colstr;
+	let count = pkgs.len();
+	// ngettext without a catalog: the singular msgid for 1
+	let what = match count {
+		1 => format!("There is {count} member in group "),
+		_ => format!("There are {count} members in group "),
+	};
+	let msg = [what.as_bytes(), cs.groups, group, cs.title, b":\n"];
+	colon_printf(&mut ui.out.stdout, cs, &msg.concat());
+	let shown: Vec<DbPkg> = pkgs.iter().map(|t| db_pkg(h, t)).collect();
+	select_display(&mut ui.out.stdout, cs, &shown, ui.cols);
+	let mut array = vec![false; count];
+	if multiselect_question(ui.out, ui.config, ui.term, &mut array) != 0 {
+		return 1;
+	}
+	for (t, chosen) in pkgs.into_iter().zip(array) {
+		if chosen && process_pkg(ui, h, t) == 1 {
+			return 1;
+		}
+	}
+	0
+}
+
+// process_targname: the satisfier of targname in dbs, else a group of
+// that name. an ignored package the user declined skips the target
+fn process_targname<R: BufRead>(
+	ui: &mut Ui<R>,
+	h: &mut Handle,
+	dbs: &[usize],
+	targname: &[u8],
+	error_seen: bool,
+) -> i32 {
+	match dbs_satisfier(h, dbs, targname) {
+		Err(Errno::PkgIgnored) => {
+			let msg: [&[u8]; 3] =
+				[b"skipping target: ", targname, b"\n"];
+			warning(ui.out, ui.config, &msg);
+			0
+		}
+		Ok(t) => process_pkg(ui, h, t),
+		Err(_) => process_group(ui, h, dbs, targname, error_seen),
+	}
+}
+
+// process_target: "repo/name" looks only in repo (made usable for
+// installs meanwhile), anything else in every sync db. a failed target
+// that names a readable file gets the -U hint. access(R_OK) is an open
+// for reading here
+fn process_target<R: BufRead>(
+	ui: &mut Ui<R>,
+	h: &mut Handle,
+	target: &[u8],
+	error_seen: bool,
+) -> i32 {
+	let target = until_nul(target);
+	let slash = target.iter().position(|&c| c == b'/').filter(|&i| i > 0);
+	let ret = match slash {
+		Some(i) => {
+			let (dbname, targname) =
+				(&target[..i], &target[i + 1..]);
+			match get_db(h, dbname) {
+				None => {
+					let msg: [&[u8]; 3] = [
+						b"database not found: ",
+						dbname,
+						b"\n",
+					];
+					error(ui.out, ui.config, &msg);
+					1
+				}
+				Some(db) => {
+					let usage = h.syncdbs()[db].usage();
+					let d = &mut h.syncdbs_mut()[db];
+					d.set_usage(usage | DB_USAGE_INSTALL);
+					let r = process_targname(
+						ui,
+						h,
+						&[db],
+						targname,
+						error_seen,
+					);
+					h.syncdbs_mut()[db].set_usage(usage);
+					r
+				}
+			}
+		}
+		None => {
+			let dbs: Vec<usize> = (0..h.syncdbs().len()).collect();
+			process_targname(ui, h, &dbs, target, error_seen)
+		}
+	};
+	let path = std::ffi::OsStr::from_bytes(target);
+	if ret != 0 && File::open(path).is_ok() {
+		let msg: [&[u8]; 7] = [
+			b"'",
+			target,
+			b"' is a file, did you mean ",
+			b"-U/--upgrade",
+			b" instead of ",
+			b"-S/--sync",
+			b"?\n",
+		];
+		warning(ui.out, ui.config, &msg);
+	}
+	ret
+}
+
+// sync_trans: a transaction with the targets and -u, then
+// sync_prepare_execute
+pub fn sync_trans<R: BufRead, S: AsRef<[u8]>>(
+	ui: &mut Ui<R>,
+	h: &mut Handle,
+	targets: &[S],
+) -> Prepared {
+	let config = ui.config;
+	if !trans_init(ui.out, config, h, config.flags, true) {
+		return Prepared::Done(1);
+	}
+	let mut retval = 0;
+	for t in targets {
+		if process_target(ui, h, t.as_ref(), retval != 0) == 1 {
+			retval = 1;
+		}
+	}
+	if retval != 0 {
+		trans_release(ui.out, config, h);
+		return Prepared::Done(retval);
+	}
+	if config.op_s_upgrade != 0 {
+		if config.print == 0 {
+			let msg = b"Starting full system upgrade...\n";
+			colon_printf(&mut ui.out.stdout, &config.colstr, msg);
+			let msg = b"starting full system upgrade\n";
+			let _ = h.logaction(PACMAN_CALLER_PREFIX, msg);
+		}
+		if let Err(e) = sync_sysupgrade(h, config.op_s_upgrade >= 2) {
+			let msg = [e.strerror().as_bytes(), b"\n"];
+			error(ui.out, config, &msg);
+			trans_release(ui.out, config, h);
+			return Prepared::Done(1);
+		}
+	}
+	sync_prepare_execute(ui, h)
+}
+
+// print_broken_dep: a missing dependency of a target, or one an
+// installed package loses through an upgrade or a removal
+fn print_broken_dep<R>(ui: &mut Ui<R>, add: &[TransPkg], miss: &DepMissing) {
+	let dep = dep_compute_string(&miss.depend);
+	let target = &miss.target[..];
+	let msg = match &miss.causingpkg {
+		None => cat(&[
+			b"unable to satisfy dependency '",
+			&dep,
+			b"' required by ",
+			target,
+			b"\n",
+		]),
+		Some(c) => {
+			let add = add.iter().map(|t| &t.pkg);
+			match pkg_find(add, c) {
+				Some(p) => cat(&[
+					b"installing ",
+					c,
+					b" (",
+					opt(&p.version),
+					b") breaks dependency '",
+					&dep,
+					b"' required by ",
+					target,
+					b"\n",
+				]),
+				None => cat(&[
+					b"removing ",
+					c,
+					b" breaks dependency '",
+					&dep,
+					b"' required by ",
+					target,
+					b"\n",
+				]),
+			}
+		}
+	};
+	colon_printf(&mut ui.out.stdout, &ui.config.colstr, &msg);
+}
+
+// the failure report of sync_prepare_execute
+fn prepare_failed<R>(ui: &mut Ui<R>, h: &Handle, e: &PrepareError) {
+	let msg = [
+		b"failed to prepare transaction (",
+		e.errno.strerror().as_bytes(),
+		b")\n",
+	];
+	error(ui.out, ui.config, &msg);
+	let cs = &ui.config.colstr;
+	match &e.data {
+		PrepareData::InvalidArch(pkgs) => {
+			for p in pkgs {
+				let msg = cat(&[
+					b"package ",
+					p,
+					b" does not have a valid architecture\n",
+				]);
+				colon_printf(&mut ui.out.stdout, cs, &msg);
+			}
+		}
+		PrepareData::Missing(misses) => {
+			let add = trans_get_add(h).unwrap_or_default();
+			for m in misses {
+				print_broken_dep(ui, add, m);
+			}
+		}
+		PrepareData::Conflicts(conflicts) => {
+			for c in conflicts {
+				let (p1, p2) = (&c.package1, &c.package2);
+				let mut msg = cat(&[
+					opt(&p1.name),
+					b"-",
+					opt(&p1.version),
+					b" and ",
+					opt(&p2.name),
+					b"-",
+					opt(&p2.version),
+					b" are in conflict",
+				]);
+				// the reason only when it adds a version
+				if c.reason.depmod != DepMod::Any {
+					let reason =
+						dep_compute_string(&c.reason);
+					msg.extend(cat(&[
+						b" (", &reason, b")",
+					]));
+				}
+				msg.push(b'\n');
+				colon_printf(&mut ui.out.stdout, cs, &msg);
+			}
+		}
+		PrepareData::None => {}
+	}
+}
+
+// sync_prepare_execute: prepare, then nothing to do, --print, or the
+// target list and the proceed question. a yes is Prepared::Commit with
+// the transaction still held; every other end releases it
+pub fn sync_prepare_execute<R: BufRead>(
+	ui: &mut Ui<R>,
+	h: &mut Handle,
+) -> Prepared {
+	let config = ui.config;
+	let mut retval = match trans_prepare(h) {
+		Err(e) => {
+			prepare_failed(ui, h, &e);
+			1
+		}
+		Ok(()) => match proceed(ui, h) {
+			Some(r) => r,
+			None => return Prepared::Commit,
+		},
+	};
+	if !trans_release(ui.out, config, h) {
+		retval = 1;
+	}
+	Prepared::Done(retval)
+}
+
+// the steps after a successful prepare, None for a yes to proceed
+fn proceed<R: BufRead>(ui: &mut Ui<R>, h: &Handle) -> Option<i32> {
+	let config = ui.config;
+	let add = trans_get_add(h).unwrap_or_default();
+	if add.is_empty() {
+		if config.print == 0 {
+			ui.out.stdout.extend_from_slice(
+				b" there is nothing to do\n",
+			);
+		}
+		return Some(0);
+	}
+	let pkgs: Vec<DbPkg> = add.iter().map(|t| db_pkg(h, t)).collect();
+	if config.print != 0 {
+		let out = &mut ui.out.stdout;
+		print_packages(
+			out,
+			config,
+			&pkgs,
+			h.cachedirs(),
+			ui.format_date,
+		);
+		return Some(0);
+	}
+	let remove: Vec<&Package> =
+		trans_get_remove(h).unwrap_or_default().iter().collect();
+	let explicit_adds: Vec<&Package> = ui.explicit_adds.iter().collect();
+	let explicit_removes: Vec<&Package> =
+		ui.explicit_removes.iter().collect();
+	let targets = TransTargets {
+		add: &pkgs,
+		remove: &remove,
+		explicit_adds: &explicit_adds,
+		explicit_removes: &explicit_removes,
+	};
+	display_targets(ui.out, config, &targets, &local_list(h), ui.cols);
+	ui.out.stdout.push(b'\n');
+	let msg: &[u8] = match config.op_s_downloadonly {
+		0 => b"Proceed with installation?",
+		_ => b"Proceed with download?",
+	};
+	match yesno(ui.out, config, ui.term, msg) {
+		true => None,
+		false => Some(1),
+	}
 }

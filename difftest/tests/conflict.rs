@@ -449,14 +449,14 @@ fn cmp_deps(
 			)
 		})
 		.collect();
-	let inner = innerconflicts(pkgs);
+	let inner = innerconflicts(pkgs, &mut ());
 	assert_eq!(inner, c.innerconflicts(pkgs), "inner {names:?}");
 	assert_eq!(
-		checkconflicts(pkgs),
+		checkconflicts(pkgs, &mut ()),
 		c.checkconflicts(pkgs),
 		"check {names:?}"
 	);
-	let outer = outerconflicts(&fix.cache, pkgs);
+	let outer = outerconflicts(&fix.cache, pkgs, &mut ());
 	assert_eq!(outer, c.outerconflicts(pkgs), "outer {names:?}");
 	[inner, outer]
 }

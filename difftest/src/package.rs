@@ -86,7 +86,7 @@ pub(crate) struct CPkg {
 	makedepends: *mut CList,
 	conflicts: *mut CList,
 	provides: *mut CList,
-	removes: *mut CList,
+	pub(crate) removes: *mut CList,
 	pub(crate) oldpkg: *mut CPkg,
 	ops: *const c_void,
 	files: CFileList,

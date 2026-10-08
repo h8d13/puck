@@ -7,5 +7,7 @@ pub mod getopt;
 pub mod package;
 pub mod pacman;
 pub mod query;
+pub mod remove;
 pub mod sync;
+pub mod upgrade;
 pub mod util;

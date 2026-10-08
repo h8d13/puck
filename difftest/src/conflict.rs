@@ -127,7 +127,7 @@ fn depmod_from_c(m: c_int) -> DepMod {
 }
 
 // copies a conflict list out and frees it, conflicts and nodes
-fn take_conflicts(list: *mut CList) -> Vec<Conflict> {
+pub(crate) fn take_conflicts(list: *mut CList) -> Vec<Conflict> {
 	let data = list_data(list);
 	let out = data
 		.iter()
