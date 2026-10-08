@@ -28,7 +28,7 @@ use alpm_core::callbacks::{Callbacks, Fetch};
 use alpm_core::deps::dep_from_string;
 use alpm_core::error::Errno;
 use alpm_core::handle::Handle;
-use alpm_core::sandbox::{ExecError, SandboxExec};
+use alpm_core::sandbox::{ExecError, IgnoreSignals, SandboxExec};
 use alpm_core::util::{fnmatch, strerror, until_nul};
 use pacman_common::ini::{Ini, parse_ini};
 use pacman_common::util_common::{PATH_MAX, wordsplit};
@@ -1881,8 +1881,8 @@ fn glob_in_dir(
 // to its name after exit status 0. 0 downloaded, -1 failed (never 1);
 // failures wait 2 s for the user to cancel. systemvp runs argv itself,
 // or with a sandbox user through the sandbox helper's exec mode
-// (alpm_sandbox_setup_child in the C child). SIGINT/SIGQUIT are not
-// ignored meanwhile (no safe std API): ^C stops pacman with the command.
+// (alpm_sandbox_setup_child in the C child). SIGINT/SIGQUIT are ignored
+// meanwhile (sandbox::IgnoreSignals, read by sighandler.rs).
 // messages go out through pm_printf with the config as it was given
 pub struct XferCommand {
 	config: Config,
@@ -1918,6 +1918,8 @@ impl XferCommand {
 		let Some(file) = argv.first() else {
 			return -1;
 		};
+		// SIGINT/SIGQUIT ignored until the command is reaped
+		let _quiet = IgnoreSignals::new();
 		let r = match self.config.sandboxuser.clone() {
 			Some(user) => self.exec.run(&user, argv),
 			None => Command::new(OsStr::from_bytes(file))

@@ -619,6 +619,14 @@ fn xfercommand() {
 	let fetch_cwd =
 		xfer_script(&dir, "xfer-O.sh", &format!("{curl} -O \"$1\""));
 	let fail = xfer_script(&dir, "xfer-exit.sh", "exit 7");
+	// ^C and ^\ at pacman while the command runs: the C ignores both
+	let signal = |sig: &str| {
+		let body = format!(
+			"kill -{sig} $PPID\nsleep 0.3\n{curl} -o \"$2\" \"$1\""
+		);
+		xfer_script(&dir, &format!("xfer-{sig}.sh"), &body)
+	};
+	let (int, quit) = (signal("INT"), signal("QUIT"));
 	let http = srv.url("/m");
 	let http = String::from_utf8(http).unwrap();
 	let filem = format!("file://{}", dir.join("mirror").display());
@@ -638,6 +646,13 @@ fn xfercommand() {
 			"user missing",
 			"XferCommand = /nonexistent/xfer %u %o\nDownloadUser = nobody\n"
 				.into(),
+			&http,
+		),
+		("sigint", format!("XferCommand = {int} %u %o\n"), &http),
+		("sigquit", format!("XferCommand = {quit} %u %o\n"), &http),
+		(
+			"user sigint",
+			format!("XferCommand = {int} %u %o\nDownloadUser = nobody\n"),
 			&http,
 		),
 		// the built-in downloader in the sandbox child (seccomp on).

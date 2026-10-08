@@ -20,8 +20,8 @@
 // steps the C runs in the child as root run in the helper as the
 // DownloadUser: chdir, no_new_privs (first, landlock_restrict_self needs
 // it without CAP_SYS_ADMIN), landlock, seccomp. getuid() == 0 and
-// getpwnam are checked by the parent before spawning. SIGINT/SIGQUIT are
-// not ignored in the parent while the helper runs (no safe std API).
+// getpwnam are checked by the parent before spawning. SIGINT/SIGQUIT
+// count as ignored in the parent while the helper runs (IgnoreSignals).
 use std::ffi::{OsStr, OsString, c_int};
 use std::fs::File;
 use std::io::{self, IoSlice, IoSliceMut, Read, Write};
@@ -33,6 +33,8 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use rustix::net::{
 	RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags,
@@ -748,6 +750,49 @@ fn os(p: &[u8]) -> &Path {
 	Path::new(OsStr::from_bytes(until_nul(p)))
 }
 
+// SIGINT and SIGQUIT ignored by this process while a download or
+// command child runs (the C's sigaction SIG_IGN around fork and waitpid;
+// the child gets the default action back): the frontend's signal
+// handling reads these, a handler in safe Rust cannot change the
+// disposition. QUIT_DEFAULT is the flag a SIGQUIT registration falls back
+// to the default action on
+static IGNORED: AtomicBool = AtomicBool::new(false);
+static QUIT_DEFAULT: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+pub fn signals_ignored() -> bool {
+	IGNORED.load(Ordering::SeqCst)
+}
+
+// true while SIGQUIT keeps its default action
+pub fn quit_default() -> Arc<AtomicBool> {
+	let f = QUIT_DEFAULT.get_or_init(|| Arc::new(AtomicBool::new(true)));
+	Arc::clone(f)
+}
+
+// the ignoring window, closed on drop
+pub struct IgnoreSignals(());
+
+impl IgnoreSignals {
+	pub fn new() -> Self {
+		IGNORED.store(true, Ordering::SeqCst);
+		quit_default().store(false, Ordering::SeqCst);
+		IgnoreSignals(())
+	}
+}
+
+impl Default for IgnoreSignals {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+impl Drop for IgnoreSignals {
+	fn drop(&mut self) {
+		quit_default().store(true, Ordering::SeqCst);
+		IGNORED.store(false, Ordering::SeqCst);
+	}
+}
+
 // what the parent asks the system, a trait for tests that do not run
 // as root
 pub trait Host {
@@ -877,6 +922,7 @@ impl HelperSandbox {
 		cb: &mut dyn Callbacks,
 		req: &[u8],
 	) -> (Result<bool, Errno>, c_int) {
+		let _quiet = IgnoreSignals::new();
 		let child = Command::new(&self.program)
 			.args(&self.args)
 			.uid(uid)

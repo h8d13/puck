@@ -27,7 +27,8 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use alpm_core::handle::Interrupt;
-use signal_hook::consts::{SIGHUP, SIGINT};
+use alpm_core::sandbox;
+use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT};
 use signal_hook::flag;
 use signal_hook::iterator::Signals;
 use signal_hook::low_level;
@@ -64,8 +65,13 @@ fn write_out(s: &[u8]) {
 	let _ = out.flush();
 }
 
-// soft_interrupt_handler, on the signal thread
+// soft_interrupt_handler, on the signal thread. SIGINT while a
+// download or XferCommand child runs is dropped: the C ignores it there
+// (decided here a moment after delivery, like the rest)
 fn soft_interrupt_handler(signum: c_int) {
+	if signum == SIGINT && sandbox::signals_ignored() {
+		return;
+	}
 	let mut s = Vec::new();
 	let below = BARS_BELOW.load(Ordering::SeqCst);
 	if below > 0 {
@@ -109,6 +115,9 @@ pub fn install_soft_interrupt_handler() -> io::Result<()> {
 	for sig in [SIGINT, SIGHUP] {
 		flag::register_conditional_default(sig, Arc::clone(&removed))?;
 	}
+	// SIGQUIT keeps its default action but while a child runs (the C's
+	// SIG_IGN there); exec'd children get the default action back
+	flag::register_conditional_default(SIGQUIT, sandbox::quit_default())?;
 	let mut signals = Signals::new([SIGINT, SIGHUP])?;
 	std::thread::Builder::new()
 		.name("sighandler".into())

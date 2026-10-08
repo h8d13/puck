@@ -562,8 +562,10 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   The helper's stdin is a socket bringing argv and the parent's stdin
   (SCM_RIGHTS, rustix `net`); an exec failure's errno comes back on it
   like the C's err_fd, so "fork failed!" shows as in the C. SIGINT and
-  SIGQUIT are not ignored while the command runs (no safe std API): ^C
-  ends pacman with the command, where the C carries on after it.
+  SIGQUIT count as ignored while a download helper or the command runs
+  (`sandbox::IgnoreSignals`): sighandler.rs drops SIGINT then, and a
+  SIGQUIT registration falls back to the default action only outside
+  that window; decided a moment after delivery, on the signal thread.
 - `remove` commit side: `remove_single_package(h, oldpkg, newpkg,
   targ_count, pkg_count)` reads flags and skip_remove from `h.trans()`,
   oldpkg is the `trans.remove` dup (every section loaded), newpkg's files
