@@ -72,10 +72,23 @@ fn any_name(rng: &mut Rng) -> &'static str {
 	}
 }
 
-// mostly unversioned, so satisfiers and cycles are frequent. names and
-// versions stay valid for alpm-types (odd relations empty the section on
-// the Rust side, PORTING.md divergences)
+// mostly unversioned, so satisfiers and cycles are frequent; now and
+// then one dep_from_string takes apart oddly (empty name or version,
+// a description, "<=>", a pkgrel against a version)
 fn relation(rng: &mut Rng) -> String {
+	const ODD: [&str; 8] = [
+		"a>=",
+		"<1",
+		"b=1:2-3",
+		"c<=>1",
+		"d: for d",
+		"e>=1-01",
+		"v1=",
+		"libx>1.0-1",
+	];
+	if rng.below(10) == 0 {
+		return pick(rng, &ODD).to_string();
+	}
 	let name = any_name(rng);
 	match rng.below(3) {
 		0 => format!(
