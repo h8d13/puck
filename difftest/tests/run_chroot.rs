@@ -12,12 +12,13 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::Command;
 
-use alpm_core::hook::{AddTarget, HookEnv, HookWhen, hook_run};
+use alpm_core::callbacks::HookWhen;
+use alpm_core::hook::{AddTarget, Targets, hook_run};
 use alpm_core::package::Package;
 use alpm_core::trans::runscriptlet;
 use alpm_core::util::{ldconfig, run_chroot};
 use difftest::{
-	CHookHandle, CHookResult, COMPS, HookRecorder, Rng, TempRoot, iters,
+	CHookHandle, CHookResult, COMPS, Rng, RustHookHandle, TempRoot, iters,
 	tar_file, ustar, write_db,
 };
 
@@ -76,6 +77,14 @@ impl Fix {
 			&self.tmp.root(),
 			&self.tmp.dbpath(),
 			self.tmp.dir().join("log"),
+		)
+	}
+
+	fn r(&self) -> RustHookHandle {
+		RustHookHandle::new(
+			&self.tmp.root(),
+			&self.tmp.dbpath(),
+			self.tmp.dir().join("log-rs"),
 		)
 	}
 
@@ -179,10 +188,6 @@ fn normalize(r: CHookResult) -> CHookResult {
 	(r.0, recs, untemp(&r.2))
 }
 
-fn rust(rec: HookRecorder, ok: bool) -> CHookResult {
-	(if ok { 0 } else { 1 }, rec.recs, rec.actions)
-}
-
 fn show(r: &CHookResult) -> String {
 	let recs: Vec<String> = r.1.iter().map(difftest::show_rec).collect();
 	format!(
@@ -222,7 +227,7 @@ fn fc_fixed() {
 	}
 	use difftest::HookRec::{Log, Scriptlet};
 	let fix = Fix::new("fc-fixed");
-	let mut c = fix.c();
+	let (mut c, mut r) = (fix.c(), fix.r());
 	let line = |s: &str| Scriptlet(s.as_bytes().to_vec());
 	let long = "0".repeat(2046);
 	let cases: [(&str, &str, Vec<difftest::HookRec>); 6] = [
@@ -272,15 +277,9 @@ fn fc_fixed() {
 				.cloned()
 				.collect();
 		assert_eq!(got, lines, "{cmd} {script}\n{}", show(&cr));
-		let mut rec = HookRecorder::default();
-		let ok = run_chroot(
-			&fix.root,
-			Some(cmd.as_bytes()),
-			&args,
-			None,
-			&mut rec,
-		);
-		assert_eq!(cr, rust(rec, ok), "{cmd} {script}");
+		let ok =
+			run_chroot(&mut r.h, Some(cmd.as_bytes()), &args, None);
+		assert_eq!(cr, r.take(ok, 1), "{cmd} {script}");
 	}
 	let term = Log(
 		1,
@@ -360,7 +359,7 @@ fn fc_run_chroot() {
 		return;
 	}
 	let fix = Fix::new("fc-run");
-	let mut c = fix.c();
+	let (mut c, mut r) = (fix.c(), fix.r());
 	let mut rng = Rng::new(0xc4a007);
 	for _ in 0..(iters() / 500).max(60) {
 		let cmd = pick(&mut rng, &CMDS);
@@ -393,15 +392,13 @@ fn fc_run_chroot() {
 				)
 			},
 			&mut || {
-				let mut rec = HookRecorder::default();
 				let ok = run_chroot(
-					&fix.root,
+					&mut r.h,
 					Some(cmd.as_bytes()),
 					&args,
 					stdin.as_deref(),
-					&mut rec,
 				);
-				rust(rec, ok)
+				r.take(ok, 1)
 			},
 			&what,
 		);
@@ -411,15 +408,8 @@ fn fc_run_chroot() {
 	fix.reset();
 	fs::remove_dir_all(fix.rootdir()).unwrap();
 	let cr = c.run_chroot(Some(b"/bin/sh"), &argv, None);
-	let mut rec = HookRecorder::default();
-	let ok = run_chroot(
-		&fix.root,
-		Some(b"/bin/sh"),
-		&[b"/bin/sh"],
-		None,
-		&mut rec,
-	);
-	assert_eq!(cr, rust(rec, ok));
+	let ok = run_chroot(&mut r.h, Some(b"/bin/sh"), &[b"/bin/sh"], None);
+	assert_eq!(cr, r.take(ok, 1));
 }
 
 #[test]
@@ -428,7 +418,7 @@ fn fc_ldconfig() {
 		return;
 	}
 	let fix = Fix::new("fc-ldconfig");
-	let mut c = fix.c();
+	let (mut c, mut r) = (fix.c(), fix.r());
 	let stub = "#!/bin/sh\necho \"stub $# $0\"\n: > /etc/ld.so.cache\n";
 	for conf in [false, true] {
 		for mode in [None, Some(0o755), Some(0o644)] {
@@ -453,9 +443,8 @@ fn fc_ldconfig() {
 				&setup,
 				&mut |c| c.ldconfig(),
 				&mut || {
-					let mut rec = HookRecorder::default();
-					let ok = ldconfig(&fix.root, &mut rec);
-					rust(rec, ok)
+					let ok = ldconfig(&mut r.h);
+					r.take(ok, 1)
 				},
 				&format!("conf {conf} mode {mode:?}"),
 			);
@@ -509,7 +498,7 @@ fn fc_runscriptlet() {
 		return;
 	}
 	let fix = Fix::new("fc-scriptlet");
-	let mut c = fix.c();
+	let (mut c, mut r) = (fix.c(), fix.r());
 	let mut rng = Rng::new(0x5c41);
 	let src = fix.tmp.dir().join("install");
 	let pkgfile = fix.tmp.dir().join("pkg.tar");
@@ -563,17 +552,15 @@ fn fc_runscriptlet() {
 				)
 			},
 			&mut || {
-				let mut rec = HookRecorder::default();
 				let ok = runscriptlet(
-					&fix.root,
+					&mut r.h,
 					&fpath,
 					script.as_bytes(),
 					b"1.0-1",
 					oldver,
 					is_archive,
-					&mut rec,
 				);
-				rust(rec, ok)
+				r.take(ok, 1)
 			},
 			&what,
 		);
@@ -590,11 +577,12 @@ fn fc_hooks() {
 		return;
 	}
 	let fix = Fix::new("fc-hooks");
-	let mut c = fix.c();
+	let (mut c, mut r) = (fix.c(), fix.r());
 	let sys = [&fix.root[..], b"usr/share/libalpm/hooks/"].concat();
 	let etc = [&fix.root[..], b"etc/pacman.d/hooks/"].concat();
 	let dirs = vec![sys, etc];
 	c.set_hookdirs(&dirs);
+	r.set_hookdirs(&dirs);
 	let mut rng = Rng::new(0x400c5);
 	let names = ["a", "b", "foo"];
 	let paths = ["usr/bin/x", "etc/conf", "usr/lib/l.so"];
@@ -728,17 +716,12 @@ fn fc_hooks() {
 				(if r.0 == 0 { 0 } else { 1 }, r.1, r.2)
 			},
 			&mut || {
-				let mut rec = HookRecorder::default();
-				let env = HookEnv {
-					root: &fix.root,
-					hookdirs: &dirs,
-					noextract: &[],
-					local: &[],
+				let targets = Targets {
 					add: &rt,
 					remove: &rem,
 				};
-				let ok = hook_run(&env, when, &mut rec);
-				rust(rec, ok)
+				let ok = hook_run(&mut r.h, &targets, when);
+				r.take(ok, 1)
 			},
 			&what,
 		);

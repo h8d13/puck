@@ -25,13 +25,10 @@ use alpm_core::be_local::{
 use alpm_core::handle::Handle;
 use alpm_core::package::Package;
 use alpm_core::util::{strerror, until_nul};
-use pacman_common::util_common::llstat;
+use pacman_common::util_common::{PATH_MAX, llstat};
 
 use crate::conf::{Config, LOG_ERROR, LOG_WARNING, cat};
 use crate::util::{Output, pm_printf};
-
-// limits.h, the filepath buffers of check.c
-const PATH_MAX: usize = 4096;
 
 // the libalpm calls of check.c
 pub trait CheckEnv {
@@ -445,7 +442,7 @@ pub fn check_pkg_full(
 				path,
 				b"\n",
 			]);
-			pm_printf(o, c, LOG_WARNING, &msg);
+			pm_printf(&mut o.stderr, c, LOG_WARNING, &msg);
 			continue;
 		}
 		if !type_matches(e.kind, &st) {

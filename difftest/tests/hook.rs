@@ -10,13 +10,13 @@ use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
-use alpm_core::be_local::{INFRQ_DESC, LocalDb};
+use alpm_core::callbacks::HookWhen;
 use alpm_core::filelist::{File, FileList};
-use alpm_core::hook::{AddTarget, HookEnv, HookWhen, hook_run};
+use alpm_core::hook::{AddTarget, Targets, hook_run};
 use alpm_core::package::Package;
 use alpm_core::util::hash_sdbm;
 use difftest::{
-	CHookHandle, CHookResult, HookRecorder, LocalEntry, Rng, TempRoot,
+	CHookHandle, CHookResult, LocalEntry, Rng, RustHookHandle, TempRoot,
 	iters,
 };
 
@@ -49,12 +49,11 @@ fn pick<T: Copy>(rng: &mut Rng, items: &[T]) -> T {
 	items[rng.below(items.len())]
 }
 
-// a fixture tempdir: local db, three hookdir paths, a logfile; the C
-// handle on root "/"
+// a fixture tempdir: local db, three hookdir paths, a logfile per side;
+// the C and the Rust handle on root "/"
 struct Fix {
 	tmp: TempRoot,
 	dirs: Vec<Vec<u8>>,
-	local: Vec<Package>,
 }
 
 impl Fix {
@@ -82,19 +81,13 @@ impl Fix {
 			})
 			.collect();
 		tmp.write_local(&entries);
-		let db = LocalDb::register(&tmp.dbpath()).unwrap();
-		let mut cache = db.populate().unwrap();
-		for p in cache.iter_mut() {
-			db.read(p, INFRQ_DESC).unwrap();
-		}
-		let local = cache.iter().cloned().collect();
 		let dirs = (0..3)
 			.map(|i| {
 				[&tmp.path(&format!("hooks{i}"))[..], b"/"]
 					.concat()
 			})
 			.collect();
-		Fix { tmp, dirs, local }
+		Fix { tmp, dirs }
 	}
 
 	fn c(&self) -> CHookHandle {
@@ -105,6 +98,16 @@ impl Fix {
 		);
 		c.set_hookdirs(&self.dirs);
 		c
+	}
+
+	fn r(&self) -> RustHookHandle {
+		let mut r = RustHookHandle::new(
+			b"/",
+			&self.tmp.dbpath(),
+			self.tmp.dir().join("log-rs"),
+		);
+		r.set_hookdirs(&self.dirs);
+		r
 	}
 
 	fn dir(&self, i: usize) -> std::path::PathBuf {
@@ -258,24 +261,13 @@ fn write_dirs(
 }
 
 fn rust_run(
-	fix: &Fix,
+	r: &mut RustHookHandle,
 	add: &[AddTarget],
 	remove: &[&Package],
-	noextract: &[Vec<u8>],
 	when: HookWhen,
 ) -> CHookResult {
-	let local: Vec<&Package> = fix.local.iter().collect();
-	let env = HookEnv {
-		root: b"/",
-		hookdirs: &fix.dirs,
-		noextract,
-		local: &local,
-		add,
-		remove,
-	};
-	let mut rec = HookRecorder::default();
-	let ok = hook_run(&env, when, &mut rec);
-	(if ok { 0 } else { -1 }, rec.recs, rec.actions)
+	let ok = hook_run(&mut r.h, &Targets { add, remove }, when);
+	r.take(ok, -1)
 }
 
 fn show(fix: &Fix) -> String {
@@ -307,7 +299,7 @@ fn compare(fix: &Fix, c: CHookResult, r: CHookResult) {
 #[test]
 fn fixed_masking() {
 	let fix = Fix::new("hook-mask");
-	let mut c = fix.c();
+	let (mut c, mut r) = (fix.c(), fix.r());
 	fix.clear();
 	for i in 0..3 {
 		fs::create_dir(fix.dir(i)).unwrap();
@@ -333,7 +325,7 @@ fn fixed_masking() {
 		pkg: &pkg,
 		oldpkg: None,
 	}];
-	let rr = rust_run(&fix, &add, &[], &[], when);
+	let rr = rust_run(&mut r, &add, &[], when);
 	let ran = |r: &CHookResult| {
 		r.1.iter()
 			.filter_map(|x| match x {
@@ -353,14 +345,14 @@ fn fixed_masking() {
 #[test]
 fn parse_validate_fuzz() {
 	let fix = Fix::new("hook-parse");
-	let mut c = fix.c();
+	let (mut c, mut r) = (fix.c(), fix.r());
 	let mut rng = Rng::new(0x600c);
 	let n = (iters() / 5).max(500);
 	for _ in 0..n {
 		write_dirs(&fix, &mut rng, true, &mut hook_text);
 		let when = when_of(&mut rng);
 		let cr = c.hook_run(&[], &[], when);
-		let rr = rust_run(&fix, &[], &[], &[], when);
+		let rr = rust_run(&mut r, &[], &[], when);
 		compare(&fix, cr, rr);
 	}
 	fix.clear();
@@ -472,7 +464,7 @@ fn valid_hook(rng: &mut Rng) -> String {
 #[test]
 fn match_run_fuzz() {
 	let fix = Fix::new("hook-match");
-	let mut c = fix.c();
+	let (mut c, mut r) = (fix.c(), fix.r());
 	let mut rng = Rng::new(0x7e57);
 	let n = (iters() / 50).max(300);
 	let mut ran = 0;
@@ -507,8 +499,9 @@ fn match_run_fuzz() {
 			.collect();
 		let rem: Vec<&Package> = removes.iter().collect();
 		c.set_noextracts(&noextract);
+		r.set_noextracts(&noextract);
 		let cr = c.hook_run(&ctargets, &rem, when);
-		let rr = rust_run(&fix, &rtargets, &rem, &noextract, when);
+		let rr = rust_run(&mut r, &rtargets, &rem, when);
 		ran += cr
 			.1
 			.iter()

@@ -3,10 +3,10 @@
 // an earlier one), trigger matching against the transaction, and running
 // the triggered hooks through util::run_chroot.
 //
-// the handle and its transaction come in as HookEnv; logs, logaction
-// lines and events go through HookCb. where the C dereferences NULL (an
-// Operation, Type or When without '='), the port reports an invalid
-// value instead.
+// hookdirs, noextract, root, the local db, logcb, eventcb and the
+// logfile come from the Handle; the transaction (a separate unit) comes
+// in as Targets. where the C dereferences NULL (an Operation, Type or
+// When without '='), the port reports an invalid value instead.
 
 use std::fs;
 use std::io;
@@ -16,25 +16,17 @@ use std::path::Path;
 use pacman_common::ini::{Ini, parse_ini};
 use pacman_common::util_common::wordsplit;
 
-use crate::deps::{LogLevel, find_satisfier};
-use crate::package::Package;
+use crate::callbacks::{Callbacks, Event, HookRun, HookWhen, LogLevel};
+use crate::deps::find_satisfier;
+use crate::handle::Handle;
+use crate::package::{DbCaches, Package};
 use crate::util::{
-	CALLER_PREFIX, ChrootCb, fnmatch_patterns, run_chroot, strerror,
+	CALLER_PREFIX, PATH_MAX, fnmatch_patterns, run_chroot, strerror,
 	until_nul,
 };
 
 // ALPM_HOOK_SUFFIX
 pub const HOOK_SUFFIX: &[u8] = b".hook";
-
-// limits.h on linux
-const PATH_MAX: usize = 4096;
-
-// alpm_hook_when_t, discriminants as in alpm.h
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HookWhen {
-	PreTransaction = 1,
-	PostTransaction = 2,
-}
 
 // enum _alpm_hook_op_t bits of Trigger::op
 pub const OP_INSTALL: u8 = 1 << 0;
@@ -80,47 +72,14 @@ pub struct AddTarget<'a> {
 	pub oldpkg: Option<&'a Package>,
 }
 
-// the handle state hook.c reads. packages need names and file lists
+// handle->trans->add and ->remove. packages need names and file lists
 #[derive(Clone, Copy, Debug)]
-pub struct HookEnv<'a> {
-	// handle->root, with its trailing '/'
-	pub root: &'a [u8],
-	// handle->hookdirs in order, each with its trailing '/'
-	pub hookdirs: &'a [Vec<u8>],
-	// handle->noextract
-	pub noextract: &'a [Vec<u8>],
-	// the local db cache in list order, for Depends
-	pub local: &'a [&'a Package],
-	// handle->trans->add and ->remove
+pub struct Targets<'a> {
 	pub add: &'a [AddTarget<'a>],
 	pub remove: &'a [&'a Package],
 }
 
-// the hook events (alpm_event_hook_t, alpm_event_hook_run_t)
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HookEvent<'a> {
-	Start(HookWhen),
-	RunStart {
-		name: &'a [u8],
-		desc: Option<&'a [u8]>,
-		position: usize,
-		total: usize,
-	},
-	RunDone {
-		name: &'a [u8],
-		desc: Option<&'a [u8]>,
-		position: usize,
-		total: usize,
-	},
-	Done(HookWhen),
-}
-
-// the handle callbacks of hook.c on top of run_chroot's
-pub trait HookCb: ChrootCb {
-	fn hook_event(&mut self, ev: HookEvent<'_>);
-}
-
-fn logv(cb: &mut impl ChrootCb, level: LogLevel, parts: &[&[u8]]) {
+fn logv(cb: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
 	cb.log(level, &parts.concat());
 }
 
@@ -134,7 +93,7 @@ fn parse_cb(
 	hook: &mut Hook,
 	file: &[u8],
 	ev: Ini,
-	cb: &mut impl ChrootCb,
+	cb: &mut dyn Callbacks,
 ) -> i32 {
 	let (line, section, key, value) = match ev {
 		Ini::OpenError(e) => {
@@ -163,7 +122,7 @@ fn parse_cb(
 	};
 	let at = format!(" line {line}: ");
 	let at = at.as_bytes();
-	let error = |cb: &mut _, what: &[u8], v: &[u8]| {
+	let error = |cb: &mut dyn Callbacks, what: &[u8], v: &[u8]| {
 		logv(
 			cb,
 			LogLevel::Error,
@@ -171,7 +130,7 @@ fn parse_cb(
 		);
 		1
 	};
-	let overwrite = |cb: &mut _, what: &[u8]| {
+	let overwrite = |cb: &mut dyn Callbacks, what: &[u8]| {
 		logv(
 			cb,
 			LogLevel::Warning,
@@ -185,7 +144,9 @@ fn parse_cb(
 			],
 		);
 	};
-	let invalid = |cb: &mut _| error(cb, b"invalid value ", shown(value));
+	let invalid = |cb: &mut dyn Callbacks| {
+		error(cb, b"invalid value ", shown(value))
+	};
 	match (section, key) {
 		(None, _) => error(cb, b"invalid option ", key),
 		(Some(b"Trigger"), _) => {
@@ -281,7 +242,7 @@ fn begin_section(
 	file: &[u8],
 	line: usize,
 	name: &[u8],
-	cb: &mut impl ChrootCb,
+	cb: &mut dyn Callbacks,
 ) -> i32 {
 	match name {
 		b"Trigger" => hook.triggers.push(Trigger::default()),
@@ -301,7 +262,7 @@ fn begin_section(
 
 impl Trigger {
 	// _alpm_trigger_validate
-	fn validate(&self, file: &[u8], cb: &mut impl ChrootCb) -> bool {
+	fn validate(&self, file: &[u8], cb: &mut dyn Callbacks) -> bool {
 		let missing = [
 			(self.targets.is_empty(), &b"targets"[..]),
 			(self.ttype.is_none(), b"type"),
@@ -331,7 +292,11 @@ impl Trigger {
 	// into installed (minus NoExtract), removed (upgraded packages' old
 	// files and removed packages' files) and those in both (upgraded).
 	// returned when one of the trigger's operations has paths
-	fn match_file<'a>(&self, env: &HookEnv<'a>) -> Matches<'a> {
+	fn match_file<'a>(
+		&self,
+		targets: &Targets<'a>,
+		noextract: &[Vec<u8>],
+	) -> Matches<'a> {
 		let pats = self.patterns();
 		let hit = |name: &[u8]| {
 			fnmatch_patterns(&pats, name) == Some(false)
@@ -339,18 +304,18 @@ impl Trigger {
 		let files = |p: &'a Package| {
 			p.files.files.iter().map(|f| &f.name[..])
 		};
-		let mut install: Vec<&[u8]> =
-			env.add.iter()
-				.flat_map(|t| files(t.pkg))
-				.filter(|n| {
-					fnmatch_patterns(env.noextract, n)
-						!= Some(false)
-				})
-				.filter(|n| hit(n))
-				.collect();
-		let old = env.add.iter().filter_map(|t| t.oldpkg);
+		let mut install: Vec<&[u8]> = targets
+			.add
+			.iter()
+			.flat_map(|t| files(t.pkg))
+			.filter(|n| {
+				fnmatch_patterns(noextract, n) != Some(false)
+			})
+			.filter(|n| hit(n))
+			.collect();
+		let old = targets.add.iter().filter_map(|t| t.oldpkg);
 		let mut remove: Vec<&[u8]> = old
-			.chain(env.remove.iter().copied())
+			.chain(targets.remove.iter().copied())
 			.flat_map(files)
 			.filter(|n| hit(n))
 			.collect();
@@ -390,14 +355,14 @@ impl Trigger {
 	// _alpm_hook_trigger_match_pkg: installs and upgrades by the new
 	// package's name (an upgrade has an oldpkg), removals of names not
 	// also being added
-	fn match_pkg<'a>(&self, env: &HookEnv<'a>) -> Matches<'a> {
+	fn match_pkg<'a>(&self, targets: &Targets<'a>) -> Matches<'a> {
 		let pats = self.patterns();
 		let hit = |p: &Package| {
 			fnmatch_patterns(&pats, p.name_bytes()) == Some(false)
 		};
 		let (mut ins, mut upgrade, mut rem) = (vec![], vec![], vec![]);
 		if self.op & (OP_INSTALL | OP_UPGRADE) != 0 {
-			for t in env.add.iter().filter(|t| hit(t.pkg)) {
+			for t in targets.add.iter().filter(|t| hit(t.pkg)) {
 				match t.oldpkg {
 					Some(_) if self.op & OP_UPGRADE
 						!= 0 =>
@@ -413,11 +378,11 @@ impl Trigger {
 		}
 		if self.op & OP_REMOVE != 0 {
 			let added = |p: &Package| {
-				env.add.iter().any(|t| {
+				targets.add.iter().any(|t| {
 					t.pkg.name_bytes() == p.name_bytes()
 				})
 			};
-			for p in env
+			for p in targets
 				.remove
 				.iter()
 				.filter(|p| hit(p) && !added(p))
@@ -457,7 +422,7 @@ impl Hook {
 	// _alpm_hook_validate: a hook without triggers is valid (it masks a
 	// lower priority one); otherwise every trigger, Exec and When must
 	// be set. AbortOnFail outside PreTransaction only warns
-	pub fn validate(&self, file: &[u8], cb: &mut impl ChrootCb) -> bool {
+	pub fn validate(&self, file: &[u8], cb: &mut dyn Callbacks) -> bool {
 		if self.triggers.is_empty() {
 			return true;
 		}
@@ -505,14 +470,17 @@ impl Hook {
 	// sorted and deduplicated as _alpm_hook_run_hook feeds them
 	pub fn triggered<'a>(
 		&self,
-		env: &HookEnv<'a>,
+		targets: &Targets<'a>,
+		noextract: &[Vec<u8>],
 	) -> Option<Vec<&'a [u8]>> {
 		let mut all = Vec::new();
 		let mut hit = false;
 		for t in &self.triggers {
 			let m = match t.ttype {
-				Some(TriggerType::Package) => t.match_pkg(env),
-				_ => t.match_file(env),
+				Some(TriggerType::Package) => {
+					t.match_pkg(targets)
+				}
+				_ => t.match_file(targets, noextract),
 			};
 			if m.0.is_empty() {
 				continue;
@@ -529,20 +497,16 @@ impl Hook {
 	}
 
 	// _alpm_hook_run_hook: Depends against the local db, then Exec with
-	// the matches one per line on stdin for NeedsTargets
-	fn run(
-		&self,
-		env: &HookEnv,
-		matches: &[&[u8]],
-		cb: &mut impl ChrootCb,
-	) -> bool {
+	// the matches one per line on stdin for NeedsTargets. the local
+	// descs load up front where the C lazy-loads them per satisfier
+	fn run(&self, h: &mut Handle, matches: &[&[u8]]) -> bool {
 		for dep in &self.depends {
-			let local = env.local.iter().copied();
+			let local = h.local_cache().into_iter();
 			if dep.as_ref()
 				.and_then(|d| find_satisfier(local, d))
 				.is_none()
 			{
-				logv(cb, LogLevel::Error, &[
+				logv(h.callbacks(), LogLevel::Error, &[
 					b"unable to run hook ",
 					&self.name,
 					b": could not satisfy dependencies\n",
@@ -560,7 +524,7 @@ impl Hook {
 		});
 		let stdin: Option<Vec<u8>> = stdin.map(Iterator::collect);
 		let cmd0 = argv.first().copied();
-		run_chroot(env.root, cmd0, &argv, stdin.as_deref(), cb)
+		run_chroot(h, cmd0, &argv, stdin.as_deref())
 	}
 }
 
@@ -575,7 +539,7 @@ fn stem(h: &Hook) -> &[u8] {
 
 // parse_ini + _alpm_hook_parse_cb on path. None when the callback
 // stopped parsing (its error is logged). name is left empty
-pub fn parse_hook(path: &[u8], cb: &mut impl ChrootCb) -> Option<Hook> {
+pub fn parse_hook(path: &[u8], cb: &mut dyn Callbacks) -> Option<Hook> {
 	let mut hook = Hook::default();
 	let path = until_nul(path);
 	let os = Path::new(std::ffi::OsStr::from_bytes(path));
@@ -585,7 +549,7 @@ pub fn parse_hook(path: &[u8], cb: &mut impl ChrootCb) -> Option<Hook> {
 
 // one directory of _alpm_hook_run's scan: hooks not yet in hooks
 // (masked by name) are parsed and validated. false on any error
-fn scan_dir(dir: &[u8], hooks: &mut Vec<Hook>, cb: &mut impl ChrootCb) -> bool {
+fn scan_dir(dir: &[u8], hooks: &mut Vec<Hook>, cb: &mut dyn Callbacks) -> bool {
 	let too_long = strerror(&rustix::io::Errno::NAMETOOLONG.into());
 	if dir.len() >= PATH_MAX {
 		logv(
@@ -663,10 +627,10 @@ fn scan_entry(
 	dir: &[u8],
 	name: &[u8],
 	hooks: &mut Vec<Hook>,
-	cb: &mut impl ChrootCb,
+	cb: &mut dyn Callbacks,
 ) -> bool {
 	let path = [dir, name].concat();
-	let debug = |cb: &mut _, what: &[u8]| {
+	let debug = |cb: &mut dyn Callbacks, what: &[u8]| {
 		logv(cb, LogLevel::Debug, &[what, &path, b"\n"]);
 	};
 	if !name.ends_with(HOOK_SUFFIX) {
@@ -719,11 +683,13 @@ fn scan_entry(
 // PreTransaction before running. the hooks of `when` whose triggers
 // match run sorted by name; for PreTransaction a failing AbortOnFail hook
 // stops the rest. true when nothing failed (C 0)
-pub fn hook_run(env: &HookEnv, when: HookWhen, cb: &mut impl HookCb) -> bool {
+pub fn hook_run(h: &mut Handle, targets: &Targets, when: HookWhen) -> bool {
 	let mut hooks = Vec::new();
 	let mut ok = true;
-	for dir in env.hookdirs.iter().rev() {
-		ok &= scan_dir(until_nul(dir), &mut hooks, cb);
+	// the scan logs through the handle
+	let hookdirs = h.hookdirs().to_vec();
+	for dir in hookdirs.iter().rev() {
+		ok &= scan_dir(until_nul(dir), &mut hooks, h.callbacks());
 	}
 	if !ok && when == HookWhen::PreTransaction {
 		return false;
@@ -733,37 +699,34 @@ pub fn hook_run(env: &HookEnv, when: HookWhen, cb: &mut impl HookCb) -> bool {
 	let triggered: Vec<(&Hook, Vec<&[u8]>)> = hooks
 		.iter()
 		.filter(|h| h.when == Some(when))
-		.filter_map(|h| Some((h, h.triggered(env)?)))
+		.filter_map(|hk| {
+			Some((hk, hk.triggered(targets, h.noextracts())?))
+		})
 		.collect();
 	if triggered.is_empty() {
 		return ok;
 	}
-	cb.hook_event(HookEvent::Start(when));
+	h.callbacks().event(&Event::HookStart { when });
 	let total = triggered.len();
 	for (i, (hook, matches)) in triggered.iter().enumerate() {
-		let (name, desc) = (&hook.name[..], hook.desc.as_deref());
-		let position = i + 1;
-		let msg = [b"running '", name, b"'...\n"].concat();
-		cb.logaction(CALLER_PREFIX, &msg);
-		cb.hook_event(HookEvent::RunStart {
-			name,
-			desc,
-			position,
+		let run = HookRun {
+			name: &hook.name,
+			desc: hook.desc.as_deref(),
+			position: i + 1,
 			total,
-		});
-		if !hook.run(env, matches, cb) && hook.abort_on_fail {
+		};
+		let msg = [b"running '", run.name, b"'...\n"].concat();
+		// alpm_logaction's result is not checked
+		let _ = h.logaction(CALLER_PREFIX, &msg);
+		h.callbacks().event(&Event::HookRunStart(run));
+		if !hook.run(h, matches) && hook.abort_on_fail {
 			ok = false;
 		}
-		cb.hook_event(HookEvent::RunDone {
-			name,
-			desc,
-			position,
-			total,
-		});
+		h.callbacks().event(&Event::HookRunDone(run));
 		if !ok && when == HookWhen::PreTransaction {
 			break;
 		}
 	}
-	cb.hook_event(HookEvent::Done(when));
+	h.callbacks().event(&Event::HookDone { when });
 	ok
 }

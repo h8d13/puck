@@ -9,10 +9,8 @@ use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use alpm_core::dload::{
-	Callbacks, DownloadEvent, DownloadState, LogLevel, Payload, Sandbox,
-	Settings,
-};
+use alpm_core::callbacks::{Callbacks, DownloadEvent, LogLevel};
+use alpm_core::dload::{DownloadState, Payload, Sandbox, Settings};
 use alpm_core::error::Errno;
 use alpm_core::sandbox::{
 	CB_DOWNLOAD, CB_LOG, CallbackWriter, ChildOps, HelperSandbox, Host,

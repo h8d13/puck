@@ -17,7 +17,8 @@ use landlock::{
 };
 use rustix::fs::{Mode, OFlags};
 
-use crate::dload::{Callbacks, LogLevel, strerror};
+use crate::callbacks::{Callbacks, LogLevel};
+use crate::util::strerror;
 use crate::util::until_nul;
 
 // _LANDLOCK_ACCESS_FS_READ

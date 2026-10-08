@@ -25,14 +25,13 @@ use crate::error::Errno;
 use crate::log::{Clock, Logger};
 use crate::package::{DbCaches, Package};
 use crate::signing::Keyring;
-use crate::util::{fnmatch_patterns, hash_sdbm, makepath, until_nul};
+use crate::util::{
+	CALLER_PREFIX, PATH_MAX, fnmatch_patterns, hash_sdbm, makepath,
+	until_nul,
+};
 
-// limits.h on linux, the realpath buffer of _alpm_set_directory_option
-const PATH_MAX: usize = 4096;
 // SYSHOOKDIR of the meson build, appended to root without its '/'
 const SYSHOOKDIR: &[u8] = b"/usr/share/libalpm/hooks/";
-// ALPM_CALLER_PREFIX
-const CALLER_PREFIX: &[u8] = b"ALPM";
 // getpwnam(3) with the "files" NSS source
 const PASSWD: &str = "/etc/passwd";
 const ENOENT: i32 = 2;

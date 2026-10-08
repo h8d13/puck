@@ -31,14 +31,14 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::callbacks::{Callbacks, DownloadEvent, LogLevel};
 use crate::dload::{
-	Callbacks, DownloadEvent, DownloadState, LogLevel, Payload, Sandbox,
-	Settings, download_internal,
+	DownloadState, Payload, Sandbox, Settings, download_internal,
 };
 use crate::error::Errno;
 use crate::sandbox_fs::restrict_writes_to;
 use crate::sandbox_syscalls::syscalls_filter;
-use crate::util::until_nul;
+use crate::util::{PATH_MAX, until_nul};
 
 // argv[1] of the helper
 pub const HELPER_ARG: &str = "--alpm-sandbox-helper";
@@ -52,8 +52,6 @@ const DL_INIT: u32 = 0;
 const DL_PROGRESS: u32 = 1;
 const DL_RETRY: u32 = 2;
 const DL_COMPLETED: u32 = 3;
-
-const PATH_MAX: usize = 4096;
 
 // the alpm_download_event_*_t structs, for their C sizes (padding
 // included): the pipe carries them raw

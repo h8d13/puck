@@ -4,27 +4,30 @@
 // fixture. logcb, eventcb and the logfile (alpm_logaction) are recorded;
 // the transaction is set by hand from Rust Packages.
 //
-// HookRecorder is the Rust side's HookCb, recording the same way, so the
+// RustHookHandle is the same on an alpm_core Handle: HookRecorder as its
+// Callbacks, recording the same way, and a logfile of its own, so the
 // tests compare HookRec lists and logfile text directly.
+use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::fs;
 use std::path::PathBuf;
 use std::ptr;
+use std::rc::Rc;
 use std::sync::MutexGuard;
 
-use alpm_core::deps::LogLevel;
-use alpm_core::hook::{HookCb, HookEvent, HookWhen};
-use alpm_core::package::Package;
-use alpm_core::util::ChrootCb;
+use alpm_core::callbacks::{Callbacks, Event, HookRun, HookWhen, LogLevel};
+use alpm_core::handle::Handle;
+use alpm_core::package::{DbCaches, Package};
 
 use crate::handle::{
 	ALPM, CHandleHead, alpm_db_get_pkgcache, alpm_get_localdb,
-	alpm_initialize, alpm_option_set_eventcb, alpm_option_set_logcb,
+	alpm_initialize, alpm_option_set_eventcb, alpm_option_set_hookdirs,
+	alpm_option_set_logcb, alpm_option_set_logfile,
 	alpm_option_set_noextracts, alpm_release, alpm_trans_init,
 	alpm_trans_release,
 };
 use crate::package::{CPkgBox, alpm_pkg_get_provides, list_data, with_strs};
-use crate::{CList, alpm_list_add, alpm_list_free, cstr, vsnprintf};
+use crate::{alpm_list_add, alpm_list_free, cstr, vsnprintf};
 
 // ALPM_TRANS_FLAG_NOLOCK: no lock file under the fixture dbpath
 const TRANS_FLAG_NOLOCK: c_int = 1 << 17;
@@ -48,14 +51,6 @@ unsafe extern "C" {
 		ver: *const c_char,
 		oldver: *const c_char,
 		is_archive: c_int,
-	) -> c_int;
-	fn alpm_option_set_logfile(
-		handle: *mut c_void,
-		logfile: *const c_char,
-	) -> c_int;
-	fn alpm_option_set_hookdirs(
-		handle: *mut c_void,
-		hookdirs: *mut CList,
 	) -> c_int;
 }
 
@@ -91,58 +86,86 @@ pub fn show_rec(r: &HookRec) -> String {
 	}
 }
 
-// the Rust side's callbacks: recs as HookRec, logaction lines as the
-// logfile has them without the timestamp
+// the Rust side's callbacks: logs and the events hook.c and util.c send
+// as HookRec, shared with the RustHookHandle that reads them back
 #[derive(Debug, Default)]
-pub struct HookRecorder {
-	pub recs: Vec<HookRec>,
-	pub actions: Vec<u8>,
-}
+pub struct HookRecorder(Rc<RefCell<Vec<HookRec>>>);
 
-impl ChrootCb for HookRecorder {
+impl Callbacks for HookRecorder {
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {
-		self.recs.push(HookRec::Log(level as c_int, msg.to_vec()));
+		let rec = HookRec::Log(level as c_int, msg.to_vec());
+		self.0.borrow_mut().push(rec);
 	}
 
-	fn logaction(&mut self, prefix: &[u8], msg: &[u8]) {
-		self.actions.push(b'[');
-		self.actions.extend_from_slice(prefix);
-		self.actions.extend_from_slice(b"] ");
-		self.actions.extend_from_slice(msg);
-	}
-
-	fn scriptlet_info(&mut self, line: &[u8]) {
-		self.recs.push(HookRec::Scriptlet(line.to_vec()));
+	fn event(&mut self, event: &Event<'_>) {
+		let run = |r: &HookRun| {
+			let desc = r.desc.map(<[u8]>::to_vec);
+			(r.name.to_vec(), desc, r.position, r.total)
+		};
+		let rec = match event {
+			Event::ScriptletInfo { line } => {
+				HookRec::Scriptlet(line.to_vec())
+			}
+			Event::HookStart { when } => {
+				HookRec::HookStart(*when as c_int)
+			}
+			Event::HookDone { when } => {
+				HookRec::HookDone(*when as c_int)
+			}
+			Event::HookRunStart(r) => {
+				let (n, d, p, t) = run(r);
+				HookRec::RunStart(n, d, p, t)
+			}
+			Event::HookRunDone(r) => {
+				let (n, d, p, t) = run(r);
+				HookRec::RunDone(n, d, p, t)
+			}
+			e => panic!("unexpected event {}", e.kind()),
+		};
+		self.0.borrow_mut().push(rec);
 	}
 }
 
-impl HookCb for HookRecorder {
-	fn hook_event(&mut self, ev: HookEvent<'_>) {
-		let run = |name: &[u8], desc: Option<&[u8]>| {
-			(name.to_vec(), desc.map(<[u8]>::to_vec))
-		};
-		self.recs.push(match ev {
-			HookEvent::Start(w) => HookRec::HookStart(w as c_int),
-			HookEvent::Done(w) => HookRec::HookDone(w as c_int),
-			HookEvent::RunStart {
-				name,
-				desc,
-				position,
-				total,
-			} => {
-				let (n, d) = run(name, desc);
-				HookRec::RunStart(n, d, position, total)
-			}
-			HookEvent::RunDone {
-				name,
-				desc,
-				position,
-				total,
-			} => {
-				let (n, d) = run(name, desc);
-				HookRec::RunDone(n, d, position, total)
-			}
-		});
+// a Rust Handle on root/dbpath with a HookRecorder and a logfile, the
+// counterpart of CHookHandle
+pub struct RustHookHandle {
+	pub h: Handle,
+	logfile: PathBuf,
+	recs: Rc<RefCell<Vec<HookRec>>>,
+}
+
+impl RustHookHandle {
+	// root and dbpath must exist, logfile is created on first use
+	pub fn new(root: &[u8], dbpath: &[u8], logfile: PathBuf) -> Self {
+		let mut h = Handle::initialize(root, dbpath).unwrap();
+		let recs = Rc::new(RefCell::new(Vec::new()));
+		h.set_callbacks(Box::new(HookRecorder(recs.clone())));
+		h.set_logfile(logfile.as_os_str().as_encoded_bytes());
+		// the local descs loaded up front like CHookHandle's
+		h.local_cache();
+		recs.borrow_mut().clear();
+		RustHookHandle { h, logfile, recs }
+	}
+
+	pub fn set_hookdirs(&mut self, dirs: &[Vec<u8>]) {
+		self.h.set_hookdirs(dirs);
+		self.recs.borrow_mut().clear();
+	}
+
+	pub fn set_noextracts(&mut self, list: &[Vec<u8>]) {
+		self.h.set_noextracts(list);
+		self.recs.borrow_mut().clear();
+	}
+
+	// the records and logfile text since the last call, with the C
+	// return value of the call: 0 for ok, fail otherwise
+	pub fn take(&mut self, ok: bool, fail: c_int) -> CHookResult {
+		let log = fs::read(&self.logfile).unwrap_or_default();
+		if !log.is_empty() {
+			fs::write(&self.logfile, b"").unwrap();
+		}
+		let recs = std::mem::take(&mut *self.recs.borrow_mut());
+		(if ok { 0 } else { fail }, recs, strip_stamps(&log))
 	}
 }
 

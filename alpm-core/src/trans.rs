@@ -1,6 +1,6 @@
 // port of the scriptlet part of lib/libalpm/trans.c: _alpm_runscriptlet
-// and its grep helper. the transaction itself is a separate unit; root
-// and the handle callbacks come in as parameters.
+// and its grep helper. the transaction itself is a separate unit; root,
+// logcb, eventcb and the logfile come from the Handle.
 
 use std::collections::hash_map::RandomState;
 use std::fs::{self, DirBuilder, File};
@@ -13,20 +13,18 @@ use std::path::Path;
 use pacman_common::util_common::safe_fgets;
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
-use crate::deps::LogLevel;
+use crate::callbacks::{Callbacks, LogLevel};
+use crate::handle::Handle;
 use crate::util::{
-	ChrootCb, SCRIPTLET_SHELL, copyfile, makepath_mode, run_chroot,
+	PATH_MAX, SCRIPTLET_SHELL, copyfile, makepath_mode, run_chroot,
 	strerror, unpack_single, until_nul,
 };
-
-// limits.h on linux
-const PATH_MAX: usize = 4096;
 
 fn os(path: &[u8]) -> &Path {
 	Path::new(std::ffi::OsStr::from_bytes(until_nul(path)))
 }
 
-fn logv(cb: &mut impl ChrootCb, level: LogLevel, parts: &[&[u8]]) {
+fn logv(cb: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
 	cb.log(level, &parts.concat());
 }
 
@@ -81,7 +79,7 @@ fn mkdtemp(template: &[u8]) -> Option<Vec<u8>> {
 }
 
 // "is not readable" debug line of _alpm_access with a NULL dir
-fn readable(path: &[u8], cb: &mut impl ChrootCb) -> bool {
+fn readable(path: &[u8], cb: &mut dyn Callbacks) -> bool {
 	let flags = AtFlags::SYMLINK_NOFOLLOW;
 	let Err(e) = accessat(CWD, os(path), Access::READ_OK, flags) else {
 		return true;
@@ -96,24 +94,25 @@ fn readable(path: &[u8], cb: &mut impl ChrootCb) -> bool {
 }
 
 // _alpm_runscriptlet: runs `. <copy>; <script> <ver> [<oldver>]` with
-// SCRIPTLET_SHELL -c under root (with its trailing '/'), the copy being
+// SCRIPTLET_SHELL -c under handle->root (with its trailing '/'), the copy being
 // filepath (or its .INSTALL entry when is_archive) placed in a fresh
 // root/tmp/alpm_XXXXXX. a missing filepath or a script name that does
 // not appear in it runs nothing. true unless something failed (C 0)
 pub fn runscriptlet(
-	root: &[u8],
+	h: &mut Handle,
 	filepath: &[u8],
 	script: &[u8],
 	ver: &[u8],
 	oldver: Option<&[u8]>,
 	is_archive: bool,
-	cb: &mut impl ChrootCb,
 ) -> bool {
-	let (root, filepath) = (until_nul(root), until_nul(filepath));
+	// the callbacks borrow the handle mutably
+	let root = h.root().to_vec();
+	let (root, filepath) = (&root[..], until_nul(filepath));
 	let (script, ver) = (until_nul(script), until_nul(ver));
-	if !readable(filepath, cb) {
+	if !readable(filepath, h.callbacks()) {
 		logv(
-			cb,
+			h.callbacks(),
 			LogLevel::Debug,
 			&[b"scriptlet '", filepath, b"' not found\n"],
 		);
@@ -129,15 +128,16 @@ pub fn runscriptlet(
 		let _ = makepath_mode(&tmp, 0o1777);
 	}
 	let Some(tmpdir) = mkdtemp(&[root, b"tmp/alpm_XXXXXX"].concat()) else {
-		cb.log(LogLevel::Error, b"could not create temp directory\n");
+		let msg = b"could not create temp directory\n";
+		h.callbacks().log(LogLevel::Error, msg);
 		return false;
 	};
 	let scriptfn = [&tmpdir[..], b"/.INSTALL"].concat();
 	let mut ok = if is_archive {
-		unpack_single(filepath, &tmpdir, b".INSTALL", cb)
+		unpack_single(h, filepath, &tmpdir, b".INSTALL")
 	} else if let Err(e) = copyfile(filepath, &scriptfn) {
 		logv(
-			cb,
+			h.callbacks(),
 			LogLevel::Error,
 			&[
 				b"could not copy tempfile to ",
@@ -164,24 +164,24 @@ pub fn runscriptlet(
 		// snprintf into char[PATH_MAX]
 		cmdline.truncate(PATH_MAX - 1);
 		logv(
-			cb,
+			h.callbacks(),
 			LogLevel::Debug,
 			&[b"executing \"", &cmdline, b"\"\n"],
 		);
 		let argv: [&[u8]; 3] = [SCRIPTLET_SHELL, b"-c", &cmdline];
-		ok = run_chroot(root, Some(SCRIPTLET_SHELL), &argv, None, cb);
+		ok = run_chroot(h, Some(SCRIPTLET_SHELL), &argv, None);
 	}
 
 	if fs::remove_file(os(&scriptfn)).is_err() {
 		logv(
-			cb,
+			h.callbacks(),
 			LogLevel::Warning,
 			&[b"could not remove ", &scriptfn, b"\n"],
 		);
 	}
 	if fs::remove_dir(os(&tmpdir)).is_err() {
 		logv(
-			cb,
+			h.callbacks(),
 			LogLevel::Warning,
 			&[b"could not remove tmpdir ", &tmpdir, b"\n"],
 		);

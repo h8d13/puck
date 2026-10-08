@@ -40,11 +40,12 @@ use crate::signing::{
 	Keyring, SIG_DATABASE, SIG_DATABASE_MARGINAL_OK, SIG_DATABASE_OPTIONAL,
 	SIG_DATABASE_UNKNOWN_OK, check_pgp_helper, process_siglist,
 };
-use crate::util::{fnmatch, hash_sdbm, splitname, strerror, until_nul};
+use crate::util::{
+	PATH_MAX, fnmatch, hash_sdbm, splitname, strerror, until_nul,
+};
 
 // limits.h on linux
 const NAME_MAX: usize = 255;
-const PATH_MAX: usize = 4096;
 
 // why an entry made the db invalid
 #[derive(Debug)]
