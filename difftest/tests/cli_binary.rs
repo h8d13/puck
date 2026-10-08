@@ -173,7 +173,7 @@ const MTREE: &str = concat!(
 );
 
 fn unreadable(path: &Path) {
-	fs::set_permissions(path, fs::Permissions::from_mode(0)).unwrap();
+	fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
 }
 
 // an installed package owning real files under the root, for -Ql/-Qo/-Qk,

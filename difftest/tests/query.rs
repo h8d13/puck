@@ -275,7 +275,7 @@ fn write_section(path: &Path, state: Section, data: &[u8]) {
 }
 
 fn unreadable(path: &Path) {
-	fs::set_permissions(path, fs::Permissions::from_mode(0)).unwrap();
+	fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
 }
 
 fn write_local(fx: &TempRoot, pkgs: &[Pkg]) {
