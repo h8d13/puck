@@ -20,11 +20,13 @@ use std::os::unix::ffi::OsStrExt;
 
 use crate::backup::needbackup;
 use crate::be_local::INFRQ_ERROR;
-use crate::callbacks::{Callbacks, LogLevel, Progress};
+use crate::callbacks::{Callbacks, LogLevel, Progress, logv};
 use crate::deps::{Depend, dep_compute_string, depcmp};
 use crate::package::{Package, PkgFrom, has_name, pkg_cmp};
 use crate::pkghash::PkgHash;
 use crate::util::{PATH_MAX, fnmatch_patterns, llstat, until_nul};
+
+use LogLevel::Debug;
 
 // alpm_conflict_t. the C dups both packages and points reason into the
 // conflicts list of the package that declares it, cloned here
@@ -65,10 +67,6 @@ fn dup_fails(pkg: &Package) -> bool {
 	pkg.origin == Some(PkgFrom::LocalDb) && pkg.infolevel & INFRQ_ERROR != 0
 }
 
-fn debug(log: &mut dyn Callbacks, parts: &[&[u8]]) {
-	log.log(LogLevel::Debug, &parts.concat());
-}
-
 // add_conflict: pairs already listed (by both names) are not added again
 fn add_conflict(
 	baddeps: &mut Vec<Conflict>,
@@ -103,7 +101,7 @@ fn add_conflict(
 		&dep_compute_string(reason),
 		b")\n",
 	];
-	debug(log, &line);
+	logv(log, Debug, &line);
 }
 
 // check_conflict: the conflicts of each list1 package against every list2
@@ -140,7 +138,7 @@ pub fn innerconflicts(
 	log: &mut dyn Callbacks,
 ) -> Vec<Conflict> {
 	let mut baddeps = Vec::new();
-	debug(log, &[b"check targets vs targets\n"]);
+	logv(log, Debug, &[b"check targets vs targets\n"]);
 	check_conflict(packages, packages, &mut baddeps, false, log);
 	baddeps
 }
@@ -190,9 +188,9 @@ pub fn outerconflicts<P: Borrow<Package>>(
 	let cache: Vec<&Package> = local.iter().map(Borrow::borrow).collect();
 	let dblist = pkg_diff(&cache, packages);
 	let mut baddeps = Vec::new();
-	debug(log, &[b"check targets vs db\n"]);
+	logv(log, Debug, &[b"check targets vs db\n"]);
 	check_conflict(packages, &dblist, &mut baddeps, false, log);
-	debug(log, &[b"check db vs targets\n"]);
+	logv(log, Debug, &[b"check db vs targets\n"]);
 	check_conflict(&dblist, packages, &mut baddeps, true, log);
 	baddeps
 }
@@ -248,7 +246,7 @@ fn fileconflict(
 		owner,
 		b"\n",
 	];
-	debug(cb, &line);
+	logv(cb, Debug, &line);
 	let (conflict_type, ctarget) = match pkg2 {
 		None => (FileConflictType::Filesystem, &[][..]),
 		Some(p) if p.origin == Some(PkgFrom::LocalDb) => {
@@ -287,7 +285,7 @@ fn dir_belongsto_pkgs(
 		let name = name.as_bytes();
 		let full = cat(&[root, dirpath, name]);
 		let Ok(meta) = fs::symlink_metadata(os(&full)) else {
-			debug(cb, &[b"could not stat ", &full, b"\n"]);
+			logv(cb, Debug, &[b"could not stat ", &full, b"\n"]);
 			return false;
 		};
 		let is_dir = meta.is_dir();
@@ -298,7 +296,7 @@ fn dir_belongsto_pkgs(
 				|| dir_belongsto_pkgs(root, &path, pkgs, cb));
 		if !owned {
 			let msg = b" found in directory\n";
-			debug(cb, &[b"unowned file ", &path, msg]);
+			logv(cb, Debug, &[b"unowned file ", &path, msg]);
 			return false;
 		}
 	}
@@ -358,7 +356,11 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 		cb: &mut dyn Callbacks,
 	) {
 		let name = p1.name_bytes();
-		debug(cb, &[b"searching for file conflicts: ", name, b"\n"]);
+		logv(
+			cb,
+			Debug,
+			&[b"searching for file conflicts: ", name, b"\n"],
+		);
 		for p2 in rest {
 			for filename in p1.files.intersection(&p2.files) {
 				let path = cat(&[self.root, filename]);
@@ -373,9 +375,9 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 						p2.name_bytes(),
 						b"'\n",
 					];
-					debug(cb, &line);
+					logv(cb, Debug, &line);
 					let msg = b"file-file conflict being forced\n";
-					debug(cb, &[msg]);
+					logv(cb, Debug, &[msg]);
 					continue;
 				}
 				out.conflicts.push(fileconflict(
@@ -409,7 +411,7 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 			return false;
 		}
 		let msg = b" belong to removed packages\n";
-		debug(cb, &[b"checking if all files in ", &dir, msg]);
+		logv(cb, Debug, &[b"checking if all files in ", &dir, msg]);
 		dir_belongsto_pkgs(self.root, &dir, &owners, cb)
 	}
 
@@ -427,7 +429,7 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 		let rootlen = self.root.len();
 		let name = p1.name_bytes();
 		let msg = b"searching for filesystem conflicts: ";
-		debug(cb, &[msg, name, b"\n"]);
+		logv(cb, Debug, &[msg, name, b"\n"]);
 		let dbpkg = self.local_pkg(p1.name_bytes());
 		let newfiles: Vec<&[u8]> = match dbpkg {
 			Some(db) => p1.files.difference(&db.files),
@@ -447,7 +449,7 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 				continue;
 			};
 			let msg = b"checking possible conflict: ";
-			debug(cb, &[msg, &path, b"\n"]);
+			logv(cb, Debug, &[msg, &path, b"\n"]);
 			let is_dir = lsbuf.is_dir();
 			let mut resolved = false;
 			// the C reads path[pathlen - 1] with the untruncated length,
@@ -456,7 +458,7 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 			if pfile_isdir {
 				if is_dir {
 					let msg = b"file is a directory, not a conflict\n";
-					debug(cb, &[msg]);
+					logv(cb, Debug, &[msg]);
 					j += 1;
 					continue;
 				}
@@ -468,7 +470,7 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 				if dbpkg.is_some_and(|db| {
 					has_file(db, relative_path)
 				}) {
-					debug(cb, &[REPLACING_FILE]);
+					logv(cb, Debug, &[REPLACING_FILE]);
 					resolved = true;
 					skip_inside(&newfiles, &mut j, filestr);
 				}
@@ -482,7 +484,7 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 					break;
 				}
 				if has_file(rempkg, relative_path) {
-					debug(cb, &[LOCAL_REMOVED]);
+					logv(cb, Debug, &[LOCAL_REMOVED]);
 					resolved = true;
 					if pfile_isdir {
 						skip_inside(
@@ -510,7 +512,7 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 				if has_file(localp2, relative_path) {
 					out.skip_remove
 						.push(relative_path.to_vec());
-					debug(cb, &[CHANGED_HANDS]);
+					logv(cb, Debug, &[CHANGED_HANDS]);
 					resolved = true;
 					if filestr.last() == Some(&b'/') {
 						skip_inside(
@@ -535,12 +537,12 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 				&& needbackup(relative_path, p1).is_some()
 				&& self.file_owner(relative_path).is_none()
 			{
-				debug(cb, &[UNOWNED_BACKUP]);
+				logv(cb, Debug, &[UNOWNED_BACKUP]);
 				resolved = true;
 			}
 
 			if !is_dir && self.can_overwrite(filestr, &path) {
-				debug(cb, &[FORCED]);
+				logv(cb, Debug, &[FORCED]);
 				resolved = true;
 			}
 

@@ -25,7 +25,7 @@ use pacman_common::util_common::safe_fgets;
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
 use crate::be_local::{INFRQ_ALL, INFRQ_DESC};
-use crate::callbacks::{Callbacks, Event, HookWhen, LogLevel};
+use crate::callbacks::{Callbacks, Event, HookWhen, LogLevel, logv};
 use crate::conflict::{Conflict, FileConflict};
 use crate::db::{DB_USAGE_INSTALL, DB_USAGE_UPGRADE};
 use crate::deps::{DbPkgs, DepMissing, DepsEnv, sortbydeps};
@@ -42,10 +42,6 @@ use crate::{remove, sync};
 
 fn os(path: &[u8]) -> &Path {
 	Path::new(std::ffi::OsStr::from_bytes(until_nul(path)))
-}
-
-fn logv(cb: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
-	cb.log(level, &parts.concat());
 }
 
 // grep (static in C): needle in a chunk of the file read like
@@ -365,10 +361,6 @@ impl From<Errno> for CommitError {
 // a string field through printf %s: glibc prints NULL as "(null)"
 pub(crate) fn opt_str(s: &Option<Vec<u8>>) -> &[u8] {
 	s.as_deref().map_or(b"(null)", until_nul)
-}
-
-pub(crate) fn log(cb: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
-	logv(cb, level, parts);
 }
 
 // the handle's trans in the state the call asserts, else its errno

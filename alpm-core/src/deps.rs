@@ -13,7 +13,7 @@ use std::cmp::Ordering;
 use std::ffi::{c_int, c_ulong};
 use std::ptr;
 
-use crate::callbacks::{Callbacks, LogLevel, Question};
+use crate::callbacks::{Callbacks, LogLevel, Question, logv};
 use crate::db::{DB_USAGE_INSTALL, DB_USAGE_UPGRADE};
 use crate::error::Errno;
 use crate::graph::{Graph, State};
@@ -232,10 +232,6 @@ pub struct DepsEnv<'a> {
 	pub local: DbPkgs<'a>,
 	// handle->dbs_sync, registration order
 	pub sync: &'a [DbPkgs<'a>],
-}
-
-fn logv(log: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
-	log.log(level, &parts.concat());
 }
 
 // a string field through printf %s: glibc prints NULL as "(null)"
