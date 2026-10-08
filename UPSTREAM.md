@@ -755,6 +755,17 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
 - the -1 check after `_alpm_remove_single_package` is dead, it always
   returns 0 (add.c:508-511). **none**
 
+## `sighandler.c` minor
+
+- the soft handler calls printf/`fflush`, `alpm_trans_interrupt` and
+  `alpm_unlock` in signal context (sighandler.c:52-74), not
+  async-signal-safe (a signal mid-printf holds stdio's lock). **env**
+- CURSOR_SHOW is written to stdout even when it is not a terminal
+  (sighandler.c:63): Ctrl-C with redirected output leaves `\x1b[?25h`.
+  **real**, cosmetic (port matches)
+- "SIGINT sent, abort by alerting curl" is stale: `dload_interrupted` is
+  only set for the max file size (dload.c:267-270, 281). **none**
+
 ## `pacman-conf.c` / `testpkg.c` minor
 
 - `DisableSandboxFilesystem` cannot be queried: the `DisableSandbox` test

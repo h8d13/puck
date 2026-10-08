@@ -31,8 +31,8 @@ use crate::trans::{
 	PrepareData, PrepareError, TRANS_FLAG_CASCADE, TRANS_FLAG_DBONLY,
 	TRANS_FLAG_NODEPS, TRANS_FLAG_NODEPVERSION, TRANS_FLAG_NOSAVE,
 	TRANS_FLAG_NOSCRIPTLET, TRANS_FLAG_RECURSE, TRANS_FLAG_RECURSEALL,
-	TRANS_FLAG_UNNEEDED, Trans, TransState, View, log, opt_str,
-	runscriptlet, trans_in,
+	TRANS_FLAG_UNNEEDED, Trans, TransState, View, interrupted, log,
+	opt_str, runscriptlet, trans_in,
 };
 use crate::util::{
 	CALLER_PREFIX, PATH_MAX, compute_md5sum, files_in_directory,
@@ -822,12 +822,12 @@ fn remove_db_entry(h: &mut Handle, oldpkg: &Package) {
 pub(crate) fn remove_packages(h: &mut Handle, run_ldconfig: bool) {
 	let pkg_count = h.trans().map_or(0, |t| t.remove.len());
 	for i in 0..pkg_count {
+		if interrupted(h) {
+			return;
+		}
 		let Some(trans) = h.trans() else {
 			return;
 		};
-		if trans.state == TransState::Interrupted {
-			return;
-		}
 		// remove_single_package reads flags and skip_remove from the
 		// transaction, the package goes in as a copy
 		let pkg = trans.remove[i].clone();

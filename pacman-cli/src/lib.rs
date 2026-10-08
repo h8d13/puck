@@ -11,6 +11,7 @@ pub mod pacman;
 pub mod pacman_conf;
 pub mod query;
 pub mod remove;
+pub mod sighandler;
 pub mod sync;
 pub mod upgrade;
 pub mod util;
