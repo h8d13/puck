@@ -377,9 +377,10 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   `db_update` and after every callback; tests read the buffer. The
   binary's uid is 0 (or FAKEROOTUID) under fakeroot (FAKEROOTKEY): /proc
   shows the real uid where fakeroot fakes getuid. Transaction prompts and
-  callback prompts read stdin through separate buffers. No Callbacks hook
-  for `multibar_move_completed_up` (sync_prepare_execute sets it before
-  the commit's downloads; the callbacks sit boxed in the handle). After
+  callback prompts read stdin through separate buffers.
+  `multibar_move_completed_up` is a flag every `Term` of the process
+  shares (`run` hands one to each): the commit sets it like
+  sync_prepare_execute, sync_syncdbs' reset is a no-op in one run. After
   '-' targets the C reopens the tty on stdin; std cannot swap fd 0. Write
   errors are dropped (the C dies of SIGPIPE). PACMAN_DEBUG stamps in UTC.
 - `be_sync::db_update` takes positions in `syncdbs()`, returns
@@ -603,7 +604,7 @@ Follow-ups raised by port units:
 | one `logv(cb, ...)` helper (copies in hook.rs, deps.rs, trans.rs, util's `log_parts`) | integrate2 | in progress: `callbacks::logv`, used by db, be_local, be_sync |
 | `-D` dispatch arm: `pacman_database(config, handle, targets, &mut o)` | m1close | done |
 | setup_libalpm's server adds through `Handle::dbs_mut()` (`Db::add_server` takes the callbacks) | m1close | done |
-| `multibar_move_completed_up` from the frontend (a Callbacks hook or a shared flag) | commit | todo |
+| `multibar_move_completed_up` from the frontend (a Callbacks hook or a shared flag) | commit | done (`Term::move_completed_up`) |
 | conflict.rs debug lines ("searching for file conflicts", ...), then drop the difftest's quiet window | commit | done |
 | commit difftest with hooks (fakechroot) and signed packages (check_keyring, PKG_INVALID_SIG, MISSING_SIG) | commit | in progress (hooksig unit) |
 | alpm-repo-db / alpm-pkginfo: accept pactest's minimal sync db entries and empty `.PKGINFO` values, the main pactest blockers | commit | in progress: owned readers (dbreaders, pkgreader units), not patches |

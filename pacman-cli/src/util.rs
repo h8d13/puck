@@ -21,6 +21,8 @@ use std::fs;
 use std::io::{self, BufRead, IsTerminal};
 use std::iter::repeat_n;
 use std::os::unix::ffi::OsStrExt;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use alpm_core::db::Db;
 use alpm_core::deps::{Depend, dep_compute_string, find_satisfier};
@@ -1372,6 +1374,9 @@ pub struct Term<R> {
 	pub cols: fn() -> u16,
 	pub now_ms: fn() -> i64,
 	pub now_secs: fn() -> i64,
+	// callback.c's multibar_ui.move_completed_up, a process global
+	// there: run() hands every Term of the process the same flag
+	pub move_completed_up: Arc<AtomicBool>,
 }
 
 impl<R> Term<R> {
@@ -1384,6 +1389,7 @@ impl<R> Term<R> {
 			cols: || 0,
 			now_ms: || 0,
 			now_secs: || 0,
+			move_completed_up: Arc::default(),
 		}
 	}
 }

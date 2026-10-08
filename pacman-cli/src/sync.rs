@@ -18,13 +18,14 @@
 //
 // the branches that prompt need a Ui: pacman_sync returns Deferred where
 // it reaches them, the dispatch runs sync_clean or sync_trans.
-// multibar_move_completed_up(true) before the commit is not modelled:
-// the callbacks sit boxed in the handle.
+// multibar_move_completed_up goes through the flag Term shares with the
+// callbacks.
 
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, BufRead, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
+use std::sync::atomic::Ordering;
 
 use alpm_core::add::add_pkg;
 use alpm_core::be_package::pkg_load_level;
@@ -836,8 +837,8 @@ pub fn sync_syncdbs(
 	out: &mut Output,
 ) -> bool {
 	// what is buffered goes out first, the callbacks print now. the C
-	// also resets multibar_move_completed_up here: only a package
-	// download sets it, which this port does not have yet
+	// also resets multibar_move_completed_up here, a no-op in one run:
+	// the commit setting it comes after (no Term reaches this)
 	out.flush();
 	let dbs: Vec<usize> = (0..handle.syncdbs().len()).collect();
 	let ret = db_update(handle, &dbs, level >= 2);
@@ -1287,6 +1288,8 @@ pub fn sync_prepare_execute<R: BufRead>(ui: &mut Ui<R>, h: &mut Handle) -> i32 {
 // alpm_trans_commit with what came before it printed first
 fn commit<R>(ui: &mut Ui<R>, h: &mut Handle) -> i32 {
 	ui.out.flush();
+	// completed package downloads move to the top of the bars
+	ui.term.move_completed_up.store(true, Ordering::Relaxed);
 	match trans_commit(h) {
 		Ok(()) => 0,
 		Err(e) => {
