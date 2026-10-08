@@ -742,6 +742,7 @@ pub fn find_dbs_satisfier<'a>(
 // with a data list, here the caller drops them). Err is always
 // UNSATISFIED_DEPS: the pm_errno the C leaves behind is overwritten by
 // later lookups and by its caller (sync.c)
+// _alpm_resolvedeps' own arguments, plus env and callbacks for the handle
 #[allow(clippy::too_many_arguments)]
 pub fn resolvedeps<'a>(
 	env: &DepsEnv<'a>,

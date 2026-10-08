@@ -343,7 +343,8 @@ impl CGraph {
 		CGraph { h, rec }
 	}
 
-	// CDepend mirrors over owned strings, the C only reads them
+	// CDepend mirrors over owned strings, the C only reads them. the
+	// strings must outlive the mirrors: both come back as one tuple
 	#[allow(clippy::type_complexity)]
 	fn assume(
 		deps: &[Depend],
@@ -483,7 +484,8 @@ impl CGraph {
 		(r, calls)
 	}
 
-	// (return value, packages after, data entries)
+	// (return value, packages after, data entries). the arguments are
+	// _alpm_resolvedeps' plus the scripted answers
 	#[allow(clippy::too_many_arguments)]
 	pub fn resolvedeps(
 		&self,

@@ -311,6 +311,7 @@ pub type CTarget<'a> = (&'a Package, Option<&'a Package>);
 pub struct CHookHandle {
 	h: *mut c_void,
 	logfile: PathBuf,
+	// the callbacks' ctx: boxed so the Vec stays put when the handle moves
 	#[allow(clippy::box_collection)]
 	recs: Box<Vec<HookRec>>,
 	_guard: MutexGuard<'static, ()>,

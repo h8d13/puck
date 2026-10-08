@@ -282,6 +282,7 @@ impl Db {
 	// alpm_register_syncdb's (Handle::register_syncdb), then
 	// sync_db_validate with the handle's keyring, default siglevel and
 	// callbacks
+	// the handle fields it reads come apart (split borrow of the handle)
 	#[allow(clippy::too_many_arguments)]
 	pub fn register_sync(
 		dbpath: &[u8],
