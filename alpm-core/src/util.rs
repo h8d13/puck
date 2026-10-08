@@ -1278,6 +1278,9 @@ pub(crate) const S_IFCHR: u32 = 0o020000;
 pub(crate) const S_IFBLK: u32 = 0o060000;
 pub(crate) const S_IFIFO: u32 = 0o010000;
 
+// util.h, BUFSIZ in glibc
+const ALPM_BUFFER_SIZE: u64 = 8192;
+
 // the umask _alpm_unpack extracts under
 const UNPACK_UMASK: u32 = 0o022;
 
@@ -1304,6 +1307,15 @@ pub struct Filter {
 	consumed: Rc<Cell<u64>>,
 }
 
+// the filter's out_block_size, 0 without a filter
+fn out_block_size(s: &DecompressionSettings) -> usize {
+	match s {
+		DecompressionSettings::None => 0,
+		DecompressionSettings::Zstd => 128 * 1024,
+		_ => 64 * 1024,
+	}
+}
+
 // bytes uudecode_bidder_bid's line scan goes on over (its ascii table)
 fn is_uu_text(c: &u8) -> bool {
 	matches!(c, b' '..=b'~' | b'\n' | b'\r')
@@ -1314,14 +1326,9 @@ impl Filter {
 		decoder: CompressionDecoder<'static>,
 		s: &DecompressionSettings,
 	) -> Self {
-		let size = match s {
-			DecompressionSettings::None => 0,
-			DecompressionSettings::Zstd => 128 * 1024,
-			_ => 64 * 1024,
-		};
 		Filter {
 			decoder,
-			size,
+			size: out_block_size(s),
 			data: Vec::new(),
 			pos: 0,
 			end: false,
@@ -1439,6 +1446,19 @@ pub struct Archive {
 	pub consumed: Rc<Cell<u64>>,
 	// the filter picked, None: tar offsets are file offsets
 	pub settings: DecompressionSettings,
+}
+
+impl Archive {
+	// the blocks archive_read_data_block hands an entry's data out in:
+	// they end where the filter's output blocks end. without a filter
+	// the reads of archive_read_open_fd's buffer (_alpm_open_archive:
+	// ALPM_BUFFER_SIZE, or st_blksize when larger)
+	pub fn block_size(&self) -> u64 {
+		match out_block_size(&self.settings) {
+			0 => self.meta.blksize().max(ALPM_BUFFER_SIZE),
+			n => n as u64,
+		}
+	}
 }
 
 pub(crate) fn archive_io_err(e: alpm_compress::Error) -> io::Error {
