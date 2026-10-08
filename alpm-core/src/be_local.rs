@@ -31,7 +31,7 @@ use alpm_mtree::libarchive::{self, Entry};
 use alpm_types::{ExtraDataEntry, PackageInstallReason, PackageValidation};
 
 use crate::backup::Backup;
-use crate::callbacks::{Callbacks, LogLevel};
+use crate::callbacks::{Callbacks, LogLevel, logv};
 use crate::deps::{Depend, dep_compute_string, dep_from_string};
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
@@ -136,10 +136,6 @@ fn add_version(path: &[u8]) -> io::Result<()> {
 	fs::write(os(&file), format!("{LOCAL_DB_VERSION}\n"))
 }
 
-fn log(cb: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
-	cb.log(level, &parts.concat());
-}
-
 // the directory listing as the C reads it: readdir stops at the first
 // error. "." and ".." never come out of read_dir
 fn entries(dir: fs::ReadDir) -> impl Iterator<Item = fs::DirEntry> {
@@ -240,7 +236,7 @@ impl LocalDb {
 					fname,
 					b"'\n",
 				];
-				log(cb, LogLevel::Error, &parts);
+				logv(cb, LogLevel::Error, &parts);
 				continue;
 			};
 			if cache.find(name).is_some() {
@@ -249,7 +245,7 @@ impl LocalDb {
 					name,
 					b"'\n",
 				];
-				log(cb, LogLevel::Error, &parts);
+				logv(cb, LogLevel::Error, &parts);
 				continue;
 			}
 			let mut pkg = Package {
@@ -266,7 +262,7 @@ impl LocalDb {
 				name,
 				b"' to package cache for db 'local'\n",
 			];
-			log(cb, LogLevel::Function, &parts);
+			logv(cb, LogLevel::Function, &parts);
 			cache.add_sorted(pkg).map_err(|_| DbError::Memory)?;
 		}
 		let count = cache.len().to_string();
@@ -275,7 +271,7 @@ impl LocalDb {
 			count.as_bytes(),
 			b" packages to package cache for db 'local'\n",
 		];
-		log(cb, LogLevel::Debug, &parts);
+		logv(cb, LogLevel::Debug, &parts);
 		Ok(cache)
 	}
 
@@ -302,7 +298,7 @@ impl LocalDb {
 			level.as_bytes(),
 			b"\n",
 		];
-		log(cb, LogLevel::Function, &parts);
+		logv(cb, LogLevel::Function, &parts);
 		let r = self.read_sections(pkg, inforeq, cb);
 		if r.is_err() {
 			pkg.infolevel |= INFRQ_ERROR;
@@ -327,7 +323,7 @@ impl LocalDb {
 				&err,
 				b"\n",
 			];
-			log(cb, LogLevel::Error, &parts);
+			logv(cb, LogLevel::Error, &parts);
 			ReadError::Io(e)
 		})
 	}
@@ -870,7 +866,7 @@ impl LocalDb {
 			pkg.name_bytes(),
 			b"\n",
 		];
-		log(cb, LogLevel::Debug, &parts);
+		logv(cb, LogLevel::Debug, &parts);
 		let _ = self.read(pkg, INFRQ_DESC, cb);
 		if pkg.reason == reason {
 			return Ok(());

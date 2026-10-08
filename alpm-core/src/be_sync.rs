@@ -28,7 +28,7 @@ use alpm_repo_db::desc::{Section, parse_libalpm};
 use alpm_repo_db::files::RepoFiles;
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
-use crate::callbacks::{Callbacks, Event, LogLevel};
+use crate::callbacks::{Callbacks, Event, LogLevel, logv};
 use crate::db::{DB_USAGE_SYNC, Db};
 use crate::deps::{Depend, dep_from_string};
 use crate::dload::{
@@ -427,10 +427,6 @@ struct Walk<'a> {
 	cb: &'a mut dyn Callbacks,
 }
 
-fn log(cb: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
-	cb.log(level, &parts.concat());
-}
-
 fn invalid(entry: &[u8], reason: Reason) -> Error {
 	Error::Invalid {
 		entry: entry.to_vec(),
@@ -457,7 +453,7 @@ impl Walk<'_> {
 			self.treename,
 			b"'\n",
 		];
-		log(self.cb, LogLevel::Function, &parts);
+		logv(self.cb, LogLevel::Function, &parts);
 		let pkg = Package {
 			name_hash: hash_sdbm(name),
 			name: Some(name.to_vec()),
@@ -486,7 +482,7 @@ impl Walk<'_> {
 			&entryname,
 			b"\n",
 		];
-		log(self.cb, LogLevel::Function, &parts);
+		logv(self.cb, LogLevel::Function, &parts);
 		let i = self.pkg_for_entry(&entryname)?;
 		// strrchr: the last '/', where splitname cut at the first
 		let Some(slash) = entryname.iter().rposition(|&c| c == b'/')
@@ -650,7 +646,7 @@ pub fn populate(
 	cb: &mut dyn Callbacks,
 ) -> Result<PkgHash<Package>, Error> {
 	let path = until_nul(path);
-	log(cb, LogLevel::Debug, &[b"opening archive ", path, b"\n"]);
+	logv(cb, LogLevel::Debug, &[b"opening archive ", path, b"\n"]);
 	let (mut archive, est) = open_archive(path, until_nul(dbext))?;
 	let mut cache = PkgHash::new(est as u32).ok_or(Error::Memory)?;
 
@@ -705,6 +701,6 @@ pub fn populate(
 		treename,
 		b"'\n",
 	];
-	log(walk.cb, LogLevel::Debug, &parts);
+	logv(walk.cb, LogLevel::Debug, &parts);
 	Ok(cache)
 }

@@ -11,9 +11,9 @@
 // and getenv("PATH") come in through QueryEnv. messages are the
 // untranslated msgids.
 //
-// not modelled: libalpm logging (the frontend's log callback prints
-// lazy-load errors), gpgme checks of package files with a .sig (-Qpi
-// reports ALPM_ERR_GPGME there).
+// libalpm's log lines (lazy-load errors) go to the handle's callbacks.
+// not modelled: gpgme checks of package files with a .sig (-Qpi reports
+// ALPM_ERR_GPGME there).
 use std::ffi::{OsStr, c_int};
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read};

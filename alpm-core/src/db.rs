@@ -19,7 +19,7 @@ use crate::be_local::{
 	DbError, INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET, LocalDb,
 };
 use crate::be_sync;
-use crate::callbacks::{Callbacks, Event, LogLevel};
+use crate::callbacks::{Callbacks, Event, LogLevel, logv};
 use crate::deps::{dep_from_string, depcmp_literal, depcmp_provides};
 use crate::error::Errno;
 use crate::group::Group;
@@ -102,10 +102,6 @@ fn sanitize_url(url: &[u8]) -> Vec<u8> {
 	url.strip_suffix(b"/").unwrap_or(url).to_vec()
 }
 
-fn log(cb: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
-	cb.log(level, &parts.concat());
-}
-
 // a server list and the word its log lines name it by
 struct Urls<'a> {
 	list: &'a mut Vec<Vec<u8>>,
@@ -135,7 +131,7 @@ fn add_url(
 		b"\n",
 	];
 	u.list.push(url.clone());
-	log(cb, LogLevel::Debug, &what);
+	logv(cb, LogLevel::Debug, &what);
 	Ok(())
 }
 
@@ -164,7 +160,7 @@ fn remove_url(
 		&url,
 		b"\n",
 	];
-	log(cb, LogLevel::Debug, &what);
+	logv(cb, LogLevel::Debug, &what);
 	Ok(true)
 }
 
@@ -505,7 +501,7 @@ impl Db {
 	fn log_repo(&self, cb: &mut dyn Callbacks, what: &[u8]) {
 		let parts: [&[u8]; 4] =
 			[what, b" for repository '", &self.treename, b"'\n"];
-		log(cb, LogLevel::Debug, &parts);
+		logv(cb, LogLevel::Debug, &parts);
 	}
 
 	// _alpm_db_get_pkgcache_hash: loaded on first use (load_pkgcache)
@@ -715,7 +711,7 @@ impl Db {
 			let targ = until_nul(needle.as_ref());
 			let parts: [&[u8]; 3] =
 				[b"searching for target '", targ, b"'\n"];
-			log(cb, LogLevel::Debug, &parts);
+			logv(cb, LogLevel::Debug, &parts);
 			let reg = Regex::new(targ, flags)
 				.map_err(|_| Errno::InvalidRegex)?;
 			list.retain(|&i| {
@@ -734,7 +730,7 @@ impl Db {
 					pkg.name_bytes(),
 					b"'\n",
 				];
-				log(cb, LogLevel::Debug, &parts);
+				logv(cb, LogLevel::Debug, &parts);
 				true
 			});
 		}
@@ -842,7 +838,7 @@ impl Db {
 			b"' cache",
 			end,
 		];
-		log(cb, LogLevel::Debug, &parts);
+		logv(cb, LogLevel::Debug, &parts);
 	}
 
 	// _alpm_db_add_pkgincache: a dup() of pkg, origin set to this db,
@@ -920,7 +916,7 @@ impl Db {
 	pub fn unregister(mut self, cb: &mut dyn Callbacks) {
 		let parts: [&[u8]; 3] =
 			[b"unregistering database '", &self.treename, b"'\n"];
-		log(cb, LogLevel::Debug, &parts);
+		logv(cb, LogLevel::Debug, &parts);
 		self.free_pkgcache(cb);
 	}
 }
