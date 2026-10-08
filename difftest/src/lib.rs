@@ -211,3 +211,50 @@ impl Rng {
 		(0..self.below(max)).map(|_| self.pick(alphabet)).collect()
 	}
 }
+
+// Command::output with a wall-clock cap: a binary under comparison (C
+// or Rust) that hangs is killed and the run panics with its command
+// line. memory stays capped by the test runner's ulimit, which children
+// inherit. stdin is null, the pipes are drained by threads so a full
+// pipe cannot stall the child
+pub fn output_capped(
+	cmd: &mut std::process::Command,
+	secs: u64,
+) -> std::process::Output {
+	use std::io::Read;
+	use std::process::Stdio;
+	use std::time::{Duration, Instant};
+
+	let mut child = cmd
+		.stdin(Stdio::null())
+		.stdout(Stdio::piped())
+		.stderr(Stdio::piped())
+		.spawn()
+		.unwrap_or_else(|e| panic!("spawn {cmd:?}: {e}"));
+	let drain = |mut r: Box<dyn Read + Send>| {
+		std::thread::spawn(move || {
+			let mut v = Vec::new();
+			let _ = r.read_to_end(&mut v);
+			v
+		})
+	};
+	let out = drain(Box::new(child.stdout.take().unwrap()));
+	let err = drain(Box::new(child.stderr.take().unwrap()));
+	let deadline = Instant::now() + Duration::from_secs(secs);
+	let status = loop {
+		if let Some(s) = child.try_wait().unwrap() {
+			break s;
+		}
+		if Instant::now() > deadline {
+			let _ = child.kill();
+			let _ = child.wait();
+			panic!("{cmd:?} still running after {secs}s, killed");
+		}
+		std::thread::sleep(Duration::from_millis(2));
+	};
+	std::process::Output {
+		status,
+		stdout: out.join().unwrap(),
+		stderr: err.join().unwrap(),
+	}
+}
