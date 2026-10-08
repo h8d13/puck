@@ -199,6 +199,9 @@ fn commands(w: &SyncWorld) -> Vec<Vec<String>> {
 	let root = w.fx.dir().join("root").display().to_string();
 	let owned = format!("{root}/usr/bin/owned");
 	let repo = w.repos.first().copied().unwrap_or("core");
+	let cache = w.fx.dir().join("cache");
+	let foreign =
+		format!("{}/foreign-1.0-1-any.pkg.tar.gz", cache.display());
 	let lines: Vec<Vec<&str>> = vec![
 		vec!["-Q"],
 		vec!["-Qq"],
@@ -227,6 +230,7 @@ fn commands(w: &SyncWorld) -> Vec<Vec<String>> {
 		vec!["-Qkk"],
 		vec!["-Qk", "owner"],
 		vec!["-Qc", "owner"],
+		vec!["-Qpc", "--debug", &foreign],
 		vec!["-Q", "nope"],
 		vec!["-Qi", "nope", "owner"],
 		vec!["-Si"],

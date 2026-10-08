@@ -189,3 +189,63 @@ impl Drop for CPkgHandle {
 		drop(unsafe { Box::from_raw(self.logs) });
 	}
 }
+
+// the texts of libarchive's mtree reader, which the port has too
+const MTREE_TEXTS: [&[u8]; 20] = [
+	b"Unrecognized archive format\n",
+	b"Can't parse line ",
+	b"Line too long\n",
+	b"/unset shall not contain",
+	b"Missing type keyword",
+	b"Malformed attribute ",
+	b"Unrecognized key ",
+	b"Unrecognized file type ",
+	b"Symbolic or non-octal mode ",
+	b"incorrect digest length",
+	b"invalid digest data",
+	b"Unknown format `",
+	b"Missing number\n",
+	b"Too many arguments\n",
+	b"Not enough arguments\n",
+	b"invalid major number\n",
+	b"invalid minor number\n",
+	b"too many fields for format\n",
+	b"invalid unit number\n",
+	b"invalid subunit number\n",
+];
+
+// libarchive's own error texts cannot match the port's (its reader,
+// strerror, an fd number): cut after the path of an open failure, a read
+// failure and an mtree failure (unless the mtree reader's own text), the
+// message's newline kept. one message, which may start with testpkg's or
+// pacman's "error: "
+pub fn cut_archive_text(msg: &[u8]) -> Vec<u8> {
+	let mtree: &[u8] = b"error while reading mtree of package ";
+	let heads = [
+		&b"could not open file "[..],
+		b"error while reading package ",
+		mtree,
+	];
+	let mut out = msg.to_vec();
+	let body = out.strip_prefix(b"error: ").map_or(0, |_| 7);
+	for head in heads {
+		if !out[body..].starts_with(head) {
+			continue;
+		}
+		let start = body + head.len();
+		let Some(i) = out[start..].windows(2).position(|w| w == b": ")
+		else {
+			continue;
+		};
+		let at = start + i + 2;
+		let text = &out[at..];
+		if head != mtree
+			|| !MTREE_TEXTS.iter().any(|t| text.starts_with(t))
+		{
+			let nl = out.ends_with(b"\n");
+			out.truncate(at);
+			out.extend(nl.then_some(b'\n'));
+		}
+	}
+	out
+}

@@ -164,7 +164,7 @@ fn validate_and_changelog() {
 		],
 	);
 	let p = pkg_load(pkg.path(), false).unwrap();
-	assert_eq!(changelog(&p).unwrap(), b"log\n");
+	assert_eq!(changelog(&mut (), &p).unwrap(), b"log\n");
 	let bad = Package {
 		sha256sum: Some(b"00".to_vec()),
 		..Package::default()
@@ -186,7 +186,7 @@ fn validate_and_changelog() {
 	);
 	let nolog = Pkg::new("nolog", &[(b".PKGINFO", b'0', PKGINFO)]);
 	let p = pkg_load(nolog.path(), false).unwrap();
-	assert!(matches!(changelog(&p), Err(Error::NotFound)));
+	assert!(matches!(changelog(&mut (), &p), Err(Error::NotFound)));
 }
 
 // signature levels where no gpg runs: a missing .sig is refused unless
