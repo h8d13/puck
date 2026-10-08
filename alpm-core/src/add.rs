@@ -299,7 +299,10 @@ fn check_symlinks(
 		match fs::symlink_metadata(os(&head)) {
 			Err(e) if e.kind() == ErrorKind::NotFound => break,
 			Err(e) => {
-				return Err(fail(errno(&e), b"Could not stat "));
+				return Err(fail(
+					errno(&e),
+					b"Could not stat ",
+				));
 			}
 			Ok(st) if st.is_dir() => {
 				// la_opendirat(O_RDONLY | O_DIRECTORY)
@@ -538,7 +541,7 @@ impl Writer<'_> {
 			let msg = [
 				b"Hard-link target '",
 				&t[..],
-				b"' does not exist.",
+				b"' does not exist",
 			]
 			.concat();
 			return Err(warn(ENOENT, msg));
@@ -612,10 +615,19 @@ impl Writer<'_> {
 		&mut self,
 		entry: &mut TarballEntry,
 	) -> Result<(), ExtractError> {
+		// libarchive's tar reader names a short entry, other read
+		// errors show the port's text
 		let fatal = |e: io::Error| ExtractError {
 			fatal: true,
 			errno: errno(&e),
-			msg: strerror(&e),
+			msg: match e.kind() {
+				ErrorKind::UnexpectedEof => {
+					b"Truncated tar archive \
+					detected while reading data"
+						.to_vec()
+				}
+				_ => strerror(&e),
+			},
 		};
 		let Some(mut f) = self.fd.take() else {
 			return Ok(());

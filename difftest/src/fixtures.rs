@@ -150,7 +150,8 @@ fn octal(field: &mut [u8], v: u64) {
 }
 
 // any tar entry: type flag, permission bits, link target (symlink or
-// hard link), data. owner, mtime and device numbers 0
+// hard link), data. mtime fixed, owner and device numbers 0 unless
+// ustar_owned
 #[derive(Clone, Debug)]
 pub struct TarNode {
 	pub name: Vec<u8>,
@@ -166,12 +167,13 @@ fn header(
 	mode: u32,
 	size: usize,
 	kind: u8,
+	(uid, gid): (u32, u32),
 ) -> [u8; 512] {
 	let mut h = [0u8; 512];
 	h[..name.len()].copy_from_slice(name);
 	octal(&mut h[100..108], u64::from(mode));
-	octal(&mut h[108..116], 0);
-	octal(&mut h[116..124], 0);
+	octal(&mut h[108..116], u64::from(uid));
+	octal(&mut h[116..124], u64::from(gid));
 	octal(&mut h[124..136], size as u64);
 	octal(&mut h[136..148], 1_700_000_000);
 	h[156] = kind;
@@ -202,6 +204,7 @@ fn long_field<'a>(out: &mut Vec<u8>, field: &'a [u8], kind: u8) -> &'a [u8] {
 		0o644,
 		long.len(),
 		kind,
+		(0, 0),
 	));
 	push_data(out, &long);
 	&field[..100]
@@ -209,11 +212,17 @@ fn long_field<'a>(out: &mut Vec<u8>, field: &'a [u8], kind: u8) -> &'a [u8] {
 
 // ustar archive of any entries
 pub fn ustar_nodes(nodes: &[TarNode]) -> Vec<u8> {
+	ustar_owned(nodes, (0, 0))
+}
+
+// ustar archive of any entries, every one owned by uid:gid
+pub fn ustar_owned(nodes: &[TarNode], owner: (u32, u32)) -> Vec<u8> {
 	let mut out = Vec::new();
 	for n in nodes {
 		let name = long_field(&mut out, &n.name, b'L');
 		let link = long_field(&mut out, &n.link, b'K');
-		let h = header(name, link, n.mode, n.data.len(), n.kind);
+		let size = n.data.len();
+		let h = header(name, link, n.mode, size, n.kind, owner);
 		out.extend_from_slice(&h);
 		push_data(&mut out, &n.data);
 	}
