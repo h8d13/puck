@@ -120,21 +120,20 @@ fn check_db_missing_deps(
 	o: &mut Output,
 ) -> i32 {
 	let upgrade: Vec<&Package> = pkglist.iter().collect();
-	let missing = handle.with_callbacks(|handle, cb| {
-		let empty = PkgHash::new(0).expect("empty table");
-		let local = handle.localdb().and_then(Db::loaded_pkgcache);
-		let env = DepsEnv {
-			handle,
-			// no transaction: ALPM_TRANS_FLAG_NODEPVERSION unset
-			nodepversion: false,
-			local: DbPkgs {
-				usage: 0,
-				cache: local.unwrap_or(&empty),
-			},
-			sync: &[],
-		};
-		checkdeps(&env, &[], &[], &upgrade, false, cb)
-	});
+	let dbs = handle.dbs_mut();
+	let empty = PkgHash::new(0).expect("empty table");
+	let local = dbs.local.as_deref().and_then(Db::loaded_pkgcache);
+	let env = DepsEnv {
+		opts: dbs.opts,
+		// no transaction: ALPM_TRANS_FLAG_NODEPVERSION unset
+		nodepversion: false,
+		local: DbPkgs {
+			usage: 0,
+			cache: local.unwrap_or(&empty),
+		},
+		sync: &[],
+	};
+	let missing = checkdeps(&env, &[], &[], &upgrade, false, dbs.cb);
 	for miss in &missing {
 		let depstring = dep_compute_string(&miss.depend);
 		let msg: [&[u8]; 5] = [

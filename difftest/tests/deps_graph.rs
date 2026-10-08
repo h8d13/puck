@@ -438,7 +438,7 @@ impl Case<'_> {
 				.map(|(cache, &usage)| DbPkgs { usage, cache })
 				.collect();
 		let env = DepsEnv {
-			handle: &self.rs.handle,
+			opts: self.rs.handle.deps_opts(),
 			nodepversion: self.setup.nodepversion,
 			local: DbPkgs {
 				usage: self.setup.local_usage,

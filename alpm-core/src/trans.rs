@@ -423,7 +423,7 @@ impl<'a> View<'a> {
 
 	pub fn env(&self, nodepversion: bool) -> DepsEnv<'_> {
 		DepsEnv {
-			handle: self.handle,
+			opts: self.handle.deps_opts(),
 			nodepversion,
 			local: DbPkgs {
 				usage: self.local_usage,

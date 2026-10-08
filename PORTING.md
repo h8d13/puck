@@ -436,8 +436,8 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   section, so the "loading package data" lines match.
 - `database`: trans_init(0, 0)/trans_release are the db lock
   (`Handle::lock`/`handle_unlock`), the getters' lazy loads happen up
-  front. checkdeps logs through the handle's callbacks, swapped out for
-  the call because `DepsEnv` borrows the `Handle`.
+  front. checkdeps logs through the handle's callbacks, lent by
+  `Handle::dbs_mut` next to the caches and `DepsOpts`.
 - lazy loads (`load_pkg`, the group cache) write into the cache entry like
   the C. `Package` has no ops pointer, so every local cache entry
   lazy-loads through be_local (the C keeps default ops for a package added
@@ -711,7 +711,7 @@ Follow-ups raised by port units:
 | query: -Qk/-Qkk lazy loads per package like the C (-Qkk loads files up front), op stderr flushed per package so callback lines interleave; then drop cli_binary's empty files lists | m1close | todo |
 | signing debug lines (`_alpm_access` "is not readable", "sig path ... could not be opened", "missing required signature") | m1close | todo (trans_commit difftest filters them: `SIGNING_DEBUG`, `sig_unreadable`; drop those once ported) |
 | difftest C log callbacks (deps_graph, dload, diskspace, db_update) onto `handle::record_log` | m1close | todo |
-| `DepsEnv` without `&Handle` (assumeinstalled, ignore lists), so checkdeps logs without swapping the callbacks | m1close | todo |
+| `DepsEnv` without `&Handle` (assumeinstalled, ignore lists), so checkdeps logs without swapping the callbacks | m1close | done: `DepsOpts` (`Handle::deps_opts`, `DbsMut::opts`); `with_callbacks` stays for the `View` planning steps, the sync loads and the frontend's package loads |
 | difftest: `read_deps` pub(crate) (drops conflict's `CDepend`), `SyncWorld` into fixtures.rs | conflict, sync | todo |
 | be_sync: a non-archive db must fail at open (DB_OPEN, db invalid) like libarchive, not LIBARCHIVE | query | done |
 | `%DATA%` in repo dbs, gzip multi-member, `Packager` default, backup `(null)` | db readers | ALPM side, see `UPSTREAM.md` |

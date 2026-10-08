@@ -2,8 +2,9 @@
 // satisfiers, checkdeps, sorting by dependencies, the resolver and the
 // -Rs cascade.
 //
-// handle state comes in as a DepsEnv (ignore lists and assumeinstalled
-// through the Handle, the NODEPVERSION trans flag, db caches and usage).
+// handle state comes in as a DepsEnv (ignore lists and assumeinstalled,
+// the NODEPVERSION trans flag, db caches and usage), borrowed apart from
+// the callbacks (Handle::dbs_mut).
 // QUESTION and _alpm_log go to the caller's Callbacks, pm_errno comes
 // back as Err. alpm_dep_free, depmiss_new/alpm_depmissing_free and
 // _alpm_dep_dup are Drop and Clone.
@@ -17,11 +18,9 @@ use crate::callbacks::{Callbacks, LogLevel, Question, logv};
 use crate::db::{DB_USAGE_INSTALL, DB_USAGE_UPGRADE};
 use crate::error::Errno;
 use crate::graph::{Graph, State};
-use crate::handle::Handle;
-use crate::package::{
-	Package, PkgReason, has_name, pkg_cmp, pkg_find, pkg_should_ignore,
-};
+use crate::package::{Package, PkgReason, has_name, pkg_cmp, pkg_find};
 use crate::pkghash::PkgHash;
+use crate::util::fnmatch;
 use crate::util::{hash_sdbm, until_nul};
 use crate::version::vercmp;
 
@@ -219,12 +218,35 @@ pub struct DbPkgs<'a> {
 	pub cache: &'a PkgHash<Package>,
 }
 
+// the handle options deps.c reads (Handle::deps_opts)
+#[derive(Clone, Copy, Debug)]
+pub struct DepsOpts<'a> {
+	pub ignorepkg: &'a [Vec<u8>],
+	pub ignoregroup: &'a [Vec<u8>],
+	pub assumeinstalled: &'a [Depend],
+}
+
+impl DepsOpts<'_> {
+	// alpm_pkg_should_ignore: the name or one of the groups matches an
+	// ignorepkg/ignoregroup entry as an fnmatch pattern (alpm_list_find
+	// with _alpm_fnmatch, so no '!' negation). groups as given, the C
+	// getter lazy-loads them for local packages
+	pub fn should_ignore(&self, pkg: &Package) -> bool {
+		let matches = |pats: &[Vec<u8>], s: &[u8]| {
+			pats.iter().any(|p| fnmatch(p, s))
+		};
+		matches(self.ignorepkg, pkg.name_bytes())
+			|| pkg.groups
+				.iter()
+				.any(|g| matches(self.ignoregroup, g))
+	}
+}
+
 // the handle state deps.c reads. packages need depends, provides, groups
 // and reason loaded (the C getters lazy-load local entries)
 #[derive(Clone, Copy, Debug)]
 pub struct DepsEnv<'a> {
-	// ignorepkg/ignoregroup, through pkg_should_ignore
-	pub handle: &'a Handle,
+	pub opts: DepsOpts<'a>,
 	// handle->trans->flags & ALPM_TRANS_FLAG_NODEPVERSION, false without
 	// a transaction
 	pub nodepversion: bool,
@@ -316,7 +338,7 @@ pub fn checkdeps(
 	let satisfied = |dep: &Depend| {
 		satisfied_in(upgrade, dep)
 			|| satisfied_in(&dblist, dep)
-			|| depcmp_provides(dep, env.handle.assumeinstalled())
+			|| depcmp_provides(dep, env.opts.assumeinstalled)
 	};
 	let mut baddeps = Vec::new();
 
@@ -637,7 +659,7 @@ fn resolvedep<'a>(
 		if !depcmp_literal(pkg, dep) || excluded(pkg) {
 			continue;
 		}
-		if pkg_should_ignore(env.handle, pkg)
+		if env.opts.should_ignore(pkg)
 			&& !install_ignored(cb, pkg, prompt)
 		{
 			ignored = true;
@@ -656,7 +678,7 @@ fn resolvedep<'a>(
 			{
 				continue;
 			}
-			if pkg_should_ignore(env.handle, pkg)
+			if env.opts.should_ignore(pkg)
 				&& !install_ignored(cb, pkg, prompt)
 			{
 				ignored = true;
