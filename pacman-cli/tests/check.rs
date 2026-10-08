@@ -67,8 +67,10 @@ impl CheckEnv for Env {
 		(path == b"skipped").then_some(false)
 	}
 
-	fn files(&mut self, _: &mut Output, pkg: &Package) -> Vec<File> {
-		pkg.files.files.clone()
+	fn load_files(&mut self, _: &mut Output, _: &Package) {}
+
+	fn files<'a>(&'a self, pkg: &'a Package) -> &'a [File] {
+		&pkg.files.files
 	}
 
 	fn is_backup(

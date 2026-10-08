@@ -43,13 +43,12 @@ pub trait CheckEnv {
 	// alpm_option_match_noextract: None nothing matched (C -1),
 	// Some(false) a pattern matched (C 0), Some(true) a negated one
 	fn match_noextract(&self, path: &[u8]) -> Option<bool>;
-	// alpm_pkg_get_files. a local package lazy-loads them here, o holds
-	// what the check printed before
-	fn files(
-		&mut self,
-		o: &mut Output,
-		pkg: &Package,
-	) -> Vec<filelist::File>;
+	// alpm_pkg_get_files, split in two so the list is borrowed, not
+	// copied: a local package lazy-loads it here, o holds what the
+	// check printed before
+	fn load_files(&mut self, o: &mut Output, pkg: &Package);
+	// the list load_files loaded
+	fn files<'a>(&'a self, pkg: &'a Package) -> &'a [filelist::File];
 	// alpm_pkg_get_backup has an entry named path, loaded like files
 	fn is_backup(
 		&mut self,
@@ -83,12 +82,10 @@ impl CheckEnv for HandleEnv<'_> {
 		self.handle.match_noextract(path)
 	}
 
-	fn files(
-		&mut self,
-		_: &mut Output,
-		pkg: &Package,
-	) -> Vec<filelist::File> {
-		pkg.files.files.clone()
+	fn load_files(&mut self, _: &mut Output, _: &Package) {}
+
+	fn files<'a>(&'a self, pkg: &'a Package) -> &'a [filelist::File] {
+		&pkg.files.files
 	}
 
 	fn is_backup(
@@ -199,12 +196,14 @@ pub fn check_pkg_fast(
 		return 1;
 	}
 	let pkgname = until_nul(pkg.name.as_deref().unwrap_or_default());
-	let files = env.files(o, pkg);
+	env.load_files(o, pkg);
+	let env = &*env;
+	let files = env.files(pkg);
 	let mut errors = 0usize;
 	// one path buffer like the C's filepath[PATH_MAX]: root, then each
 	// file's name after it
 	let mut filepath = root.clone();
-	for file in &files {
+	for file in files {
 		let path = file.name();
 		if rootlen + 1 + path.len() > PATH_MAX {
 			let msg = cat(&[b"path too long: ", root, path, b"\n"]);
