@@ -15,6 +15,28 @@ use alpm_compress::compression::{
 	ZstdThreads,
 };
 
+// the C binary of PACMAN_BUILD
+pub fn c_pacman() -> PathBuf {
+	let dir = match std::env::var_os("PACMAN_BUILD") {
+		Some(d) => PathBuf::from(d),
+		None => Path::new(env!("CARGO_MANIFEST_DIR"))
+			.join("../pacman/build"),
+	};
+	dir.join("pacman")
+}
+
+// target/<profile>/deps/cli_binary-<hash> -> target/<profile>/pacman
+pub fn rust_pacman() -> PathBuf {
+	let exe = std::env::current_exe().unwrap();
+	let bin = exe.parent().unwrap().parent().unwrap().join("pacman");
+	assert!(
+		bin.exists(),
+		"{} missing: cargo build --release -p pacman-cli",
+		bin.display()
+	);
+	bin
+}
+
 // <tmp>/difftest-<tag>-<pid>-<n>/ holding root/ and db/sync/, resolved
 // like alpm_initialize resolves it, removed on drop
 pub struct TempRoot(PathBuf);
