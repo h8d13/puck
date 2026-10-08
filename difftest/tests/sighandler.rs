@@ -180,10 +180,11 @@ fn reader(
 	(buf, t)
 }
 
-// pacman below pid (fakechroot and fakeroot are shell scripts running it)
+// pacman (C) or puck (the port) below pid (fakechroot and fakeroot are
+// shell scripts running it)
 fn find_pacman(pid: u32) -> Option<u32> {
 	let comm = fs::read_to_string(format!("/proc/{pid}/comm"));
-	if comm.is_ok_and(|c| c.trim_end() == "pacman") {
+	if comm.is_ok_and(|c| matches!(c.trim_end(), "pacman" | "puck")) {
 		return Some(pid);
 	}
 	let path = format!("/proc/{pid}/task/{pid}/children");
