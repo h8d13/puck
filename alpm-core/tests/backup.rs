@@ -3,8 +3,8 @@ use alpm_core::backup::*;
 
 fn backup(name: &[u8], hash: Option<&[u8]>) -> Backup {
 	Backup {
-		name: name.to_vec(),
-		hash: hash.map(<[u8]>::to_vec),
+		name: name.into(),
+		hash: hash.map(Box::from),
 	}
 }
 
@@ -15,7 +15,8 @@ fn needbackup_cases() {
 			backup(b"etc/a", Some(b"1")),
 			backup(b"etc/b", None),
 			backup(b"etc/a", Some(b"2")),
-		],
+		]
+		.into(),
 		..Default::default()
 	};
 	let found = needbackup(b"etc/a", &pkg).unwrap();

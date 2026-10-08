@@ -111,7 +111,7 @@ struct Shared {
 struct Script(Rc<RefCell<Shared>>);
 
 fn name(p: &alpm_core::package::Package) -> Vec<u8> {
-	p.name.clone().unwrap_or_default()
+	p.name.as_deref().unwrap_or_default().to_vec()
 }
 
 impl Callbacks for Script {
@@ -268,14 +268,18 @@ fn view_of(t: &Trans) -> TpView {
 				version: a
 					.pkg
 					.version
-					.clone()
-					.unwrap_or_default(),
+					.as_deref()
+					.unwrap_or_default()
+					.to_vec(),
 				reason: a.pkg.reason as c_int,
 				db: a.db,
 				removes: a.removes.iter().map(name).collect(),
 				download_size: a.pkg.download_size,
 				oldpkg: a.oldpkg.as_ref().map(|o| {
-					o.version.clone().unwrap_or_default()
+					o.version
+						.as_deref()
+						.unwrap_or_default()
+						.to_vec()
 				}),
 			})
 			.collect(),
@@ -288,8 +292,11 @@ fn view_of(t: &Trans) -> TpView {
 			.remove
 			.iter()
 			.map(|p| {
-				let v = p.version.clone().unwrap_or_default();
-				(name(p), v, p.reason as c_int)
+				let v = p
+					.version
+					.as_deref()
+					.unwrap_or_default();
+				(name(p), v.to_vec(), p.reason as c_int)
 			})
 			.collect(),
 	}
@@ -300,20 +307,24 @@ fn data_of(d: PrepareData) -> TpData {
 		PrepareData::None => TpData::None,
 		PrepareData::InvalidArch(v) => TpData::Arch(v),
 		PrepareData::Missing(v) => TpData::Missing(v),
-		PrepareData::Conflicts(v) => TpData::Conflicts(
-			v.into_iter()
-				.map(|c| {
-					let (p1, p2) = (c.package1, c.package2);
-					(
-						p1.name.unwrap_or_default(),
-						p1.version.unwrap_or_default(),
-						p2.name.unwrap_or_default(),
-						p2.version.unwrap_or_default(),
+		PrepareData::Conflicts(v) => {
+			TpData::Conflicts(
+				v.into_iter()
+					.map(|c| {
+						let (p1, p2) = (
+							c.package1, c.package2,
+						);
+						(
+						p1.name.unwrap_or_default().into_vec(),
+						p1.version.unwrap_or_default().into_vec(),
+						p2.name.unwrap_or_default().into_vec(),
+						p2.version.unwrap_or_default().into_vec(),
 						c.reason,
 					)
-				})
-				.collect(),
-		),
+					})
+					.collect(),
+			)
+		}
 	}
 }
 

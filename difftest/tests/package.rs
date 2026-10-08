@@ -30,7 +30,7 @@ const REASONS: [PkgReason; 3] =
 	[PkgReason::Explicit, PkgReason::Depend, PkgReason::Unknown];
 
 fn show(p: &Package) -> String {
-	let s = |s: &Option<Vec<u8>>| {
+	let s = |s: &Option<Box<[u8]>>| {
 		s.as_deref()
 			.map(|s| String::from_utf8_lossy(s).into_owned())
 	};
@@ -49,9 +49,9 @@ fn random_dep(rng: &mut Rng) -> Depend {
 	let name = rng.bytes(NAME_ALPHABET, 6);
 	Depend {
 		name_hash: hash_sdbm(&name),
-		name,
-		version: opt(rng, VER_ALPHABET, 5),
-		desc: opt(rng, TEXT_ALPHABET, 5),
+		name: name.into(),
+		version: opt(rng, VER_ALPHABET, 5).map(Box::from),
+		desc: opt(rng, TEXT_ALPHABET, 5).map(Box::from),
 		depmod: MODS[rng.below(MODS.len())],
 	}
 }
@@ -60,14 +60,14 @@ fn deps(rng: &mut Rng) -> Vec<Depend> {
 	some_of(rng, random_dep)
 }
 
-fn strs(rng: &mut Rng) -> Vec<Vec<u8>> {
-	some_of(rng, |r| r.bytes(TEXT_ALPHABET, 6))
+fn strs(rng: &mut Rng) -> Vec<Box<[u8]>> {
+	some_of(rng, |r| r.bytes(TEXT_ALPHABET, 6).into())
 }
 
 fn random_origin(rng: &mut Rng) -> Option<PkgFrom> {
 	match rng.below(4) {
 		0 => None,
-		1 => Some(PkgFrom::File(rng.bytes(TEXT_ALPHABET, 8))),
+		1 => Some(PkgFrom::File(rng.bytes(TEXT_ALPHABET, 8).into())),
 		2 => Some(PkgFrom::LocalDb),
 		_ => Some(PkgFrom::SyncDb),
 	}
@@ -82,42 +82,44 @@ fn random_pkg(rng: &mut Rng) -> Package {
 	});
 	Package {
 		name_hash: rng.next_u64(),
-		filename: opt(rng, TEXT_ALPHABET, 6),
-		base: opt(rng, NAME_ALPHABET, 6),
-		name: opt(rng, NAME_ALPHABET, 6),
-		version: opt(rng, VER_ALPHABET, 6),
-		desc: opt(rng, TEXT_ALPHABET, 6),
-		url: opt(rng, TEXT_ALPHABET, 6),
-		packager: opt(rng, TEXT_ALPHABET, 6),
-		sha256sum: opt(rng, TEXT_ALPHABET, 6),
-		base64_sig: opt(rng, TEXT_ALPHABET, 6),
-		arch: opt(rng, TEXT_ALPHABET, 6),
+		filename: opt(rng, TEXT_ALPHABET, 6).map(Box::from),
+		base: opt(rng, NAME_ALPHABET, 6).map(Box::from),
+		name: opt(rng, NAME_ALPHABET, 6).map(Box::from),
+		version: opt(rng, VER_ALPHABET, 6).map(Box::from),
+		desc: opt(rng, TEXT_ALPHABET, 6).map(Box::from),
+		url: opt(rng, TEXT_ALPHABET, 6).map(Box::from),
+		packager: opt(rng, TEXT_ALPHABET, 6).map(Box::from),
+		sha256sum: opt(rng, TEXT_ALPHABET, 6).map(Box::from),
+		base64_sig: opt(rng, TEXT_ALPHABET, 6).map(Box::from),
+		arch: opt(rng, TEXT_ALPHABET, 6).map(Box::from),
 		builddate: rng.next_u64() as i64,
 		installdate: rng.next_u64() as i64,
 		size: rng.next_u64() as i64,
 		isize: rng.next_u64() as i64,
 		download_size: rng.next_u64() as i64,
-		licenses: strs(rng),
-		replaces: deps(rng),
-		groups: strs(rng),
+		licenses: strs(rng).into(),
+		replaces: deps(rng).into(),
+		groups: strs(rng).into(),
 		backup: some_of(rng, |r| Backup {
-			name: r.bytes(TEXT_ALPHABET, 6),
-			hash: opt(r, TEXT_ALPHABET, 6),
-		}),
-		depends: deps(rng),
-		optdepends: deps(rng),
-		checkdepends: deps(rng),
-		makedepends: deps(rng),
-		conflicts: deps(rng),
-		provides: deps(rng),
+			name: r.bytes(TEXT_ALPHABET, 6).into(),
+			hash: opt(r, TEXT_ALPHABET, 6).map(Box::from),
+		})
+		.into(),
+		depends: deps(rng).into(),
+		optdepends: deps(rng).into(),
+		checkdepends: deps(rng).into(),
+		makedepends: deps(rng).into(),
+		conflicts: deps(rng).into(),
+		provides: deps(rng).into(),
 		files: FileList { files },
 		origin: random_origin(rng),
 		reason: REASONS[rng.below(REASONS.len())],
 		scriptlet: rng.next_u64() as i32,
 		xdata: some_of(rng, |r| PkgXData {
-			name: r.bytes(TEXT_ALPHABET, 5),
-			value: r.bytes(TEXT_ALPHABET, 5),
-		}),
+			name: r.bytes(TEXT_ALPHABET, 5).into(),
+			value: r.bytes(TEXT_ALPHABET, 5).into(),
+		})
+		.into(),
 		infolevel: rng.next_u64() as i32,
 		validation: rng.next_u64() as i32,
 	}
@@ -126,7 +128,9 @@ fn random_pkg(rng: &mut Rng) -> Package {
 // what the C getters can see: no getter for these fields
 fn gettable(p: &Package) -> Package {
 	let origin = match &p.origin {
-		Some(PkgFrom::File(_)) => Some(PkgFrom::File(Vec::new())),
+		Some(PkgFrom::File(_)) => {
+			Some(PkgFrom::File(Vec::new().into()))
+		}
 		o => o.clone(),
 	};
 	Package {
@@ -147,7 +151,7 @@ fn check_model(p: &Package) {
 fn named(name: &[u8]) -> Package {
 	Package {
 		name_hash: hash_sdbm(name),
-		name: Some(name.to_vec()),
+		name: Some(name.into()),
 		..Package::default()
 	}
 }
@@ -156,14 +160,14 @@ fn named(name: &[u8]) -> Package {
 fn model_edge_cases() {
 	check_model(&Package::default());
 	let file = Package {
-		origin: Some(PkgFrom::File(b"/tmp/a.pkg.tar.zst".to_vec())),
+		origin: Some(PkgFrom::File(b"/tmp/a.pkg.tar.zst"[..].into())),
 		..named(b"a")
 	};
 	check_model(&file);
 	// empty strings stay distinct from NULL, dup drops the uncopied ones
 	let empty = Package {
-		base64_sig: Some(Vec::new()),
-		xdata: vec![PkgXData::default()],
+		base64_sig: Some(Box::default()),
+		xdata: vec![PkgXData::default()].into(),
 		download_size: 7,
 		..file
 	};
@@ -199,11 +203,11 @@ fn compare_versions_fuzz() {
 	let mut rng = Rng::new(0x7e75);
 	for _ in 0..iters() {
 		let a = Package {
-			version: opt(&mut rng, VER_ALPHABET, 7),
+			version: opt(&mut rng, VER_ALPHABET, 7).map(Box::from),
 			..Package::default()
 		};
 		let b = Package {
-			version: opt(&mut rng, VER_ALPHABET, 7),
+			version: opt(&mut rng, VER_ALPHABET, 7).map(Box::from),
 			..Package::default()
 		};
 		assert_eq!(

@@ -182,10 +182,10 @@ fn random_dep(rng: &mut Rng) -> Depend {
 	let depmod = pick(rng, &MODS);
 	Depend {
 		name_hash: hash_sdbm(&name),
-		name,
+		name: name.into(),
 		version: (depmod != DepMod::Any || rng.below(4) == 0)
-			.then(|| pick(rng, VERSIONS).to_vec()),
-		desc: (rng.below(4) == 0).then(|| text(rng, 4)),
+			.then(|| pick(rng, VERSIONS).into()),
+		desc: (rng.below(4) == 0).then(|| text(rng, 4)).map(Box::from),
 		depmod,
 	}
 }
@@ -197,8 +197,8 @@ fn deps(rng: &mut Rng) -> Vec<Depend> {
 fn named(name: &[u8], version: &[u8]) -> Package {
 	Package {
 		name_hash: hash_sdbm(name),
-		name: Some(name.to_vec()),
-		version: Some(version.to_vec()),
+		name: Some(name.into()),
+		version: Some(version.into()),
 		..Package::default()
 	}
 }
@@ -209,11 +209,11 @@ fn random_cache(rng: &mut Rng) -> Vec<Package> {
 	names.retain(|_| rng.below(2) == 0);
 	names.into_iter()
 		.map(|n| Package {
-			depends: deps(rng),
-			optdepends: deps(rng),
-			provides: deps(rng),
-			groups: some_of(rng, 3, |r| text(r, 3)),
-			desc: opt_text(rng, 12),
+			depends: deps(rng).into(),
+			optdepends: deps(rng).into(),
+			provides: deps(rng).into(),
+			groups: some_of(rng, 3, |r| text(r, 3).into()).into(),
+			desc: opt_text(rng, 12).map(Box::from),
 			..named(n, pick(rng, VERSIONS))
 		})
 		.collect()
@@ -252,7 +252,10 @@ fn random_backup(rng: &mut Rng) -> Backup {
 		3 => Some(md5(b"secret\n")),
 		_ => Some(text(rng, 6)),
 	};
-	Backup { name, hash }
+	Backup {
+		name: name.into(),
+		hash: hash.map(Box::from),
+	}
 }
 
 // the package dump_pkg_full shows, with the keys of its signature
@@ -260,7 +263,7 @@ fn random_pkg(rng: &mut Rng, fx: &Fx, extra: bool) -> (Package, Vec<Vec<u8>>) {
 	let origin = match rng.below(if extra { 3 } else { 4 }) {
 		0 => Some(PkgFrom::LocalDb),
 		1 => Some(PkgFrom::SyncDb),
-		2 => Some(PkgFrom::File(fx.pkgfile())),
+		2 => Some(PkgFrom::File(fx.pkgfile().into())),
 		_ => None,
 	};
 	let file = matches!(origin, Some(PkgFrom::File(_)));
@@ -276,28 +279,28 @@ fn random_pkg(rng: &mut Rng, fx: &Fx, extra: bool) -> (Package, Vec<Vec<u8>>) {
 	};
 	let pkg = Package {
 		name_hash: hash_sdbm(&name),
-		name: Some(name),
-		filename: file.then(|| fx.pkgfile()),
+		name: Some(name.into()),
+		filename: file.then(|| fx.pkgfile()).map(Box::from),
 		version: (rng.below(6) != 0)
-			.then(|| pick(rng, VERSIONS).to_vec()),
-		desc: opt_text(rng, 30),
-		url: opt_text(rng, 6),
-		packager: opt_text(rng, 6),
-		sha256sum: opt_text(rng, 4),
-		base64_sig: sig,
-		arch: opt_text(rng, 3),
+			.then(|| pick(rng, VERSIONS).into()),
+		desc: opt_text(rng, 30).map(Box::from),
+		url: opt_text(rng, 6).map(Box::from),
+		packager: opt_text(rng, 6).map(Box::from),
+		sha256sum: opt_text(rng, 4).map(Box::from),
+		base64_sig: sig.map(Box::from),
+		arch: opt_text(rng, 3).map(Box::from),
 		builddate: random_date(rng),
 		installdate: random_date(rng),
 		size: random_size(rng),
 		isize: random_size(rng),
-		licenses: some_of(rng, 5, |r| text(r, 4)),
-		groups: some_of(rng, 4, |r| text(r, 3)),
-		replaces: deps(rng),
-		depends: some_of(rng, 8, random_dep),
-		optdepends: some_of(rng, 6, random_dep),
-		conflicts: deps(rng),
-		provides: deps(rng),
-		backup: some_of(rng, 6, random_backup),
+		licenses: some_of(rng, 5, |r| text(r, 4).into()).into(),
+		groups: some_of(rng, 4, |r| text(r, 3).into()).into(),
+		replaces: deps(rng).into(),
+		depends: some_of(rng, 8, random_dep).into(),
+		optdepends: some_of(rng, 6, random_dep).into(),
+		conflicts: deps(rng).into(),
+		provides: deps(rng).into(),
+		backup: some_of(rng, 6, random_backup).into(),
 		origin,
 		reason: pick(rng, &REASONS),
 		scriptlet: if rng.below(2) == 0 {
@@ -306,9 +309,10 @@ fn random_pkg(rng: &mut Rng, fx: &Fx, extra: bool) -> (Package, Vec<Vec<u8>>) {
 			rng.next_u64() as i32
 		},
 		xdata: some_of(rng, 4, |r| PkgXData {
-			name: text(r, 3),
-			value: text(r, 5),
-		}),
+			name: text(r, 3).into(),
+			value: text(r, 5).into(),
+		})
+		.into(),
 		validation: rng.below(16) as i32,
 		..Package::default()
 	};
@@ -567,14 +571,14 @@ fn full_fixed() {
 	let mut fx = Fx::new("fixed");
 	let dep = |n: &[u8]| Depend {
 		name_hash: hash_sdbm(n),
-		name: n.to_vec(),
+		name: n.into(),
 		version: None,
 		desc: None,
 		depmod: DepMod::Any,
 	};
 	let user = |n: &[u8]| Package {
-		depends: vec![dep(b"foo")],
-		optdepends: vec![dep(b"foo")],
+		depends: vec![dep(b"foo")].into(),
+		optdepends: vec![dep(b"foo")].into(),
 		..named(n, b"1")
 	};
 	let local = [user(b"b"), user(b"a"), named(b"bar", b"2")];
@@ -583,21 +587,22 @@ fn full_fixed() {
 	let caches = [&local[..], &sync[..], &sync[..1]];
 	let base = Package {
 		desc: Some(
-			b"a package with a long description to wrap".to_vec()
+			b"a package with a long description to wrap"[..].into()
 		),
-		licenses: vec![b"GPL".to_vec(), b"MIT".to_vec()],
-		optdepends: vec![dep(b"bar"), dep(b"nope")],
+		licenses: vec![b"GPL"[..].into(), b"MIT"[..].into()].into(),
+		optdepends: vec![dep(b"bar"), dep(b"nope")].into(),
 		backup: BACKUP_NAMES
 			.iter()
 			.map(|n| Backup {
-				name: n.to_vec(),
-				hash: Some(md5(b"alpha\n")),
+				name: n[..].into(),
+				hash: Some(md5(b"alpha\n").into()),
 			})
 			.collect(),
 		xdata: vec![PkgXData {
-			name: b"pkgtype".to_vec(),
-			value: b"pkg".to_vec(),
-		}],
+			name: b"pkgtype"[..].into(),
+			value: b"pkg"[..].into(),
+		}]
+		.into(),
 		builddate: 1_700_000_000,
 		installdate: 1_700_000_100,
 		size: 123_456,
@@ -608,7 +613,7 @@ fn full_fixed() {
 	let origins = [
 		Some(PkgFrom::LocalDb),
 		Some(PkgFrom::SyncDb),
-		Some(PkgFrom::File(fx.pkgfile())),
+		Some(PkgFrom::File(fx.pkgfile().into())),
 	];
 	let mut rng = Rng::new(1);
 	for origin in origins {
@@ -621,8 +626,10 @@ fn full_fixed() {
 				(Some(encode_base64(&p)), k)
 			};
 			let pkg = Package {
-				filename: file.then(|| fx.pkgfile()),
-				base64_sig: sig,
+				filename: file
+					.then(|| fx.pkgfile())
+					.map(Box::from),
+				base64_sig: sig.map(Box::from),
 				origin: origin.clone(),
 				..base.clone()
 			};
@@ -671,7 +678,7 @@ fn backups_fuzz() {
 	let mut rng = Rng::new(0xbac);
 	for _ in 0..iters() / 4 {
 		let pkg = Package {
-			backup: some_of(&mut rng, 8, random_backup),
+			backup: some_of(&mut rng, 8, random_backup).into(),
 			..named(b"foo", b"1")
 		};
 		let (cols, cs) = (pick(&mut rng, &COLS), colstr(&mut rng));
@@ -713,7 +720,8 @@ fn groups_installed_fuzz() {
 		let local = random_cache(&mut rng);
 		fx.w_mut().set_caches(&local, [&[], &[]]);
 		let pkg = Package {
-			groups: some_of(&mut rng, 4, |r| text(r, 3)),
+			groups: some_of(&mut rng, 4, |r| text(r, 3).into())
+				.into(),
 			..named(pick(&mut rng, NAMES), pick(&mut rng, VERSIONS))
 		};
 		let cs = colstr(&mut rng);

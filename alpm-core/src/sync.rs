@@ -1029,7 +1029,7 @@ fn pkg_get_sig(
 // a key a sync target is signed with and the keychain lacks: the
 // packager as uid, the key id
 struct MissingKey {
-	uid: Option<Vec<u8>>,
+	uid: Option<Box<[u8]>>,
 	keyid: Vec<u8>,
 }
 

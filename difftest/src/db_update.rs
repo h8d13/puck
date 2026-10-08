@@ -448,7 +448,7 @@ impl CUpdate {
 fn name_version(p: *const CPkg) -> (Vec<u8>, Vec<u8>) {
 	let pkg = read_pkg(p);
 	let v = pkg.version.clone().unwrap_or_default();
-	(pkg.name_bytes().to_vec(), v)
+	(pkg.name_bytes().to_vec(), v.into_vec())
 }
 
 // the Rust side: a Handle on its own fixture, built like CUpdate
@@ -520,7 +520,7 @@ impl RUpdate {
 							Ok(c.iter()
 								.map(|p| {
 									let v = p.version.clone();
-									(p.name_bytes().to_vec(), v.unwrap_or_default())
+									(p.name_bytes().to_vec(), v.unwrap_or_default().into_vec())
 								})
 								.collect())
 						}

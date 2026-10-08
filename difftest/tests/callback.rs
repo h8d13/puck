@@ -61,8 +61,8 @@ fn setup(config: Config, cols: u16, now_ms: i64) -> CbSetup {
 
 fn pkg(name: &str, version: &str, optdeps: &[&str]) -> Package {
 	Package {
-		name: Some(name.as_bytes().to_vec()),
-		version: Some(version.as_bytes().to_vec()),
+		name: Some(name.as_bytes().into()),
+		version: Some(version.as_bytes().into()),
 		optdepends: optdeps
 			.iter()
 			.map(|d| dep_from_string(d.as_bytes()))

@@ -452,7 +452,10 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
 - `strreplace` with an empty needle returns the input unchanged.
 - `Package`: owned struct, NULL strings are `None`; handle, ops vtable,
   `origin_data.db`, `removes`, `oldpkg` not modelled. `dup()` copies only
-  what `_alpm_pkg_dup` copies, `Clone` copies everything.
+  what `_alpm_pkg_dup` copies, `Clone` copies everything. Strings and
+  lists (also `Depend`, `Backup`, `PkgXData`) are boxed slices, exact
+  like the C's: nothing grows them after a read, the readers append a
+  section through a Vec (`util::with_vec`). `files` stays a Vec.
 - `PkgHash<P: Borrow<Package>>` keeps the C bucket layout (prime sizes,
   f64 size/limit, rehash in old bucket order, backward shift on remove),
   so `find`/`remove` with duplicate names hit the same entry. Growth
@@ -863,6 +866,7 @@ Follow-ups raised by port units:
 | dload's internal debug lines (url, maxsize, time condition, tempfile, curl result, response code), so `-Sy --debug` with the built-in downloader matches | process | done: every dload.c debug line, CURLcodes carried by `Code::Failed`, a client-side unmet time condition is response code 304 like curl; dload/db_update difftests keep debug lines (RET_ERR's left out), db_update's `DLOAD_DEBUG`, trans_commit's download quiet window and cli_binary's sandbox `--debug` skip dropped |
 | `_alpm_upgrade_packages` loop over trans.add, interrupted state, ldconfig | addcommit | with alpm_trans_commit |
 | test generators still limited to what alpm-db/alpm-repo-db/alpm-pkginfo accepted (db_search.rs, diskspace.rs, check.rs, be_local_write.rs, sync_clean.rs, be_package.rs "per the alpm-pkginfo spec"): widen to what the C reads, drop the comments | stale sweep | done: `fixtures::loose_sections` (sparse, empty, blank, unknown desc sections), files lists without parents/sorting, odd `.PKGINFO` lines, random packages read back by set_reason, odd deps_graph relations; cli_binary's empty files lists went with the -Qkk row above |
+| per-package layout: `Vec` strings and lists carry a capacity word and readers' slack (`shrink_lists`) | boxslice | done: boxed slices, `Package` 616 -> 448 bytes, `Depend` 88 -> 64; core + extra cache heap 43.0 -> 35.4 MB; peak RSS -Si/-Sl/-Ss/-Qu 65-66 -> 55.5-56 MB (C 62); wall equal within noise |
 
 Divergences below are the remaining ones; the ALPM parser and type
 divergences left with the owned readers.

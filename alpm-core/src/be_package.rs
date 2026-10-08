@@ -28,13 +28,14 @@ use rustix::fs::Access;
 use crate::backup::Backup;
 use crate::be_local::{INFRQ_BASE, INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET};
 use crate::callbacks::{Callbacks, LogLevel, logv};
-use crate::deps::dep_from_string;
+use crate::deps::{Depend, dep_from_string};
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
 use crate::mtree;
 use crate::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
-	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, check_meta, parse_xdata,
+	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, PkgXData, check_meta,
+	parse_xdata,
 };
 use crate::signing::{
 	Keyring, SIG_PACKAGE, SIG_PACKAGE_MARGINAL_OK, SIG_PACKAGE_OPTIONAL,
@@ -44,7 +45,7 @@ use crate::signing::{
 use crate::tar;
 use crate::util::{
 	self, ArchiveFgets, DataBlocks, Entry, alpm_access, hash_sdbm,
-	parsedate, strtoofft, until_nul,
+	parsedate, strtoofft, until_nul, with_vec,
 };
 
 // read_sigfile's limit, adopted from repo-add
@@ -155,12 +156,50 @@ fn text(v: &impl Display) -> Vec<u8> {
 	v.to_string().into_bytes()
 }
 
+// the list keys of a .PKGINFO while it is read, appended to the
+// package's lists once it is done
+#[derive(Default)]
+struct Lists {
+	groups: Vec<Box<[u8]>>,
+	licenses: Vec<Box<[u8]>>,
+	depends: Vec<Depend>,
+	optdepends: Vec<Depend>,
+	makedepends: Vec<Depend>,
+	checkdepends: Vec<Depend>,
+	conflicts: Vec<Depend>,
+	replaces: Vec<Depend>,
+	provides: Vec<Depend>,
+	backup: Vec<Backup>,
+	xdata: Vec<PkgXData>,
+}
+
+fn append<T>(b: &mut Box<[T]>, v: Vec<T>) {
+	with_vec(b, |b| b.extend(v));
+}
+
+impl Lists {
+	fn put(self, pkg: &mut Package) {
+		append(&mut pkg.groups, self.groups);
+		append(&mut pkg.licenses, self.licenses);
+		append(&mut pkg.depends, self.depends);
+		append(&mut pkg.optdepends, self.optdepends);
+		append(&mut pkg.makedepends, self.makedepends);
+		append(&mut pkg.checkdepends, self.checkdepends);
+		append(&mut pkg.conflicts, self.conflicts);
+		append(&mut pkg.replaces, self.replaces);
+		append(&mut pkg.provides, self.provides);
+		append(&mut pkg.backup, self.backup);
+		append(&mut pkg.xdata, self.xdata);
+	}
+}
+
 // one "key = value" line of parse_descfile. the key ends at the line's
 // first space, which must start " = "; key and value are read as C
 // strings, so a nul cuts them. single keys overwrite, list keys append
 fn parse_line(
 	cb: &mut dyn Callbacks,
 	pkg: &mut Package,
+	l: &mut Lists,
 	line: &[u8],
 	linenum: c_int,
 ) -> Result<(), Reason> {
@@ -182,38 +221,36 @@ fn parse_line(
 	let v = until_nul(&line[i + 3..]);
 	match key {
 		b"pkgname" => {
-			pkg.name = Some(v.to_vec());
+			pkg.name = Some(v.into());
 			pkg.name_hash = hash_sdbm(v);
 		}
-		b"pkgbase" => pkg.base = Some(v.to_vec()),
-		b"pkgver" => pkg.version = Some(v.to_vec()),
+		b"pkgbase" => pkg.base = Some(v.into()),
+		b"pkgver" => pkg.version = Some(v.into()),
 		// not used atm
 		b"basever" => {}
-		b"pkgdesc" => pkg.desc = Some(v.to_vec()),
-		b"group" => pkg.groups.push(v.to_vec()),
-		b"url" => pkg.url = Some(v.to_vec()),
-		b"license" => pkg.licenses.push(v.to_vec()),
+		b"pkgdesc" => pkg.desc = Some(v.into()),
+		b"group" => l.groups.push(v.into()),
+		b"url" => pkg.url = Some(v.into()),
+		b"license" => l.licenses.push(v.into()),
 		// 0 when not a whole number
 		b"builddate" => pkg.builddate = parsedate(v).unwrap_or(0),
-		b"packager" => pkg.packager = Some(v.to_vec()),
-		b"arch" => pkg.arch = Some(v.to_vec()),
+		b"packager" => pkg.packager = Some(v.into()),
+		b"arch" => pkg.arch = Some(v.into()),
 		// off_t: -1 when not bare digits, past i64::MAX the unsigned
 		// value wraps (gcc's conversion)
 		b"size" => pkg.isize = strtoofft(v).map_or(-1, |n| n as i64),
-		b"depend" => pkg.depends.push(dep_from_string(v)),
-		b"optdepend" => pkg.optdepends.push(dep_from_string(v)),
-		b"makedepend" => pkg.makedepends.push(dep_from_string(v)),
-		b"checkdepend" => pkg.checkdepends.push(dep_from_string(v)),
-		b"conflict" => pkg.conflicts.push(dep_from_string(v)),
-		b"replaces" => pkg.replaces.push(dep_from_string(v)),
-		b"provides" => pkg.provides.push(dep_from_string(v)),
-		b"backup" => pkg.backup.push(Backup {
-			name: v.to_vec(),
+		b"depend" => l.depends.push(dep_from_string(v)),
+		b"optdepend" => l.optdepends.push(dep_from_string(v)),
+		b"makedepend" => l.makedepends.push(dep_from_string(v)),
+		b"checkdepend" => l.checkdepends.push(dep_from_string(v)),
+		b"conflict" => l.conflicts.push(dep_from_string(v)),
+		b"replaces" => l.replaces.push(dep_from_string(v)),
+		b"provides" => l.provides.push(dep_from_string(v)),
+		b"backup" => l.backup.push(Backup {
+			name: v.into(),
 			hash: None,
 		}),
-		b"xdata" => {
-			pkg.xdata.push(parse_xdata(v).ok_or(Reason::Xdata)?)
-		}
+		b"xdata" => l.xdata.push(parse_xdata(v).ok_or(Reason::Xdata)?),
 		_ => {
 			let what =
 				[name, b": unknown key '", key, b"'"].concat();
@@ -240,6 +277,19 @@ fn parse_descfile(
 	pkg: &mut Package,
 	entry: &mut Entry,
 ) -> Result<(), Reason> {
+	let mut lists = Lists::default();
+	let r = read_descfile(cb, pkg, &mut lists, entry);
+	// what was read before an error stays, like the C's
+	lists.put(pkg);
+	r
+}
+
+fn read_descfile(
+	cb: &mut dyn Callbacks,
+	pkg: &mut Package,
+	l: &mut Lists,
+	entry: &mut Entry,
+) -> Result<(), Reason> {
 	let mut lines = ArchiveFgets::new(DataBlocks::new(entry));
 	let mut linenum: c_int = 0;
 	loop {
@@ -256,7 +306,7 @@ fn parse_descfile(
 		if matches!(line.first(), None | Some(0 | b'#')) {
 			continue;
 		}
-		parse_line(cb, pkg, line, linenum)?;
+		parse_line(cb, pkg, l, line, linenum)?;
 	}
 }
 
@@ -360,7 +410,7 @@ pub fn pkg_load_internal(
 	let msg = [b"starting package load for ", pkgfile, b"\n"];
 	logv(cb, LogLevel::Debug, &msg);
 	let mut pkg = Package {
-		filename: Some(pkgfile.to_vec()),
+		filename: Some(pkgfile.into()),
 		size,
 		..Package::default()
 	};
@@ -438,7 +488,7 @@ pub fn pkg_load_internal(
 		logv(cb, LogLevel::Error, &msg);
 		return Err(Error::Invalid(Reason::Missing));
 	}
-	pkg.origin = Some(PkgFrom::File(pkgfile.to_vec()));
+	pkg.origin = Some(PkgFrom::File(pkgfile.into()));
 	pkg.infolevel = INFRQ_BASE | INFRQ_DESC | INFRQ_SCRIPTLET;
 	pkg.validation = PKG_VALIDATION_NONE;
 	if full {

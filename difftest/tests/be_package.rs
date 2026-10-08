@@ -143,8 +143,10 @@ fn show_logs(logs: &CLogs) -> String {
 
 // field name and printable value, to show which fields differ
 fn fields(p: &Package) -> Vec<(&'static str, String)> {
-	let o = |s: &Option<Vec<u8>>| format!("{:?}", s.as_deref().map(lossy));
-	let l = |v: &[Vec<u8>]| {
+	let o = |s: &Option<Box<[u8]>>| {
+		format!("{:?}", s.as_deref().map(lossy))
+	};
+	let l = |v: &[Box<[u8]>]| {
 		format!("{:?}", v.iter().map(|s| lossy(s)).collect::<Vec<_>>())
 	};
 	let d = |v: &[alpm_core::deps::Depend]| {
@@ -2084,7 +2086,7 @@ fn fixed_validate() {
 	let sum = Sha256Checksum::calculate_from(fs::read(&path).unwrap())
 		.to_string();
 	let sync = |s: Option<&str>| Package {
-		sha256sum: s.map(|s| s.as_bytes().to_vec()),
+		sha256sum: s.map(|s| s.as_bytes().into()),
 		..Package::default()
 	};
 	let upper = sum.to_uppercase();

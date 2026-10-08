@@ -85,7 +85,7 @@ pub trait PkgEnv: DbCaches {
 		pkg.scriptlet != 0
 	}
 	// alpm_pkg_get_backup: a local package lazy-loads its files here
-	fn backup(&mut self, pkg: &Package) -> Vec<Backup> {
+	fn backup(&mut self, pkg: &Package) -> Box<[Backup]> {
 		pkg.backup.clone()
 	}
 }
@@ -270,7 +270,7 @@ fn size_line(
 	out.extend_from_slice(format!(" {}\n", size.1).as_bytes());
 }
 
-fn opt(s: &Option<Vec<u8>>) -> &[u8] {
+fn opt(s: &Option<Box<[u8]>>) -> &[u8] {
 	s.as_deref().unwrap_or_default()
 }
 
@@ -320,7 +320,7 @@ pub fn dump_pkg_full(
 	};
 	if sync {
 		let db = env.db_name(pkg);
-		s(out, T::Repository, opt(&db));
+		s(out, T::Repository, db.as_deref().unwrap_or_default());
 	}
 	s(out, T::Name, opt(&pkg.name));
 	s(out, T::Version, opt(&pkg.version));

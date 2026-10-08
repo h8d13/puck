@@ -558,22 +558,24 @@ fn gen_add_pkg(rng: &mut Rng) -> Package {
 	let name = pick(rng, &PKG_NAMES);
 	Package {
 		name_hash: hash_sdbm(name.as_bytes()),
-		name: Some(name.as_bytes().to_vec()),
-		version: Some(format!("9.{}-1", rng.below(5)).into_bytes()),
-		desc: Some(b"added".to_vec()),
+		name: Some(name.as_bytes().into()),
+		version: Some(format!("9.{}-1", rng.below(5))
+			.into_bytes()
+			.into()),
+		desc: Some(b"added"[..].into()),
 		groups: gen_groups(rng)
 			.into_iter()
-			.map(String::into_bytes)
+			.map(|g| g.into_bytes().into())
 			.collect(),
-		makedepends: Vec::new(),
-		base64_sig: (rng.below(2) == 0).then(|| b"c2ln".to_vec()),
+		makedepends: Box::default(),
+		base64_sig: (rng.below(2) == 0).then(|| b"c2ln"[..].into()),
 		download_size: rng.below(100) as i64,
 		// loaded like a package from a file or sync db
 		infolevel: INFRQ_ALL,
 		origin: match rng.below(4) {
 			0 => None,
 			1 => Some(PkgFrom::File(
-				b"/tmp/x.pkg.tar.zst".to_vec(),
+				b"/tmp/x.pkg.tar.zst"[..].into(),
 			)),
 			2 => Some(PkgFrom::LocalDb),
 			_ => Some(PkgFrom::SyncDb),
@@ -759,7 +761,7 @@ fn step(b: &mut Both, rng: &mut Rng) {
 			let name = pick(rng, &PKG_NAMES);
 			let mut key = Package {
 				name_hash: hash_sdbm(name.as_bytes()),
-				name: Some(name.as_bytes().to_vec()),
+				name: Some(name.as_bytes().into()),
 				..Package::default()
 			};
 			if rng.below(8) == 0 {
