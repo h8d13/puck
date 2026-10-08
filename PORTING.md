@@ -692,7 +692,8 @@ Follow-ups raised by port units:
 | query.rs's new_version copy onto `alpm_core::sync::sync_get_new_version` | query | todo (ported in transprep) |
 | `pacman_sync` dispatches to `sync_trans` (needs a `Ui`), re-export `TRANS_FLAG_*` in pacman.rs | transprep | done |
 | "found cached pkg" debug line into `util::filecache_find` (local wrapper in sync.rs) | transprep | todo |
-| conflict.rs `pkg_diff` onto `deps::list_diff`; deps_graph test reuses the trans_prep world generator | transprep | todo |
+| conflict.rs `pkg_diff` onto `deps::list_diff`; deps_graph test reuses the trans_prep world generator | transprep | done: deps_graph runs on `gen_world`/`write_world` plus its odd depends and `>=` provisions |
+| trans_prep worlds with deps_graph's odd relations (`a>=`, `d: for d`, `c<=>1`, ...) in every relation list: `prepare_fuzz` aborts in the C (`free(): invalid pointer` at `alpm_trans_release` after a prepare with file targets), `frontend_fuzz` drops below its "nothing to do" floor. root-cause (C bug or difftest free path), then widen `tp_relation` | cruft | todo |
 | `Handle` owns dload `DownloadState`/`Settings`/cachedirs; `filecache_*` into util | dload | with the callbacks unit |
 | `alpm_db_update` (be_sync download + validate) | dload | done |
 | drop `SyncCallbacks` and the `replace_callbacks` swap in sync.rs for `callback.rs` (progress bars, "is up to date", "failed to download") | dbupdate | done |

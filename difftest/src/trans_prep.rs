@@ -54,9 +54,9 @@ use crate::{deps_graph, vsnprintf};
 pub const TP_SYNC: [&str; 3] = ["core", "extra", "multi"];
 const NAMES: [&str; 8] = ["a", "b", "c", "d", "e", "f", "g", "h"];
 // provided only
-const VIRTUAL: [&str; 3] = ["v1", "v2", "libx"];
+pub const TP_VIRTUAL: [&str; 3] = ["v1", "v2", "libx"];
 const PKG_VERSIONS: [&str; 4] = ["1.0-1", "2.0-1", "1:0.5-1", "1.5-2"];
-const DEP_VERSIONS: [&str; 5] = ["1.0", "2.0", "1:0.5", "1.5", "1.0-1"];
+pub const TP_DEP_VERSIONS: [&str; 5] = ["1.0", "2.0", "1:0.5", "1.5", "1.0-1"];
 const OPS: [&str; 5] = ["=", ">=", "<=", ">", "<"];
 pub const TP_GROUPS: [&str; 2] = ["g1", "g2"];
 // the handle architectures, when set, are "x86_64"
@@ -70,20 +70,20 @@ fn some<T>(rng: &mut Rng, n: usize, f: impl Fn(&mut Rng) -> T) -> Vec<T> {
 	(0..rng.below(n)).map(|_| f(rng)).collect()
 }
 
-fn any_name(rng: &mut Rng) -> &'static str {
+pub fn tp_any_name(rng: &mut Rng) -> &'static str {
 	match rng.below(4) {
-		0 => pick(rng, &VIRTUAL),
+		0 => pick(rng, &TP_VIRTUAL),
 		_ => pick(rng, &NAMES),
 	}
 }
 
-fn relation(rng: &mut Rng) -> String {
-	let name = any_name(rng);
+pub fn tp_relation(rng: &mut Rng) -> String {
+	let name = tp_any_name(rng);
 	match rng.below(3) {
 		0 => format!(
 			"{name}{}{}",
 			pick(rng, &OPS),
-			pick(rng, &DEP_VERSIONS)
+			pick(rng, &TP_DEP_VERSIONS)
 		),
 		_ => name.to_string(),
 	}
@@ -91,12 +91,12 @@ fn relation(rng: &mut Rng) -> String {
 
 fn provision(rng: &mut Rng) -> String {
 	let name = match rng.below(3) {
-		0 | 1 => pick(rng, &VIRTUAL),
+		0 | 1 => pick(rng, &TP_VIRTUAL),
 		_ => pick(rng, &NAMES),
 	};
 	match rng.below(4) {
 		0 | 1 => name.to_string(),
-		_ => format!("{name}={}", pick(rng, &DEP_VERSIONS)),
+		_ => format!("{name}={}", pick(rng, &TP_DEP_VERSIONS)),
 	}
 }
 
@@ -139,15 +139,15 @@ fn gen_pkg(rng: &mut Rng, name: &'static str, sync: bool) -> TpPkg {
 	let mut p = TpPkg {
 		name,
 		version,
-		depends: some(rng, 4, relation),
-		optdepends: some(rng, 3, |r| any_name(r).to_string()),
+		depends: some(rng, 4, tp_relation),
+		optdepends: some(rng, 3, |r| tp_any_name(r).to_string()),
 		provides: some(rng, 3, provision),
 		conflicts: match rng.below(3) {
-			0 => some(rng, 3, relation),
+			0 => some(rng, 3, tp_relation),
 			_ => Vec::new(),
 		},
 		replaces: match (sync, rng.below(4)) {
-			(true, 0) => some(rng, 3, relation),
+			(true, 0) => some(rng, 3, tp_relation),
 			_ => Vec::new(),
 		},
 		groups: subset(rng, &TP_GROUPS, 3),
