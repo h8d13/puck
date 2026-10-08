@@ -36,8 +36,8 @@ pub fn c_backup_dup(backup: &Backup) -> Backup {
 	// SAFETY: d is the valid struct just returned
 	let (n, h) = unsafe { ((*d).name, (*d).hash) };
 	let out = Backup {
-		name: take(n).unwrap(),
-		hash: take(h),
+		name: take(n).unwrap().into(),
+		hash: take(h).map(Box::from),
 	};
 	c_free(d.cast());
 	out

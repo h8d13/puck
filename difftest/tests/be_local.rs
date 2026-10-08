@@ -146,7 +146,7 @@ fn diff_fields(a: &Package, b: &Package) -> Vec<&'static str> {
 	out
 }
 
-fn s(b: &Option<Vec<u8>>) -> String {
+fn s(b: &Option<Box<[u8]>>) -> String {
 	b.as_ref().map_or("NULL".into(), |b| {
 		format!("{:?}", String::from_utf8_lossy(b))
 	})

@@ -287,7 +287,7 @@ impl CConflictHandle {
 		list_data(list)
 			.into_iter()
 			// SAFETY: cached packages, name is the first string
-			.map(|p| read_pkg(p.cast()).name.unwrap())
+			.map(|p| read_pkg(p.cast()).name.unwrap().into_vec())
 			.collect()
 	}
 

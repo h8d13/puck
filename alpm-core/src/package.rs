@@ -21,8 +21,8 @@ use crate::version::vercmp;
 // alpm_pkg_xdata_t
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PkgXData {
-	pub name: Vec<u8>,
-	pub value: Vec<u8>,
+	pub name: Box<[u8]>,
+	pub value: Box<[u8]>,
 }
 
 // limits.h on linux
@@ -34,9 +34,21 @@ pub fn parse_xdata(s: &[u8]) -> Option<PkgXData> {
 	let s = until_nul(s);
 	let sep = s.iter().position(|&c| c == b'=')?;
 	Some(PkgXData {
-		name: s[..sep].to_vec(),
-		value: s[sep + 1..].to_vec(),
+		name: s[..sep].into(),
+		value: s[sep + 1..].into(),
 	})
+}
+
+// parse_xdata over lines onto xdata up to the first line without '=',
+// returned: the entries before it stay, like the C's
+pub(crate) fn extend_xdata(
+	xdata: &mut Vec<PkgXData>,
+	lines: Vec<Vec<u8>>,
+) -> Result<(), Vec<u8>> {
+	for l in lines {
+		xdata.push(parse_xdata(&l).ok_or(l)?);
+	}
+	Ok(())
 }
 
 // alpm_pkgreason_t, discriminants as in alpm.h
@@ -53,7 +65,7 @@ pub enum PkgReason {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PkgFrom {
 	// path the package was loaded from, origin_data.file
-	File(Vec<u8>),
+	File(Box<[u8]>),
 	LocalDb,
 	SyncDb,
 }
@@ -72,38 +84,38 @@ pub struct Package {
 	// _alpm_hash_sdbm of name, set by hand like the C: a stale hash
 	// changes lookups the same way
 	pub name_hash: c_ulong,
-	pub filename: Option<Vec<u8>>,
-	pub base: Option<Vec<u8>>,
-	pub name: Option<Vec<u8>>,
-	pub version: Option<Vec<u8>>,
-	pub desc: Option<Vec<u8>>,
-	pub url: Option<Vec<u8>>,
-	pub packager: Option<Vec<u8>>,
-	pub sha256sum: Option<Vec<u8>>,
-	pub base64_sig: Option<Vec<u8>>,
-	pub arch: Option<Vec<u8>>,
+	pub filename: Option<Box<[u8]>>,
+	pub base: Option<Box<[u8]>>,
+	pub name: Option<Box<[u8]>>,
+	pub version: Option<Box<[u8]>>,
+	pub desc: Option<Box<[u8]>>,
+	pub url: Option<Box<[u8]>>,
+	pub packager: Option<Box<[u8]>>,
+	pub sha256sum: Option<Box<[u8]>>,
+	pub base64_sig: Option<Box<[u8]>>,
+	pub arch: Option<Box<[u8]>>,
 	pub builddate: i64,
 	pub installdate: i64,
 	pub size: i64,
 	pub isize: i64,
 	pub download_size: i64,
-	pub licenses: Vec<Vec<u8>>,
-	pub replaces: Vec<Depend>,
-	pub groups: Vec<Vec<u8>>,
-	pub backup: Vec<Backup>,
-	pub depends: Vec<Depend>,
-	pub optdepends: Vec<Depend>,
-	pub checkdepends: Vec<Depend>,
-	pub makedepends: Vec<Depend>,
-	pub conflicts: Vec<Depend>,
-	pub provides: Vec<Depend>,
+	pub licenses: Box<[Box<[u8]>]>,
+	pub replaces: Box<[Depend]>,
+	pub groups: Box<[Box<[u8]>]>,
+	pub backup: Box<[Backup]>,
+	pub depends: Box<[Depend]>,
+	pub optdepends: Box<[Depend]>,
+	pub checkdepends: Box<[Depend]>,
+	pub makedepends: Box<[Depend]>,
+	pub conflicts: Box<[Depend]>,
+	pub provides: Box<[Depend]>,
 	pub files: FileList,
 	// None while unset, calloc leaves the C enum at 0
 	pub origin: Option<PkgFrom>,
 	pub reason: PkgReason,
 	// C int, nonzero when the package has an install scriptlet
 	pub scriptlet: c_int,
-	pub xdata: Vec<PkgXData>,
+	pub xdata: Box<[PkgXData]>,
 	// alpm_dbinfrq_t bits
 	pub infolevel: c_int,
 	// PKG_VALIDATION_* bits
@@ -113,28 +125,6 @@ pub struct Package {
 impl Package {
 	// name as strcmp sees it. the C dereferences NULL names, None reads
 	// as empty here
-	// the lists at their length: readers push entry by entry, and the
-	// doubling slack (a third of the depends of a sync db) would stay
-	// for the cache's life where the C's lists are exact
-	pub fn shrink_lists(&mut self) {
-		for l in [
-			&mut self.depends,
-			&mut self.optdepends,
-			&mut self.checkdepends,
-			&mut self.makedepends,
-			&mut self.conflicts,
-			&mut self.provides,
-			&mut self.replaces,
-		] {
-			l.shrink_to_fit();
-		}
-		self.licenses.shrink_to_fit();
-		self.groups.shrink_to_fit();
-		self.backup.shrink_to_fit();
-		self.xdata.shrink_to_fit();
-		self.files.files.shrink_to_fit();
-	}
-
 	pub fn name_bytes(&self) -> &[u8] {
 		until_nul(self.name.as_deref().unwrap_or_default())
 	}
@@ -146,9 +136,9 @@ impl Package {
 		Package {
 			base64_sig: None,
 			download_size: 0,
-			checkdepends: Vec::new(),
-			makedepends: Vec::new(),
-			xdata: Vec::new(),
+			checkdepends: Box::default(),
+			makedepends: Box::default(),
+			xdata: Box::default(),
 			..self.clone()
 		}
 	}

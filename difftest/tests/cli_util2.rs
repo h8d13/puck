@@ -468,8 +468,8 @@ const VERSION_TOKENS: &[&[u8]] = &[
 fn pkg(name: &[u8], version: &[u8]) -> Package {
 	Package {
 		name_hash: hash_sdbm(name),
-		name: Some(name.to_vec()),
-		version: Some(version.to_vec()),
+		name: Some(name.into()),
+		version: Some(version.into()),
 		infolevel: INFRQ_DSIZE,
 		builddate: -1,
 		..Package::default()
@@ -574,7 +574,7 @@ fn display_targets_tables() {
 				);
 				p.origin = match rng.below(5) {
 					0 => Some(PkgFrom::File(
-						b"/x.pkg".to_vec(),
+						b"/x.pkg"[..].into(),
 					)),
 					_ => Some(PkgFrom::SyncDb),
 				};
@@ -745,21 +745,20 @@ fn print_packages_formats() {
 				p.origin = match rng.below(5) {
 					0 => Some(PkgFrom::LocalDb),
 					1 => Some(PkgFrom::File(
-						b"/srv/x.pkg".to_vec(),
+						b"/srv/x.pkg"[..].into(),
 					)),
 					2 => None,
 					_ => Some(PkgFrom::SyncDb),
 				};
 				p.filename =
-					Some(pick(&mut rng, FILENAMES)
-						.to_vec());
-				p.desc = field(&mut rng);
-				p.arch = field(&mut rng);
-				p.base = field(&mut rng);
-				p.url = field(&mut rng);
-				p.packager = field(&mut rng);
-				p.sha256sum = field(&mut rng);
-				p.base64_sig = field(&mut rng);
+					Some(pick(&mut rng, FILENAMES).into());
+				p.desc = field(&mut rng).map(Box::from);
+				p.arch = field(&mut rng).map(Box::from);
+				p.base = field(&mut rng).map(Box::from);
+				p.url = field(&mut rng).map(Box::from);
+				p.packager = field(&mut rng).map(Box::from);
+				p.sha256sum = field(&mut rng).map(Box::from);
+				p.base64_sig = field(&mut rng).map(Box::from);
 				p.builddate = [
 					-1,
 					0,
@@ -770,18 +769,18 @@ fn print_packages_formats() {
 				p.isize = size(&mut rng);
 				p.download_size =
 					[0, 0, size(&mut rng)][rng.below(3)];
-				p.depends = deps(&mut rng, 3);
-				p.optdepends = deps(&mut rng, 3);
-				p.checkdepends = deps(&mut rng, 2);
-				p.makedepends = deps(&mut rng, 2);
-				p.conflicts = deps(&mut rng, 2);
-				p.provides = deps(&mut rng, 2);
-				p.replaces = deps(&mut rng, 2);
+				p.depends = deps(&mut rng, 3).into();
+				p.optdepends = deps(&mut rng, 3).into();
+				p.checkdepends = deps(&mut rng, 2).into();
+				p.makedepends = deps(&mut rng, 2).into();
+				p.conflicts = deps(&mut rng, 2).into();
+				p.provides = deps(&mut rng, 2).into();
+				p.replaces = deps(&mut rng, 2).into();
 				p.groups = (0..rng.below(3))
-					.map(|_| name(&mut rng))
+					.map(|_| name(&mut rng).into())
 					.collect();
 				p.licenses = (0..rng.below(3))
-					.map(|_| name(&mut rng))
+					.map(|_| name(&mut rng).into())
 					.collect();
 				(p, rng.below(2))
 			})
@@ -835,7 +834,7 @@ fn optdepends_lists() {
 					pick(rng, &[b"1", b"2", b"0.5", b"3"]),
 				);
 				p.origin = Some(origin.clone());
-				p.provides = deps(rng, 2);
+				p.provides = deps(rng, 2).into();
 				p
 			})
 			.collect()
@@ -845,9 +844,9 @@ fn optdepends_lists() {
 		let local = some(&mut rng, PkgFrom::LocalDb);
 		let pending = some(&mut rng, PkgFrom::SyncDb);
 		let mut old = pkg(b"old", b"1");
-		old.optdepends = deps(&mut rng, 5);
+		old.optdepends = deps(&mut rng, 5).into();
 		let mut new = pkg(&name(&mut rng), b"2");
-		new.optdepends = deps(&mut rng, 5);
+		new.optdepends = deps(&mut rng, 5).into();
 		let cols = cols(&mut rng);
 		fx.world.set_caches(&local, [&[], &[]]);
 		let local_r: Vec<&Package> = local.iter().collect();

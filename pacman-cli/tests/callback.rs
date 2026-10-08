@@ -37,8 +37,8 @@ fn pkg(name: &str, optdeps: &[&str]) -> Package {
 	Package {
 		// depcmp looks at the hash first
 		name_hash: hash_sdbm(name.as_bytes()),
-		name: Some(name.as_bytes().to_vec()),
-		version: Some(b"1-1".to_vec()),
+		name: Some(name.as_bytes().into()),
+		version: Some(b"1-1"[..].into()),
 		optdepends: optdeps
 			.iter()
 			.map(|d| dep_from_string(d.as_bytes()))

@@ -96,7 +96,8 @@ const EVENT_SCRIPTLET_INFO: c_int = 17;
 const EVENT_PACSAVE_CREATED: c_int = 33;
 
 fn pkg_name(p: *const CPkg) -> Option<Vec<u8>> {
-	(!p.is_null()).then(|| read_pkg(p).name.expect("package without name"))
+	let name = |p| read_pkg(p).name.expect("package without name");
+	(!p.is_null()).then(|| name(p).into_vec())
 }
 
 // the recorder behind the C callbacks' ctx; mute during the setup
@@ -310,7 +311,7 @@ impl Callbacks for RustRec {
 
 	fn event(&mut self, event: &Event<'_>) {
 		let name = |p: Option<&Package>| {
-			p.map(|p| p.name.clone().unwrap())
+			p.map(|p| p.name.as_deref().unwrap().to_vec())
 		};
 		let r = match event {
 			Event::PackageOperationStart(op)
@@ -322,7 +323,10 @@ impl Callbacks for RustRec {
 			),
 			Event::PacsaveCreated { oldpkg, file } => {
 				RmRec::Pacsave(
-					oldpkg.name.clone().unwrap(),
+					oldpkg.name
+						.as_deref()
+						.unwrap()
+						.to_vec(),
 					file.to_vec(),
 				)
 			}
@@ -392,7 +396,10 @@ pub fn rust_remove_single(
 	let db = h.localdb().unwrap();
 	let cache = db
 		.loaded_pkgcache()
-		.map(|c| c.iter().map(|p| p.name.clone().unwrap()).collect())
+		.map(|c| {
+			c.iter().map(|p| p.name.as_deref().unwrap().to_vec())
+				.collect()
+		})
 		.unwrap_or_default();
 	trans_release(&mut h).unwrap();
 	let recs = std::mem::take(&mut *recs.borrow_mut());

@@ -264,12 +264,13 @@ fn file_pkg(rng: &mut Rng, fx: &TempRoot) -> Package {
 	let path = fx.path("root/x.pkg.tar.zst");
 	Package {
 		name_hash: hash_sdbm(name.as_bytes()),
-		name: Some(name.as_bytes().to_vec()),
-		version: Some(pick(rng, &PKG_VERSIONS).as_bytes().to_vec()),
+		name: Some(name.as_bytes().into()),
+		version: Some(pick(rng, &PKG_VERSIONS).as_bytes().into()),
 		provides: some(rng, 3, |r| {
 			dep_from_string(provision(r).as_bytes())
-		}),
-		origin: Some(PkgFrom::File(path)),
+		})
+		.into(),
+		origin: Some(PkgFrom::File(path.into())),
 		..Package::default()
 	}
 }
@@ -416,8 +417,11 @@ fn should_ignore_fuzz() {
 		let name = rng.bytes(alphabet, 4);
 		let pkg = Package {
 			name_hash: hash_sdbm(&name),
-			name: Some(name),
-			groups: strs(&mut rng, 3),
+			name: Some(name.into()),
+			groups: strs(&mut rng, 3)
+				.into_iter()
+				.map(Box::from)
+				.collect(),
 			..Package::default()
 		};
 		h.set_ignorepkgs(&ipkg);

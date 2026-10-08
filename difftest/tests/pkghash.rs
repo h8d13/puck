@@ -22,7 +22,7 @@ impl Borrow<Package> for Entry<'_> {
 fn named(name: &[u8]) -> Package {
 	Package {
 		name_hash: hash_sdbm(name),
-		name: Some(name.to_vec()),
+		name: Some(name.into()),
 		..Package::default()
 	}
 }

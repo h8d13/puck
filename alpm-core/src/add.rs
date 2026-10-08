@@ -1163,7 +1163,7 @@ fn extract_single_file(
 		.iter()
 		.position(|b| until_nul(&b.name) == &entryname[..]);
 	let (mut notouch, mut needbackup) = (false, false);
-	let mut hash_orig: Option<Vec<u8>> = None;
+	let mut hash_orig: Option<Box<[u8]>> = None;
 	let lsbuf = llstat(&filename);
 	let is_dir = |m: u32| m & S_IFMT == S_IFDIR;
 	let mut isnewfile = lsbuf.is_err();
@@ -1264,7 +1264,8 @@ fn extract_single_file(
 		return 1;
 	}
 	if let Some(i) = backup {
-		newpkg.backup[i].hash = compute_md5sum(&filename);
+		newpkg.backup[i].hash =
+			compute_md5sum(&filename).map(Box::from);
 	}
 
 	let origfile = &filename[..filename_len];
@@ -1286,18 +1287,18 @@ fn extract_single_file(
 		];
 		logaction(h, &act);
 	} else if needbackup {
-		let hash_local = compute_md5sum(origfile);
+		let hash_local = compute_md5sum(origfile).map(Box::from);
 		let hash_pkg = match backup {
 			Some(i) => newpkg.backup[i].hash.clone(),
-			None => compute_md5sum(&filename),
+			None => compute_md5sum(&filename).map(Box::from),
 		};
 		let cb = h.callbacks();
-		let null = |s: &Option<Vec<u8>>| opt_str(s).to_vec();
+		let null = |s: &Option<Box<[u8]>>| opt_str(s).to_vec();
 		logv(cb, Debug, &[b"checking hashes for ", origfile, b"\n"]);
 		logv(cb, Debug, &[b"current:  ", &null(&hash_local), b"\n"]);
 		logv(cb, Debug, &[b"new:      ", &null(&hash_pkg), b"\n"]);
 		logv(cb, Debug, &[b"original: ", &null(&hash_orig), b"\n"]);
-		let same = |a: &Option<Vec<u8>>, b: &Option<Vec<u8>>| {
+		let same = |a: &Option<Box<[u8]>>, b: &Option<Box<[u8]>>| {
 			matches!((a, b), (Some(a), Some(b))
 				if until_nul(a) == until_nul(b))
 		};
@@ -1566,7 +1567,7 @@ pub fn commit_single_pkg(
 	let oldver = oldver.as_deref();
 
 	let pkgfile = match &t.pkg.origin {
-		Some(PkgFrom::File(f)) => f.clone(),
+		Some(PkgFrom::File(f)) => f.to_vec(),
 		_ => Vec::new(),
 	};
 	let (name, ver) =

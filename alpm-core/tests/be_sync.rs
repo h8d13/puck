@@ -107,8 +107,8 @@ fn fields() {
 	// as read like the C, alpm-types only normalizes their Display
 	assert_eq!(foo.desc.as_deref(), Some(&b"a  b"[..]));
 	assert_eq!(foo.url.as_deref(), Some(&b"https://example.org"[..]));
-	assert_eq!(foo.depends[0].name, b"bar");
-	assert_eq!(foo.depends[1].name, b"libx.so");
+	assert_eq!(&*foo.depends[0].name, b"bar");
+	assert_eq!(&*foo.depends[1].name, b"libx.so");
 	let files: Vec<&[u8]> =
 		foo.files.files.iter().map(|f| &f.name[..]).collect();
 	assert_eq!(files, [&b"usr/"[..], b"usr/a", b"usr/b"]);
@@ -149,8 +149,8 @@ fn invalid_entries() {
 fn validation() {
 	let mut p = Package::default();
 	assert_eq!(get_validation(&p), PKG_VALIDATION_NONE);
-	p.sha256sum = Some(b"x".to_vec());
-	p.base64_sig = Some(b"y".to_vec());
+	p.sha256sum = Some(b"x"[..].into());
+	p.base64_sig = Some(b"y"[..].into());
 	let both = PKG_VALIDATION_SHA256SUM | PKG_VALIDATION_SIGNATURE;
 	assert_eq!(get_validation(&p), both);
 }

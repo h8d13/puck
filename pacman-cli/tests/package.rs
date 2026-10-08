@@ -24,8 +24,8 @@ impl Default for Env {
 			changelog: None,
 			errors: Vec::new(),
 			dependent: Package {
-				name: Some(b"dependent".to_vec()),
-				depends: vec![dep_from_string(b"foo")],
+				name: Some(b"dependent"[..].into()),
+				depends: vec![dep_from_string(b"foo")].into(),
 				..Package::default()
 			},
 		}
@@ -84,8 +84,8 @@ impl PkgEnv for Env {
 fn pkg(origin: Option<PkgFrom>) -> Package {
 	Package {
 		name_hash: hash_sdbm(b"foo"),
-		name: Some(b"foo".to_vec()),
-		version: Some(b"1-1".to_vec()),
+		name: Some(b"foo"[..].into()),
+		version: Some(b"1-1"[..].into()),
 		builddate: -1,
 		installdate: -1,
 		origin,
@@ -149,7 +149,7 @@ fn titles_and_empty_values() {
 
 #[test]
 fn file_signatures() {
-	let p = pkg(Some(PkgFrom::File(b"/x.pkg".to_vec())));
+	let p = pkg(Some(PkgFrom::File(b"/x.pkg"[..].into())));
 	let mut env = Env {
 		sig: Some(Err(Errno::SigMissing)),
 		..Env::default()
@@ -187,14 +187,15 @@ fn backup_states() {
 	let p = Package {
 		backup: vec![
 			Backup {
-				name: b"etc/a".to_vec(),
-				hash: Some(b"abc".to_vec()),
+				name: b"etc/a"[..].into(),
+				hash: Some(b"abc"[..].into()),
 			},
 			Backup {
-				name: b"etc/nohash".to_vec(),
+				name: b"etc/nohash"[..].into(),
 				hash: None,
 			},
-		],
+		]
+		.into(),
 		..pkg(Some(PkgFrom::LocalDb))
 	};
 	let cases = [
@@ -246,7 +247,7 @@ fn changelog() {
 #[test]
 fn installed_groups_files() {
 	let p = Package {
-		groups: vec![b"g1".to_vec(), b"g2".to_vec()],
+		groups: vec![b"g1"[..].into(), b"g2"[..].into()].into(),
 		..pkg(None)
 	};
 	let mut out = Vec::new();
@@ -254,7 +255,7 @@ fn installed_groups_files() {
 	assert!(out.is_empty());
 	print_installed(&mut out, Some(&p), &p, &ColStr::PLAIN);
 	let other = Package {
-		version: Some(b"2-1".to_vec()),
+		version: Some(b"2-1"[..].into()),
 		..pkg(None)
 	};
 	print_installed(&mut out, Some(&other), &p, &ColStr::PLAIN);
@@ -265,7 +266,7 @@ fn installed_groups_files() {
 #[test]
 fn search() {
 	let p = Package {
-		desc: Some(b"text".to_vec()),
+		desc: Some(b"text"[..].into()),
 		..pkg(None)
 	};
 	let mut out = Vec::new();

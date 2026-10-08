@@ -221,7 +221,7 @@ fn remove_str(list: &mut Vec<Vec<u8>>, s: &[u8]) -> bool {
 }
 
 // two optional C strings: both set and strcmp equal, or both NULL
-fn opt_eq(a: &Option<Vec<u8>>, b: &Option<Vec<u8>>) -> bool {
+fn opt_eq(a: &Option<Box<[u8]>>, b: &Option<Box<[u8]>>) -> bool {
 	match (a, b) {
 		(Some(a), Some(b)) => until_nul(a) == until_nul(b),
 		(None, None) => true,

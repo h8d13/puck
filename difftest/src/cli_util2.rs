@@ -302,7 +302,7 @@ fn pkg_list(boxes: &[CPkgBox]) -> *mut CList {
 	})
 }
 
-fn assert_text(what: &str, s: &Option<Vec<u8>>) {
+fn assert_text(what: &str, s: &Option<Box<[u8]>>) {
 	let s = s
 		.as_deref()
 		.unwrap_or_else(|| panic!("printf %s of NULL {what}"));
