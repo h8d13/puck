@@ -16,8 +16,7 @@ lz4_flex.workspace = true
 pacman-common = { path = "../pacman-common" }
 reqwest.workspace = true
 rustix.workspace = true
-# localtime(3) offsets for log stamps (METHODOLOGY.md)
-time = { workspace = true, features = ["local-offset"] }
+time.workspace = true
 twox-hash.workspace = true
 zstd.workspace = true
 

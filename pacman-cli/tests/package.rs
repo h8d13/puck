@@ -112,11 +112,12 @@ fn dates() {
 	// year 0 and before, no padding
 	assert_eq!(d(-62_167_219_200), "Sat Jan  1 00:00:00 0");
 	assert_eq!(d(-62_198_755_200), "Fri Jan  1 00:00:00 -1");
-	// the years time covers
 	assert_eq!(d(253_402_300_799), "Fri Dec 31 23:59:59 9999");
-	assert_eq!(d(-377_705_116_800), "Mon Jan  1 00:00:00 -9999");
-	assert_eq!(format_date_at(253_402_300_800, 0), None);
-	assert_eq!(format_date_at(-377_705_116_801, 0), None);
+	assert_eq!(d(253_402_300_800), "Sat Jan  1 00:00:00 10000");
+	assert_eq!(d(-377_705_116_801), "Sun Dec 31 23:59:59 -10000");
+	// tm_year past int: localtime fails
+	assert_eq!(d(67_768_036_191_676_799), "Wed Dec 31 23:59:59 2147485547");
+	assert_eq!(format_date_at(67_768_036_191_676_800, 0), None);
 	assert_eq!(format_date_at(i64::MAX, 0), None);
 }
 

@@ -34,10 +34,10 @@ use crate::pacman::PM_OP_FILES;
 use crate::sighandler::set_bars_below;
 use crate::util::{
 	Output, Term, colon_printf, console_cursor_move_down,
-	console_cursor_move_up, console_erase_line, display_new_optdepends,
-	display_optdepends, humanize_size, list_display, mbstowcs, noyes,
-	pm_vasprintf, pm_vfprintf, select_display, select_question, wcwidth,
-	yesno,
+	console_cursor_move_up, console_erase_line, decimal,
+	display_new_optdepends, display_optdepends, humanize_size,
+	list_display, mbstowcs, noyes, pm_vasprintf, pm_vfprintf,
+	select_display, select_question, wcwidth, yesno,
 };
 
 // update speed for the fill_progress based functions
@@ -389,10 +389,10 @@ impl<R: BufRead> Frontend<R> {
 			_ => 0,
 		};
 		let (xl, rl) = (xfered_label, rate_label);
-		let line = format!(
-			"{xfered:6.1} {xl:>3}  {rate:4.prec$} {rl:>3}/s "
-		);
-		s.extend_from_slice(line.as_bytes());
+		s.extend(decimal(format!("{xfered:6.1}")));
+		s.extend(format!(" {xl:>3}  ").bytes());
+		s.extend(decimal(format!("{rate:4.prec$}")));
+		s.extend(format!(" {rl:>3}/s ").bytes());
 		let eta = match (eta_h, eta_m) {
 			(0, m) => format!("{m:02}:{eta_s:02}"),
 			(1, m) if m < 40 => format!("{:02}:{eta_s:02}", m + 60),

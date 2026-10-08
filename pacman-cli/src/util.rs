@@ -32,6 +32,7 @@ use alpm_core::log::local_offset;
 // time(NULL)
 pub use alpm_core::log::now_secs;
 use alpm_core::package::{Package, PkgFrom, pkg_cmp, pkg_find};
+use alpm_core::setlocale;
 use alpm_core::trans::{
 	InitError, trans_init as alpm_trans_init,
 	trans_release as alpm_trans_release,
@@ -751,7 +752,20 @@ fn opt(s: &Option<Vec<u8>>) -> &[u8] {
 // "%.2f %s" of humanize_size in MiB
 fn mib(size: i64) -> Vec<u8> {
 	let (v, unit) = humanize_size(size, b'M', 2);
-	format!("{v:.2} {unit}").into_bytes()
+	[&decimal(format!("{v:.2}"))[..], b" ", unit.as_bytes()].concat()
+}
+
+// a float printf formatted: LC_NUMERIC's decimal_point for Rust's '.'.
+// the field width counts it as one character, like glibc's __printf_fp
+pub fn decimal(s: String) -> Vec<u8> {
+	let point = &setlocale::current().decimal_point;
+	match s.find('.') {
+		Some(i) if point != b"." => {
+			[s[..i].as_bytes(), point, s[i + 1..].as_bytes()]
+				.concat()
+		}
+		_ => s.into_bytes(),
+	}
 }
 
 // table_cell_t modes

@@ -24,6 +24,8 @@ fn main() {
 	// before the stdin targets are read, like the C's main. the C
 	// ignores sigaction's result
 	let _ = install_soft_interrupt_handler();
+	// main's localize(): setlocale(LC_ALL, "")
+	alpm_core::setlocale::localize();
 	let mut argv: Vec<Vec<u8>> =
 		std::env::args_os().map(OsStringExt::into_vec).collect();
 	// stdin is read only for a "-" target, prompts need it otherwise
