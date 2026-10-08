@@ -32,7 +32,7 @@ use alpm_core::trans::{
 	trans_release as alpm_trans_release,
 };
 use alpm_core::util::{strerror, until_nul};
-use pacman_common::util_common::{safe_fgets, strtrim};
+use pacman_common::util_common::{PATH_MAX, safe_fgets, strtrim};
 use unicode_width::UnicodeWidthChar;
 
 pub use crate::conf::ColStr;
@@ -645,9 +645,7 @@ pub fn colon_printf(out: &mut Vec<u8>, colstr: &ColStr, msg: &[u8]) {
 	out.extend_from_slice(until_nul(colstr.nocolor));
 }
 
-// PATH_MAX of the snprintf buffers, the result cut to PATH_MAX - 1
-const PATH_MAX: usize = 4096;
-
+// snprintf into a PATH_MAX buffer: the result cut to PATH_MAX - 1
 fn path_max(mut p: Vec<u8>) -> Vec<u8> {
 	p.truncate(PATH_MAX - 1);
 	p
@@ -662,31 +660,41 @@ const EISDIR: i32 = 21;
 // is 0; unlink failing with anything but EPERM/EISDIR is 1 without
 // trying it as a directory
 pub fn rmrf(path: &[u8]) -> i32 {
+	rmrf_errno(path).0
+}
+
+// rmrf and what errno holds after a failure: the last call that failed,
+// the top level's rmdir when the tree did not go (sync_cleandb prints it)
+pub fn rmrf_errno(path: &[u8]) -> (i32, Option<io::Error>) {
 	let path = until_nul(path);
 	let p = OsStr::from_bytes(path);
 	let err = match fs::remove_file(p) {
-		Ok(()) => return 0,
-		Err(e) => e.raw_os_error(),
+		Ok(()) => return (0, None),
+		Err(e) => e,
 	};
-	match err {
-		Some(ENOENT) => return 0,
+	match err.raw_os_error() {
+		Some(ENOENT) => return (0, None),
 		Some(EPERM | EISDIR) => {}
-		_ => return 1,
+		_ => return (1, Some(err)),
 	}
-	let Ok(dir) = fs::read_dir(p) else {
-		return 1;
+	let dir = match fs::read_dir(p) {
+		Ok(dir) => dir,
+		Err(e) => return (1, Some(e)),
 	};
-	let mut errflag = 0;
+	let (mut errflag, mut last) = (0, None);
 	// readdir ends the loop on an error as on the end, read_dir skips
 	// "." and ".."
 	for e in dir.map_while(Result::ok) {
 		let name = [path, b"/", e.file_name().as_bytes()].concat();
-		errflag += rmrf(&path_max(name));
+		let (n, e) = rmrf_errno(&path_max(name));
+		errflag += n;
+		last = e.or(last);
 	}
-	if fs::remove_dir(p).is_err() {
+	if let Err(e) = fs::remove_dir(p) {
 		errflag += 1;
+		last = Some(e);
 	}
-	errflag
+	(errflag, last)
 }
 
 // a package and the db alpm_pkg_get_db gives for it, None for NULL.

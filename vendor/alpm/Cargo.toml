@@ -17,11 +17,8 @@ members = [
     "alpm-types",
     "alpm-parsers",
     "alpm-common",
-    "alpm-pkginfo",
     "alpm-mtree",
-    "alpm-buildinfo",
     "alpm-compress",
-    "alpm-package",
 ]
 resolver = "3"
 

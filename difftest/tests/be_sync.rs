@@ -982,6 +982,19 @@ fn odd_inputs() {
 		("data without pkgtype", foo_with("%DATA%\na=b\n\n")),
 		("header line in a list", foo_with("%GROUPS%\ng\n%URL%\n\n")),
 		("empty archive", vec![]),
+		// _alpm_strtoofft's unsigned long long wraps through off_t
+		(
+			"sizes past i64::MAX",
+			foo(&base
+				.replace(
+					"%CSIZE%\n1",
+					"%CSIZE%\n18446744073709551615",
+				)
+				.replace(
+					"%ISIZE%\n2",
+					"%ISIZE%\n9223372036854775808",
+				)),
+		),
 	];
 	for (label, entries) in cases {
 		let (c, r, why) = run_case(&entries, Comp::None, ".db");

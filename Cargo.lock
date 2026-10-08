@@ -18,21 +18,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "alpm-buildinfo"
-version = "0.5.4"
-dependencies = [
- "alpm-common",
- "alpm-parsers",
- "alpm-types",
- "fluent-i18n",
- "serde",
- "serde_more",
- "serde_with",
- "strum",
- "thiserror",
-]
-
-[[package]]
 name = "alpm-common"
 version = "0.2.2"
 dependencies = [
@@ -65,8 +50,6 @@ dependencies = [
  "alpm-common",
  "alpm-compress",
  "alpm-mtree",
- "alpm-package",
- "alpm-pkginfo",
  "alpm-types",
  "base64",
  "landlock",
@@ -95,44 +78,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "alpm-package"
-version = "0.4.3"
-dependencies = [
- "alpm-buildinfo",
- "alpm-common",
- "alpm-compress",
- "alpm-mtree",
- "alpm-pkginfo",
- "alpm-types",
- "fluent-i18n",
- "log",
- "tar",
- "thiserror",
-]
-
-[[package]]
 name = "alpm-parsers"
 version = "0.4.2"
 dependencies = [
  "colored",
- "serde",
  "testresult",
  "unicode-width",
  "winnow",
-]
-
-[[package]]
-name = "alpm-pkginfo"
-version = "0.6.3"
-dependencies = [
- "alpm-common",
- "alpm-parsers",
- "alpm-types",
- "fluent-i18n",
- "serde",
- "serde_with",
- "strum",
- "thiserror",
 ]
 
 [[package]]
@@ -1973,27 +1925,6 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
-]
-
-[[package]]
-name = "serde_more"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8d8966b293ec6b30e99c13f6b70e9ac8b0ee6e2f9ad073e819f47af943217aa"
-dependencies = [
- "serde",
- "serde_more_derive",
-]
-
-[[package]]
-name = "serde_more_derive"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0751bc649e9e61ce87bb5a3771e1f33a84c88b6f66fdc5c9fcbd91a5c0997a91"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]

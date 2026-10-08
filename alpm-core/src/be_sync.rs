@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::ffi::{OsStr, c_int};
 use std::fs;
-use std::io::{self, ErrorKind, Read};
+use std::io::{self, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -42,9 +42,11 @@ use crate::signing::{
 	SIG_DATABASE_UNKNOWN_OK, check_pgp_helper, process_siglist,
 };
 use crate::util::{
-	self, Entry, Filter, PATH_MAX, get_fullpath, hash_sdbm, makepath,
-	parsedate, splitname, strerror, strtoofft, until_nul,
+	self, ArchiveFgets, DataBlocks, Entry, Filter, PATH_MAX, get_fullpath,
+	hash_sdbm, makepath, parsedate, splitname, strerror, strtoofft,
+	until_nul,
 };
+
 // hard upper limit of a db download
 const DB_MAX_SIZE: i64 = 128 * 1024 * 1024;
 
@@ -379,7 +381,8 @@ fn open_archive(
 	if dbext == b".files" {
 		est /= 4;
 	}
-	Ok((archive.reader, est, archive.block))
+	let block = archive.block_size();
+	Ok((archive.reader, est, block))
 }
 
 // _alpm_validate_filename, its failure logged
@@ -408,131 +411,37 @@ fn validate_filename(
 	false
 }
 
-// "512K for a line length seems reasonable"
-const MAX_LINE_SIZE: usize = 512 * 1024;
-// errno.h
-const ERANGE: i32 = 34;
-
-// archive_read_data_block on an entry: its data in pieces ending at the
-// multiples of block in the tar stream (util::Archive::block), then
-// ARCHIVE_EOF (None). a short read is libarchive's truncated archive
-struct Blocks<'e, 'a> {
-	entry: &'e mut Entry<'a>,
-	// tar stream offset of the next byte, bytes of the entry left
-	pos: u64,
-	left: u64,
-	block: u64,
-}
-
-impl Blocks<'_, '_> {
-	fn next(&mut self) -> io::Result<Option<Vec<u8>>> {
-		if self.left == 0 {
-			return Ok(None);
-		}
-		let n = (self.block - self.pos % self.block).min(self.left);
-		let mut data = Vec::with_capacity(n as usize);
-		(&mut *self.entry).take(n).read_to_end(&mut data)?;
-		if data.len() as u64 != n {
-			return Err(ErrorKind::UnexpectedEof.into());
-		}
-		self.pos += n;
-		self.left -= n;
-		Ok(Some(data))
-	}
-}
-
-// struct archive_read_buffer and _alpm_archive_fgets over one entry
-struct ArchiveLines<'e, 'a> {
-	blocks: Blocks<'e, 'a>,
-	// the current data block, block[off..] not consumed yet
-	block: Vec<u8>,
-	off: usize,
-	// b->ret == ARCHIVE_EOF: the last block read was the end
-	eof: bool,
-	// b->line allocated: sized to the first block, unchecked
-	allocated: bool,
-	// b->line up to real_line_size: nul bytes included, no '\n'
+// _alpm_archive_fgets on one entry with the line as the READ_* macros
+// see it
+struct Lines<'e, 'a> {
+	f: ArchiveFgets<'e, 'a>,
+	// the last line as a C string. _alpm_strip_newline(line,
+	// real_line_size) is 0 exactly when this is empty
 	line: Vec<u8>,
 }
 
-impl<'e, 'a> ArchiveLines<'e, 'a> {
+impl<'e, 'a> Lines<'e, 'a> {
 	fn new(entry: &'e mut Entry<'a>, block: u64) -> Self {
-		let blocks = Blocks {
-			pos: entry.raw_file_position(),
-			left: entry.size(),
-			entry,
-			block,
-		};
-		ArchiveLines {
-			blocks,
-			block: Vec::new(),
-			off: 0,
-			eof: false,
-			allocated: false,
+		Lines {
+			f: ArchiveFgets::new(DataBlocks::new(entry, block)),
 			line: Vec::new(),
 		}
 	}
 
-	// Ok(true) ARCHIVE_OK with a line, Ok(false) ARCHIVE_EOF, Err a
-	// failed block read or a line over MAX_LINE_SIZE (-ERANGE). a line
-	// ends at the first '\n' of what is left of a block, or at its
-	// first nul when it has no '\n'; one without either goes on in the
-	// next block. after a final '\n' an empty line comes before the
-	// end. the size check skips the block the buffer is first sized
-	// for
+	// Ok(true) ARCHIVE_OK, Ok(false) ARCHIVE_EOF, Err a failed block
+	// read or a line over MAX_LINE_SIZE
 	fn fgets(&mut self) -> io::Result<bool> {
-		self.line.clear();
-		loop {
-			if self.off == self.block.len() {
-				if self.eof {
-					return Ok(false);
-				}
-				match self.blocks.next()? {
-					Some(b) => self.block = b,
-					None => {
-						self.eof = true;
-						self.block.clear();
-					}
-				}
-				self.off = 0;
-			}
-			let rest = &self.block[self.off..];
-			let eol = rest
-				.iter()
-				.position(|&c| c == b'\n')
-				.or_else(|| rest.iter().position(|&c| c == 0));
-			let needed =
-				self.line.len() + eol.unwrap_or(rest.len()) + 1;
-			if self.allocated && needed > MAX_LINE_SIZE {
-				return Err(io::Error::from_raw_os_error(
-					ERANGE,
-				));
-			}
-			self.allocated = true;
-			if let Some(i) = eol {
-				self.line.extend_from_slice(&rest[..i]);
-				self.off += i + 1;
-				return Ok(true);
-			}
-			let len = rest.len();
-			self.line.extend_from_slice(rest);
-			self.off = self.block.len();
-			if len == 0 {
-				return Ok(true);
-			}
-		}
-	}
-
-	// the line as a C string. _alpm_strip_newline(line,
-	// real_line_size) is 0 exactly when this is empty
-	fn cstr(&self) -> &[u8] {
-		until_nul(&self.line)
+		let Some(l) = self.f.next()? else {
+			return Ok(false);
+		};
+		self.line = until_nul(l).to_vec();
+		Ok(true)
 	}
 
 	// READ_NEXT, READ_AND_STORE: the end of the data fails too
 	fn next(&mut self) -> Result<&[u8], Reason> {
 		match self.fgets() {
-			Ok(true) => Ok(self.cstr()),
+			Ok(true) => Ok(&self.line),
 			Ok(false) => Err(Reason::Truncated),
 			Err(e) => Err(Reason::Read(e)),
 		}
@@ -579,7 +488,7 @@ struct Walk<'a> {
 	// db->treename and handle->logcb
 	treename: &'a [u8],
 	cb: &'a mut dyn Callbacks,
-	// util::Archive::block
+	// util::Archive::block_size
 	block: u64,
 }
 
@@ -664,7 +573,7 @@ impl Walk<'_> {
 			logv(self.cb, LogLevel::Debug, &parts);
 			return Ok(());
 		}
-		let mut lines = ArchiveLines::new(entry, self.block);
+		let mut lines = Lines::new(entry, self.block);
 		let r = self.read_data(i, &mut lines);
 		// the filename check returns without this line
 		if r.as_ref().is_err_and(|r| !matches!(r, Reason::Filename)) {
@@ -694,11 +603,7 @@ impl Walk<'_> {
 	// the parsing loop of sync_db_read: keys matched as C strings, a
 	// repeated key overwrites a value, appends to a list and replaces
 	// the file list
-	fn read_data(
-		&mut self,
-		i: usize,
-		f: &mut ArchiveLines,
-	) -> Result<(), Reason> {
+	fn read_data(&mut self, i: usize, f: &mut Lines) -> Result<(), Reason> {
 		let deps = dep_from_string;
 		loop {
 			match f.fgets() {
@@ -706,7 +611,7 @@ impl Walk<'_> {
 				Ok(false) => return Ok(()),
 				Err(e) => return Err(Reason::Read(e)),
 			}
-			let key = f.cstr().to_vec();
+			let key = f.line.clone();
 			if key.is_empty() {
 				continue;
 			}

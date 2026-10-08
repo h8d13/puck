@@ -14,13 +14,10 @@ license = "GPL-2.0-or-later"
 # vendor/patches, scripts/vendor-alpm.sh), used instead of re-porting
 # what they already implement
 [workspace.dependencies]
-alpm-buildinfo = { path = "vendor/alpm/alpm-buildinfo" }
 alpm-common = { path = "vendor/alpm/alpm-common" }
 alpm-compress = { path = "vendor/alpm/alpm-compress" }
 alpm-mtree = { path = "vendor/alpm/alpm-mtree" }
-alpm-package = { path = "vendor/alpm/alpm-package" }
 alpm-parsers = { path = "vendor/alpm/alpm-parsers" }
-alpm-pkginfo = { path = "vendor/alpm/alpm-pkginfo" }
 alpm-types = { path = "vendor/alpm/alpm-types" }
 # crates ALPM itself depends on, same versions
 base64 = "0.23.0"
