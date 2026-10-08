@@ -36,6 +36,7 @@ use crate::dload::{
 	DownloadState, Payload, Sandbox, Settings, download_internal,
 };
 use crate::error::Errno;
+use crate::handle::Handle;
 use crate::sandbox_fs::restrict_writes_to;
 use crate::sandbox_syscalls::syscalls_filter;
 use crate::util::{PATH_MAX, until_nul};
@@ -709,6 +710,16 @@ impl HelperSandbox {
 			args: vec![HELPER_ARG.into()],
 			host: Box::new(System),
 		}
+	}
+
+	// _alpm_use_sandbox on the handle's sandboxuser and flags, uid
+	// standing for handle->user: None when downloads run unsandboxed
+	pub fn for_handle(handle: &Handle, uid: u32) -> Option<Self> {
+		let user = handle.sandboxuser()?;
+		let fs = handle.disable_sandbox_filesystem() != 0;
+		let sc = handle.disable_sandbox_syscalls() != 0;
+		use_sandbox(uid, Some(user), fs, sc)
+			.then(|| HelperSandbox::new(user, fs, sc))
 	}
 
 	// the parent's half: spawn, request, callbacks, exit status. the C
