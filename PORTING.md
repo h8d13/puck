@@ -20,7 +20,11 @@ References (git submodules):
 - `scripts/cli-parity-fixtures.sh`: the milestone 1/2 gate, C `pacman` vs
   the Rust binary on generated worlds (difftest `cli_binary`)
 - `scripts/pactest.sh <bin>`: upstream pactest (meson's list, args, xfail)
-  on a binary, the milestone 3 gate
+  on a binary
+- `scripts/upstream-suite.sh [BINDIR]`: upstream's full meson suite (pactest,
+  vercmptest, the two script tests) on a directory of binaries, the
+  milestone 3 gate: exit 0 only at meson's 338 ok / 6 expected fail
+  (`pacman/build` reproduces it)
 
 Rules for every port unit: `METHODOLOGY.md`.
 
@@ -110,15 +114,15 @@ in the milestone 1 gate and equal.
 | sandbox (landlock/seccomp, download helper) | done |
 | local db writing | done |
 
-Gate: the full pactest suite (`meson test` baseline 338 ok, 6 expected
-fail) run against the Rust binary. `scripts/pactest.sh` (341 pactests,
-meson's 338 counts 3 non-pactest tests): C 335 ok / 6 xfail; Rust today
-132 ok / 5 xfail / 203 fail / 1 unexpected pass (deprange001). Failure
-classes: ~140 sync dbs pactest writes with only the sections it sets
-(alpm-repo-db's `parse_libalpm` refuses the db, "target not found" or a
-silent -Su), ~60 `.PKGINFO` with empty `pkgdesc`/`url`/`builddate`/
-`packager` (alpm-pkginfo refuses, "could not parse package description
-file"), 5 `-Sc`, a few with other causes behind those two.
+Gate: upstream's full meson suite against the Rust binaries,
+`scripts/upstream-suite.sh` (pactest's 341 tests, vercmptest and the two
+script tests): meson's 338 ok / 6 expected fail, reproduced by
+`pacman/build`. Rust on master: 135 ok / 5 xfail / 203 fail / 1
+unexpected pass (deprange001); vercmptest and the script tests pass.
+Failure classes: ~140 db desc files pactest writes with only the sections
+it sets, ~60 `.PKGINFO` with empty `pkgdesc`/`url`/`builddate`/`packager`
+(both: ALPM's spec-strict parsers, readers being owned), 5 `-Sc`, a few
+with other causes behind those.
 
 ### 4. Drop-in
 
