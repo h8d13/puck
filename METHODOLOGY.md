@@ -33,21 +33,26 @@ whoever writes it.
 - Where the C is undefined (out of bounds, uninitialized memory), the port
   does the safe thing and difftest must never feed the C that input.
 - Dependencies: only what the official ALPM crates (`alpm/`) already use.
-  Before porting a C file, check whether ALPM implements it (formats:
-  `alpm-db`, `alpm-repo-db`, `alpm-pkginfo`, `alpm-mtree`,
-  `alpm-buildinfo`, `alpm-package`, `alpm-compress`; types, versions,
-  relations, checksums: `alpm-types`). If it does, use the ALPM crate
-  instead of translating, and difftest ALPM against the C on the inputs
-  ALPM accepts. Where ALPM differs from pacman, correct it: one patch per
-  divergence in `vendor/patches/` (applied to the pristine `alpm/`
-  submodule by `scripts/vendor-alpm.sh` into `vendor/alpm`, which the
-  workspace builds against), with the difftest flipped from "pinned
-  divergence" to "equal". pacman bugs recorded in `UPSTREAM.md` are not
-  copied. Crates ALPM itself depends on count as precedent
-  too (base64, md-5, sha2, time, unicode-width, url, tar, compression,
-  winnow): never hand-write what one of them implements. Keeping a port
-  next to a precedent needs a stated reason (e.g. pacman semantics the
-  crate cannot express) in `PORTING.md`.
+  Crates ALPM itself depends on count as precedent (base64, md-5, sha2,
+  time, unicode-width, url, tar, compression, winnow): never hand-write
+  what one of them implements. Keeping a port next to a precedent needs a
+  stated reason (e.g. pacman semantics the crate cannot express) in
+  `PORTING.md`.
+- Use an ALPM crate where its semantics are pacman's: the alpm-compress
+  decoders, checksums. ALPM's format parsers (`alpm-db`, `alpm-repo-db`,
+  `alpm-pkginfo`, `alpm-mtree`, `alpm-package`) validate the spec
+  strictly: required fields, typed values, UTF-8. pacman reads its files
+  leniently and byte for byte, so pacman's readers are translated from
+  the C like any other unit (be_local/be_sync desc and files,
+  be_package's parse_descfile, libarchive's mtree reader), difftested
+  equal on every input the C reads. ALPM types are used only where their
+  value set is the C's.
+- `vendor/patches/` (applied to the pristine `alpm/` submodule by
+  `scripts/vendor-alpm.sh` into `vendor/alpm`) holds real ALPM bugs and
+  missing capability of general use only, each written to go upstream
+  (gzip members, content sniffing). Never a patch that bends a strict
+  parser into pacman's semantics: own that reader instead. pacman bugs
+  recorded in `UPSTREAM.md` are not copied.
 
 ## System-level decisions
 

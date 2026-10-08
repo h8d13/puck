@@ -20,7 +20,11 @@ References (git submodules):
 - `scripts/cli-parity-fixtures.sh`: the milestone 1/2 gate, C `pacman` vs
   the Rust binary on generated worlds (difftest `cli_binary`)
 - `scripts/pactest.sh <bin>`: upstream pactest (meson's list, args, xfail)
-  on a binary, the milestone 3 gate
+  on a binary
+- `scripts/upstream-suite.sh [BINDIR]`: upstream's full meson suite (pactest,
+  vercmptest, the two script tests) on a directory of binaries, the
+  milestone 3 gate: exit 0 only at meson's 338 ok / 6 expected fail
+  (`pacman/build` reproduces it)
 
 Rules for every port unit: `METHODOLOGY.md`.
 
@@ -110,15 +114,15 @@ in the milestone 1 gate and equal.
 | sandbox (landlock/seccomp, download helper) | done |
 | local db writing | done |
 
-Gate: the full pactest suite (`meson test` baseline 338 ok, 6 expected
-fail) run against the Rust binary. `scripts/pactest.sh` (341 pactests,
-meson's 338 counts 3 non-pactest tests): C 335 ok / 6 xfail; Rust today
-132 ok / 5 xfail / 203 fail / 1 unexpected pass (deprange001). Failure
-classes: ~140 sync dbs pactest writes with only the sections it sets
-(alpm-repo-db's `parse_libalpm` refuses the db, "target not found" or a
-silent -Su), ~60 `.PKGINFO` with empty `pkgdesc`/`url`/`builddate`/
-`packager` (alpm-pkginfo refuses, "could not parse package description
-file"), 5 `-Sc`, a few with other causes behind those two.
+Gate: upstream's full meson suite against the Rust binaries,
+`scripts/upstream-suite.sh` (pactest's 341 tests, vercmptest and the two
+script tests): meson's 338 ok / 6 expected fail, reproduced by
+`pacman/build`. Rust on master: 135 ok / 5 xfail / 203 fail / 1
+unexpected pass (deprange001); vercmptest and the script tests pass.
+Failure classes: ~140 db desc files pactest writes with only the sections
+it sets, ~60 `.PKGINFO` with empty `pkgdesc`/`url`/`builddate`/`packager`
+(both: ALPM's spec-strict parsers, readers being owned), 5 `-Sc`, a few
+with other causes behind those.
 
 ### 4. Drop-in
 
@@ -127,13 +131,34 @@ front-ends (yay, paru via alpm.rs, pamac, pyalpm) keep working.
 
 Gate: those front-ends' basic operations against the Rust libalpm.
 
+## Owned readers (replacing ALPM parser patches)
+
+ALPM's format parsers are spec-strict by design, pacman's readers are
+lenient and byte based (METHODOLOGY.md). Bending the parsers with patches
+grew a third of the series into whole pacman readers inside ALPM crates
+that upstream will not take, and the typed values still could not hold
+NULL/empty/bytes (pactest's sparse desc files and empty `.PKGINFO` values,
+~200 tests). The readers are owned instead, translated from the C; the
+reader patches and crate dependencies go once nothing uses them.
+
+| Reader | C source | Owned in | Drops | State |
+|---|---|---|---|---|
+| local db desc/files | be_local.c `local_db_read`, READ_AND_STORE | `alpm-core::be_local` | 0201-0207, alpm-db | in progress |
+| sync db desc/files | be_sync.c `sync_db_read`, READ_AND_STORE | `alpm-core::be_sync` | 0301-0305, alpm-repo-db | in progress |
+| `.PKGINFO` | be_package.c `parse_descfile` | `alpm-core::be_package` | 0501-0506, alpm-pkginfo | in progress |
+| `.MTREE` / local mtree | libarchive mtree reader (as pacman uses it) | `alpm-core::mtree` | 0401-0411, alpm-mtree | todo |
+| alpm-types patches | whatever still uses ALPM types after the above | - | 01xx no longer used | todo (after the readers) |
+
+Kept and to report upstream: 0551 (gzip members), 0552 (content
+sniffing), and any 01xx/04xx fix that is an ALPM bug on its own terms
+(0401 `PartialEq`, 0403 mtree gzip members, 0411 `Error::Parse` display).
+
 ## ALPM patches for parity
 
-Every place a comparison shows the ALPM crates differing from pacman gets
-one patch in `vendor/patches/` (METHODOLOGY.md). Ranges: 01xx
-alpm-types, 02xx alpm-db, 03xx alpm-repo-db, 04xx alpm-mtree, 05xx
-alpm-pkginfo, 055x alpm-compress. pacman bugs in `UPSTREAM.md` are not
-copied. State: todo until a patch lands, then the patch file name.
+Ranges: 01xx alpm-types, 02xx alpm-db, 03xx alpm-repo-db, 04xx
+alpm-mtree, 05xx alpm-pkginfo, 055x alpm-compress. The reader patches
+below leave with their owned reader (table above); new patches are real
+ALPM bugs only. pacman bugs in `UPSTREAM.md` are not copied.
 
 | Crate | Divergence to correct | Seen on real data | State |
 |---|---|---|---|
@@ -194,9 +219,9 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `version.c` vercmp | `alpm-types` version comparison | keep port (pacman compares arbitrary strings), difftest ALPM vs C on versions ALPM parses |
 | `deps.c` dep strings | `alpm-types` relations | same as above |
 | xdata, base64, checksums | `alpm-types` (`ExtraData`, base64, md-5/sha2) | use ALPM / its crates, no hand-written hashes |
-| `be_local.c` desc/files | `alpm-db` | use `alpm-db`, difftest against C `local_db_read` |
-| `be_sync.c` | `alpm-repo-db` | use `alpm-repo-db` |
-| `be_package.c` | `alpm-package`, `alpm-compress`, `alpm-pkginfo`, `alpm-mtree` | use ALPM |
+| `be_local.c` desc/files | `alpm-db` | translate (spec-strict parser, owned reader) |
+| `be_sync.c` | `alpm-repo-db` | translate (owned reader) |
+| `be_package.c` | `alpm-package`, `alpm-compress`, `alpm-pkginfo`, `alpm-mtree` | alpm-compress decoders; `.PKGINFO` and mtree readers translated |
 | filelist, pkghash, deps resolution, transactions, hooks, frontend | none | translate |
 
 ## Status
@@ -254,8 +279,13 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `src/pacman/conf.c` (in the above) | 1468 | `pacman-cli::conf` (partial) | config model, parseconfigfile, setdefaults (include, siglevel, cleanmethod, usage, repeating options, $repo/$arch, sysroot), glob(3) subset: difftest on random config trees (return, stderr, whole config_t), glob vs libc; setup_libalpm, register_repo: difftest reading the handle back through every getter; XferCommand download pending |
 | `src/pacman/util.c` (in the above) | 1981 | `pacman-cli::util` (partial: all but trans_init/release, sync_syncdbs, tcflush) | display_targets + table engine, print_packages (--print-format), optdepends lists, select/multiselect/yesno prompts (stdin via fmemopen), rmrf: difftest; earlier helpers: | indentprint, strreplace, string_display, list_display(_linebreak), signature_display, humanize_size, arg_to_string, console cursor helpers: difftest fuzz; glibc mbstowcs: difftest; wcwidth via unicode-width, divergence per class counted, display difftests on agreeing characters |
 | `src/util/testpkg.c` | 103 | - | |
+| `src/pacman/pacman-conf.c` | 481 | - | the scripts read config values through it (pacman-key, makepkg) |
 
-Not in scope: makepkg, repo-add, pacman-key and the other bash scripts.
+Not ported, kept as upstream ships them: makepkg and libmakepkg,
+repo-add/repo-remove, pacman-key, pacman-db-upgrade, the wrapper (bash)
+and makepkg-template (Perl). They call `pacman` and `pacman-conf` as
+binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
+`pacman-key --init`/`--populate` and `repo-add` against the Rust binaries.
 
 ## Notes
 
@@ -602,8 +632,9 @@ rows still here are the remaining ones.
 
 ## Divergences from pacman (ALPM parsers)
 
-Where the ALPM crates read pacman's files differently. Kept as is
-(`METHODOLOGY.md`), pinned in the `be_local`/`be_sync` difftests.
+Where the ALPM crates read pacman's files differently, pinned in the
+`be_local`/`be_sync` difftests. Leaves with the owned readers (table
+"Owned readers"): each unit removes what its reader fixes.
 
 Seen on real databases:
 

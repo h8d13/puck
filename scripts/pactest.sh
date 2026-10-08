@@ -7,7 +7,8 @@
 #        pacman/test/pacman/meson.build)
 # needs fakechroot and fakeroot; temporary roots go to $TMPDIR (default
 # .tmp/ of the checkout, never /tmp)
-# PACTEST_LOGS=DIR keeps every failing test's verbose log as DIR/<test>.log
+# PACTEST_LOGS=DIR keeps every failing test's verbose log as DIR/<test>.log,
+# pacman's own output (the root's var/log/pactest.log) appended
 
 bin=$1
 if [ ! -x "$bin" ]; then
@@ -35,14 +36,23 @@ xfail=(deprange001.py replace110.py
 	sync-update-package-removing-required-provides.py sync403.py
 	sync406.py upgrade078.py)
 
+# the binary runs outside cargo's test-runner.sh: same caps here, so a
+# runaway pacman fails its test instead of swapping the machine
+ulimit -v "${TEST_MEM_KB:-4194304}"
+keep=()
+[ -n "${PACTEST_LOGS:-}" ] && keep=(--keep-root)
 ok=0 fail=0 xfailed=0 xpassed=0
 log=$(mktemp)
-trap 'rm -f "$log"' EXIT
+# one dir per test, so a kept root is the only pactest-* inside
+roots=$(mktemp -d)
+trap 'rm -rf "$log" "$roots"' EXIT
 for t in "${tests[@]}"; do
 	name=$(basename "$t")
-	RUNNING_UNDER_MESON=1 python3 "$suite/pactest.py" \
+	TMPDIR=$roots RUNNING_UNDER_MESON=1 timeout "${PACTEST_TIMEOUT:-300}" \
+		python3 "$suite/pactest.py" \
 		--scriptlet-shell /bin/sh --bindir "$bindir" \
-		--ldconfig /sbin/ldconfig --verbose "$t" > "$log" 2>&1
+		--ldconfig /sbin/ldconfig --verbose "${keep[@]}" "$t" \
+		> "$log" 2>&1
 	# meson reads the TAP: a top level "not ok" fails the test
 	rc=0
 	grep -q '^not ok' "$log" && rc=1
@@ -63,7 +73,15 @@ for t in "${tests[@]}"; do
 	if [ -n "${PACTEST_LOGS:-}" ] && [ "$res" != ok ]; then
 		mkdir -p "$PACTEST_LOGS"
 		cp "$log" "$PACTEST_LOGS/$name.log"
+		for out in "$roots"/pactest-*/var/log/pactest.log; do
+			[ -e "$out" ] || continue
+			echo "# ==> pacman output" >> "$PACTEST_LOGS/$name.log"
+			cat "$out" >> "$PACTEST_LOGS/$name.log"
+		done
 	fi
+	# tests may leave read-only dirs in a kept root
+	chmod -R u+rwx "$roots"
+	rm -rf "${roots:?}"/*
 	echo "$res  $name"
 done
 echo "== ok $ok, expected fail $xfailed, fail $fail," \
