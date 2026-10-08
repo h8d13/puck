@@ -23,8 +23,6 @@ use crate::Error;
 /// This type does not yet enforce a secure connection (e.g. HTTPS).
 ///
 /// The `Url` type wraps the [`url::Url`] type.
-/// [`url::Url`] normalizes its input (e.g. `https://example.com` becomes `https://example.com/`),
-/// the string a `Url` is created from stays available via [`Url::as_original_str`].
 ///
 /// ## Examples
 ///
@@ -40,73 +38,34 @@ use crate::Error;
 ///
 /// // Format as String
 /// assert_eq!(format!("{url}"), "https://example.com/download");
-///
-/// // The normalized and the original string
-/// let url = Url::from_str("HTTPS://Example.com")?;
-/// assert_eq!(url.as_str(), "https://example.com/");
-/// assert_eq!(url.as_original_str(), "HTTPS://Example.com");
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "serde", serde(from = "url::Url", into = "url::Url"))]
-pub struct Url {
-    url: url::Url,
-    /// The string the URL has been parsed from.
-    original: String,
-}
+pub struct Url(url::Url);
 
 impl Url {
     /// Creates a new `Url` instance.
     pub fn new(url: url::Url) -> Result<Self, Error> {
-        Ok(Self::from(url))
+        Ok(Self(url))
     }
 
     /// Returns a reference to the inner `url::Url` as a `&str`.
     pub fn as_str(&self) -> &str {
-        self.url.as_str()
-    }
-
-    /// Returns the string the `Url` has been created from, before normalization.
-    ///
-    /// For a `Url` created from a [`url::Url`], this is the same as [`Url::as_str`].
-    pub fn as_original_str(&self) -> &str {
-        &self.original
+        self.0.as_str()
     }
 
     /// Consumes the `Url` and returns the inner `url::Url`.
     pub fn into_inner(self) -> url::Url {
-        self.url
+        self.0
     }
 
     /// Returns a reference to the inner `url::Url`.
     pub fn inner(&self) -> &url::Url {
-        &self.url
+        &self.0
     }
 }
-
-impl From<url::Url> for Url {
-    fn from(url: url::Url) -> Self {
-        let original = url.as_str().to_string();
-        Self { url, original }
-    }
-}
-
-impl From<Url> for url::Url {
-    fn from(value: Url) -> Self {
-        value.url
-    }
-}
-
-/// Compares the normalized URLs, so that e.g. `https://example.com` equals `https://example.com/`.
-impl PartialEq for Url {
-    fn eq(&self, other: &Self) -> bool {
-        self.url == other.url
-    }
-}
-
-impl Eq for Url {}
 
 impl AsRef<str> for Url {
     fn as_ref(&self) -> &str {
@@ -134,10 +93,7 @@ impl FromStr for Url {
     /// ```
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let url = url::Url::parse(s).map_err(Error::InvalidUrl)?;
-        Ok(Self {
-            url,
-            original: s.to_string(),
-        })
+        Self::new(url)
     }
 }
 
@@ -868,20 +824,6 @@ mod tests {
         if let Ok(url) = result {
             assert_eq!(url.as_str(), input);
         }
-    }
-
-    /// Ensure that the original string of a normalized URL is kept.
-    #[rstest]
-    #[case("https://example.com", "https://example.com/")]
-    #[case("HTTPS://Example.COM/A", "https://example.com/A")]
-    #[case("https://example.com/a/./b/../c", "https://example.com/a/c")]
-    fn url_original_string(#[case] input: &str, #[case] normalized: &str) -> TestResult {
-        let url = Url::from_str(input)?;
-        assert_eq!(url.as_str(), normalized);
-        assert_eq!(url.to_string(), normalized);
-        assert_eq!(url.as_original_str(), input);
-        assert_eq!(url, Url::from_str(normalized)?);
-        Ok(())
     }
 
     #[rstest]

@@ -2,12 +2,11 @@
 // sync_db_read, load_pkg_for_entry, _sync_get_validation, and the sync
 // branch of db.c's _alpm_db_path.
 //
-// the tar walk follows the C, the entry contents do not: desc/depends go
-// through alpm-repo-db's libalpm-compatible desc reader and files through
-// its files reader, in place of _alpm_archive_fgets and the READ_AND_STORE
-// macros. the typed values still differ, see PORTING.md. libarchive is
-// replaced by alpm-compress (gzip, bzip2, xz, zstd, none) picked by magic
-// bytes, as the db file name carries no compression suffix.
+// the tar walk and the entry reader follow the C: _alpm_archive_fgets
+// over the entry's data blocks as libarchive cuts them, the READ_*
+// macros, keys matched as C strings. libarchive is replaced by
+// alpm-compress (gzip, bzip2, xz, zstd, none) picked by magic bytes, as
+// the db file name carries no compression suffix.
 //
 // sync_db_validate without the status bits db.c keeps: the missing file
 // and the signature check (signing.rs). alpm_db_update with get_sync_dir:
@@ -16,20 +15,17 @@
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, c_int};
-use std::fmt::Display;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use alpm_compress::decompression::DecompressionSettings;
-use alpm_repo_db::desc::{Section, parse_libalpm};
-use alpm_repo_db::files::RepoFiles;
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 
 use crate::callbacks::{Callbacks, Event, LogLevel, logv};
 use crate::db::{DB_USAGE_SYNC, Db};
-use crate::deps::{Depend, dep_from_string};
+use crate::deps::dep_from_string;
 use crate::dload::{
 	Downloader, Payload, Settings, remove_temporary_download_dir,
 };
@@ -38,7 +34,7 @@ use crate::filelist::{File as PkgFile, FileList};
 use crate::handle::{Handle, SyncParts};
 use crate::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
-	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, PkgXData,
+	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, check_meta, parse_xdata,
 };
 use crate::pkghash::PkgHash;
 use crate::signing::{
@@ -46,12 +42,11 @@ use crate::signing::{
 	SIG_DATABASE_UNKNOWN_OK, check_pgp_helper, process_siglist,
 };
 use crate::util::{
-	self, Entry, Filter, PATH_MAX, fnmatch, get_fullpath, hash_sdbm,
-	makepath, splitname, strerror, until_nul,
+	self, ArchiveFgets, DataBlocks, Entry, Filter, PATH_MAX, get_fullpath,
+	hash_sdbm, makepath, parsedate, splitname, strerror, strtoofft,
+	until_nul,
 };
 
-// limits.h on linux
-const NAME_MAX: usize = 255;
 // hard upper limit of a db download
 const DB_MAX_SIZE: i64 = 128 * 1024 * 1024;
 
@@ -64,12 +59,12 @@ pub enum Reason {
 	Meta,
 	// _alpm_validate_filename refused %FILENAME%
 	Filename,
-	// entry data could not be read
+	// a data block could not be read, or a line is over 512 KiB
 	Read(io::Error),
-	// alpm-repo-db parses str, the C reads bytes
-	Utf8,
-	Desc(alpm_repo_db::Error),
-	Files(alpm_repo_db::files::Error),
+	// the data ended where a value or a list's blank line was due
+	Truncated,
+	// a %DATA% line without '=' (_alpm_pkg_parse_xdata NULL)
+	XData(Vec<u8>),
 	// the cache cannot grow, ALPM_ERR_MEMORY turned into DB_INVALID
 	Cache,
 }
@@ -370,11 +365,12 @@ fn bytes_per_package(settings: &DecompressionSettings) -> u64 {
 	}
 }
 
-// _alpm_open_archive plus estimate_package_count
+// _alpm_open_archive plus estimate_package_count, and the data block
+// size of the entries
 fn open_archive(
 	path: &[u8],
 	dbext: &[u8],
-) -> Result<(tar::Archive<Filter>, u64), Error> {
+) -> Result<(tar::Archive<Filter>, u64, u64), Error> {
 	let archive = util::open_archive(path).map_err(|e| match e.kind() {
 		ErrorKind::NotFound => Error::NotFound,
 		_ => Error::Open(e),
@@ -385,45 +381,115 @@ fn open_archive(
 	if dbext == b".files" {
 		est /= 4;
 	}
-	Ok((archive.reader, est))
+	let block = archive.block_size();
+	Ok((archive.reader, est, block))
 }
 
-// _alpm_pkg_check_meta on what load_pkg_for_entry sets. splitname already
-// rules out the version checks ('-' twice, '/'). fnmatch arguments in the
-// C's order: the name is the pattern
-fn check_meta(name: &[u8], version: &[u8]) -> bool {
-	!(name.is_empty()
-		|| version.is_empty()
-		|| matches!(name[0], b'-' | b'.')
-		|| fnmatch(name, b"[![:alnum:]+_.@-]")
-		|| name.len() + version.len() + 1 > NAME_MAX)
+// _alpm_validate_filename, its failure logged
+fn validate_filename(
+	treename: &[u8],
+	name: &[u8],
+	filename: &[u8],
+	cb: &mut dyn Callbacks,
+) -> bool {
+	let why: &[u8] = if filename.first() == Some(&b'.')
+		|| filename.contains(&b'/')
+	{
+		b" is illegal\n"
+	} else if filename.len() > PATH_MAX {
+		b" is too long\n"
+	} else {
+		return true;
+	};
+	let parts: [&[u8]; 4] = [
+		treename,
+		b" database is inconsistent: filename of package ",
+		name,
+		why,
+	];
+	logv(cb, LogLevel::Error, &parts);
+	false
 }
 
-// _alpm_validate_filename
-fn validate_filename(filename: &[u8]) -> bool {
-	filename.first() != Some(&b'.')
-		&& !filename.contains(&b'/')
-		&& filename.len() <= PATH_MAX
+// _alpm_archive_fgets on one entry with the line as the READ_* macros
+// see it
+struct Lines<'e, 'a> {
+	f: ArchiveFgets<'e, 'a>,
+	// the last line as a C string. _alpm_strip_newline(line,
+	// real_line_size) is 0 exactly when this is empty
+	line: Vec<u8>,
 }
 
-// a package being collected: entry texts are parsed once the walk is done,
-// desc and depends of the old split format as one desc
-struct Loading {
-	pkg: Package,
-	// "name-version/", for error reports
-	dir: Vec<u8>,
-	desc: Option<Vec<u8>>,
-	files: Option<Vec<u8>>,
+impl<'e, 'a> Lines<'e, 'a> {
+	fn new(entry: &'e mut Entry<'a>, block: u64) -> Self {
+		Lines {
+			f: ArchiveFgets::new(DataBlocks::new(entry, block)),
+			line: Vec::new(),
+		}
+	}
+
+	// Ok(true) ARCHIVE_OK, Ok(false) ARCHIVE_EOF, Err a failed block
+	// read or a line over MAX_LINE_SIZE
+	fn fgets(&mut self) -> io::Result<bool> {
+		let Some(l) = self.f.next()? else {
+			return Ok(false);
+		};
+		self.line = until_nul(l).to_vec();
+		Ok(true)
+	}
+
+	// READ_NEXT, READ_AND_STORE: the end of the data fails too
+	fn next(&mut self) -> Result<&[u8], Reason> {
+		match self.fgets() {
+			Ok(true) => Ok(&self.line),
+			Ok(false) => Err(Reason::Truncated),
+			Err(e) => Err(Reason::Read(e)),
+		}
+	}
+
+	fn store(&mut self) -> Result<Option<Vec<u8>>, Reason> {
+		Ok(Some(self.next()?.to_vec()))
+	}
+
+	// READ_AND_STORE_ALL, READ_AND_SPLITDEP, the %FILES% loop: lines up
+	// to a blank one. READ_AND_SPLITDEP parses the line pointer of the
+	// section header, freed once a longer line grows the buffer
+	// (UPSTREAM.md): the current line here
+	fn list<T>(
+		&mut self,
+		out: &mut Vec<T>,
+		f: impl Fn(&[u8]) -> T,
+	) -> Result<(), Reason> {
+		loop {
+			let line = self.next()?;
+			if line.is_empty() {
+				return Ok(());
+			}
+			out.push(f(line));
+		}
+	}
+}
+
+fn line_vec(s: &[u8]) -> Vec<u8> {
+	s.to_vec()
+}
+
+// _alpm_strtoofft: -1 for anything but bare digits, the unsigned long
+// long cast to off_t wraps past i64::MAX
+fn off_t(s: &[u8]) -> i64 {
+	strtoofft(s).map_or(-1, |v| v as i64)
 }
 
 // the walk state of sync_db_populate. index replaces the lookups in
 // db->pkgcache and likely_pkg: both find the one package of that name
 struct Walk<'a> {
-	pkgs: Vec<Loading>,
+	pkgs: Vec<Package>,
 	index: HashMap<Vec<u8>, usize>,
 	// db->treename and handle->logcb
 	treename: &'a [u8],
 	cb: &'a mut dyn Callbacks,
+	// util::Archive::block_size
+	block: u64,
 }
 
 fn invalid(entry: &[u8], reason: Reason) -> Error {
@@ -436,14 +502,21 @@ fn invalid(entry: &[u8], reason: Reason) -> Error {
 impl Walk<'_> {
 	// load_pkg_for_entry: the package named by the entry, created on
 	// first sight with name and version from the entry name
-	fn pkg_for_entry(&mut self, entryname: &[u8]) -> Result<usize, Error> {
-		let (name, version) = splitname(entryname)
-			.ok_or_else(|| invalid(entryname, Reason::Name))?;
+	fn pkg_for_entry(&mut self, entryname: &[u8]) -> Result<usize, Reason> {
+		let Some((name, version)) = splitname(entryname) else {
+			let parts: [&[u8]; 3] = [
+				b"invalid name for database entry '",
+				entryname,
+				b"'\n",
+			];
+			logv(self.cb, LogLevel::Error, &parts);
+			return Err(Reason::Name);
+		};
 		if let Some(&i) = self.index.get(name) {
 			return Ok(i);
 		}
-		if !check_meta(name, version) {
-			return Err(invalid(entryname, Reason::Meta));
+		if !check_meta(name, version, self.cb) {
+			return Err(Reason::Meta);
 		}
 		let parts: [&[u8]; 5] = [
 			b"adding '",
@@ -461,17 +534,12 @@ impl Walk<'_> {
 			..Package::default()
 		};
 		self.index.insert(name.to_vec(), self.pkgs.len());
-		self.pkgs.push(Loading {
-			pkg,
-			dir: [name, b"-", version, b"/"].concat(),
-			desc: None,
-			files: None,
-		});
+		self.pkgs.push(pkg);
 		Ok(self.pkgs.len() - 1)
 	}
 
-	// sync_db_read up to the parsing of the entry data
-	fn read_entry(&mut self, entry: &mut Entry) -> Result<(), Error> {
+	// sync_db_read on one non-directory entry
+	fn read_entry(&mut self, entry: &mut Entry) -> Result<(), Reason> {
 		let entryname = entry.path_bytes().to_vec();
 		let parts: [&[u8]; 3] = [
 			b"loading package data from archive entry ",
@@ -479,147 +547,189 @@ impl Walk<'_> {
 			b"\n",
 		];
 		logv(self.cb, LogLevel::Function, &parts);
-		let i = self.pkg_for_entry(&entryname)?;
+		let i = self.pkg_for_entry(&entryname).inspect_err(|_| {
+			let parts: [&[u8]; 5] = [
+				b"entry ",
+				&entryname,
+				b" could not be loaded into ",
+				self.treename,
+				b" sync database\n",
+			];
+			logv(self.cb, LogLevel::Debug, &parts);
+		})?;
 		// strrchr: the last '/', where splitname cut at the first
 		let Some(slash) = entryname.iter().rposition(|&c| c == b'/')
 		else {
-			// a file outside a directory: warned, package kept
+			// a file outside a directory: no read error, package kept
+			let parts: [&[u8]; 3] =
+				[b"unknown database file: ", &entryname, b"\n"];
+			logv(self.cb, LogLevel::Warning, &parts);
 			return Ok(());
 		};
-		let loading = &mut self.pkgs[i];
-		let text = match &entryname[slash + 1..] {
-			b"desc" | b"depends" => &mut loading.desc,
-			b"files" => &mut loading.files,
-			// unknown database file, skipped
-			_ => return Ok(()),
-		};
-		let data = util::content(entry)
-			.map_err(|e| invalid(&entryname, Reason::Read(e)))?;
-		let text = text.get_or_insert_with(Vec::new);
-		// the C reads each entry on its own: a blank line ends whatever
-		// section the previous entry left open
-		if !text.is_empty() {
-			if text.last() != Some(&b'\n') {
-				text.push(b'\n');
+		let filename = &entryname[slash + 1..];
+		if !matches!(filename, b"desc" | b"depends" | b"files") {
+			let parts: [&[u8]; 3] =
+				[b"unknown database file: ", filename, b"\n"];
+			logv(self.cb, LogLevel::Debug, &parts);
+			return Ok(());
+		}
+		let mut lines = Lines::new(entry, self.block);
+		let r = self.read_data(i, &mut lines);
+		// the filename check returns without this line
+		if r.as_ref().is_err_and(|r| !matches!(r, Reason::Filename)) {
+			let parts: [&[u8]; 3] = [
+				b"error parsing database file: ",
+				filename,
+				b"\n",
+			];
+			logv(self.cb, LogLevel::Debug, &parts);
+		}
+		r
+	}
+
+	// "<treename> database is inconsistent: <what> mismatch on package"
+	fn mismatch(&mut self, what: &[u8], name: &[u8]) {
+		let parts: [&[u8]; 6] = [
+			self.treename,
+			b" database is inconsistent: ",
+			what,
+			b" mismatch on package ",
+			name,
+			b"\n",
+		];
+		logv(self.cb, LogLevel::Error, &parts);
+	}
+
+	// the parsing loop of sync_db_read: keys matched as C strings, a
+	// repeated key overwrites a value, appends to a list and replaces
+	// the file list
+	fn read_data(&mut self, i: usize, f: &mut Lines) -> Result<(), Reason> {
+		let deps = dep_from_string;
+		loop {
+			match f.fgets() {
+				Ok(true) => {}
+				Ok(false) => return Ok(()),
+				Err(e) => return Err(Reason::Read(e)),
 			}
-			text.push(b'\n');
-		}
-		text.extend_from_slice(&data);
-		Ok(())
-	}
-}
-
-fn text<T: Display>(v: &T) -> Vec<u8> {
-	v.to_string().into_bytes()
-}
-
-fn texts<T: Display>(v: &[T]) -> Vec<Vec<u8>> {
-	v.iter().map(text).collect()
-}
-
-// relations are printed by alpm-types and read back like the C reads its
-// lines, through alpm_dep_from_string
-fn deps<T: Display>(v: &[T]) -> Vec<Depend> {
-	v.iter().map(|d| dep_from_string(&text(d))).collect()
-}
-
-// off_t of _alpm_strtoofft: -1 past its range
-fn off_t(v: u64) -> i64 {
-	i64::try_from(v).unwrap_or(-1)
-}
-
-fn utf8(data: &[u8]) -> Result<&str, Reason> {
-	std::str::from_utf8(data).map_err(|_| Reason::Utf8)
-}
-
-// what sync_db_read stores from a desc, key by key: a repeated value
-// overwrites, a repeated list appends, a missing section leaves the field
-// unset
-fn fill_desc(pkg: &mut Package, data: &[u8]) -> Result<(), Reason> {
-	let desc = parse_libalpm(utf8(data)?).map_err(Reason::Desc)?;
-	desc.into_iter().try_for_each(|s| fill_section(pkg, s))
-}
-
-fn fill_section(pkg: &mut Package, section: Section) -> Result<(), Reason> {
-	match section {
-		// only compared with the entry name by the C (logged, never
-		// stored); %MD5SUM% is skipped
-		Section::Name(_) | Section::Version(_) | Section::Md5Sum(_) => {
-		}
-		Section::Filename(v) => {
-			let filename = text(&v);
-			if !validate_filename(&filename) {
-				return Err(Reason::Filename);
+			let key = f.line.clone();
+			if key.is_empty() {
+				continue;
 			}
-			pkg.filename = Some(filename);
-		}
-		Section::Base(v) => pkg.base = Some(text(&v)),
-		// description and url as read, alpm-types normalizes Display
-		Section::Desc(v) => pkg.desc = Some(text(&v.as_original_str())),
-		Section::Groups(v) => pkg.groups.extend(texts(&v)),
-		// an empty value is alpm-repo-db's None
-		Section::Url(v) => {
-			pkg.url = Some(v
-				.map(|u| text(&u.as_original_str()))
-				.unwrap_or_default())
-		}
-		Section::License(v) => pkg.licenses.extend(texts(&v)),
-		Section::Arch(v) => pkg.arch = Some(text(&v)),
-		Section::BuildDate(v) => pkg.builddate = v,
-		Section::Packager(v) => pkg.packager = Some(text(&v)),
-		Section::CSize(v) => pkg.size = off_t(v),
-		Section::ISize(v) => pkg.isize = off_t(v),
-		Section::Sha256Sum(v) => pkg.sha256sum = Some(text(&v)),
-		Section::PgpSig(v) => pkg.base64_sig = Some(text(&v)),
-		Section::Replaces(v) => pkg.replaces.extend(deps(&v)),
-		Section::Depends(v) => pkg.depends.extend(deps(&v)),
-		Section::OptDepends(v) => pkg.optdepends.extend(deps(&v)),
-		Section::MakeDepends(v) => pkg.makedepends.extend(deps(&v)),
-		Section::CheckDepends(v) => pkg.checkdepends.extend(deps(&v)),
-		Section::Conflicts(v) => pkg.conflicts.extend(deps(&v)),
-		Section::Provides(v) => pkg.provides.extend(deps(&v)),
-		Section::Data(v) => {
-			pkg.xdata.extend(v.iter().map(|x| PkgXData {
-				name: x.key().as_bytes().to_vec(),
-				value: x.value().as_bytes().to_vec(),
-			}))
+			let name = self.pkgs[i].name_bytes().to_vec();
+			let pkg = &mut self.pkgs[i];
+			match &key[..] {
+				b"%NAME%" => {
+					if f.next()? != &name[..] {
+						self.mismatch(b"name", &name);
+					}
+				}
+				b"%VERSION%" => {
+					let v = pkg.version.as_deref();
+					let v = until_nul(
+						v.unwrap_or_default(),
+					);
+					if f.next()? != v {
+						self.mismatch(
+							b"version", &name,
+						);
+					}
+				}
+				b"%FILENAME%" => {
+					pkg.filename = f.store()?;
+					let filename = pkg.filename.clone();
+					let filename =
+						filename.unwrap_or_default();
+					let (tree, cb) =
+						(self.treename, &mut *self.cb);
+					if !validate_filename(
+						tree, &name, &filename, cb,
+					) {
+						return Err(Reason::Filename);
+					}
+				}
+				b"%BASE%" => pkg.base = f.store()?,
+				b"%DESC%" => pkg.desc = f.store()?,
+				b"%GROUPS%" => {
+					f.list(&mut pkg.groups, line_vec)?
+				}
+				b"%URL%" => pkg.url = f.store()?,
+				b"%LICENSE%" => {
+					f.list(&mut pkg.licenses, line_vec)?
+				}
+				b"%ARCH%" => pkg.arch = f.store()?,
+				// _alpm_parsedate: 0 for anything but a number
+				b"%BUILDDATE%" => {
+					pkg.builddate = parsedate(f.next()?)
+						.unwrap_or(0)
+				}
+				b"%PACKAGER%" => pkg.packager = f.store()?,
+				b"%CSIZE%" => pkg.size = off_t(f.next()?),
+				b"%ISIZE%" => pkg.isize = off_t(f.next()?),
+				// deprecated, skipped
+				b"%MD5SUM%" => {
+					f.next()?;
+				}
+				b"%SHA256SUM%" => pkg.sha256sum = f.store()?,
+				b"%PGPSIG%" => pkg.base64_sig = f.store()?,
+				b"%REPLACES%" => {
+					f.list(&mut pkg.replaces, deps)?
+				}
+				b"%DEPENDS%" => {
+					f.list(&mut pkg.depends, deps)?
+				}
+				b"%OPTDEPENDS%" => {
+					f.list(&mut pkg.optdepends, deps)?
+				}
+				b"%MAKEDEPENDS%" => {
+					f.list(&mut pkg.makedepends, deps)?
+				}
+				b"%CHECKDEPENDS%" => {
+					f.list(&mut pkg.checkdepends, deps)?
+				}
+				b"%CONFLICTS%" => {
+					f.list(&mut pkg.conflicts, deps)?
+				}
+				b"%PROVIDES%" => {
+					f.list(&mut pkg.provides, deps)?
+				}
+				// sorted with _alpm_filelist_sort
+				b"%FILES%" => {
+					let mut files = Vec::new();
+					f.list(&mut files, |l| PkgFile {
+						name: l.to_vec(),
+						..PkgFile::default()
+					})?;
+					pkg.files = FileList { files };
+					pkg.files.sort();
+				}
+				b"%DATA%" => {
+					let mut lines = Vec::new();
+					f.list(&mut lines, line_vec)?;
+					// entries before a bad line stay
+					for l in lines {
+						let x = parse_xdata(&l).ok_or(
+							Reason::XData(l),
+						)?;
+						pkg.xdata.push(x);
+					}
+				}
+				_ => {
+					let parts: [&[u8]; 4] = [
+						&name,
+						b": unknown key '",
+						&key,
+						b"' in sync database\n",
+					];
+					logv(
+						self.cb,
+						LogLevel::Warning,
+						&parts,
+					);
+					f.list(&mut Vec::new(), |_| ())?;
+				}
+			}
 		}
 	}
-	Ok(())
-}
-
-// %FILES%, sorted with _alpm_filelist_sort like the C
-fn fill_files(pkg: &mut Package, data: &[u8]) -> Result<(), Reason> {
-	let files = RepoFiles::from_str_libalpm(utf8(data)?)
-		.map_err(Reason::Files)?;
-	let files = files.as_ref().iter().map(|p| PkgFile {
-		name: p.as_os_str().as_bytes().to_vec(),
-		..PkgFile::default()
-	});
-	pkg.files = FileList {
-		files: files.collect(),
-	};
-	pkg.files.sort();
-	Ok(())
-}
-
-fn finish(l: Loading) -> Result<Package, Error> {
-	let Loading {
-		mut pkg,
-		dir,
-		desc,
-		files,
-	} = l;
-	let entry = |file: &[u8]| [&dir[..], file].concat();
-	if let Some(d) = desc {
-		fill_desc(&mut pkg, &d)
-			.map_err(|r| invalid(&entry(b"desc"), r))?;
-	}
-	if let Some(f) = files {
-		fill_files(&mut pkg, &f)
-			.map_err(|r| invalid(&entry(b"files"), r))?;
-	}
-	Ok(pkg)
 }
 
 // sync_db_populate: the package cache of the db file at path (its
@@ -627,13 +737,14 @@ fn finish(l: Loading) -> Result<Package, Error> {
 // dbext is handle->dbext at load time: ".files" divides the size
 // estimate, whatever the path's own extension.
 //
-// errors rank like the C: an entry that fails makes the db invalid even
-// when the archive breaks later, a broken archive with good entries so
+// errors rank like the C: the walk goes on past an entry that fails, and
+// any such entry makes the db invalid (the first one is returned), even
+// when the archive breaks later; a broken archive with good entries so
 // far is an archive error.
 //
-// logs through cb the opening, entry and count lines of the C; not
-// modelled: the error lines (the C goes on past a bad entry, its archive
-// error texts are libarchive's)
+// logs through cb the C's lines of the walk; the archive error line
+// carries the port's text where the C has libarchive's, the open
+// failures of _alpm_open_archive are not logged
 pub fn populate(
 	path: &[u8],
 	dbext: &[u8],
@@ -642,7 +753,7 @@ pub fn populate(
 ) -> Result<PkgHash<Package>, Error> {
 	let path = until_nul(path);
 	logv(cb, LogLevel::Debug, &[b"opening archive ", path, b"\n"]);
-	let (mut archive, est) = open_archive(path, until_nul(dbext))?;
+	let (mut archive, est, block) = open_archive(path, until_nul(dbext))?;
 	let mut cache = PkgHash::new(est as u32).ok_or(Error::Memory)?;
 
 	let mut walk = Walk {
@@ -650,7 +761,9 @@ pub fn populate(
 		index: HashMap::new(),
 		treename,
 		cb,
+		block,
 	};
+	let mut first_invalid = None;
 	let mut broken = None;
 	let entries = archive.entries().map_err(Error::Archive)?;
 	for (i, entry) in entries.enumerate() {
@@ -669,20 +782,38 @@ pub fn populate(
 		if is_dir || entry.path_bytes().last() == Some(&b'/') {
 			continue;
 		}
-		walk.read_entry(&mut entry)?;
+		if let Err(reason) = walk.read_entry(&mut entry) {
+			let entryname = entry.path_bytes().to_vec();
+			let parts: [&[u8]; 5] = [
+				b"could not parse package description file '",
+				&entryname,
+				b"' from db '",
+				treename,
+				b"'\n",
+			];
+			logv(walk.cb, LogLevel::Error, &parts);
+			first_invalid
+				.get_or_insert(invalid(&entryname, reason));
+		}
 	}
-
-	let pkgs: Vec<Package> = walk
-		.pkgs
-		.into_iter()
-		.map(finish)
-		.collect::<Result<_, _>>()?;
+	if let Some(e) = first_invalid {
+		return Err(e);
+	}
 	if let Some(e) = broken {
+		let why = e.to_string();
+		let parts: [&[u8]; 5] = [
+			b"could not read db '",
+			treename,
+			b"' (",
+			why.as_bytes(),
+			b")\n",
+		];
+		logv(walk.cb, LogLevel::Error, &parts);
 		return Err(Error::Archive(e));
 	}
 	// _alpm_pkghash_add in archive order then alpm_list_msort by name:
 	// names are unique, so add_sorted gives the same buckets and list
-	for pkg in pkgs {
+	for pkg in walk.pkgs {
 		let name = pkg.name.clone().unwrap_or_default();
 		cache.add_sorted(pkg)
 			.map_err(|_| invalid(&name, Reason::Cache))?;

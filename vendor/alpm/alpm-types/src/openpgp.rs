@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::DeserializeFromStr;
 use winnow::{
     ascii::space0,
-    combinator::{alt, not, opt, peek, preceded, repeat_till},
+    combinator::{alt, not, peek, repeat_till},
     error::ErrMode,
     token::any,
 };
@@ -390,12 +390,8 @@ impl Display for Base64OpenPGPSignature {
 /// A packager of a package
 ///
 /// A `Packager` is represented by a User ID (e.g. `"Foobar McFooFace <foobar@mcfooface.org>"`).
-/// Internally this struct wraps a `String` for the name and an optional `EmailAddress` for a valid
-/// email address.
-///
-/// An OpenPGP User ID is conventionally composed of a name and an email address, but either may be
-/// missing: e.g. makepkg's default packager `Unknown Packager` has no email address.
-/// If a `<` or `>` is present, it must enclose a valid email address.
+/// Internally this struct wraps a `String` for the name and an `EmailAddress` for a valid email
+/// address.
 ///
 /// ## Examples
 /// ```
@@ -411,23 +407,16 @@ impl Display for Base64OpenPGPSignature {
 /// assert_eq!("Foobar McFooface", packager.name());
 ///
 /// // get email
-/// let email = packager.email().expect("an email address");
-/// assert_eq!("foobar@mcfooface.org", email.to_string());
+/// assert_eq!("foobar@mcfooface.org", packager.email().to_string());
 ///
 /// // get email domain
-/// assert_eq!("mcfooface.org", email.domain());
+/// assert_eq!("mcfooface.org", packager.email().domain());
 ///
 /// // format as String
 /// assert_eq!(
 ///     "Foobar McFooface <foobar@mcfooface.org>",
 ///     format!("{}", packager)
 /// );
-///
-/// // a User ID without email address
-/// let packager = Packager::from_str("Unknown Packager")?;
-/// assert_eq!("Unknown Packager", packager.name());
-/// assert_eq!(None, packager.email());
-/// assert_eq!("Unknown Packager", format!("{}", packager));
 /// # Ok(())
 /// # }
 /// ```
@@ -435,28 +424,23 @@ impl Display for Base64OpenPGPSignature {
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 pub struct Packager {
     name: String,
-    email: Option<EmailAddress>,
+    email: EmailAddress,
 }
 
 impl Packager {
     /// Create a new Packager
     pub fn new(name: String, email: EmailAddress) -> Packager {
-        Packager {
-            name,
-            email: Some(email),
-        }
+        Packager { name, email }
     }
 
     /// Return the name of the Packager
-    ///
-    /// The name is empty for a User ID consisting of an email address only.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Return the email of the Packager, if the User ID has one
-    pub fn email(&self) -> Option<&EmailAddress> {
-        self.email.as_ref()
+    /// Return the email of the Packager
+    pub fn email(&self) -> &EmailAddress {
+        &self.email
     }
 }
 
@@ -478,29 +462,22 @@ impl ParserUntil for Packager {
             // Consume any of those so we don't have to guess about them later on.
             space0.parse_next(input)?;
 
-            // The name that precedes the email address, which may be missing (`<email>`).
-            let name = opt(preceded(
-                not("<"),
-                repeat_till::<_, _, (), _, _, _, _>(
-                    1..,
-                    any,
-                    peek(alt(("<", delimiter_parser.by_ref()))),
-                )
-                .take(),
-            ))
-            .map(|name: Option<&str>| name.map_or_else(String::new, |name| name.trim().to_string()))
+            // Make sure the first character isn't a `<`, which may happen if the packager name is
+            // missing.
+            not("<")
+                .expected_text("a packager name")
+                .parse_next(input)?;
+
+            // The name that precedes the email address
+            let name = repeat_till::<_, _, (), _, _, _, _>(
+                1..,
+                any,
+                peek(alt(("<", delimiter_parser.by_ref()))),
+            )
+            .take()
+            .map(|name: &str| name.trim().to_string())
             .layer("packager name")
             .parse_next(input)?;
-
-            // A User ID without email address, e.g. makepkg's default `Unknown Packager`.
-            if !name.is_empty()
-                && !name.contains('>')
-                && opt(peek(delimiter_parser.by_ref()))
-                    .parse_next(input)?
-                    .is_some()
-            {
-                return Ok(Self { name, email: None });
-            }
 
             // The '<' delimiter that marks the start of the email string
             '<'.expected_text("opening delimiter '<'")
@@ -528,10 +505,7 @@ impl ParserUntil for Packager {
                 .expected_text("end of input.")
                 .parse_next(input)?;
 
-            Ok(Self {
-                name,
-                email: Some(email),
-            })
+            Ok(Self { name, email })
         };
 
         parser.layer("alpm packager")
@@ -554,11 +528,7 @@ impl FromStr for Packager {
 
 impl Display for Packager {
     fn fmt(&self, fmt: &mut Formatter) -> std::fmt::Result {
-        match (self.name.is_empty(), &self.email) {
-            (_, None) => write!(fmt, "{}", self.name),
-            (true, Some(email)) => write!(fmt, "<{email}>"),
-            (false, Some(email)) => write!(fmt, "{} <{email}>", self.name),
-        }
+        write!(fmt, "{} <{}>", self.name, self.email)
     }
 }
 
@@ -746,35 +716,14 @@ mod tests {
         "Foobar McFooface (The Third) <foobar@mcfooface.org>",
         Packager{
             name: "Foobar McFooface (The Third)".to_string(),
-            email: EmailAddress::from_str("foobar@mcfooface.org").ok()
+            email: EmailAddress::from_str("foobar@mcfooface.org").unwrap()
         }
     )]
     #[case(
         "Foobar McFooface <foobar@mcfooface.org>",
         Packager{
             name: "Foobar McFooface".to_string(),
-            email: EmailAddress::from_str("foobar@mcfooface.org").ok()
-        }
-    )]
-    #[case::no_name(
-        "<foobar@mcfooface.org>",
-        Packager{
-            name: String::new(),
-            email: EmailAddress::from_str("foobar@mcfooface.org").ok()
-        }
-    )]
-    #[case::no_wrapped_address(
-        "Unknown Packager",
-        Packager{
-            name: "Unknown Packager".to_string(),
-            email: None
-        }
-    )]
-    #[case::address_not_wrapped(
-        "foobar@mcfooface.org",
-        Packager{
-            name: "foobar@mcfooface.org".to_string(),
-            email: None
+            email: EmailAddress::from_str("foobar@mcfooface.org").unwrap()
         }
     )]
     fn valid_packager(#[case] from_str: &str, #[case] packager: Packager) {
@@ -783,15 +732,13 @@ mod tests {
 
     /// Test that invalid packager expressions are detected as such and throw the expected error.
     #[rstest]
-    #[case::no_name("<>")]
-    #[case::no_name_and_address_not_wrapped("foobar@mcfooface.org>")]
-    #[case::no_wrapped_address("Foobar McFooface <>")]
+    #[case::no_name("<foobar@mcfooface.org>")]
+    #[case::no_name_and_address_not_wrapped("foobar@mcfooface.org")]
+    #[case::no_wrapped_address("Foobar McFooface")]
     #[case::two_wrapped_addresses(
         "Foobar McFooface <foobar@mcfooface.org> <foobar@mcfoofacemcfooface.org>"
     )]
     #[case::address_without_local_part("Foobar McFooface <@mcfooface.org>")]
-    #[case::empty("")]
-    #[case::address_not_closed("Foobar McFooface <foobar@mcfooface.org")]
     fn invalid_packager(#[case] input: &str) {
         let (test_name, _guard) = configure_insta();
 
@@ -807,8 +754,6 @@ mod tests {
         Packager::from_str("Foobar McFooface <foobar@mcfooface.org>").unwrap(),
         "Foobar McFooface <foobar@mcfooface.org>"
     )]
-    #[case(Packager::from_str("<foobar@mcfooface.org>").unwrap(), "<foobar@mcfooface.org>")]
-    #[case(Packager::from_str("Unknown Packager").unwrap(), "Unknown Packager")]
     fn packager_format_string(#[case] packager: Packager, #[case] packager_str: &str) {
         assert_eq!(packager_str, format!("{packager}"));
     }
@@ -825,6 +770,6 @@ mod tests {
         &EmailAddress::from_str("foobar@mcfooface.org").unwrap(),
     )]
     fn packager_email(#[case] packager: Packager, #[case] email: &EmailAddress) {
-        assert_eq!(Some(email), packager.email());
+        assert_eq!(email, packager.email());
     }
 }

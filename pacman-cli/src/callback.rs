@@ -31,6 +31,7 @@ use alpm_core::util::until_nul;
 
 use crate::conf::{ColStr, Config, LOG_WARNING};
 use crate::pacman::PM_OP_FILES;
+use crate::sighandler::set_bars_below;
 use crate::util::{
 	Output, Term, colon_printf, console_cursor_move_down,
 	console_cursor_move_up, console_erase_line, display_new_optdepends,
@@ -345,6 +346,14 @@ impl<R: BufRead, L: Lookup> Frontend<R, L> {
 		}
 		self.print(&s);
 		self.multibar.cursor_lineno = num;
+	}
+
+	// the end of every callback: what it printed goes out, the bar
+	// cursor is published for the soft interrupt handler
+	fn end_callback(&mut self) {
+		self.out.flush();
+		let m = &self.multibar;
+		set_bars_below(m.active.len(), m.cursor_lineno);
 	}
 
 	// console_cursor_move_end: the line after the last active bar
@@ -1171,17 +1180,17 @@ fn ask_provider<R: BufRead>(
 impl<R: BufRead, L: Lookup> Callbacks for Frontend<R, L> {
 	fn log(&mut self, level: LogLevel, msg: &[u8]) {
 		self.cb_log(level, msg);
-		self.out.flush();
+		self.end_callback();
 	}
 
 	fn event(&mut self, event: &Event<'_>) {
 		self.cb_event(event);
-		self.out.flush();
+		self.end_callback();
 	}
 
 	fn question(&mut self, question: &mut Question<'_>) {
 		self.cb_question(question);
-		self.out.flush();
+		self.end_callback();
 	}
 
 	fn progress(
@@ -1193,11 +1202,11 @@ impl<R: BufRead, L: Lookup> Callbacks for Frontend<R, L> {
 		current: usize,
 	) {
 		self.cb_progress(progress, pkg, percent, howmany, current);
-		self.out.flush();
+		self.end_callback();
 	}
 
 	fn download(&mut self, filename: &[u8], event: DownloadEvent) {
 		self.cb_download(filename, event);
-		self.out.flush();
+		self.end_callback();
 	}
 }

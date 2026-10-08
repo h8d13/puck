@@ -130,12 +130,22 @@ fn invalid_entries() {
 		let e = db.load().unwrap_err();
 		assert_eq!(e.errno(), Errno::DbInvalid, "{name}");
 	}
-	db.write(&tar(&[("foo-1-1/desc", "%CSIZE%\nx\n")]));
+	db.write(&tar(&[("foo-1-1/desc", "%DATA%\nnoequals\n\n")]));
 	let e = db.load().unwrap_err();
 	assert!(matches!(
 		e,
 		Error::Invalid {
-			reason: Reason::Desc(_),
+			reason: Reason::XData(_),
+			..
+		}
+	));
+	// a list running into the end of the data
+	db.write(&tar(&[("foo-1-1/desc", "%GROUPS%\ng")]));
+	let e = db.load().unwrap_err();
+	assert!(matches!(
+		e,
+		Error::Invalid {
+			reason: Reason::Truncated,
 			..
 		}
 	));

@@ -10,34 +10,13 @@
 // scripts/cli-parity-fixtures.sh runs it with the table shown
 use std::fs;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use difftest::{
-	Comp, DbFile, LocalEntry, Rng, SyncWorld, section, snapshot,
-	write_package,
+	Comp, DbFile, LocalEntry, Rng, SyncWorld, c_pacman, rust_pacman,
+	section, snapshot, write_package,
 };
-
-fn c_pacman() -> PathBuf {
-	let dir = match std::env::var_os("PACMAN_BUILD") {
-		Some(d) => PathBuf::from(d),
-		None => Path::new(env!("CARGO_MANIFEST_DIR"))
-			.join("../pacman/build"),
-	};
-	dir.join("pacman")
-}
-
-// target/<profile>/deps/cli_binary-<hash> -> target/<profile>/pacman
-fn rust_pacman() -> PathBuf {
-	let exe = std::env::current_exe().unwrap();
-	let bin = exe.parent().unwrap().parent().unwrap().join("pacman");
-	assert!(
-		bin.exists(),
-		"{} missing: cargo build --release -p pacman-cli",
-		bin.display()
-	);
-	bin
-}
 
 // --debug in the world with the default SigLevel (Required, unsigned
 // dbs): the C logs the failed .sig lookup (util.c _alpm_access, signing.c
@@ -194,8 +173,6 @@ fn owner_pkg(w: &SyncWorld) {
 		section("VERSION", &one("1.0-1")),
 		section("BASE", &one("owner")),
 		section("DESC", &one("owns files")),
-		// alpm-db wants a URL (PORTING.md, ALPM divergences)
-		section("URL", &one("https://example.org/owner")),
 		section("ARCH", &one("x86_64")),
 		section("BUILDDATE", &one("1700000000")),
 		section("INSTALLDATE", &one("1700000001")),

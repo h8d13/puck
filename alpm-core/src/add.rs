@@ -35,8 +35,8 @@ use crate::remove::remove_single_package;
 use crate::trans::{
 	TRANS_FLAG_ALLDEPS, TRANS_FLAG_ALLEXPLICIT, TRANS_FLAG_DBONLY,
 	TRANS_FLAG_DOWNLOADONLY, TRANS_FLAG_NEEDED, TRANS_FLAG_NOSCRIPTLET,
-	TransPkg, TransState, load_caches, log, opt_str, runscriptlet,
-	trans_in,
+	TransPkg, TransState, interrupted, load_caches, log, opt_str,
+	runscriptlet, trans_in,
 };
 use crate::util::{
 	CALLER_PREFIX, Entry, PATH_MAX, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO,
@@ -1795,7 +1795,7 @@ pub(crate) fn upgrade_packages(h: &mut Handle) -> Result<(), Errno> {
 	let pkg_count = add.len();
 	let (mut ret, mut run_ldconfig) = (Ok(()), true);
 	for (i, t) in add.iter_mut().enumerate() {
-		if trans_state(h) == Some(TransState::Interrupted) {
+		if interrupted(h) {
 			// the C returns here, before ldconfig
 			run_ldconfig = false;
 			break;
@@ -1816,8 +1816,4 @@ pub(crate) fn upgrade_packages(h: &mut Handle) -> Result<(), Errno> {
 		ldconfig(h);
 	}
 	ret
-}
-
-fn trans_state(h: &Handle) -> Option<TransState> {
-	h.trans().map(|t| t.state)
 }

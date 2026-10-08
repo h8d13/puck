@@ -14,10 +14,9 @@
 // operations and the callbacks write into Outputs flushed to one sink
 // (the binary's std streams) where the C flushes. the prompts of the
 // operations and of the callbacks read stdin through separate buffers.
-// signals: std has no handler API; SIGINT/SIGHUP kill the process (the
-// C's soft handler exits 128 + signal without a transaction, the same
-// status), no SIGSEGV cursor restore, no SIGWINCH (getcols is not cached
-// anyway).
+// signals: the binary installs sighandler's soft interrupt handler, run
+// gives it the handle after setup_libalpm and removes it in cleanup,
+// before the handle is released like the C.
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -43,6 +42,7 @@ use crate::getopt::{Getopt, HasArg, LongOpt};
 use crate::package::format_date_utc;
 use crate::query::{QueryEnv, pacman_query};
 use crate::remove::pacman_remove;
+use crate::sighandler::{remove_soft_interrupt_handler, set_handle};
 use crate::sync::{Deferred, pacman_sync, sync_clean, sync_trans};
 use crate::upgrade::pacman_upgrade;
 use crate::util::{
@@ -1644,9 +1644,12 @@ pub fn run<R: BufRead + 'static>(
 		..Output::default()
 	};
 	console_cursor_hide(&mut out.stdout, term.stdout_tty);
+	// alpm_release comes after remove_soft_interrupt_handler
+	let mut released = None;
 	let ret = match setup(argv, process, io, &mut out, &new_term) {
 		Err(ret) => ret,
 		Ok((config, targets, mut handle)) => {
+			set_handle(handle.interrupt());
 			if config.verbose > 0 {
 				verbose(
 					&mut out.stdout,
@@ -1674,10 +1677,13 @@ pub fn run<R: BufRead + 'static>(
 			let ret = dispatch(&mut ui, &mut handle, &targets);
 			// the op's output before alpm_release logs (cleanup)
 			ui.out.flush();
+			released = Some(handle);
 			ret & 0xff
 		}
 	};
 	console_cursor_show(&mut out.stdout, term.stdout_tty);
 	out.flush();
+	remove_soft_interrupt_handler();
+	drop(released);
 	ret
 }

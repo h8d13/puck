@@ -8,7 +8,7 @@
 use std::cell::Cell;
 use std::ffi::{OsStr, OsString, c_char, c_ulong};
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
-use std::io::{self, ErrorKind, Read, Seek, Write};
+use std::io::{self, BufRead, BufReader, Cursor, ErrorKind, Read, Seek, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{
@@ -480,7 +480,7 @@ fn skip(p: &[u8], mut pi: usize, not: bool) -> Bracket {
 }
 
 // C path from bytes, cut at the first nul
-fn c_path(path: &[u8]) -> &Path {
+pub(crate) fn c_path(path: &[u8]) -> &Path {
 	Path::new(OsStr::from_bytes(until_nul(path)))
 }
 
@@ -1278,6 +1278,9 @@ pub(crate) const S_IFCHR: u32 = 0o020000;
 pub(crate) const S_IFBLK: u32 = 0o060000;
 pub(crate) const S_IFIFO: u32 = 0o010000;
 
+// util.h, BUFSIZ in glibc
+const ALPM_BUFFER_SIZE: u64 = 8192;
+
 // the umask _alpm_unpack extracts under
 const UNPACK_UMASK: u32 = 0o022;
 
@@ -1289,8 +1292,8 @@ const UNPACK_UMASK: u32 = 0o022;
 // that block is never seen, and the filter stays failed. the decoders
 // themselves deliver every byte up to the cut, so the blocks are redone
 // here. no filter (plain tar) reads the file as it is
-pub struct Filter {
-	decoder: CompressionDecoder<'static>,
+pub struct Filter<R: Source = BufReader<File>> {
+	decoder: CompressionDecoder<'static, R>,
 	// out_block_size, 0 without a filter
 	size: usize,
 	// blocks read ahead, data[pos..] not consumed yet
@@ -1304,40 +1307,52 @@ pub struct Filter {
 	consumed: Rc<Cell<u64>>,
 }
 
+// the filter's out_block_size, 0 without a filter
+fn out_block_size(s: &DecompressionSettings) -> usize {
+	match s {
+		DecompressionSettings::None => 0,
+		DecompressionSettings::Zstd => 128 * 1024,
+		_ => 64 * 1024,
+	}
+}
+
+// what a filter decodes: a file, or a .MTREE read into memory
+// (archive_read_open_memory)
+pub trait Source: BufRead {
+	// bytes of it the decoder has read
+	fn offset(&self) -> u64;
+}
+
+impl Source for BufReader<File> {
+	fn offset(&self) -> u64 {
+		self.get_ref().stream_position().unwrap_or_default()
+	}
+}
+
+impl Source for Cursor<Vec<u8>> {
+	fn offset(&self) -> u64 {
+		self.position()
+	}
+}
+
 // bytes uudecode_bidder_bid's line scan goes on over (its ascii table)
 fn is_uu_text(c: &u8) -> bool {
 	matches!(c, b' '..=b'~' | b'\n' | b'\r')
 }
 
-impl Filter {
+impl<R: Source> Filter<R> {
 	pub fn new(
-		decoder: CompressionDecoder<'static>,
+		decoder: CompressionDecoder<'static, R>,
 		s: &DecompressionSettings,
 	) -> Self {
-		let size = match s {
-			DecompressionSettings::None => 0,
-			DecompressionSettings::Zstd => 128 * 1024,
-			_ => 64 * 1024,
-		};
 		Filter {
 			decoder,
-			size,
+			size: out_block_size(s),
 			data: Vec::new(),
 			pos: 0,
 			end: false,
 			failed: None,
 			consumed: Rc::default(),
-		}
-	}
-
-	// the file under the decoder
-	fn file(&self) -> &File {
-		match &self.decoder {
-			CompressionDecoder::Bzip2(d) => d.get_ref().get_ref(),
-			CompressionDecoder::Gzip(d) => d.get_ref().get_ref(),
-			CompressionDecoder::Xz(d) => d.get_ref().get_ref(),
-			CompressionDecoder::Zstd(d) => d.get_ref().get_ref(),
-			CompressionDecoder::None(r) => r.get_ref(),
 		}
 	}
 
@@ -1376,8 +1391,7 @@ impl Filter {
 		let start = self.data.len();
 		self.data.resize(start + self.size, 0);
 		let r = read_full(&mut self.decoder, &mut self.data[start..]);
-		let pos = self.file().stream_position();
-		self.consumed.set(pos.unwrap_or_default());
+		self.consumed.set(self.decoder.get_ref().offset());
 		match r {
 			Ok(n) => {
 				self.end = n < self.size;
@@ -1407,7 +1421,7 @@ fn read_full(r: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
 	Ok(n)
 }
 
-impl Read for Filter {
+impl<R: Source> Read for Filter<R> {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		if self.size == 0 {
 			return self.decoder.read(buf);
@@ -1430,6 +1444,128 @@ pub fn content(entry: &mut Entry) -> io::Result<Vec<u8>> {
 	Ok(data)
 }
 
+// _alpm_archive_fgets's line limit, archive_read_buffer.max_line_size as
+// its callers set it ("512K for a line length seems reasonable")
+pub(crate) const MAX_LINE_SIZE: usize = 512 * 1024;
+
+// archive_read_data_block on an entry: its data in the blocks libarchive
+// hands out, which end at multiples of the block size in the archive
+// stream. a short read is the truncated archive: what arrived is one
+// more block, the next read fails like libarchive's
+pub(crate) struct DataBlocks<'e, 'a> {
+	entry: &'e mut Entry<'a>,
+	block: u64,
+	// stream offset of the next byte, entry bytes not read yet
+	pos: u64,
+	left: u64,
+	truncated: bool,
+}
+
+impl<'e, 'a> DataBlocks<'e, 'a> {
+	pub(crate) fn new(entry: &'e mut Entry<'a>, block: u64) -> Self {
+		DataBlocks {
+			pos: entry.raw_file_position(),
+			left: entry.size(),
+			entry,
+			block,
+			truncated: false,
+		}
+	}
+
+	// None at the entry's end (ARCHIVE_EOF)
+	pub(crate) fn next(&mut self) -> io::Result<Option<Vec<u8>>> {
+		if self.truncated {
+			return Err(ErrorKind::UnexpectedEof.into());
+		}
+		if self.left == 0 {
+			return Ok(None);
+		}
+		let want = (self.block - self.pos % self.block).min(self.left);
+		let mut data = Vec::new();
+		(&mut *self.entry).take(want).read_to_end(&mut data)?;
+		if data.is_empty() {
+			return Err(ErrorKind::UnexpectedEof.into());
+		}
+		self.truncated = (data.len() as u64) < want;
+		self.pos += data.len() as u64;
+		self.left -= data.len() as u64;
+		Ok(Some(data))
+	}
+}
+
+// _alpm_archive_fgets with its archive_read_buffer. a line ends at the
+// first '\n' of the block; a block without one ends it at its first nul
+// instead, and a line may run over several blocks. the data's end gives
+// the last line (empty after a final '\n')
+pub(crate) struct ArchiveFgets<'e, 'a> {
+	src: DataBlocks<'e, 'a>,
+	block: Vec<u8>,
+	off: usize,
+	// the last read was the entry's end (b->ret == ARCHIVE_EOF)
+	eof: bool,
+	// b->line allocated: its first allocation skips the size check
+	started: bool,
+	line: Vec<u8>,
+}
+
+impl<'e, 'a> ArchiveFgets<'e, 'a> {
+	pub(crate) fn new(src: DataBlocks<'e, 'a>) -> Self {
+		ArchiveFgets {
+			src,
+			block: Vec::new(),
+			off: 0,
+			eof: false,
+			started: false,
+			line: Vec::new(),
+		}
+	}
+
+	// the next line without its end of line, None at the end. an error
+	// ends the reading (the C frees the buffer)
+	pub(crate) fn next(&mut self) -> io::Result<Option<&[u8]>> {
+		self.line.clear();
+		loop {
+			if self.off == self.block.len() {
+				if self.eof {
+					return Ok(None);
+				}
+				let next = self.src.next()?;
+				self.eof = next.is_none();
+				self.block = next.unwrap_or_default();
+				self.off = 0;
+			}
+			let rest = &self.block[self.off..];
+			let eol = rest
+				.iter()
+				.position(|&c| c == b'\n')
+				.or_else(|| rest.iter().position(|&c| c == 0));
+			let new = eol.unwrap_or(rest.len());
+			let needed = self.line.len() + new + 1;
+			if self.started && needed > MAX_LINE_SIZE {
+				let range =
+					rustix::io::Errno::RANGE.raw_os_error();
+				return Err(io::Error::from_raw_os_error(
+					range,
+				));
+			}
+			self.started = true;
+			self.line.extend_from_slice(&rest[..new]);
+			match eol {
+				Some(i) => {
+					self.off += i + 1;
+					return Ok(Some(&self.line));
+				}
+				None => {
+					self.off = self.block.len();
+					if new == 0 {
+						return Ok(Some(&self.line));
+					}
+				}
+			}
+		}
+	}
+}
+
 // _alpm_open_archive: the reader over the file and its fstat. libarchive
 // also reads the first header to pick the format, which unpack does next
 pub struct Archive {
@@ -1439,6 +1575,19 @@ pub struct Archive {
 	pub consumed: Rc<Cell<u64>>,
 	// the filter picked, None: tar offsets are file offsets
 	pub settings: DecompressionSettings,
+}
+
+impl Archive {
+	// the blocks archive_read_data_block hands an entry's data out in:
+	// they end where the filter's output blocks end. without a filter
+	// the reads of archive_read_open_fd's buffer (_alpm_open_archive:
+	// ALPM_BUFFER_SIZE, or st_blksize when larger)
+	pub fn block_size(&self) -> u64 {
+		match out_block_size(&self.settings) {
+			0 => self.meta.blksize().max(ALPM_BUFFER_SIZE),
+			n => n as u64,
+		}
+	}
 }
 
 pub(crate) fn archive_io_err(e: alpm_compress::Error) -> io::Error {

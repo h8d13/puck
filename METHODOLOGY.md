@@ -69,6 +69,7 @@ follows the wider ALPM workspace, then parity:
 | landlock (`sandbox_fs.c`) | `landlock` crate | the Landlock maintainers' binding |
 | seccomp (`sandbox_syscalls.c`) | `libseccomp` crate | binding to the same C library pacman links |
 | lock file | `OpenOptions::create_new` | safe std (O_CREAT\|O_EXCL) |
+| signal handlers (`sighandler.c`) | `signal-hook` 0.4: self-pipe `Signals` read by a thread, `flag::register_conditional_default` | std/rustix have no safe handler API, no ALPM crate installs one; the established binding (its registry also backs tokio's signals). the handler only writes to the pipe or reads a flag, the C handler's work runs on the thread |
 
 No `unsafe` outside difftest: when something seems to need it, look for the
 std/rustix safe API or an established binding crate first (the ALPM
@@ -127,6 +128,11 @@ order.
   and no oomd, a runaway test never meets the OOM killer and freezes the
   machine; capped, it aborts and fails. Run tests through
   `scripts/cargo-test.sh`, which allows one suite at a time machine wide.
+- Waiting on a background run: never `until ! pgrep -f '<text>'`. The
+  waiter's own command line contains `<text>`, so pgrep always finds
+  it and the loop never ends (six such loops ran for hours). Wait on a
+  sentinel the run writes (`cmd; echo "rc=$?" >> log`, then
+  `until grep -q '^rc=' log`), or run it in the foreground.
 - Mutation checks that can loop (a removed loop exit, a dropped push)
   run under the same caps. `TEST_TIMEOUT=<s>` may be raised for long
   fuzz runs (2M iterations); `TEST_MEM_KB` is never raised.
@@ -150,6 +156,10 @@ order.
   difftest; rustc only flags duplicates whose signatures differ)
 - `DIFFTEST_ITERS=2000000 scripts/cargo-test.sh -p difftest --test <cfile>`
 - mutation check done
+- nothing left without an owner: files, tests, patches, scripts, crate
+  dependencies, generator limits and doc rows that only existed for what
+  the unit replaced are removed in the same unit (a dropped crate takes
+  its patches, its pins and the comments explaining its limits)
 - `PORTING.md` row(s) and notes updated
 - upstream findings listed separately in the report, each with its
   practice class from `UPSTREAM.md` (real, packager, local, api, env,
