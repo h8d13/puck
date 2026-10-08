@@ -363,11 +363,10 @@ pub fn sync_list<S: AsRef<[u8]>>(
 	let dbext = handle.dbext().to_vec();
 	let c = &config.colstr;
 	for i in ls.into_iter().flatten() {
-		let db = &mut handle.syncdbs_mut()[i];
+		let (mut localdb, syncdbs) = handle.dbs_mut();
+		let db = &mut syncdbs[i];
 		let name = db.name().to_vec();
-		let pkgs: Vec<Package> =
-			cache_list(db, &dbext).into_iter().cloned().collect();
-		for pkg in &pkgs {
+		for pkg in cache_list(db, &dbext) {
 			if config.quiet != 0 {
 				out.stdout.extend(cat(&[
 					pkg.name_bytes(),
@@ -388,7 +387,7 @@ pub fn sync_list<S: AsRef<[u8]>>(
 				until_nul(version),
 				c.nocolor,
 			]));
-			let local = handle.localdb_mut().and_then(|l| {
+			let local = localdb.as_mut().and_then(|l| {
 				l.get_pkg(&dbext, pkg.name_bytes()).ok()
 			});
 			print_installed(&mut out.stdout, local, pkg, c);

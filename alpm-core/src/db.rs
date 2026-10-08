@@ -408,6 +408,11 @@ impl Db {
 		Ok(())
 	}
 
+	// the package cache as loaded so far, None before the first load
+	pub fn loaded_pkgcache(&self) -> Option<&PkgHash<Package>> {
+		self.pkgcache.as_ref()
+	}
+
 	// alpm_db_get_pkgcache: list order is by name, the table as the
 	// backend filled it. dbext is handle->dbext, read by a sync load
 	pub fn pkgcache(

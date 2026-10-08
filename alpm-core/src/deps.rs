@@ -2,8 +2,8 @@
 // satisfiers, checkdeps, sorting by dependencies, the resolver and the
 // -Rs cascade.
 //
-// handle state comes in as a DepsEnv (ignore lists through the Handle,
-// assumeinstalled, the NODEPVERSION trans flag, db caches and usage).
+// handle state comes in as a DepsEnv (ignore lists and assumeinstalled
+// through the Handle, the NODEPVERSION trans flag, db caches and usage).
 // QUESTION and _alpm_log go to the caller's Callbacks, pm_errno comes
 // back as Err. alpm_dep_free, depmiss_new/alpm_depmissing_free and
 // _alpm_dep_dup are Drop and Clone.
@@ -225,8 +225,6 @@ pub struct DbPkgs<'a> {
 pub struct DepsEnv<'a> {
 	// ignorepkg/ignoregroup, through pkg_should_ignore
 	pub handle: &'a Handle,
-	// handle->assumeinstalled
-	pub assumeinstalled: &'a [Depend],
 	// handle->trans->flags & ALPM_TRANS_FLAG_NODEPVERSION, false without
 	// a transaction
 	pub nodepversion: bool,
@@ -319,7 +317,7 @@ pub fn checkdeps(
 	let satisfied = |dep: &Depend| {
 		satisfied_in(upgrade, dep)
 			|| satisfied_in(&dblist, dep)
-			|| depcmp_provides(dep, env.assumeinstalled)
+			|| depcmp_provides(dep, env.handle.assumeinstalled())
 	};
 	let mut baddeps = Vec::new();
 
