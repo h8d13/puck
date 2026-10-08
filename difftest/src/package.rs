@@ -380,14 +380,21 @@ fn depmod_from_c(m: c_int) -> DepMod {
 	}
 }
 
-pub(crate) fn read_deps(head: *const CList) -> Vec<Depend> {
-	read_list(head, |d: &CDepend| Depend {
-		name: field(d.name).unwrap(),
+// an alpm_depend_t copied out
+pub(crate) fn read_dep(d: *const CDepend) -> Depend {
+	// SAFETY: d is a live alpm_depend_t owned by the C
+	let d = unsafe { &*d };
+	Depend {
+		name: field(d.name).expect("C depend without a name"),
 		version: field(d.version),
 		desc: field(d.desc),
 		name_hash: d.name_hash,
 		depmod: depmod_from_c(d.depmod),
-	})
+	}
+}
+
+pub(crate) fn read_deps(head: *const CList) -> Vec<Depend> {
+	read_list(head, |d: &CDepend| read_dep(d))
 }
 
 fn read_backup(head: *const CList) -> Vec<Backup> {

@@ -46,7 +46,7 @@ use crate::handle::{
 	alpm_register_syncdb, alpm_release, alpm_trans_init,
 	alpm_trans_release,
 };
-use crate::package::{CPkg, field, list_data, with_strs};
+use crate::package::{CPkg, field, list_data, read_dep, with_strs};
 use crate::sync_ro::pacman_sync;
 use crate::{CList, Rng, alpm_list_add, alpm_list_free, c_free, cstr};
 
@@ -512,10 +512,6 @@ pub const UNPORTED_DEBUG: [&[u8]; 5] = [
 	b"loading group cache for repository ",
 ];
 
-fn read_dep(d: *mut c_void) -> Depend {
-	deps_graph::read_dep(d.cast())
-}
-
 fn pkg_name(p: *const CPkg) -> Vec<u8> {
 	crate::package::read_pkg(p)
 		.name
@@ -560,7 +556,7 @@ unsafe extern "C" fn event_cb(ctx: *mut c_void, e: *mut c_void) {
 			let o = unsafe { &*e.cast::<CEvOptdep>() };
 			TpEvent::OptdepRemoval(
 				pkg_name(o.pkg),
-				read_dep(o.optdep),
+				read_dep(o.optdep.cast()),
 			)
 		}
 		k => TpEvent::Kind(k),
@@ -601,7 +597,7 @@ unsafe extern "C" fn question_cb(ctx: *mut c_void, q: *mut c_void) {
 			let c = unsafe { &*q.list.cast::<CConflict>() };
 			let (a, b) =
 				(pkg_name(c.package1), pkg_name(c.package2));
-			TpAsk::Conflict(a, b, read_dep(c.reason))
+			TpAsk::Conflict(a, b, read_dep(c.reason.cast()))
 		}
 		Q_REMOVE_PKGS => {
 			// SAFETY: as above
@@ -611,7 +607,10 @@ unsafe extern "C" fn question_cb(ctx: *mut c_void, q: *mut c_void) {
 		Q_SELECT_PROVIDER => {
 			// SAFETY: as above
 			let q = unsafe { &*q.cast::<CQList>() };
-			TpAsk::SelectProvider(names(q.list), read_dep(q.depend))
+			TpAsk::SelectProvider(
+				names(q.list),
+				read_dep(q.depend.cast()),
+			)
 		}
 		k => panic!("unexpected question {k}"),
 	};

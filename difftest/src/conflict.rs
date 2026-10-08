@@ -4,7 +4,7 @@
 // _alpm_db_find_fileconflicts. targets and removed packages are Rust
 // Packages pushed through the package mirror with their handle set to
 // the fixture handle; local packages come from the C local db reader.
-use std::ffi::{c_char, c_int, c_ulong, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
 use std::sync::MutexGuard;
 
@@ -12,7 +12,6 @@ use alpm_core::callbacks::LogLevel;
 use alpm_core::conflict::{
 	Conflict, FileConflict, FileConflictType, FileConflicts,
 };
-use alpm_core::deps::{DepMod, Depend};
 use alpm_core::package::Package;
 
 use crate::handle::log_message;
@@ -22,19 +21,11 @@ use crate::handle::{
 	alpm_option_set_progresscb, alpm_release, alpm_trans_init,
 	alpm_trans_release,
 };
-use crate::package::{CPkg, CPkgBox, field, list_data, read_pkg};
+use crate::package::{
+	CDepend, CPkg, CPkgBox, field, list_data, read_dep, read_pkg,
+};
 use crate::package::{read_strs, with_strs};
 use crate::{CList, alpm_list_add, alpm_list_free, cstr};
-
-// alpm_depend_t, the reason of a conflict
-#[repr(C)]
-struct CDepend {
-	name: *mut c_char,
-	version: *mut c_char,
-	desc: *mut c_char,
-	name_hash: c_ulong,
-	depmod: c_int,
-}
 
 // alpm_conflict_t
 #[repr(C)]
@@ -144,18 +135,6 @@ unsafe extern "C" fn record(
 		.push((progress, pkg, percent, howmany, current));
 }
 
-fn depmod_from_c(m: c_int) -> DepMod {
-	match m {
-		1 => DepMod::Any,
-		2 => DepMod::Eq,
-		3 => DepMod::Ge,
-		4 => DepMod::Le,
-		5 => DepMod::Gt,
-		6 => DepMod::Lt,
-		_ => panic!("unknown alpm_depmod_t {m}"),
-	}
-}
-
 // copies a conflict list out and frees it, conflicts and nodes
 pub(crate) fn take_conflicts(list: *mut CList) -> Vec<Conflict> {
 	let data = list_data(list);
@@ -165,17 +144,10 @@ pub(crate) fn take_conflicts(list: *mut CList) -> Vec<Conflict> {
 			// SAFETY: each entry is a live alpm_conflict_t, its
 			// reason points into a package that is still alive
 			let c = unsafe { &*p.cast::<CConflictT>() };
-			let r = unsafe { &*c.reason };
 			Conflict {
 				package1: read_pkg(c.package1),
 				package2: read_pkg(c.package2),
-				reason: Depend {
-					name: field(r.name).unwrap(),
-					version: field(r.version),
-					desc: field(r.desc),
-					name_hash: r.name_hash,
-					depmod: depmod_from_c(r.depmod),
-				},
+				reason: read_dep(c.reason),
 			}
 		})
 		.collect();

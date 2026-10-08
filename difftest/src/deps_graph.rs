@@ -9,10 +9,10 @@
 // the callbacks and the id mapping read package structs directly: the
 // alpm_pkg_get_* getters reset pm_errno.
 use std::collections::VecDeque;
-use std::ffi::{c_char, c_int, c_ulong, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
 
-use alpm_core::deps::{DepMissing, DepMod, Depend};
+use alpm_core::deps::{DepMissing, Depend};
 use alpm_core::trans::{TRANS_FLAG_NODEPVERSION, TRANS_FLAG_NOLOCK};
 
 use crate::handle::log_message;
@@ -25,7 +25,8 @@ use crate::handle::{
 	alpm_trans_release,
 };
 use crate::package::{
-	_alpm_pkg_free, CPkg, field, list_data, read_pkg, with_strs,
+	_alpm_pkg_free, CDepend, CPkg, field, list_data, read_dep, read_pkg,
+	with_strs,
 };
 use crate::{CList, alpm_list_add, alpm_list_free, cstr, opt_ptr};
 
@@ -64,16 +65,6 @@ pub struct Setup {
 	pub local_usage: c_int,
 	// one per sync db
 	pub usage: Vec<c_int>,
-}
-
-// alpm_depend_t, alpm.h
-#[repr(C)]
-pub(crate) struct CDepend {
-	name: *mut c_char,
-	version: *mut c_char,
-	desc: *mut c_char,
-	name_hash: c_ulong,
-	depmod: c_int,
 }
 
 // alpm_depmissing_t
@@ -137,30 +128,6 @@ unsafe extern "C" {
 	fn alpm_depmissing_free(miss: *mut CDepMissing);
 	// va_list is passed as a pointer on x86_64 (array type) and
 	// aarch64 (indirect composite)
-}
-
-fn depmod_from_c(m: c_int) -> DepMod {
-	match m {
-		1 => DepMod::Any,
-		2 => DepMod::Eq,
-		3 => DepMod::Ge,
-		4 => DepMod::Le,
-		5 => DepMod::Gt,
-		6 => DepMod::Lt,
-		_ => panic!("C returned unknown alpm_depmod_t {m}"),
-	}
-}
-
-pub(crate) fn read_dep(d: *const CDepend) -> Depend {
-	// SAFETY: d is a live alpm_depend_t owned by the C
-	let c = unsafe { &*d };
-	Depend {
-		name: field(c.name).expect("C depend without a name"),
-		version: field(c.version),
-		desc: field(c.desc),
-		name_hash: c.name_hash,
-		depmod: depmod_from_c(c.depmod),
-	}
 }
 
 // copies a depmissing list out, frees entries and nodes
