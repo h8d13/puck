@@ -360,9 +360,12 @@ impl UtilWorld {
 		let mut h =
 			Handle::initialize(&path("root"), &path("db")).unwrap();
 		for (i, name) in crate::pkg_show::SYNC_DBS.iter().enumerate() {
-			let db = h.register_syncdb(name.as_bytes(), 0).unwrap();
+			h.register_syncdb(name.as_bytes(), 0).unwrap();
 			if i == 0 {
-				db.add_server(CORE_SERVER).unwrap();
+				let dbs = h.dbs_mut();
+				dbs.sync[i]
+					.add_server(dbs.cb, CORE_SERVER)
+					.unwrap();
 			}
 		}
 		for c in ["cache1", "cache2"] {

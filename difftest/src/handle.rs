@@ -325,6 +325,31 @@ unsafe extern "C" {
 	) -> c_int;
 }
 
+// the _alpm_log calls of a handle: alpm_loglevel_t and message
+pub type CLogs = Vec<(c_int, Vec<u8>)>;
+
+// alpm_cb_log appending to the CLogs at ctx
+pub(crate) unsafe extern "C" fn record_log(
+	ctx: *mut c_void,
+	level: c_int,
+	fmt: *const c_char,
+	args: *mut c_void,
+) {
+	let mut buf = [0 as c_char; 4096];
+	// SAFETY: fmt and args are the format and va_list of this
+	// _alpm_log call, used once; buf is writable for its length
+	let n = unsafe {
+		crate::vsnprintf(buf.as_mut_ptr(), buf.len(), fmt, args)
+	};
+	assert!(n >= 0 && (n as usize) < buf.len(), "log message too long");
+	// SAFETY: vsnprintf nul-terminated buf
+	let msg = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+	// SAFETY: ctx is the CLogs registered with the callback, no other
+	// reference to it is live while the C runs
+	let logs = unsafe { &mut *ctx.cast::<CLogs>() };
+	logs.push((level, msg.to_bytes().to_vec()));
+}
+
 // question callback and assumeinstalled (deps_graph)
 unsafe extern "C" {
 	pub(crate) fn alpm_option_set_questioncb(

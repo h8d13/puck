@@ -566,10 +566,10 @@ pub fn check_downloadspace(
 // the files of the local package named like pkg, lazily loaded like
 // alpm_pkg_get_files on the _alpm_db_get_pkgfromcache result
 fn local_files(handle: &mut Handle, pkg: &Package) -> Option<FileList> {
-	let dbext = handle.dbext().to_vec();
-	let db = handle.localdb_mut()?;
-	let local = db.load_pkg(&dbext, pkg.name_bytes(), INFRQ_FILES).ok()?;
-	Some(local.files.clone())
+	let dbs = handle.dbs_mut();
+	let name = pkg.name_bytes();
+	let local = dbs.local?.load_pkg(dbs.dbext, dbs.cb, name, INFRQ_FILES);
+	Some(local.ok()?.files.clone())
 }
 
 // _alpm_check_diskspace on trans->add and trans->remove. remove

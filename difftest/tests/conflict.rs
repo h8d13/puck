@@ -322,9 +322,9 @@ impl Fix {
 		tmp.write_local(&entries);
 		write_fs(&tmp.dir().join("root"), fs_nodes);
 		let db = LocalDb::register(&tmp.dbpath()).unwrap();
-		let mut cache = db.populate().unwrap();
+		let mut cache = db.populate(&mut ()).unwrap();
 		for p in cache.iter_mut() {
-			let _ = db.read(p, INFRQ_ALL);
+			let _ = db.read(p, INFRQ_ALL, &mut ());
 		}
 		let root = [&tmp.root()[..], b"/"].concat();
 		Fix { tmp, root, cache }

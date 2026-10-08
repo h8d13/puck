@@ -8,7 +8,8 @@
 // are named like the Rust side: "local" is the local db (no sync db can
 // take that name). calls that report through pm_errno return it next to
 // their result; pm_errno is reset first (alpm_option_get_root's
-// CHECK_HANDLE), so a call leaving it alone reads 0.
+// CHECK_HANDLE), so a call leaving it alone reads 0. every _alpm_log
+// call after alpm_initialize is recorded (take_logs).
 use std::cmp::Ordering;
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::ptr;
@@ -29,15 +30,43 @@ use crate::{CList, alpm_list_add, alpm_list_free, cstr};
 unsafe extern "C" {}
 
 pub struct CHandle {
+	// NULL once released
 	h: *mut c_void,
+	// the logcb ctx, from Box::into_raw, freed after the release
+	logs: *mut CLogs,
 	_guard: MutexGuard<'static, ()>,
+}
+
+impl CHandle {
+	// alpm_release, its log lines
+	fn release(&mut self) -> CLogs {
+		if !self.h.is_null() {
+			// SAFETY: h came from alpm_initialize, no transaction,
+			// nothing from it is used afterwards
+			unsafe { alpm_release(self.h) };
+			self.h = ptr::null_mut();
+		}
+		self.take_logs()
+	}
+
+	// alpm_release like drop, with the lines it logs
+	pub fn release_logs(mut self) -> CLogs {
+		self.release()
+	}
+
+	// the log lines since the last take
+	pub fn take_logs(&self) -> CLogs {
+		// SAFETY: logs is live until drop, the C is not running
+		std::mem::take(unsafe { &mut *self.logs })
+	}
 }
 
 impl Drop for CHandle {
 	fn drop(&mut self) {
-		// SAFETY: h came from alpm_initialize, no transaction, nothing
-		// from it is used afterwards; the lock is released after
-		unsafe { alpm_release(self.h) };
+		self.release();
+		// SAFETY: from Box::into_raw in new, the handle using it is
+		// released; the lock is released after
+		drop(unsafe { Box::from_raw(self.logs) });
 	}
 }
 
@@ -135,7 +164,16 @@ impl CHandle {
 		if h.is_null() {
 			return Err(err);
 		}
-		Ok(CHandle { h, _guard: guard })
+		let logs = Box::into_raw(Box::new(CLogs::new()));
+		// SAFETY: h is live, logs stays valid until after the release
+		unsafe {
+			alpm_option_set_logcb(h, Some(record_log), logs.cast())
+		};
+		Ok(CHandle {
+			h,
+			logs,
+			_guard: guard,
+		})
 	}
 
 	// pm_errno back to ALPM_ERR_OK

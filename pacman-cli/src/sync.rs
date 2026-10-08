@@ -54,8 +54,12 @@ pub(crate) fn error(out: &mut Output, config: &Config, msg: &[&[u8]]) {
 }
 
 // alpm_db_get_pkgcache as the C list: empty when the cache cannot load
-pub(crate) fn cache_list<'a>(db: &'a mut Db, dbext: &[u8]) -> Vec<&'a Package> {
-	db.pkgcache(dbext)
+pub(crate) fn cache_list<'a>(
+	db: &'a mut Db,
+	dbext: &[u8],
+	cb: &mut dyn Callbacks,
+) -> Vec<&'a Package> {
+	db.pkgcache(dbext, cb)
 		.map(|c| c.iter().collect())
 		.unwrap_or_default()
 }
@@ -63,7 +67,6 @@ pub(crate) fn cache_list<'a>(db: &'a mut Db, dbext: &[u8]) -> Vec<&'a Package> {
 // what dump_pkg_full asks of libalpm for a sync package of db_name
 struct SyncEnv<'a> {
 	handle: &'a mut Handle,
-	dbext: Vec<u8>,
 	db_name: Vec<u8>,
 	config: &'a Config,
 	stderr: Vec<u8>,
@@ -71,18 +74,17 @@ struct SyncEnv<'a> {
 
 impl DbCaches for SyncEnv<'_> {
 	fn local_cache(&mut self) -> Vec<&Package> {
-		match self.handle.localdb_mut() {
-			Some(db) => cache_list(db, &self.dbext),
+		let dbs = self.handle.dbs_mut();
+		match dbs.local {
+			Some(db) => cache_list(db, dbs.dbext, dbs.cb),
 			None => Vec::new(),
 		}
 	}
 
 	fn sync_caches(&mut self) -> Vec<Vec<&Package>> {
-		let dbext = &self.dbext;
-		self.handle
-			.syncdbs_mut()
-			.iter_mut()
-			.map(|db| cache_list(db, dbext))
+		let dbs = self.handle.dbs_mut();
+		dbs.sync.iter_mut()
+			.map(|db| cache_list(db, dbs.dbext, dbs.cb))
 			.collect()
 	}
 }
@@ -138,7 +140,6 @@ fn show_full(
 	// what alpm_pkg_get_validation computes on first use
 	pkg.validation = get_validation(&pkg);
 	let mut env = SyncEnv {
-		dbext: handle.dbext().to_vec(),
 		db_name: handle.syncdbs()[db].name().to_vec(),
 		handle,
 		config,
@@ -161,12 +162,14 @@ pub fn sync_group<S: AsRef<[u8]>>(
 	targets: &[S],
 	out: &mut Output,
 ) -> i32 {
-	let dbext = handle.dbext().to_vec();
 	if targets.is_empty() {
 		let mut ret = 1;
 		let mut seen: Vec<Vec<u8>> = Vec::new();
-		for db in handle.syncdbs_mut() {
-			let groups = db.groupcache(&dbext).unwrap_or_default();
+		let dbs = handle.dbs_mut();
+		for db in dbs.sync {
+			let groups = db
+				.groupcache(dbs.dbext, dbs.cb)
+				.unwrap_or_default();
 			for grp in groups {
 				ret = 0;
 				if level > 1 {
@@ -193,9 +196,11 @@ pub fn sync_group<S: AsRef<[u8]>>(
 	for t in targets {
 		let grpname = until_nul(t.as_ref());
 		let mut found = false;
-		for db in handle.syncdbs_mut() {
+		let dbs = handle.dbs_mut();
+		for db in dbs.sync {
 			// an empty name is WrongArgs: no group either
-			let Ok(Some(grp)) = db.get_group(&dbext, grpname)
+			let Ok(Some(grp)) =
+				db.get_group(dbs.dbext, dbs.cb, grpname)
 			else {
 				continue;
 			};
@@ -236,15 +241,16 @@ pub fn sync_info<S: AsRef<[u8]>>(
 	cols: u16,
 	out: &mut Output,
 ) -> i32 {
-	let dbext = handle.dbext().to_vec();
 	let ndbs = handle.syncdbs().len();
 	if targets.is_empty() {
 		for i in 0..ndbs {
-			let db = &mut handle.syncdbs_mut()[i];
-			let pkgs: Vec<Package> = cache_list(db, &dbext)
-				.into_iter()
-				.cloned()
-				.collect();
+			let dbs = handle.dbs_mut();
+			let db = &mut dbs.sync[i];
+			let pkgs: Vec<Package> =
+				cache_list(db, dbs.dbext, dbs.cb)
+					.into_iter()
+					.cloned()
+					.collect();
 			for pkg in pkgs {
 				show_full(config, handle, i, pkg, cols, out);
 			}
@@ -265,12 +271,13 @@ pub fn sync_info<S: AsRef<[u8]>>(
 		};
 		let (mut foundpkg, mut founddb) = (false, false);
 		for i in 0..ndbs {
-			let db = &mut handle.syncdbs_mut()[i];
+			let dbs = handle.dbs_mut();
+			let db = &mut dbs.sync[i];
 			if repo.is_some_and(|r| r != db.name()) {
 				continue;
 			}
 			founddb = true;
-			let pkg = cache_list(db, &dbext)
+			let pkg = cache_list(db, dbs.dbext, dbs.cb)
 				.into_iter()
 				.find(|p| p.name_bytes() == pkgstr)
 				.cloned();
@@ -332,13 +339,13 @@ pub fn sync_list<S: AsRef<[u8]>>(
 		ls
 	};
 
-	let dbext = handle.dbext().to_vec();
 	let c = &config.colstr;
 	for i in ls.into_iter().flatten() {
-		let (mut localdb, syncdbs) = handle.dbs_mut();
-		let db = &mut syncdbs[i];
+		let dbs = handle.dbs_mut();
+		let (dbext, cb, mut localdb) = (dbs.dbext, dbs.cb, dbs.local);
+		let db = &mut dbs.sync[i];
 		let name = db.name().to_vec();
-		for pkg in cache_list(db, &dbext) {
+		for pkg in cache_list(db, dbext, cb) {
 			if config.quiet != 0 {
 				out.stdout.extend(cat(&[
 					pkg.name_bytes(),
@@ -360,7 +367,7 @@ pub fn sync_list<S: AsRef<[u8]>>(
 				c.nocolor,
 			]));
 			let local = localdb.as_mut().and_then(|l| {
-				l.get_pkg(&dbext, pkg.name_bytes()).ok()
+				l.get_pkg(dbext, cb, pkg.name_bytes()).ok()
 			});
 			print_installed(&mut out.stdout, local, pkg, c);
 			out.stdout.push(b'\n');

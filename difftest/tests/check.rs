@@ -182,9 +182,9 @@ impl RustSide {
 		handle.set_noextracts(noextract);
 		let db = LocalDb::register(handle.dbpath()).unwrap();
 		let mut pkgs: Vec<Package> =
-			db.populate().unwrap().iter().cloned().collect();
+			db.populate(&mut ()).unwrap().iter().cloned().collect();
 		for p in &mut pkgs {
-			db.read(p, INFRQ_ALL).unwrap();
+			db.read(p, INFRQ_ALL, &mut ()).unwrap();
 		}
 		RustSide { handle, db, pkgs }
 	}

@@ -239,21 +239,21 @@ fn display_req(c: &Config, handle: &Handle, pkg: &Package) -> [c_int; 2] {
 // the local cache entry at list position i with each of reqs loaded in
 // turn, copied out. None past the end
 fn local_at(handle: &mut Handle, i: usize, reqs: &[c_int]) -> Option<Package> {
-	let dbext = handle.dbext().to_vec();
-	let db = handle.localdb_mut()?;
+	let dbs = handle.dbs_mut();
+	let db = dbs.local?;
 	let mut pkg = None;
 	for &req in reqs {
-		pkg = db.load_pkg_at(&dbext, i, req);
+		pkg = db.load_pkg_at(dbs.dbext, dbs.cb, i, req);
 	}
 	pkg.cloned()
 }
 
 // pkg_get_locality: native when a sync db has a package of that name
 fn locality(handle: &mut Handle, pkg: &Package) -> u16 {
-	let dbext = handle.dbext().to_vec();
 	let name = pkg.name_bytes();
-	let mut dbs = handle.syncdbs_mut().iter_mut();
-	match dbs.any(|db| db.get_pkg(&dbext, name).is_ok()) {
+	let d = handle.dbs_mut();
+	let mut dbs = d.sync.iter_mut();
+	match dbs.any(|db| db.get_pkg(d.dbext, d.cb, name).is_ok()) {
 		true => PKG_LOCALITY_NATIVE,
 		false => PKG_LOCALITY_FOREIGN,
 	}
@@ -262,10 +262,11 @@ fn locality(handle: &mut Handle, pkg: &Package) -> u16 {
 // alpm_sync_get_new_version: the first sync db holding a package of
 // that name decides. its version and the db's usage when it is newer
 fn new_version(handle: &mut Handle, pkg: &Package) -> Option<(Vec<u8>, c_int)> {
-	let dbext = handle.dbext().to_vec();
-	for db in handle.syncdbs_mut() {
+	let dbs = handle.dbs_mut();
+	for db in dbs.sync {
 		let usage = db.usage();
-		let Ok(spkg) = db.get_pkg(&dbext, pkg.name_bytes()) else {
+		let Ok(spkg) = db.get_pkg(dbs.dbext, dbs.cb, pkg.name_bytes())
+		else {
 			continue;
 		};
 		let newer = pkg_compare_versions(spkg, pkg).is_gt();
@@ -488,10 +489,11 @@ fn query_owner(
 		rpath.push(b'/');
 	}
 	// the C calls alpm_pkg_get_files on each package it visits
-	let (rel, dbext) = (&rpath[root.len()..], handle.dbext().to_vec());
+	let rel = &rpath[root.len()..];
 	let mut found = false;
-	if let Some(db) = handle.localdb_mut() {
-		let _ = db.walk(&dbext, INFRQ_FILES, |_, pkg| {
+	let dbs = handle.dbs_mut();
+	if let Some(db) = dbs.local {
+		let _ = db.walk(dbs.dbext, dbs.cb, INFRQ_FILES, |_, pkg| {
 			if pkg.files.contains(rel).is_some() {
 				print_owner(c, &mut o.stdout, &rpath, pkg);
 				found = true;
@@ -539,20 +541,21 @@ fn query_search(
 	targets: &[Vec<u8>],
 	o: &mut Output,
 ) -> i32 {
-	let dbext = handle.dbext().to_vec();
-	let Some(db) = handle.localdb_mut() else {
+	let dbs = handle.dbs_mut();
+	let Some(db) = dbs.local else {
 		return 1;
 	};
+	let (dbext, cb) = (dbs.dbext, dbs.cb);
 	let quiet = c.quiet != 0;
 	// the whole cache: groups and desc are only read when not quiet
 	let req = if quiet { 0 } else { INFRQ_DESC };
 	let results: Vec<&Package> = if targets.is_empty() {
-		match db.load_all(&dbext, req) {
+		match db.load_all(dbext, cb, req) {
 			Ok(cache) => cache.iter().collect(),
 			Err(_) => Vec::new(),
 		}
 	} else {
-		match db.search(&dbext, targets) {
+		match db.search(dbext, cb, targets) {
 			Ok(r) => r,
 			Err(e) => {
 				let why = e.strerror().as_bytes();
@@ -581,13 +584,13 @@ fn groups(
 	handle: &mut Handle,
 	name: Option<&[u8]>,
 ) -> Vec<(Vec<u8>, Vec<Package>)> {
-	let dbext = handle.dbext().to_vec();
-	let Some(db) = handle.localdb_mut() else {
+	let dbs = handle.dbs_mut();
+	let Some(db) = dbs.local else {
 		return Vec::new();
 	};
 	let groups = match name {
-		None => db.groupcache(&dbext).unwrap_or_default(),
-		Some(name) => match db.get_group(&dbext, name) {
+		None => db.groupcache(dbs.dbext, dbs.cb).unwrap_or_default(),
+		Some(name) => match db.get_group(dbs.dbext, dbs.cb, name) {
 			Ok(Some(g)) => vec![g],
 			_ => Vec::new(),
 		},
@@ -645,13 +648,13 @@ fn query_group(
 // a package of the local db by name, else the first satisfier of name
 // in the cache: its list position
 fn find_local(handle: &mut Handle, name: &[u8]) -> Option<usize> {
-	let dbext = handle.dbext().to_vec();
-	let db = handle.localdb_mut()?;
-	let Ok(pkg) = db.get_pkg(&dbext, name) else {
-		return db.find_satisfier(&dbext, name);
+	let dbs = handle.dbs_mut();
+	let (dbext, cb, db) = (dbs.dbext, dbs.cb, dbs.local?);
+	let Ok(pkg) = db.get_pkg(dbext, cb, name) else {
+		return db.find_satisfier(dbext, cb, name);
 	};
 	let pkg: *const Package = pkg;
-	let cache = db.pkgcache(&dbext).ok()?;
+	let cache = db.pkgcache(dbext, cb).ok()?;
 	cache.iter().position(|p| std::ptr::eq(p, pkg))
 }
 

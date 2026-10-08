@@ -856,7 +856,7 @@ impl Front {
 		for (r, list) in FRONT_REPOS.iter().zip(&self.servers) {
 			let db = h.register_syncdb(r.as_bytes(), 0).unwrap();
 			for s in list {
-				db.add_server(s).unwrap();
+				db.add_server(&mut (), s).unwrap();
 			}
 		}
 		h
