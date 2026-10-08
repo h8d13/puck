@@ -71,6 +71,7 @@ follows the wider ALPM workspace, then parity:
 | seccomp (`sandbox_syscalls.c`) | `libseccomp` crate | binding to the same C library pacman links |
 | lock file | `OpenOptions::create_new` | safe std (O_CREAT\|O_EXCL) |
 | local time (log stamps, PACMAN_DEBUG, `%c` dates) | `time` `local-offset`: `UtcOffset::local_offset_at`, glibc's `localtime_r` `tm_gmtoff` | precedent crate (ALPM's simplelog enables it); the offset is glibc's own, so TZ, `/etc/localtime`, POSIX rules and DST edges match by construction (tz-probe difftest). since time 0.3.37 it no longer refuses multithreaded processes; what is left is getenv(TZ) racing a setenv in another thread, which needs `unsafe` here. glibc reads TZ once per process for `localtime_r`, the C's `localtime` rereads it: same in a process that leaves its environment alone. a TZif reader was not taken: it would reimplement what glibc answers |
+| tar members, pax records, xattrs and ns times on extraction (libarchive's tar reader, archive_write_disk) | `alpm-core::tar` translated from libarchive 3.8.9; `rustix` `fs` for `fsetxattr`/`lsetxattr`, `futimens`/`utimensat`, `openat` O_PATH | the tar crate splits pax records on '\n' (binary xattr values lost), keeps a key's first record where libarchive keeps the last, has no pax sparse maps or ACL records and frames members its own way; `fs` is already enabled, no new feature, libc backend so fakeroot fakes the xattr calls |
 | signal handlers (`sighandler.c`) | `signal-hook` 0.4: self-pipe `Signals` read by a thread, `flag::register_conditional_default` | std/rustix have no safe handler API, no ALPM crate installs one; the established binding (its registry also backs tokio's signals). the handler only writes to the pipe or reads a flag, the C handler's work runs on the thread |
 
 No `unsafe` outside difftest: when something seems to need it, look for the
@@ -159,7 +160,9 @@ No real root, and nothing outside `.tmp/` is written.
   waiter's own command line contains `<text>`, so pgrep always finds
   it and the loop never ends (six such loops ran for hours). Wait on a
   sentinel the run writes (`cmd; echo "rc=$?" >> log`, then
-  `until grep -q '^rc=' log`), or run it in the foreground.
+  `until grep -q '^rc=' log`), or run it in the foreground. Give every
+  wait a deadline (`timeout 3600 sh -c 'until ...'`): a log removed by
+  cleanup otherwise leaves the loop spinning forever.
 - Mutation checks that can loop (a removed loop exit, a dropped push)
   run under the same caps. `TEST_TIMEOUT=<s>` may be raised for long
   fuzz runs (2M iterations); `TEST_MEM_KB` is never raised.

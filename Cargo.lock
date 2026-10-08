@@ -46,7 +46,6 @@ dependencies = [
  "pacman-common",
  "reqwest",
  "rustix",
- "tar",
  "time",
 ]
 
