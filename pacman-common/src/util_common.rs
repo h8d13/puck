@@ -79,10 +79,22 @@ pub fn safe_fgets<R: BufRead>(
 	r: &mut R,
 	size: usize,
 ) -> io::Result<Option<Vec<u8>>> {
-	let Some(max) = size.checked_sub(1) else {
-		return Ok(None);
-	};
 	let mut out = Vec::new();
+	Ok(safe_fgets_into(r, size, &mut out)?.then_some(out))
+}
+
+// safe_fgets into the caller's buffer, which is cleared first: the C's
+// fixed line buffer, so a reader of many lines allocates once. false is
+// the C's NULL
+pub fn safe_fgets_into<R: BufRead>(
+	r: &mut R,
+	size: usize,
+	out: &mut Vec<u8>,
+) -> io::Result<bool> {
+	out.clear();
+	let Some(max) = size.checked_sub(1) else {
+		return Ok(false);
+	};
 	while out.len() < max {
 		let avail = match r.fill_buf() {
 			Ok(b) => b,
@@ -103,10 +115,7 @@ pub fn safe_fgets<R: BufRead>(
 			break;
 		}
 	}
-	if out.is_empty() && max > 0 {
-		return Ok(None);
-	}
-	Ok(Some(out))
+	Ok(!(out.is_empty() && max > 0))
 }
 
 // strtrim: leading and trailing C-locale whitespace removed. the C trims in

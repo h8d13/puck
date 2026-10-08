@@ -571,6 +571,7 @@ impl Walk<'_> {
 		}
 		let mut lines = Lines::new(entry);
 		let r = self.read_data(i, &mut lines);
+		self.pkgs[i].shrink_lists();
 		// the filename check returns without this line
 		if r.as_ref().is_err_and(|r| !matches!(r, Reason::Filename)) {
 			let parts: [&[u8]; 3] = [
@@ -601,17 +602,22 @@ impl Walk<'_> {
 	// the file list
 	fn read_data(&mut self, i: usize, f: &mut Lines) -> Result<(), Reason> {
 		let deps = dep_from_string;
+		// read_data only compares against the name, and the key is kept
+		// apart from the line the values overwrite: both once per entry,
+		// not per line
+		let name = self.pkgs[i].name_bytes().to_vec();
+		let mut key = Vec::new();
 		loop {
 			match f.fgets() {
 				Ok(true) => {}
 				Ok(false) => return Ok(()),
 				Err(e) => return Err(Reason::Read(e)),
 			}
-			let key = f.line.clone();
+			key.clear();
+			key.extend_from_slice(&f.line);
 			if key.is_empty() {
 				continue;
 			}
-			let name = self.pkgs[i].name_bytes().to_vec();
 			let pkg = &mut self.pkgs[i];
 			match &key[..] {
 				b"%NAME%" => {

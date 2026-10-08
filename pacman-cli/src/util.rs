@@ -72,6 +72,15 @@ impl Output {
 			sink(self);
 		}
 	}
+
+	// stdio writes a full block out; flushing at 64 KiB keeps a long
+	// listing (-Si of every sync package is ~11 MB) from sitting whole
+	// in memory until the end
+	pub fn flush_full(&mut self) {
+		if self.stdout.len() >= 64 * 1024 {
+			self.flush();
+		}
+	}
 }
 
 // PACMAN_DEBUG (set by the meson build): pm_vfprintf puts "[%H:%M:%S] "

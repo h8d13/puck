@@ -113,6 +113,28 @@ pub struct Package {
 impl Package {
 	// name as strcmp sees it. the C dereferences NULL names, None reads
 	// as empty here
+	// the lists at their length: readers push entry by entry, and the
+	// doubling slack (a third of the depends of a sync db) would stay
+	// for the cache's life where the C's lists are exact
+	pub fn shrink_lists(&mut self) {
+		for l in [
+			&mut self.depends,
+			&mut self.optdepends,
+			&mut self.checkdepends,
+			&mut self.makedepends,
+			&mut self.conflicts,
+			&mut self.provides,
+			&mut self.replaces,
+		] {
+			l.shrink_to_fit();
+		}
+		self.licenses.shrink_to_fit();
+		self.groups.shrink_to_fit();
+		self.backup.shrink_to_fit();
+		self.xdata.shrink_to_fit();
+		self.files.files.shrink_to_fit();
+	}
+
 	pub fn name_bytes(&self) -> &[u8] {
 		until_nul(self.name.as_deref().unwrap_or_default())
 	}
@@ -186,9 +208,12 @@ fn find_requiredby(
 			false => &cachepkg.depends,
 			true => &cachepkg.optdepends,
 		};
-		let name = cachepkg.name_bytes();
 		for dep in deps {
-			if depcmp(pkg, dep) && !reqs.iter().any(|r| r == name) {
+			if !depcmp(pkg, dep) {
+				continue;
+			}
+			let name = cachepkg.name_bytes();
+			if !reqs.iter().any(|r| r == name) {
 				reqs.push(name.to_vec());
 			}
 		}

@@ -22,7 +22,7 @@ use std::os::unix::fs::{
 };
 use std::path::Path;
 
-use pacman_common::util_common::safe_fgets;
+use pacman_common::util_common::safe_fgets_into;
 
 use crate::backup::split_backup;
 use crate::callbacks::{Callbacks, LogLevel, logv};
@@ -38,7 +38,7 @@ use crate::package::{
 use crate::pkghash::PkgHash;
 use crate::util::{
 	hash_sdbm, makepath, mkdir_mode, parsedate, splitname, strerror,
-	strip_newline, strtoofft, until_nul,
+	strtoofft, until_nul,
 };
 
 // ALPM_LOCAL_DB_VERSION
@@ -298,6 +298,7 @@ impl LocalDb {
 		];
 		logv(cb, LogLevel::Function, &parts);
 		let r = self.read_sections(pkg, inforeq, cb);
+		pkg.shrink_lists();
 		if r.is_err() {
 			pkg.infolevel |= INFRQ_ERROR;
 		}
@@ -370,6 +371,8 @@ struct Lines {
 	// line as a C string: up to its first nul, the '\n' gone once
 	// stripped
 	line: Vec<u8>,
+	// fgets reads here first: a NULL must leave line as it was
+	next: Vec<u8>,
 }
 
 impl Lines {
@@ -378,6 +381,7 @@ impl Lines {
 			r: BufReader::new(f),
 			eof: false,
 			line: Vec::new(),
+			next: Vec::new(),
 		}
 	}
 
@@ -387,21 +391,27 @@ impl Lines {
 		if self.eof {
 			return Ok(false);
 		}
-		let Some(l) = safe_fgets(&mut self.r, LINE_SIZE)? else {
+		// two buffers swapped instead of one per line; a NULL at the
+		// end leaves what the last fgets put in line, like the C
+		if !safe_fgets_into(&mut self.r, LINE_SIZE, &mut self.next)? {
 			self.eof = true;
 			return Ok(false);
-		};
+		}
+		let l = &mut self.next;
 		// fgets stops at '\n' or a full buffer, else it met the end
 		self.eof = !l.ends_with(b"\n") && l.len() < LINE_SIZE - 1;
-		self.line = until_nul(&l).to_vec();
+		let n = until_nul(l).len();
+		l.truncate(n);
+		std::mem::swap(&mut self.line, &mut self.next);
 		Ok(true)
 	}
 
-	// _alpm_strip_newline(line, 0): the stripped length
+	// _alpm_strip_newline(line, 0): the stripped length. the line is cut
+	// at its nul already, so only the trailing newlines go
 	fn strip(&mut self) -> usize {
-		let n = strip_newline(&self.line).len();
-		self.line.truncate(n);
-		n
+		let keep = self.line.iter().rposition(|&c| c != b'\n');
+		self.line.truncate(keep.map_or(0, |i| i + 1));
+		self.line.len()
 	}
 
 	// READ_NEXT: NULL at the end keeps the line

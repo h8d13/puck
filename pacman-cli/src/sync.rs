@@ -212,6 +212,7 @@ fn show_full(
 		let stdout = &mut out.stdout;
 		dump_pkg_full(stdout, &mut env, pkg, extra, cols, colstr);
 		out.stderr.append(&mut env.stderr);
+		out.flush_full();
 	}
 	!pkgs.is_empty()
 }
@@ -756,6 +757,7 @@ pub fn sync_list<S: AsRef<[u8]>>(
 			});
 			print_installed(&mut out.stdout, local, pkg, c);
 			out.stdout.push(b'\n');
+			out.flush_full();
 		}
 	}
 	ret

@@ -113,7 +113,10 @@ pub fn depcmp_provides(dep: &Depend, provisions: &[Depend]) -> bool {
 // _alpm_depcmp_literal: pkg is dep by name (hash first, like the C),
 // and its version satisfies dep's
 pub fn depcmp_literal(pkg: &Package, dep: &Depend) -> bool {
-	has_name(pkg, until_nul(&dep.name), dep.name_hash)
+	// the hash alone first: cutting dep.name at its nul before the
+	// mismatch is known cost requiredby a scan per pair
+	pkg.name_hash == dep.name_hash
+		&& has_name(pkg, until_nul(&dep.name), dep.name_hash)
 		&& dep_vercmp(
 			pkg.version.as_deref(),
 			dep.depmod,

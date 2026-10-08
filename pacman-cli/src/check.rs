@@ -199,6 +199,9 @@ pub fn check_pkg_fast(
 	let pkgname = until_nul(pkg.name.as_deref().unwrap_or_default());
 	let files = env.files(o, pkg);
 	let mut errors = 0usize;
+	// one path buffer like the C's filepath[PATH_MAX]: root, then each
+	// file's name after it
+	let mut filepath = root.clone();
 	for file in &files {
 		let path = until_nul(&file.name);
 		if rootlen + 1 + path.len() > PATH_MAX {
@@ -206,7 +209,9 @@ pub fn check_pkg_fast(
 			pm_printf(&mut o.stderr, c, LOG_WARNING, &msg);
 			continue;
 		}
-		let filepath = cat(&[root, path]);
+		filepath.truncate(rootlen);
+		filepath.extend_from_slice(path);
+		let filepath = &filepath[..];
 		match file_exists(o, c, env, pkgname, &filepath, rootlen) {
 			Exists::Yes(st) => {
 				// the C reads path[plen - 1], files lists never

@@ -244,10 +244,24 @@ impl CheckEnv for Checks<'_> {
 		o: &mut Output,
 		pkg: &Package,
 	) -> Vec<filelist::File> {
-		let loaded = self
-			.pos
-			.and_then(|i| local_at(self.handle, o, i, INFRQ_FILES));
-		loaded.as_ref().unwrap_or(pkg).files.files.clone()
+		// only the list is copied out: local_at would copy the whole
+		// package (every field) per -Qk entry
+		if let Some(i) = self.pos {
+			o.flush();
+			let dbs = self.handle.dbs_mut();
+			let entry = dbs.local.and_then(|db| {
+				db.load_pkg_at(
+					dbs.dbext,
+					dbs.cb,
+					i,
+					INFRQ_FILES,
+				)
+			});
+			if let Some(p) = entry {
+				return p.files.files.clone();
+			}
+		}
+		pkg.files.files.clone()
 	}
 
 	fn is_backup(
