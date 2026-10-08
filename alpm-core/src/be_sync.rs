@@ -17,11 +17,10 @@
 use std::collections::HashMap;
 use std::ffi::c_int;
 use std::fmt::Display;
-use std::fs::File;
-use std::io::{self, ErrorKind, Read, Seek};
+use std::io::{self, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
 
-use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
+use alpm_compress::decompression::DecompressionSettings;
 use alpm_compress::tarball::{TarballEntry, TarballReader};
 use alpm_repo_db::desc::{Section, parse_libalpm};
 use alpm_repo_db::files::RepoFiles;
@@ -41,7 +40,8 @@ use crate::signing::{
 	SIG_DATABASE_UNKNOWN_OK, check_pgp_helper, process_siglist,
 };
 use crate::util::{
-	PATH_MAX, fnmatch, hash_sdbm, splitname, strerror, until_nul,
+	self, PATH_MAX, archive_io_err as io_err, fnmatch, hash_sdbm,
+	splitname, strerror, until_nul,
 };
 
 // limits.h on linux
@@ -192,28 +192,17 @@ fn open_archive(
 	path: &[u8],
 	dbext: &[u8],
 ) -> Result<(TarballReader<'static>, u64), Error> {
-	let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
-	let mut file = File::open(path).map_err(|e| match e.kind() {
+	let archive = util::open_archive(path).map_err(|e| match e.kind() {
 		ErrorKind::NotFound => Error::NotFound,
 		_ => Error::Open(e),
 	})?;
-	let size = file.metadata().map_err(Error::Open)?.len();
-	let mut magic = Vec::with_capacity(DecompressionSettings::MAGIC_LEN);
-	(&mut file)
-		.take(DecompressionSettings::MAGIC_LEN as u64)
-		.read_to_end(&mut magic)
-		.map_err(Error::Open)?;
-	file.rewind().map_err(Error::Open)?;
-	let settings = DecompressionSettings::from_magic(&magic);
-	let per_package = bytes_per_package(&settings);
-	let decoder = CompressionDecoder::new(file, settings)
-		.map_err(|e| Error::Open(io::Error::other(e)))?;
-	let mut est = size / per_package + 1;
+	let size = archive.meta.len();
+	let mut est = size / bytes_per_package(&archive.settings) + 1;
 	// files dbs are about four times larger on average
 	if dbext == b".files" {
 		est /= 4;
 	}
-	Ok((TarballReader::new(decoder), est))
+	Ok((archive.reader, est))
 }
 
 // _alpm_pkg_check_meta on what load_pkg_for_entry sets. splitname already
@@ -322,13 +311,6 @@ impl Walk {
 		}
 		text.extend_from_slice(&data);
 		Ok(())
-	}
-}
-
-fn io_err(e: alpm_compress::Error) -> io::Error {
-	match e {
-		alpm_compress::Error::IoRead { source, .. } => source,
-		e => io::Error::other(e),
 	}
 }
 
