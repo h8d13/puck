@@ -15,6 +15,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::be_local::INFRQ_DESC;
 use crate::callbacks::{Callbacks, Fetch, LogLevel};
@@ -77,6 +79,59 @@ pub struct Handle {
 	dbs_sync: Vec<Db>,
 	// handle->trans, None is NULL
 	trans: Option<Trans>,
+	// what a signal thread may touch of trans and lock
+	interrupt: Arc<Interrupt>,
+}
+
+// the part of a handle another thread may touch while the handle runs.
+// the frontend's soft interrupt handler calls alpm_trans_interrupt and
+// alpm_unlock on config->handle from signal context; safe Rust cannot
+// share the handle, so trans.rs publishes whether the transaction is
+// interruptible (trans->state COMMITTING or INTERRUPTED) and lock/unlock
+// whether the lock is held. an interrupt asked here is set into
+// trans->state where the commit reads it (trans::interrupted)
+#[derive(Debug)]
+pub struct Interrupt {
+	lockfile: Vec<u8>,
+	// handle->lockfd >= 0
+	locked: AtomicBool,
+	committing: AtomicBool,
+	// asked by trans_interrupt, not yet in trans->state
+	requested: AtomicBool,
+}
+
+impl Interrupt {
+	// alpm_trans_interrupt: Ok while the transaction commits. Err is
+	// TRANS_TYPE, also without a transaction (C: TRANS_NULL)
+	pub fn trans_interrupt(&self) -> Result<(), Errno> {
+		if !self.committing.load(Ordering::SeqCst) {
+			return Err(Errno::TransType);
+		}
+		self.requested.store(true, Ordering::SeqCst);
+		Ok(())
+	}
+
+	// alpm_unlock: the lockfile unlinked if the handle holds it. the C
+	// closes lockfd first, here it closes with the process (the caller
+	// exits) or with the handle
+	pub fn unlock(&self) -> io::Result<()> {
+		if !self.locked.swap(false, Ordering::SeqCst) {
+			return Ok(());
+		}
+		fs::remove_file(OsStr::from_bytes(&self.lockfile))
+	}
+
+	// the transaction entered or left the interruptible states. an
+	// interrupt asked across the change is dropped: the C's
+	// INTERRUPTED is overwritten by the same assignment
+	pub(crate) fn set_committing(&self, committing: bool) {
+		self.committing.store(committing, Ordering::SeqCst);
+		self.requested.store(false, Ordering::SeqCst);
+	}
+
+	pub(crate) fn take_request(&self) -> bool {
+		self.requested.swap(false, Ordering::SeqCst)
+	}
 }
 
 // Handle::sync_parts
@@ -194,6 +249,12 @@ impl Handle {
 		let lockfile = [&dbpath[..], b"db.lck"].concat();
 		let local =
 			Db::register_local(&dbpath).map_err(|e| e.errno())?;
+		let interrupt = Arc::new(Interrupt {
+			lockfile: lockfile.clone(),
+			locked: AtomicBool::new(false),
+			committing: AtomicBool::new(false),
+			requested: AtomicBool::new(false),
+		});
 		Ok(Handle {
 			root,
 			dbpath,
@@ -226,6 +287,7 @@ impl Handle {
 			db_local: Some(local),
 			dbs_sync: Vec::new(),
 			trans: None,
+			interrupt,
 		})
 	}
 
@@ -262,6 +324,11 @@ impl Handle {
 
 	pub fn trans_mut(&mut self) -> Option<&mut Trans> {
 		self.trans.as_mut()
+	}
+
+	// the handle's Interrupt, for a signal thread
+	pub fn interrupt(&self) -> Arc<Interrupt> {
+		Arc::clone(&self.interrupt)
 	}
 
 	// handle->trans = trans, the old one returned
@@ -353,6 +420,7 @@ impl Handle {
 			.mode(0o000)
 			.open(OsStr::from_bytes(lockfile))?;
 		self.lock = Some(f);
+		self.interrupt.locked.store(true, Ordering::SeqCst);
 		Ok(())
 	}
 
@@ -367,6 +435,7 @@ impl Handle {
 		if self.lock.take().is_none() {
 			return Ok(());
 		}
+		self.interrupt.locked.store(false, Ordering::SeqCst);
 		fs::remove_file(OsStr::from_bytes(&self.lockfile))
 	}
 
