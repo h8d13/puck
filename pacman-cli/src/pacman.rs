@@ -1503,6 +1503,10 @@ struct OutHost<'a> {
 }
 
 impl Host for OutHost<'_> {
+	fn sink(&self) -> Option<fn(&mut Output)> {
+		self.out.sink
+	}
+
 	fn log(&mut self, config: &Config, msg: &Msg) {
 		let now = (self.now_secs)();
 		if let Some(s) = stamped(config, msg, true, now) {
@@ -1549,8 +1553,9 @@ fn setup<R: BufRead + 'static>(
 		// errors only
 		config.logmask &= !LOG_WARNING;
 	}
-	// the callbacks read the config as it is from here on
+	// the callbacks and the fetchcb read the config as it is from here on
 	handle.set_callbacks(frontend(&config));
+	handle.set_fetchcb(config.xfercommand_fetch(sink));
 	Ok((config, targets, handle))
 }
 

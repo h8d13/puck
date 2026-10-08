@@ -24,12 +24,20 @@
 // not ignored in the parent while the helper runs (no safe std API).
 use std::ffi::{OsStr, OsString, c_int};
 use std::fs::File;
-use std::io::{self, Read, Write};
-use std::os::fd::AsFd;
+use std::io::{self, IoSlice, IoSliceMut, Read, Write};
+use std::mem::MaybeUninit;
+use std::net::Shutdown;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+
+use rustix::net::{
+	RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags,
+	SendAncillaryBuffer, SendAncillaryMessage, SendFlags, recvmsg, sendmsg,
+};
 
 use crate::callbacks::{Callbacks, DownloadEvent, LogLevel};
 use crate::dload::{
@@ -41,8 +49,9 @@ use crate::sandbox_fs::restrict_writes_to;
 use crate::sandbox_syscalls::syscalls_filter;
 use crate::util::{PATH_MAX, getuid, until_nul};
 
-// argv[1] of the helper
+// argv[1] of the helper: a download, or a command to exec (EXEC_ARG)
 pub const HELPER_ARG: &str = "--alpm-sandbox-helper";
+pub const EXEC_ARG: &str = "--alpm-sandbox-exec";
 
 // _alpm_sandbox_callback_t
 pub const CB_LOG: u32 = 0;
@@ -591,7 +600,148 @@ pub fn helper_main() -> i32 {
 // Some(exit status) when this process is the helper
 pub fn helper_entry() -> Option<i32> {
 	let arg = std::env::args_os().nth(1)?;
-	(arg == HELPER_ARG).then(helper_main)
+	match arg.to_str()? {
+		HELPER_ARG => Some(helper_main()),
+		EXEC_ARG => Some(exec_main()),
+		_ => None,
+	}
+}
+
+// the helper in exec mode, after the parent's switch to the sandbox
+// user: the request socket on stdin brings argv and the parent's stdin.
+// no_new_privs, then execvp(argv[0], argv) on that stdin; a failed exec
+// sends its errno back over the socket (the C's err_fd) and exits 127
+fn exec_main() -> i32 {
+	let Ok(sock) = io::stdin().as_fd().try_clone_to_owned() else {
+		return 127;
+	};
+	let mut sock = UnixStream::from(sock);
+	let mut space =
+		[MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+	let mut anc = RecvAncillaryBuffer::new(&mut space);
+	let mut buf = vec![0; 4096];
+	let flags = RecvFlags::CMSG_CLOEXEC;
+	let got = recvmsg(
+		&sock,
+		&mut [IoSliceMut::new(&mut buf)],
+		&mut anc,
+		flags,
+	);
+	let Ok(got) = got else {
+		return 127;
+	};
+	let mut stdin = None;
+	for m in anc.drain() {
+		if let RecvAncillaryMessage::ScmRights(mut fds) = m {
+			stdin = stdin.or(fds.next());
+		}
+	}
+	buf.truncate(got.bytes);
+	if sock.read_to_end(&mut buf).is_err() {
+		return 127;
+	}
+	let Some(argv) = Dec(&buf).list().filter(|a| !a.is_empty()) else {
+		return 127;
+	};
+	Kernel.no_new_privs();
+	let mut cmd = Command::new(OsStr::from_bytes(&argv[0]));
+	cmd.args(argv[1..].iter().map(|a| OsStr::from_bytes(a)));
+	// no stdin to hand on (fd 0 closed in the parent): none here either
+	cmd.stdin(stdin.map_or_else(Stdio::null, Stdio::from));
+	let e = cmd.exec();
+	let errno = e.raw_os_error().unwrap_or(0);
+	let _ = sock.write_all(&errno.to_ne_bytes());
+	127
+}
+
+// why a sandboxed command did not run
+#[derive(Debug)]
+pub enum ExecError {
+	// alpm_sandbox_setup_child failed: not root, no such user
+	Setup,
+	// the helper or the command could not be started: fork, setuid,
+	// execvp errno
+	Spawn(io::Error),
+}
+
+// systemvp's child with alpm_sandbox_setup_child(handle, user, NULL,
+// false): argv run as user with no_new_privs, no write or syscall
+// restriction (XferCommand). the helper in exec mode does the child's
+// part. stdin, stdout and stderr are ours; argv[0] is searched in PATH
+pub struct SandboxExec {
+	// the helper and its arguments (this binary, EXEC_ARG)
+	pub program: PathBuf,
+	pub args: Vec<OsString>,
+	pub host: Box<dyn Host>,
+}
+
+impl Default for SandboxExec {
+	fn default() -> Self {
+		SandboxExec {
+			program: PathBuf::from("/proc/self/exe"),
+			args: vec![EXEC_ARG.into()],
+			host: Box::new(System),
+		}
+	}
+}
+
+impl SandboxExec {
+	// the wait status (waitpid's) of argv run as user. the C child's
+	// getuid() and getpwnam checks are made here before spawning
+	pub fn run(
+		&mut self,
+		user: &[u8],
+		argv: &[Vec<u8>],
+	) -> Result<ExitStatus, ExecError> {
+		if self.host.uid() != 0 {
+			return Err(ExecError::Setup);
+		}
+		let Ok((uid, gid)) = self.host.getpwnam(user) else {
+			return Err(ExecError::Setup);
+		};
+		let (mut ours, theirs) =
+			UnixStream::pair().map_err(ExecError::Spawn)?;
+		let mut child = Command::new(&self.program)
+			.args(&self.args)
+			.uid(uid)
+			.gid(gid)
+			.stdin(OwnedFd::from(theirs))
+			.spawn()
+			.map_err(ExecError::Spawn)?;
+		let mut e = Enc(Vec::new());
+		e.list(argv);
+		// a helper gone early shows in its status
+		let _ = send_with_stdin(&mut ours, &e.0);
+		let _ = ours.shutdown(Shutdown::Write);
+		let status = child.wait().map_err(ExecError::Spawn)?;
+		let mut b = [0; 4];
+		match ours.read_exact(&mut b) {
+			Ok(()) => {
+				let errno = i32::from_ne_bytes(b);
+				let e = io::Error::from_raw_os_error(errno);
+				Err(ExecError::Spawn(e))
+			}
+			Err(_) => Ok(status),
+		}
+	}
+}
+
+// the request, our stdin attached (SCM_RIGHTS) to its first bytes; a
+// stdin that cannot be passed (closed) is left out
+fn send_with_stdin(sock: &mut UnixStream, req: &[u8]) -> io::Result<()> {
+	let stdin = io::stdin();
+	let fds = [stdin.as_fd()];
+	let mut space =
+		[MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+	let mut anc = SendAncillaryBuffer::new(&mut space);
+	anc.push(SendAncillaryMessage::ScmRights(&fds));
+	let iov = [IoSlice::new(req)];
+	let sent = match sendmsg(&*sock, &iov, &mut anc, SendFlags::empty()) {
+		Ok(n) => n,
+		Err(rustix::io::Errno::BADF) => 0,
+		Err(e) => return Err(e.into()),
+	};
+	sock.write_all(&req[sent..])
 }
 
 fn os(p: &[u8]) -> &Path {
