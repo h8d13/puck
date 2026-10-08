@@ -5,6 +5,7 @@
 use std::fs;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -148,15 +149,33 @@ fn octal(field: &mut [u8], v: u64) {
 	field[..w].copy_from_slice(s.as_bytes());
 }
 
-fn header(name: &[u8], size: usize, kind: u8) -> [u8; 512] {
+// any tar entry: type flag, permission bits, link target (symlink or
+// hard link), data. owner, mtime and device numbers 0
+#[derive(Clone, Debug)]
+pub struct TarNode {
+	pub name: Vec<u8>,
+	pub kind: u8,
+	pub mode: u32,
+	pub link: Vec<u8>,
+	pub data: Vec<u8>,
+}
+
+fn header(
+	name: &[u8],
+	link: &[u8],
+	mode: u32,
+	size: usize,
+	kind: u8,
+) -> [u8; 512] {
 	let mut h = [0u8; 512];
 	h[..name.len()].copy_from_slice(name);
-	octal(&mut h[100..108], if kind == b'5' { 0o755 } else { 0o644 });
+	octal(&mut h[100..108], u64::from(mode));
 	octal(&mut h[108..116], 0);
 	octal(&mut h[116..124], 0);
 	octal(&mut h[124..136], size as u64);
 	octal(&mut h[136..148], 1_700_000_000);
 	h[156] = kind;
+	h[157..157 + link.len()].copy_from_slice(link);
 	h[257..263].copy_from_slice(b"ustar\0");
 	h[263..265].copy_from_slice(b"00");
 	h[148..156].fill(b' ');
@@ -170,27 +189,112 @@ fn push_data(out: &mut Vec<u8>, data: &[u8]) {
 	out.resize(out.len().next_multiple_of(512), 0);
 }
 
-// ustar archive, names past 100 bytes through a GNU longname entry
-pub fn ustar(entries: &[TarEntry]) -> Vec<u8> {
+// GNU long name/link entry ('L'/'K') for a field past 100 bytes, the
+// field itself cut to 100
+fn long_field<'a>(out: &mut Vec<u8>, field: &'a [u8], kind: u8) -> &'a [u8] {
+	if field.len() <= 100 {
+		return field;
+	}
+	let long = [field, b"\0"].concat();
+	out.extend_from_slice(&header(
+		b"././@LongLink",
+		b"",
+		0o644,
+		long.len(),
+		kind,
+	));
+	push_data(out, &long);
+	&field[..100]
+}
+
+// ustar archive of any entries
+pub fn ustar_nodes(nodes: &[TarNode]) -> Vec<u8> {
 	let mut out = Vec::new();
-	for e in entries {
-		let mut name = &e.name[..];
-		if name.len() > 100 {
-			let long = [name, b"\0"].concat();
-			out.extend_from_slice(&header(
-				b"././@LongLink",
-				long.len(),
-				b'L',
-			));
-			push_data(&mut out, &long);
-			name = &name[..100];
-		}
-		let kind = if e.dir { b'5' } else { b'0' };
-		out.extend_from_slice(&header(name, e.data.len(), kind));
-		push_data(&mut out, &e.data);
+	for n in nodes {
+		let name = long_field(&mut out, &n.name, b'L');
+		let link = long_field(&mut out, &n.link, b'K');
+		let h = header(name, link, n.mode, n.data.len(), n.kind);
+		out.extend_from_slice(&h);
+		push_data(&mut out, &n.data);
 	}
 	out.resize(out.len() + 1024, 0);
 	out
+}
+
+// ustar archive, names past 100 bytes through a GNU longname entry
+pub fn ustar(entries: &[TarEntry]) -> Vec<u8> {
+	let nodes: Vec<TarNode> = entries
+		.iter()
+		.map(|e| TarNode {
+			name: e.name.clone(),
+			kind: if e.dir { b'5' } else { b'0' },
+			mode: if e.dir { 0o755 } else { 0o644 },
+			link: Vec::new(),
+			data: e.data.clone(),
+		})
+		.collect();
+	ustar_nodes(&nodes)
+}
+
+// a tree as compared between the C and the port: types, permission
+// bits, contents, link targets. entries sorted by name
+#[derive(Debug, PartialEq, Eq)]
+pub enum Node {
+	// mode, link count, contents
+	File(u32, u64, Vec<u8>),
+	// mode, None when the listing failed (no permission)
+	Dir(u32, Option<Vec<(Vec<u8>, Node)>>),
+	Link(Vec<u8>),
+	// fifo or device: mode with its type bits
+	Special(u32),
+	Unreadable(u32),
+}
+
+pub fn snapshot(path: &Path) -> Node {
+	let meta = fs::symlink_metadata(path).unwrap();
+	let mode = meta.permissions().mode() & 0o7777;
+	let kind = meta.file_type();
+	if kind.is_symlink() {
+		let t = fs::read_link(path).unwrap();
+		return Node::Link(t.as_os_str().as_bytes().to_vec());
+	}
+	if kind.is_file() {
+		return match fs::read(path) {
+			Ok(data) => Node::File(mode, meta.nlink(), data),
+			Err(_) => Node::Unreadable(mode),
+		};
+	}
+	if !kind.is_dir() {
+		return Node::Special(meta.mode());
+	}
+	let Ok(rd) = fs::read_dir(path) else {
+		return Node::Dir(mode, None);
+	};
+	let mut entries: Vec<_> = rd
+		.map(|e| {
+			let e = e.unwrap();
+			let name = e.file_name().as_bytes().to_vec();
+			(name, snapshot(&e.path()))
+		})
+		.collect();
+	entries.sort_by(|a, b| a.0.cmp(&b.0));
+	Node::Dir(mode, Some(entries))
+}
+
+// rm -rf, also through directories left without permissions
+pub fn force_remove(path: &Path) {
+	let Ok(meta) = fs::symlink_metadata(path) else {
+		return;
+	};
+	if !meta.is_dir() {
+		fs::remove_file(path).unwrap();
+		return;
+	}
+	fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+	for e in fs::read_dir(path).unwrap() {
+		force_remove(&e.unwrap().path());
+	}
+	fs::remove_dir(path).unwrap();
 }
 
 #[derive(Clone, Copy, Debug)]

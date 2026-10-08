@@ -5,12 +5,23 @@
 // _alpm_realloc, _alpm_greedy_grow, _alpm_alloc_fail are not ported: Vec
 // grows and zero-fills itself.
 
-use std::ffi::{OsStr, c_char, c_ulong};
+use std::ffi::{OsStr, OsString, c_char, c_ulong};
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
-use std::io::{self, ErrorKind, Read, Write};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::io::{self, ErrorKind, Read, Seek, Write};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::{
+	DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink,
+};
+use std::path::{Path, PathBuf};
+
+use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
+use alpm_compress::tarball::{TarballEntry, TarballReader};
+use rustix::fs::{
+	Access, AtFlags, CWD, FileType, Mode, accessat, makedev, mknodat,
+};
+
+use crate::be_package::tar_mode_size;
+use crate::error::Errno;
 
 // what a C string would see of these bytes
 pub fn until_nul(s: &[u8]) -> &[u8] {
@@ -482,15 +493,19 @@ pub fn makepath_mode(path: &[u8], mode: u32) -> io::Result<()> {
 	mkdir_exact(path, mode)
 }
 
-// the C runs mkdir under umask(0), which is process wide. chmod after
-// mkdir gives the same bits: mkdir keeps mode & 01777 and the setgid bit
-// inherited from the parent
 fn mkdir_exact(path: &[u8], mode: u32) -> io::Result<()> {
-	let path = c_path(path);
-	match DirBuilder::new().mode(mode).create(path) {
-		Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(()),
-		r => r?,
+	match mkdir_mode(c_path(path), mode) {
+		Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
+		r => r,
 	}
+}
+
+// mkdir(path, mode) as the C runs it under a fixed umask, which is
+// process wide: mode is the umask-applied value. chmod after mkdir gives
+// the same bits: mkdir keeps mode & 01777 and the setgid bit inherited
+// from the parent
+pub(crate) fn mkdir_mode(path: &Path, mode: u32) -> io::Result<()> {
+	DirBuilder::new().mode(mode).create(path)?;
 	let got = fs::metadata(path)?.permissions().mode();
 	let want = (mode & 0o1777) | (got & 0o2000);
 	if got & 0o7777 != want {
@@ -601,4 +616,593 @@ pub fn test_checksum(
 		_ => return None,
 	};
 	Some(until_nul(expected?) == computed?)
+}
+
+// archive extraction: _alpm_open_archive, _alpm_unpack and
+// _alpm_unpack_single
+//
+// libarchive is replaced by alpm-compress (filter picked by magic bytes
+// like libarchive's bidding, for the four filters it has) and its tar
+// reader. archive_read_extract(archive, entry, 0) is translated for what
+// a tar carries: without ARCHIVE_EXTRACT_* flags no owner, times, ACLs or
+// xattrs are restored, permissions obey the umask (_alpm_unpack sets
+// 0022) and lose SUID/SGID/sticky. an object in the way is unlinked (an
+// empty directory rmdir'd, a directory kept for a directory), missing
+// parents are created. absolute and ".." names are not refused, there are
+// no SECURE flags. the C chdir()s into prefix; here names are joined to
+// prefix and modes set by chmod, so process cwd and umask stay untouched
+
+// file type bits of mode_t
+const S_IFMT: u32 = 0o170000;
+const S_IFREG: u32 = 0o100000;
+const S_IFDIR: u32 = 0o040000;
+const S_IFLNK: u32 = 0o120000;
+const S_IFCHR: u32 = 0o020000;
+const S_IFBLK: u32 = 0o060000;
+const S_IFIFO: u32 = 0o010000;
+
+// the umask _alpm_unpack extracts under
+const UNPACK_UMASK: u32 = 0o022;
+
+// _alpm_open_archive: the reader over the file and its fstat. libarchive
+// also reads the first header to pick the format, which unpack does next
+pub struct Archive {
+	pub reader: TarballReader<'static>,
+	pub meta: fs::Metadata,
+	// no filter: tar offsets are file offsets
+	pub plain: bool,
+}
+
+pub(crate) fn archive_io_err(e: alpm_compress::Error) -> io::Error {
+	match e {
+		alpm_compress::Error::IoRead { source, .. } => source,
+		e => io::Error::other(e),
+	}
+}
+
+// the filter libarchive's bidding would pick, for the four alpm-compress
+// has. anything else is read as a plain tar
+fn sniff(magic: &[u8]) -> DecompressionSettings {
+	if magic.starts_with(&[0x1f, 0x8b]) {
+		DecompressionSettings::Gzip
+	} else if magic.starts_with(b"BZh") {
+		DecompressionSettings::Bzip2
+	} else if magic.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0]) {
+		DecompressionSettings::Xz
+	} else if magic.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+		DecompressionSettings::Zstd
+	} else {
+		DecompressionSettings::None
+	}
+}
+
+// the error is errno at the failing step (open, fstat, the first read
+// of archive_read_open_fd: EISDIR for a directory)
+pub fn open_archive(path: &[u8]) -> io::Result<Archive> {
+	let mut file = File::open(c_path(path))?;
+	let meta = file.metadata()?;
+	let mut magic = Vec::with_capacity(6);
+	(&mut file).take(6).read_to_end(&mut magic)?;
+	file.rewind()?;
+	let settings = sniff(&magic);
+	let plain = settings == DecompressionSettings::None;
+	let decoder = CompressionDecoder::new(file, settings)
+		.map_err(archive_io_err)?;
+	Ok(Archive {
+		reader: TarballReader::new(decoder),
+		meta,
+		plain,
+	})
+}
+
+// why _alpm_unpack returned 1
+#[derive(Debug)]
+pub enum UnpackError {
+	// _alpm_open_archive failed: ALPM_ERR_PKG_OPEN
+	Open(io::Error),
+	// chdir(prefix) failed, pm_errno untouched
+	Prefix(io::Error),
+	// data of the named entry could not be read (extracted or skipped):
+	// truncated or corrupt archive, pm_errno untouched
+	Read(Vec<u8>, io::Error),
+}
+
+impl UnpackError {
+	// the pm_errno the C sets, None where it leaves it alone
+	pub fn errno(&self) -> Option<Errno> {
+		match self {
+			UnpackError::Open(_) => Some(Errno::PkgOpen),
+			_ => None,
+		}
+	}
+}
+
+// archive_read_extract's result other than ARCHIVE_OK. header and write
+// failures come back as ARCHIVE_WARN (archive_read_extract2 caps them),
+// only a failed data read is fatal
+enum Failure {
+	Warn(io::Error),
+	Read(io::Error),
+}
+
+// what create_filesystem_object makes of an entry
+enum Object<'e> {
+	File,
+	Dir,
+	Symlink(&'e [u8]),
+	HardLink(&'e [u8]),
+	// mknod type, rdev
+	Node(FileType, u64),
+}
+
+fn os_path(path: Vec<u8>) -> PathBuf {
+	PathBuf::from(OsString::from_vec(path))
+}
+
+fn is_kind(r: &io::Result<impl Sized>, kinds: &[ErrorKind]) -> bool {
+	matches!(r, Err(e) if kinds.contains(&e.kind()))
+}
+
+// cleanup_pathname_fsobj without the SECURE flags: "./" and empty
+// components dropped, a trailing "." or '/' cut, ".." kept, a leading
+// '/' kept. "." or "/" when nothing is left, None for an empty name
+fn cleanup_pathname(name: &[u8]) -> Option<Vec<u8>> {
+	if name.is_empty() {
+		return None;
+	}
+	let (mut sep, mut src) = match name.strip_prefix(b"/") {
+		Some(rest) => (true, rest),
+		None => (false, name),
+	};
+	let mut out = Vec::with_capacity(name.len());
+	loop {
+		match src {
+			[] | [b'.'] => break,
+			[b'/', rest @ ..] | [b'.', b'/', rest @ ..] => {
+				src = rest;
+				continue;
+			}
+			_ => {}
+		}
+		if sep {
+			out.push(b'/');
+		}
+		let end = src.iter().position(|&c| c == b'/');
+		out.extend_from_slice(&src[..end.unwrap_or(src.len())]);
+		let Some(end) = end else { break };
+		sep = true;
+		src = &src[end + 1..];
+	}
+	if out.is_empty() {
+		out.push(if sep { b'/' } else { b'.' });
+	}
+	Some(out)
+}
+
+// _alpm_unpack's filter: the name up to and including its first '/' is
+// one of list (alpm_list_find_str)
+fn wanted<L: AsRef<[u8]>>(list: &[L], name: &[u8]) -> bool {
+	let end = name
+		.iter()
+		.position(|&c| c == b'/')
+		.map_or(name.len(), |i| i + 1);
+	list.iter().any(|l| until_nul(l.as_ref()) == &name[..end])
+}
+
+// libarchive consumes an entry's padding to 512 bytes with its data (the
+// last read, or the skip). the tar reader reads it with the next header,
+// so it is checked against the length of a plain archive; past a filter
+// a missing padding only shows at the next header
+fn check_padding(
+	entry: &TarballEntry,
+	size: u64,
+	plain_len: Option<u64>,
+) -> io::Result<()> {
+	let end = entry.raw().raw_file_position() + size.next_multiple_of(512);
+	match plain_len.is_some_and(|len| end > len) {
+		true => Err(ErrorKind::UnexpectedEof.into()),
+		false => Ok(()),
+	}
+}
+
+// archive_read_data_skip
+fn skip_data(
+	entry: &mut TarballEntry,
+	size: u64,
+	plain_len: Option<u64>,
+) -> io::Result<()> {
+	let n = io::copy(entry, &mut io::sink())?;
+	if n < size {
+		return Err(ErrorKind::UnexpectedEof.into());
+	}
+	check_padding(entry, size, plain_len)
+}
+
+// archive_write_disk state across entries
+struct Disk<'p> {
+	// the C's cwd
+	prefix: &'p [u8],
+	// st_dev/st_ino of a regular archive file, never overwritten
+	// (archive_read_extract's skip file)
+	archive: Option<(u64, u64)>,
+	// archive length when unfiltered, see check_padding
+	plain_len: Option<u64>,
+}
+
+impl Disk<'_> {
+	// a name as the C resolves it after chdir(prefix)
+	fn full(&self, rel: &[u8]) -> PathBuf {
+		match rel.first() {
+			Some(b'/') => os_path(rel.to_vec()),
+			_ => os_path([self.prefix, b"/", rel].concat()),
+		}
+	}
+
+	// create_filesystem_object, perm with the umask applied. a new
+	// regular file comes back open for its data
+	fn create(
+		&self,
+		rel: &[u8],
+		obj: &Object,
+		perm: u32,
+	) -> io::Result<Option<File>> {
+		let path = self.full(rel);
+		match *obj {
+			Object::HardLink(target) => {
+				// cleanup_pathname_fsobj (only fails on an empty name)
+				// and check_symlinks_fsobj on the target fail as EPERM.
+				// linkat(..., 0) links a symlink itself
+				if target.is_empty()
+					|| self.check_link_target(target)
+						.is_err()
+				{
+					return Err(
+						rustix::io::Errno::PERM.into()
+					);
+				}
+				fs::hard_link(self.full(target), &path)?;
+			}
+			Object::Symlink(target) => {
+				symlink(OsStr::from_bytes(target), &path)?
+			}
+			Object::File => {
+				let f = OpenOptions::new()
+					.write(true)
+					.create_new(true)
+					.mode(perm)
+					.open(&path)?;
+				// set_mode's fchmod
+				f.set_permissions(Permissions::from_mode(
+					perm,
+				))?;
+				return Ok(Some(f));
+			}
+			Object::Dir => mkdir_mode(&path, perm)?,
+			Object::Node(kind, rdev) => {
+				let mode = Mode::from_raw_mode(perm);
+				mknodat(CWD, &path, kind, mode, rdev)?;
+				fs::set_permissions(
+					&path,
+					Permissions::from_mode(perm),
+				)?;
+			}
+		}
+		Ok(None)
+	}
+
+	// check_symlinks_fsobj on a hard link target, without SECURE flags:
+	// lstat each leading component. a missing one ends the walk, other
+	// errors fail (a regular file in the middle fails at the next one), a
+	// symlink in the middle is followed when it leads to a directory
+	fn check_link_target(&self, target: &[u8]) -> io::Result<()> {
+		let mut end = usize::from(target.first() == Some(&b'/'));
+		loop {
+			while target.get(end) == Some(&b'/') {
+				end += 1;
+			}
+			while end < target.len() && target[end] != b'/' {
+				end += 1;
+			}
+			let last = target.len() - end <= 1;
+			let path = self.full(&target[..end]);
+			let st = match fs::symlink_metadata(&path) {
+				Err(e) if e.kind() == ErrorKind::NotFound => {
+					return Ok(());
+				}
+				st => st?,
+			};
+			if st.is_symlink() && !last {
+				match fs::metadata(&path) {
+					Err(e) if e.kind()
+						== ErrorKind::NotFound =>
+					{
+						return Ok(());
+					}
+					Ok(st) if !st.is_dir() => {
+						let e = "Cannot extract through symlink";
+						return Err(io::Error::other(
+							e,
+						));
+					}
+					st => st?,
+				};
+			}
+			if last {
+				return Ok(());
+			}
+			end += 1;
+		}
+	}
+
+	// create_dir: rel as a directory, missing parents first, a
+	// non-directory in the way unlinked. stat follows symlinks, so
+	// extraction goes through a symlink to a directory
+	fn create_dir(&self, rel: &[u8]) -> io::Result<()> {
+		let slash = rel.iter().rposition(|&c| c == b'/');
+		let base = &rel[slash.map_or(0, |i| i + 1)..];
+		if matches!(base, b"" | b"." | b"..") {
+			return match slash {
+				Some(i) => self.create_dir(&rel[..i]),
+				None => Ok(()),
+			};
+		}
+		let path = self.full(rel);
+		match fs::metadata(&path) {
+			Ok(st) if st.is_dir() => return Ok(()),
+			Ok(_) => fs::remove_file(&path)?,
+			Err(e) if !matches!(
+				e.kind(),
+				ErrorKind::NotFound | ErrorKind::NotADirectory
+			) =>
+			{
+				return Err(e);
+			}
+			Err(_) => {
+				if let Some(i) = slash {
+					self.create_dir(&rel[..i])?;
+				}
+			}
+		}
+		// DEFAULT_DIR_MODE under the umask
+		let r = mkdir_mode(&path, 0o777 & !UNPACK_UMASK);
+		// "a/b/../b/c": the second visit finds it made
+		if r.is_err() && fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
+			return Ok(());
+		}
+		r
+	}
+
+	// restore_entry: create, on ENOENT/ENOTDIR make the parents and
+	// retry, on EEXIST clear what is in the way and retry
+	fn restore(
+		&self,
+		rel: &[u8],
+		obj: &Object,
+		perm: u32,
+	) -> io::Result<Option<File>> {
+		// a hard link to its own (cleaned) name is refused up front
+		if let Object::HardLink(target) = *obj
+			&& target == rel
+		{
+			return Err(io::Error::other("hard link to itself"));
+		}
+		let mut r = self.create(rel, obj, perm);
+		let missing = [ErrorKind::NotFound, ErrorKind::NotADirectory];
+		if is_kind(&r, &missing) {
+			if let Some(i) = rel.iter().rposition(|&c| c == b'/') {
+				let _ = self.create_dir(&rel[..i]);
+			}
+			r = self.create(rel, obj, perm);
+		}
+		if !is_kind(&r, &[ErrorKind::AlreadyExists]) {
+			return r;
+		}
+		let path = self.full(rel);
+		let dir = matches!(obj, Object::Dir);
+		// a directory entry follows a symlink in the way, others not
+		let st = match dir {
+			true => fs::metadata(&path)
+				.or_else(|_| fs::symlink_metadata(&path)),
+			false => fs::symlink_metadata(&path),
+		}?;
+		if self.archive == Some((st.dev(), st.ino())) {
+			return Err(io::Error::other(
+				"Refusing to overwrite archive",
+			));
+		}
+		if !st.is_dir() {
+			fs::remove_file(&path)?;
+		} else if !dir {
+			fs::remove_dir(&path)?;
+		} else {
+			// a directory in the way of a directory stays as it is
+			return Ok(None);
+		}
+		self.create(rel, obj, perm)
+	}
+
+	// archive_read_extract(archive, entry, 0) on the entry named name
+	fn extract(
+		&self,
+		entry: &mut TarballEntry,
+		name: &[u8],
+		mode: u32,
+		size: u64,
+	) -> Result<(), Failure> {
+		let header = entry.raw().header();
+		let target = entry.raw().link_name_bytes().unwrap_or_default();
+		let rdev = || {
+			let major = header
+				.device_major()
+				.ok()
+				.flatten()
+				.unwrap_or(0);
+			let minor = header
+				.device_minor()
+				.ok()
+				.flatten()
+				.unwrap_or(0);
+			makedev(major, minor)
+		};
+		let obj = match mode & S_IFMT {
+			S_IFDIR => Object::Dir,
+			S_IFLNK => Object::Symlink(&target),
+			// hard links carry no type bits
+			0 => Object::HardLink(&target),
+			S_IFCHR => {
+				Object::Node(FileType::CharacterDevice, rdev())
+			}
+			S_IFBLK => Object::Node(FileType::BlockDevice, rdev()),
+			S_IFIFO => Object::Node(FileType::Fifo, 0),
+			_ => Object::File,
+		};
+		// _alpm_unpack's archive_entry_set_perm, then libarchive drops
+		// SUID/SGID/sticky and applies the umask
+		let perm = match mode & S_IFMT {
+			S_IFREG => 0o644,
+			S_IFDIR => 0o755,
+			_ => mode,
+		} & 0o777 & !UNPACK_UMASK;
+		let rel = cleanup_pathname(name).ok_or_else(|| {
+			Failure::Warn(io::Error::other(
+				"Invalid empty pathname",
+			))
+		})?;
+		let file = self
+			.restore(&rel, &obj, perm)
+			.map_err(Failure::Warn)?;
+		// only a regular file takes data, the rest is skipped with the
+		// next header
+		match file {
+			Some(f) if size > 0 => {
+				copy_data(entry, f, size)?;
+				check_padding(entry, size, self.plain_len)
+					.map_err(Failure::Read)
+			}
+			_ => Ok(()),
+		}
+	}
+}
+
+// copy_data then finish_entry: read failures are fatal, the first write
+// failure ends the entry with a warning. either way the file is extended
+// with zeros to the entry size
+fn copy_data(
+	entry: &mut TarballEntry,
+	mut file: File,
+	size: u64,
+) -> Result<(), Failure> {
+	let r = pour(entry, &mut file, size);
+	let len = file.metadata().map_err(Failure::Warn)?.len();
+	if len != size {
+		file.set_len(size).map_err(Failure::Warn)?;
+	}
+	r
+}
+
+fn pour(
+	entry: &mut TarballEntry,
+	file: &mut File,
+	size: u64,
+) -> Result<(), Failure> {
+	let mut buf = vec![0; 64 * 1024];
+	let mut got = 0;
+	while got < size {
+		let n = match entry.read(&mut buf) {
+			Ok(0) => {
+				let e = ErrorKind::UnexpectedEof.into();
+				return Err(Failure::Read(e));
+			}
+			Ok(n) => n,
+			Err(e) if e.kind() == ErrorKind::Interrupted => {
+				continue;
+			}
+			Err(e) => return Err(Failure::Read(e)),
+		};
+		got += n as u64;
+		file.write_all(&buf[..n]).map_err(Failure::Warn)?;
+	}
+	Ok(())
+}
+
+// _alpm_unpack: extract the entries of the archive at path into prefix.
+// a non-empty list keeps only the entries whose name up to its first '/'
+// is in it (empty is the C's NULL list: every entry), breakfirst stops
+// after the first extracted one. warn gets the entries libarchive warned
+// about (pacman logs "warning given when extracting"), they do not fail
+// the call. libarchive reads the first header while opening (format
+// bidding), its failure is an open failure; the loop ends at any later
+// header that cannot be read, which is no error
+pub fn unpack<L: AsRef<[u8]>>(
+	path: &[u8],
+	prefix: &[u8],
+	list: &[L],
+	breakfirst: bool,
+	mut warn: impl FnMut(&[u8], &io::Error),
+) -> Result<(), UnpackError> {
+	let open = |e| UnpackError::Open(archive_io_err(e));
+	let mut archive = open_archive(path).map_err(UnpackError::Open)?;
+	let meta = &archive.meta;
+	let plain_len = archive.plain.then_some(meta.len());
+	let skip_file = meta.is_file().then(|| (meta.dev(), meta.ino()));
+	let mut entries = archive.reader.entries().map_err(open)?;
+	let first = match entries.next() {
+		Some(Err(e)) => return Err(open(e)),
+		first => first,
+	};
+	let prefix = until_nul(prefix);
+	enter(prefix).map_err(UnpackError::Prefix)?;
+	let disk = Disk {
+		prefix,
+		archive: skip_file,
+		plain_len,
+	};
+	let entries = first.into_iter().chain(entries);
+	for entry in entries {
+		// archive_read_next_header != ARCHIVE_OK ends the loop
+		let Ok(mut entry) = entry else { break };
+		let Ok((mode, size)) = tar_mode_size(&entry) else {
+			break;
+		};
+		let size = size as u64;
+		let name =
+			until_nul(entry.path().as_os_str().as_bytes()).to_vec();
+		if !list.is_empty() && !wanted(list, &name) {
+			skip_data(&mut entry, size, plain_len)
+				.map_err(|e| UnpackError::Read(name, e))?;
+			continue;
+		}
+		match disk.extract(&mut entry, &name, mode, size) {
+			Ok(()) => {}
+			Err(Failure::Warn(e)) => warn(&name, &e),
+			Err(Failure::Read(e)) => {
+				return Err(UnpackError::Read(name, e));
+			}
+		}
+		if breakfirst {
+			break;
+		}
+	}
+	Ok(())
+}
+
+// chdir(prefix): a directory the process may search
+fn enter(prefix: &[u8]) -> io::Result<()> {
+	let path = c_path(prefix);
+	if !fs::metadata(path)?.is_dir() {
+		return Err(ErrorKind::NotADirectory.into());
+	}
+	accessat(CWD, path, Access::EXEC_OK, AtFlags::EACCESS)?;
+	Ok(())
+}
+
+// _alpm_unpack_single: the first entry named filename (or under it, for a
+// name ending in '/')
+pub fn unpack_single(
+	archive: &[u8],
+	prefix: &[u8],
+	filename: &[u8],
+	warn: impl FnMut(&[u8], &io::Error),
+) -> Result<(), UnpackError> {
+	unpack(archive, prefix, &[filename], true, warn)
 }

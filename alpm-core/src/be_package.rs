@@ -18,13 +18,12 @@
 use std::ffi::{OsStr, c_int};
 use std::fmt::Display;
 use std::fs::File;
-use std::io::{self, ErrorKind, Read, Seek};
+use std::io::{self, ErrorKind, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::str::FromStr;
 
 use alpm_common::MetadataFile;
-use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
 use alpm_compress::tarball::{TarballEntry, TarballReader};
 use alpm_mtree::Mtree;
 use alpm_mtree::mtree::v2::Path as MtreePath;
@@ -46,7 +45,9 @@ use crate::signing::{
 	SIG_PACKAGE_OPTIONAL, SIG_PACKAGE_UNKNOWN_OK, SigCallbacks, SigResult,
 	check_pgp_helper, extract_keyid, key_import, key_in_keychain, sigpath,
 };
-use crate::util::{fnmatch, hash_sdbm, until_nul};
+use crate::util::{
+	self, archive_io_err as io_err, fnmatch, hash_sdbm, until_nul,
+};
 
 // limits.h on linux
 const NAME_MAX: usize = 255;
@@ -144,44 +145,11 @@ fn open_err(e: io::Error) -> Error {
 	}
 }
 
-fn io_err(e: alpm_compress::Error) -> io::Error {
-	match e {
-		alpm_compress::Error::IoRead { source, .. } => source,
-		e => io::Error::other(e),
-	}
-}
-
-// filter libarchive's bidding would pick, for the four alpm-compress
-// has. anything else is read as a plain tar.
-// copy of be_sync's sniff without the size estimate, to dedupe later
-fn sniff(magic: &[u8]) -> DecompressionSettings {
-	if magic.starts_with(&[0x1f, 0x8b]) {
-		DecompressionSettings::Gzip
-	} else if magic.starts_with(b"BZh") {
-		DecompressionSettings::Bzip2
-	} else if magic.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0]) {
-		DecompressionSettings::Xz
-	} else if magic.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
-		DecompressionSettings::Zstd
-	} else {
-		DecompressionSettings::None
-	}
-}
-
-// _alpm_open_archive: the reader and st_size. a read error here (EISDIR)
-// is the C's archive_read_open_fd failure
+// _alpm_open_archive and the C's errno check after it: the reader and
+// st_size
 fn open_archive(path: &[u8]) -> Result<(TarballReader<'static>, i64), Error> {
-	let mut file = File::open(os(path)).map_err(open_err)?;
-	let size = file.metadata().map_err(Error::Open)?.len();
-	let mut magic = Vec::with_capacity(6);
-	(&mut file)
-		.take(6)
-		.read_to_end(&mut magic)
-		.map_err(Error::Open)?;
-	file.rewind().map_err(Error::Open)?;
-	let decoder = CompressionDecoder::new(file, sniff(&magic))
-		.map_err(|e| Error::Open(io_err(e)))?;
-	Ok((TarballReader::new(decoder), size as i64))
+	let archive = util::open_archive(path).map_err(open_err)?;
+	Ok((archive.reader, archive.meta.len() as i64))
 }
 
 // _alpm_pkg_check_meta on a package that has a name and a version with a
@@ -298,7 +266,7 @@ fn push_file(files: &mut FileList, path: &[u8], mode: u32, size: i64) {
 // archive_entry_mode and archive_entry_size of a tar entry the way
 // libarchive's tar reader sets them: the type from the type flag over the
 // header's permission bits. a hard link has no type bits and size 0
-fn tar_mode_size(entry: &TarballEntry) -> io::Result<(u32, i64)> {
+pub(crate) fn tar_mode_size(entry: &TarballEntry) -> io::Result<(u32, i64)> {
 	let header = entry.raw().header();
 	let perm = header.mode()? & !AE_IFMT;
 	let size = entry.raw().size() as i64;
