@@ -735,6 +735,20 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
 - the -1 check after `_alpm_remove_single_package` is dead, it always
   returns 0 (add.c:508-511). **none**
 
+## `pacman-conf.c` / `testpkg.c` minor
+
+- `DisableSandboxFilesystem` cannot be queried: the `DisableSandbox` test
+  appears twice (pacman-conf.c:415-418), `pacman-conf
+  DisableSandboxFilesystem` warns "unknown directive" and exits 1.
+  **real (rare)**
+- `--repo-list --repo nope` prints nothing and exits 0, `--repo nope`
+  alone fails (pacman-conf.c:126-135). **none**
+- testpkg always opens the built-in DBPATH/GPGDIR, never pacman.conf's
+  `GPGDir`; without `/var/lib/pacman` "cannot initialize alpm"
+  (testpkg.c:63-71). **env**
+- dead checks: `if(!config)` after `parse_opts` (pacman-conf.c:461-464),
+  `alpm_release == -1` (testpkg.c:98-100). **none**
+
 ## `src/pacman/sync.c` -Sc minor
 
 - `sync_cleandb` reads an uninitialised `st_mode` after a failed `stat`

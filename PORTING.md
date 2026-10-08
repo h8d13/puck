@@ -12,6 +12,7 @@ References (git submodules):
 - `alpm-core/`: port of `lib/libalpm`, `unsafe_code = "forbid"`
 - `pacman-common/`: port of `src/common`
 - `vercmp/`: port of `src/util/vercmp.c`
+- `testpkg/`: port of `src/util/testpkg.c`
 - `<crate>/tests/`: unit tests of the port, kept out of `src/`
 - `difftest/`: equivalence tests, the one crate allowed to call C. It
   links upstream `libalpm_objlib.a` and `libcommon.a` statically, so
@@ -87,7 +88,10 @@ Gate: `scripts/cli-parity.sh` between C `pacman` and the Rust binary with
 the same `--root`/`--dbpath`/`--config` on generated test roots and a
 read-only copy of a real system db; byte-identical stdout, stderr, exit.
 Now: `scripts/cli-parity-fixtures.sh` (-D runs under fakeroot with the
-written db compared), 533/535 equal; the two left are `--debug` in the
+written db compared), 533/535 equal; pacman-conf 554/554; testpkg
+binary 43/54 equal, 10 differing only in be_package's log lines, 1
+known (text file), testpkg module 470/550 + 80 log lines only;
+pacman-conf drop-in 13/13. On pacman: the two left are `--debug` in the
 default-SigLevel world (signing debug lines, GOTO_ERR's C file:line).
 
 ### 2. Sync databases (`-Sy`)
@@ -227,7 +231,7 @@ Hand-written parts checked against ALPM and the crates it depends on.
 ## Status
 
 29576 lines of C (no symlinks). Complete: `version.c`, `vercmp.c`,
-`base64.c`. Partial files list their ported functions.
+`base64.c`, `testpkg.c`, `pacman-conf.c`. Partial files list their ported functions.
 
 | C file | Lines | Rust | Checked by |
 |---|---|---|---|
@@ -278,8 +282,8 @@ Hand-written parts checked against ALPM and the crates it depends on.
 | `src/pacman/package.c` (in the above) | 587 | `pacman-cli::package` | dump_pkg_full (all origins, -i/-ii), dump_pkg_backups, dump_pkg_files, print_installed, print_groups, dump_pkg_search: difftest on a real C handle with refilled db caches and real files under the root, strftime %c vs `format_date_utc` fuzz + localtime limits; changelog and gpgme results: unit tests |
 | `src/pacman/conf.c` (in the above) | 1468 | `pacman-cli::conf` (partial) | config model, parseconfigfile, setdefaults (include, siglevel, cleanmethod, usage, repeating options, $repo/$arch, sysroot), glob(3) subset: difftest on random config trees (return, stderr, whole config_t), glob vs libc; setup_libalpm, register_repo: difftest reading the handle back through every getter; XferCommand download pending |
 | `src/pacman/util.c` (in the above) | 1981 | `pacman-cli::util` (partial: all but trans_init/release, sync_syncdbs, tcflush) | display_targets + table engine, print_packages (--print-format), optdepends lists, select/multiselect/yesno prompts (stdin via fmemopen), rmrf, rmrf_errno (the errno sync_cleandb prints): difftest; earlier helpers: | indentprint, strreplace, string_display, list_display(_linebreak), signature_display, humanize_size, arg_to_string, console cursor helpers: difftest fuzz; glibc mbstowcs: difftest; wcwidth via unicode-width, divergence per class counted, display difftests on agreeing characters |
-| `src/util/testpkg.c` | 103 | - | |
-| `src/pacman/pacman-conf.c` | 481 | - | the scripts read config values through it (pacman-key, makepkg) |
+| `src/util/testpkg.c` | 103 | `testpkg` | whole file (config.h paths and the siglevel as `Setup`): difftest `testpkg` binary vs C on generated packages (5 compressions, truncated, garbage, no/bad .PKGINFO, empty/junk .sig, unreadable, directory, missing, usage) and the gpg fixture's signed files against the system keyring; `run` vs the C load on a fixture handle at 9 package siglevels and 3 keyrings, signed and unsigned. Known: a text file (libarchive's mtree bidder reads it, "Package is invalid."; be_package refuses to open it, "Cannot open"), be_package's pinned "text file" |
+| `src/pacman/pacman-conf.c` | 481 | `pacman-cli::pacman_conf`, `pacman-conf` binary | whole file on conf.rs parseconfigfile + setdefaults: difftest `pacman_conf` binary vs C (every option, every directive by case/quoting, [options] and repo dumps, --repo-list, includes, sysroot, -R, missing files, bad options, POSIXLY_CORRECT; conf generator trees with random command lines); `scripts/pacman-conf-dropin.sh`: pacman-key, pacman-db-upgrade, makepkg's lockfile line and the completions' --repo-list against both binaries. Not modelled: strdup out of memory, stdout/stderr interleaving on a terminal (stderr written first, as with pipes) |
 
 Not ported, kept as upstream ships them: makepkg and libmakepkg,
 repo-add/repo-remove, pacman-key, pacman-db-upgrade, the wrapper (bash)
