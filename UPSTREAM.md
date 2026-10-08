@@ -684,6 +684,22 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
   entry ending in '/') as the next header, ending extraction quietly with
   success. **packager**
 
+## add.c commit minor
+
+- an intervening symlink is unlinked silently: with UNLINK |
+  SECURE_SYMLINKS (add.c:118-123) extracting `usr/lib/y` over a `usr/lib`
+  symlink to a directory replaces the link with a real directory;
+  conflict.c (~521) only flags it when the package lists the `usr/lib/`
+  entry, which makepkg always does. **packager**, or real with
+  `--overwrite`
+- the commit hangs on a fifo: `alpm_compute_md5sum` opens a backup path,
+  its `.pacnew` or a symlink to a fifo and `open(2)` blocks forever
+  (add.c:335, 357-358). **packager** (port: same)
+- pm_errno PKG_CANT_REMOVE from the remove step survives a successful
+  upgrade (add.c:508, remove.c:718). **api**
+- the -1 check after `_alpm_remove_single_package` is dead, it always
+  returns 0 (add.c:508-511). **none**
+
 ## transaction prepare minor
 
 - targets are the sync cache objects, mutated in place (sync.c:188-189,
