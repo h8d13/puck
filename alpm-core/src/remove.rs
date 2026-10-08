@@ -697,6 +697,8 @@ pub fn remove_single_package(
 		operation: PackageOperation::Remove,
 		oldpkg: Some(oldpkg),
 		newpkg: None,
+		local: &[],
+		pending: &[],
 	};
 	let scriptlet = newpkg.is_none()
 		&& oldpkg.scriptlet != 0

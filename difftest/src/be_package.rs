@@ -217,8 +217,8 @@ const MTREE_TEXTS: [&[u8]; 20] = [
 // libarchive's own error texts cannot match the port's (its reader,
 // strerror, an fd number): cut after the path of an open failure, a read
 // failure and an mtree failure (unless the mtree reader's own text), the
-// message's newline kept. one message, which may start with testpkg's or
-// pacman's "error: "
+// message's newline kept. one message, wherever the head sits in it
+// (after testpkg's or pacman's colored "error: ")
 pub fn cut_archive_text(msg: &[u8]) -> Vec<u8> {
 	let mtree: &[u8] = b"error while reading mtree of package ";
 	let heads = [
@@ -227,11 +227,12 @@ pub fn cut_archive_text(msg: &[u8]) -> Vec<u8> {
 		mtree,
 	];
 	let mut out = msg.to_vec();
-	let body = out.strip_prefix(b"error: ").map_or(0, |_| 7);
 	for head in heads {
-		if !out[body..].starts_with(head) {
+		let Some(body) =
+			out.windows(head.len()).position(|w| w == head)
+		else {
 			continue;
-		}
+		};
 		let start = body + head.len();
 		let Some(i) = out[start..].windows(2).position(|w| w == b": ")
 		else {

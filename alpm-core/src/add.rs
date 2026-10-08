@@ -1508,6 +1508,8 @@ pub fn commit_single_pkg(
 		operation,
 		oldpkg,
 		newpkg: Some(&t.pkg),
+		local: &[],
+		pending: &[],
 	};
 	h.callbacks().event(&Event::PackageOperationStart(op));
 	let oldver = oldpkg.map(|o| opt_str(&o.version).to_vec());
@@ -1741,13 +1743,41 @@ pub fn commit_single_pkg(
 	};
 	scriptlet(h, flags, &t.pkg, oldver, &install, post, false);
 
-	let op = PackageOp {
-		operation,
-		oldpkg,
-		newpkg: Some(&t.pkg),
-	};
-	h.callbacks().event(&Event::PackageOperationDone(op));
+	h.with_callbacks(|h, cb| {
+		// loaded since the commit started (alpm_db_get_pkgcache)
+		let local: Vec<&Package> = match h.localdb() {
+			Some(db) => db
+				.loaded_pkgcache()
+				.map_or_else(Vec::new, |c| c.iter().collect()),
+			None => Vec::new(),
+		};
+		let pending = match h.trans() {
+			Some(trans) => {
+				trans.add.iter().map(|t| &t.pkg).collect()
+			}
+			None => Vec::new(),
+		};
+		let op = PackageOp {
+			operation,
+			oldpkg,
+			newpkg: Some(&t.pkg),
+			local: &local,
+			pending: &pending,
+		};
+		cb.event(&Event::PackageOperationDone(op));
+	});
 	ret
+}
+
+// what alpm_find_satisfier reads of a package
+fn satisfier_copy(p: &Package) -> Package {
+	Package {
+		name: p.name.clone(),
+		name_hash: p.name_hash,
+		version: p.version.clone(),
+		provides: p.provides.clone(),
+		..Package::default()
+	}
 }
 
 // _alpm_db_add_pkgincache on the local db
@@ -1777,7 +1807,16 @@ pub fn upgrade_package(
 // skips ldconfig; Err is ALPM_ERR_TRANS_ABORT
 pub(crate) fn upgrade_packages(h: &mut Handle) -> Result<(), Errno> {
 	let trans = h.trans_mut().ok_or(Errno::TransNull)?;
-	let mut add = std::mem::take(&mut trans.add);
+	// the targets are lent out while trans->add stays readable, as
+	// name, version and provides (what alpm_find_satisfier compares)
+	let pending = trans.add.iter().map(|t| TransPkg {
+		pkg: satisfier_copy(&t.pkg),
+		db: t.db,
+		removes: Vec::new(),
+		oldpkg: None,
+	});
+	let pending = pending.collect();
+	let mut add = std::mem::replace(&mut trans.add, pending);
 	let pkg_count = add.len();
 	let (mut ret, mut run_ldconfig) = (Ok(()), true);
 	for (i, t) in add.iter_mut().enumerate() {

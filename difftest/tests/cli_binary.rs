@@ -16,7 +16,8 @@ use std::process::{Command, Stdio};
 
 use difftest::{
 	Comp, DbFile, LocalEntry, Rng, Stamped, SyncWorld, c_pacman,
-	rust_pacman, section, snapshot, stamped, write_db, write_package,
+	cut_archive_text, rust_pacman, section, snapshot, stamped, write_db,
+	write_package,
 };
 
 // GOTO_ERR logs "got error <n> at <func> (<C file>: <line>)" with
@@ -90,8 +91,14 @@ fn run_in(
 	Run {
 		status: o.status.code().expect("killed by a signal"),
 		out: norm(&o.stdout),
-		err: stamped(&norm(&o.stderr)),
+		err: stamped(&cut(&norm(&o.stderr))),
 	}
+}
+
+// each line with libarchive's text cut (cut_archive_text)
+fn cut(text: &[u8]) -> Vec<u8> {
+	let lines = text.split_inclusive(|&c| c == b'\n');
+	lines.flat_map(cut_archive_text).collect()
 }
 
 // the fixture's pacman.conf and the path options of every command line
@@ -142,9 +149,8 @@ fn setup(w: &SyncWorld, siglevel: Option<&str>) -> Vec<String> {
 }
 
 // the cache -Sc cleans, kept in cache.orig: each sync package's current
-// version with a .sig, an older one, a .part and a foreign package.
-// files libalpm cannot load stay out (be_package does not log
-// libarchive's texts, PORTING.md)
+// version with a .sig, an older one, a .part, a foreign package, a file
+// that is no package and a leftover sandbox download dir
 fn cache_files(w: &SyncWorld) {
 	let cache = w.fx.dir().join("cache");
 	let mut pkgs = Vec::new();
@@ -164,6 +170,9 @@ fn cache_files(w: &SyncWorld) {
 	write_package(&cache.join(part), "foreign", "1.0-1", Comp::None);
 	let foreign = "foreign-1.0-1-any.pkg.tar.gz";
 	write_package(&cache.join(foreign), "foreign", "1.0-1", Comp::Gzip);
+	fs::write(cache.join("junk-1-1-any.pkg.tar.zst"), "no package")
+		.unwrap();
+	fs::create_dir(cache.join("download-AbC123")).unwrap();
 	copy_dir(&cache, &w.fx.dir().join("cache.orig"));
 }
 

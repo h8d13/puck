@@ -111,6 +111,9 @@ fn events() {
 		operation,
 		oldpkg: old,
 		newpkg: new,
+		// the C side's handle has no local db or transaction
+		local: &[],
+		pending: &[],
 	};
 	let a: &'static Package = Box::leak(Box::new(a));
 	let b: &'static Package = Box::leak(Box::new(b));

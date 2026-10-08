@@ -88,10 +88,9 @@ Gate: `scripts/cli-parity.sh` between C `pacman` and the Rust binary with
 the same `--root`/`--dbpath`/`--config` on generated test roots and a
 read-only copy of a real system db; byte-identical stdout, stderr, exit.
 Now: `scripts/cli-parity-fixtures.sh` (-D runs under fakeroot with the
-written db compared), 615/615 equal; pacman-conf 554/554; testpkg
-binary 45/54 equal, 8 differing only in be_package's log lines, 1
-known (text file), testpkg module 486/550 + 64 log lines only (the
-mtree lines now carry libarchive's texts);
+written db compared), 620/620 equal; pacman-conf 554/554; testpkg
+binary 53/54 equal, 1 known (text file), testpkg module 550/550
+(libarchive's texts cut after the path on both sides);
 pacman-conf drop-in 13/13. On pacman, every run compares with the C's
 GOTO_ERR lines (`got error <n> at <func> (<C file>: <line>)`) dropped
 wherever they occur, and only those: they carry the C's source position
@@ -781,7 +780,10 @@ Follow-ups raised by port units:
 | `Question::SelectProvider` carries provider db names (today through `Lookup`); `Handle::replace_callbacks` has no frontend caller left | frontend | done: `DbPkgs::name`, `SelectProvider::dbs`; `Lookup::db_name` and `replace_callbacks` removed, deps_graph/trans_prep compare the dbs |
 | sandbox in `be_sync::downloader` (like `fetch_pkgurl`) | dbupdate | done (`SyncParts::sandbox`) |
 | `umask(0022)` around `alpm_db_update` (rustix process) | dbupdate | done, and run_chroot's child umask |
-| be_package logs libarchive's open/read failures ("could not open file X: ..." for unknown formats and dirs, "error while reading package" for a cut first header, "could not parse package description file" for a cut `.PKGINFO`); `sync_clean` and difftest query filter them today | cleancache | todo |
+| be_package logs libarchive's open/read failures ("could not open file X: ..." for unknown formats and dirs, "error while reading package" for a cut first header, "could not parse package description file" for a cut `.PKGINFO`); `sync_clean` and difftest query filter them today | cleancache | done: header and data read failures log "error while reading package"; difftests cut libarchive's text after the path (`cut_archive_text`, twin-compare's `ARCHIVE_TEXT`) instead of dropping lines: sync_clean's filter and testpkg's log-only tallies gone, cli_binary's cache holds a non-package and a download dir |
+| `be_package::changelog` without callbacks: -Qpc missed "opening archive" | qk | done (cli_binary `-Qpc --debug`) |
+| optdepends' ` [installed]`/` [pending]` after install/upgrade: the binary's `Lookup for ()` had no lists | twin-root | done: `PackageOp::local`/`pending` (local cache, trans->add at DONE; the driver keeps satisfier copies of the targets in trans.add while it lends them out), `Lookup` removed |
+| `-Sp` of an installed sync package whose local entry has no files list: the C fails ("could not open file .../files", invalid package), the port prints | output (cli_binary local_time) | todo (query/lazy-load owner) |
 | one `logv(cb, ...)` helper (copies in hook.rs, deps.rs, trans.rs, util's `log_parts`) | integrate2 | in progress: `callbacks::logv`, used by db, be_local, be_sync |
 | `-D` dispatch arm: `pacman_database(config, handle, targets, &mut o)` | m1close | done |
 | setup_libalpm's server adds through `Handle::dbs_mut()` (`Db::add_server` takes the callbacks) | m1close | done |

@@ -39,6 +39,8 @@ DLTMP = re.compile(r"^download-[A-Za-z0-9]{6}$")
 ARCHIVE_TEXT = re.compile(rb"^((?:error: )?(?:could not open file "
 			  rb"|error while reading package )[^\n]*?: )[^\n]*$",
 			  re.M)
+# mkdtemp's random suffix of a sandbox download dir, named in -Sc output
+DLTMP_TEXT = re.compile(rb"download-[A-Za-z0-9]{6}")
 # generated with run-time stamps or inode numbers inside: the java
 # keystore of update-ca-trust (entry dates), ldconfig's aux-cache
 NONDET = {
@@ -207,6 +209,8 @@ class Step:
 			r = QI_DATE.sub(rb"\1 <masked>", r)
 			c = ARCHIVE_TEXT.sub(rb"\1", c)
 			r = ARCHIVE_TEXT.sub(rb"\1", r)
+			c = DLTMP_TEXT.sub(b"download-XXXXXX", c)
+			r = DLTMP_TEXT.sub(b"download-XXXXXX", r)
 			if c == r:
 				continue
 			if f == "rc":
