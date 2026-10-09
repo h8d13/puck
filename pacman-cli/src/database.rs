@@ -18,7 +18,7 @@ use alpm_core::Db;
 use alpm_core::Errno;
 use alpm_core::Handle;
 use alpm_core::PkgHash;
-use alpm_core::checkconflicts;
+use alpm_core::local_conflicts;
 use alpm_core::strerror;
 use alpm_core::{DbPkgs, DepsEnv, DepsOpts, checkdeps, dep_compute_string};
 use alpm_core::{INFRQ_DESC, INFRQ_FILES};
@@ -202,14 +202,15 @@ fn check_db_local_files(
 	ret
 }
 
-// check_db_local_package_conflicts: alpm_checkconflicts on pkglist
+// check_db_local_package_conflicts: alpm_checkconflicts on the local db.
+// local_conflicts force-loads both packages (conflict_new's _alpm_pkg_dup)
+// so an unreadable files list drops the conflict like the C's
 fn check_db_local_package_conflicts(
 	config: &Config,
-	pkglist: &[&Package],
-	cb: &mut dyn Callbacks,
+	handle: &mut Handle,
 	o: &mut Output,
 ) -> i32 {
-	let conflicts = checkconflicts(pkglist, cb);
+	let conflicts = local_conflicts(handle);
 	for c in &conflicts {
 		let msg: [&[u8]; 5] = [
 			b"'",
@@ -290,7 +291,7 @@ fn check_db_local(config: &Config, handle: &mut Handle, o: &mut Output) -> i32 {
 	let (opts, cb) = (dbs.opts, dbs.cb);
 	let mut ret =
 		check_db_missing_deps(config, opts, cache, &pkglist, cb, o);
-	ret += check_db_local_package_conflicts(config, &pkglist, cb, o);
+	ret += check_db_local_package_conflicts(config, handle, o);
 	let dbs = handle.dbs_mut();
 	let cache = local_cache(dbs.local, dbs.dbext, dbs.cb, INFRQ_FILES);
 	ret + check_db_local_filelist_conflicts(config, &list(cache), o)

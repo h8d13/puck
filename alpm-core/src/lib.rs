@@ -133,9 +133,9 @@ pub use trans::{
 	TRANS_FLAG_NOCONFLICTS, TRANS_FLAG_NODEPS, TRANS_FLAG_NODEPVERSION,
 	TRANS_FLAG_NOHOOKS, TRANS_FLAG_NOLOCK, TRANS_FLAG_NOSAVE,
 	TRANS_FLAG_NOSCRIPTLET, TRANS_FLAG_RECURSE, TRANS_FLAG_RECURSEALL,
-	TRANS_FLAG_UNNEEDED, Trans, TransPkg, TransState, trans_commit,
-	trans_get_add, trans_get_flags, trans_get_remove, trans_init,
-	trans_interrupt, trans_prepare, trans_release,
+	TRANS_FLAG_UNNEEDED, Trans, TransPkg, TransState, local_conflicts,
+	trans_commit, trans_get_add, trans_get_flags, trans_get_remove,
+	trans_init, trans_interrupt, trans_prepare, trans_release,
 };
 pub use util::{compute_md5sum, compute_sha256sum, fnmatch, getuid, strerror};
 pub use version::vercmp;
