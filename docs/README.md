@@ -1,15 +1,53 @@
 # Why ask for `puck`
 
-- Bindings are only ever as good as the underlying code. I.e: how many open issues
-open merge requests (that are founded), and other yet-to-be discovered details...
+- Bindings are only ever as good as the underlying code, i.e. how many open issues
+and open merge requests (that are well-founded) there are, plus other yet-to-be-discovered details.
 
-- Rust deps pinned and built in (only `glibc`, `libgcc`, `libseccomp` and `liblzma` are
-linked dynamically) instead of linking `libarchive`, `curl`, `gpgme`, + any improvement
-to upstream projects, can be ported without too much difficulty. This means that
-ongoing developments by contributors directly benefits this project.
+- Rust dependencies are pinned and built in (only `glibc`, `libgcc`, `libseccomp` and `liblzma`
+are linked dynamically) instead of linking `libarchive`, `curl` and `gpgme`. Any improvement
+to upstream projects can be ported without too much difficulty, so ongoing work by
+contributors directly benefits this project.
 
-- Speed, memory usage, syscall counts, and correctness overall are attractive factors
-when it comes to the very tool that orchastrates your operating system and maitains it.
+- Speed, memory usage, syscall counts and overall correctness are attractive factors
+when it comes to the very tool that orchestrates your operating system and maintains it.
+
+- This project builds upon [ALPM](https://alpm.archlinux.page/), whose development was
+[officially announced](https://lists.archlinux.org/archives/list/arch-dev-public@lists.archlinux.org/thread/MZLH43574GGP7QQ7RKAAIRFT5LJPCEB4/)
+as funded by [the Sovereign Tech Agency](https://www.sovereign.tech/)'s Sovereign Tech Fund:
+financing for four developers to work on the ALPM project part-time over the course of 15 months.
+
+- ALPM is explicitly [not a package manager](https://alpm.archlinux.page/faq.html). It provides
+spec-backed parsers and writers for the file formats, but not the transaction engine on top:
+dependency resolution, conflicts/replaces, downloads, install/remove/upgrade, hooks and locking.
+That engine is the part `puck` ports.
+
+- File-by-file porting keeps behaviour traceable to upstream. Every Rust module maps to a C
+source file, so regressions can be checked with differential tests against `pacman` on the
+same root, database and package set.
+
+- Drop-in compatibility: same `pacman.conf`, `mirrorlist`, local database, sync databases,
+hooks and cache layout. Nothing to migrate, and you can switch back to `pacman` at any time.
+
+- Signature verification without a stateful GnuPG keyring. [VOA](https://voa.archlinux.page/)
+replaces `gpgme` and the `pacman-key` init/populate dance, which is a long-standing source of
+"invalid or corrupted package (PGP signature)" breakage.
+
+- Self-sufficient in a broken system. A partial upgrade that breaks `libarchive`, `curl` or
+`libcrypto` can leave `pacman` unable to run (the reason `pacman-static` exists). With almost
+everything built in, `puck` keeps working when the libraries around it don't.
+
+- Memory safety where it matters most: a root-privileged process that downloads, decompresses
+and parses archives and metadata from the network.
+
+- Strict typing at the boundary. Malformed `desc`, `.PKGINFO`, `.MTREE` or version strings are
+rejected at parse time by `alpm-types`, instead of being carried as loose `char *` through
+the transaction.
+
+- `libseccomp` sandboxing of the riskier stages (download, decompression, parsing) shrinks
+what a malicious or malformed package can reach.
+
+- License-compatible stack: the ALPM and VOA crates are `MIT OR Apache-2.0`, so they can be
+used by GPL-licensed `puck`, which follows `pacman`'s license as a port.
 
 ---
 
