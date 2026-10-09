@@ -314,12 +314,14 @@ pub fn tp_cachedir(fx: &TempRoot) -> Vec<u8> {
 // paths come back in world order
 pub fn write_world(fx: &TempRoot, w: &TpWorld, rng: &mut Rng) -> Vec<Vec<u8>> {
 	fx.reset_local();
+	// now and then no files list: the force_load of a dup fails on it
+	// (the removals, -Rs pulls, oldpkgs)
 	let entries: Vec<LocalEntry> =
 		w.local.iter()
 			.map(|p| LocalEntry {
 				dir: format!("{}-{}", p.name, p.version),
 				desc: Some(local_desc(p).into_bytes()),
-				files: Some(Vec::new()),
+				files: (rng.below(6) != 0).then(Vec::new),
 				install: false,
 			})
 			.collect();

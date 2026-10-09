@@ -20,6 +20,7 @@ use crate::be_local::{INFRQ_FILES, scan_zu};
 use crate::callbacks::{
 	Callbacks, Event, LogLevel, PackageOp, PackageOperation, Progress, logv,
 };
+use crate::db::Db;
 use crate::deps::{
 	DepMissing, checkdeps, dep_compute_string, find_satisfier, recursedeps,
 };
@@ -31,8 +32,8 @@ use crate::trans::{
 	PrepareData, PrepareError, TRANS_FLAG_CASCADE, TRANS_FLAG_DBONLY,
 	TRANS_FLAG_NODEPS, TRANS_FLAG_NODEPVERSION, TRANS_FLAG_NOSAVE,
 	TRANS_FLAG_NOSCRIPTLET, TRANS_FLAG_RECURSE, TRANS_FLAG_RECURSEALL,
-	TRANS_FLAG_UNNEEDED, Trans, TransState, View, interrupted, opt_str,
-	runscriptlet, trans_in,
+	TRANS_FLAG_UNNEEDED, Trans, TransState, View, interrupted, load_caches,
+	load_local_descs, opt_str, pkg_dup, runscriptlet, trans_in, with_view,
 };
 use crate::util::{
 	CALLER_PREFIX, PATH_MAX, alpm_access, compute_md5sum,
@@ -61,18 +62,16 @@ pub fn remove_pkg(h: &mut Handle, pkg: &Package) -> Result<(), Errno> {
 		b" to the transaction remove list\n",
 	];
 	logv(h.callbacks(), Debug, &msg);
-	let dbs = h.dbs_mut();
-	let (dbext, cb) = (dbs.dbext, dbs.cb);
-	let full = dbs
-		.local
-		.and_then(|db| {
-			db.force_load_pkg(dbext, cb, pkg.name_bytes()).ok()
-		})
-		.map(Package::dup);
-	let copy = full.unwrap_or_else(|| pkg.dup());
+	// a dup that loaded short only warns (the C tests == -1)
+	let copy = pkg_dup(h, pkg.name_bytes())
+		.map_or_else(|| pkg.dup(), |(copy, _)| copy);
 	let trans = h.trans_mut().expect("checked above");
 	trans.remove.push(copy);
 	Ok(())
+}
+
+fn removal_names(trans: &Trans) -> Vec<&[u8]> {
+	trans.remove.iter().map(Package::name_bytes).collect()
 }
 
 fn checkdeps_rev(
@@ -87,38 +86,64 @@ fn checkdeps_rev(
 }
 
 // remove_prepare_cascade (static in C): the local packages whose
-// dependencies break join the removals, until nothing breaks
-fn cascade(
-	view: &View,
-	cb: &mut dyn Callbacks,
-	trans: &mut Trans,
-	mut lp: Vec<DepMissing>,
-) {
+// dependencies break join the removals (dup'ed whole, a short load
+// only warns: the C tests == -1), until nothing breaks
+fn cascade(h: &mut Handle, trans: &mut Trans, mut lp: Vec<DepMissing>) {
 	while !lp.is_empty() {
 		for miss in &lp {
-			let Some(info) = view.local.find(&miss.target) else {
+			let cache = h.localdb().and_then(Db::loaded_pkgcache);
+			let info = cache.and_then(|c| c.find(&miss.target));
+			let Some(name) =
+				info.map(|p| opt_str(&p.name).to_vec())
+			else {
 				let msg = [
 					b"could not find ",
 					&miss.target[..],
 					b" in database -- skipping\n",
 				];
-				logv(cb, Error, &msg);
+				logv(h.callbacks(), Error, &msg);
 				continue;
 			};
-			if pkg_find(&trans.remove, info.name_bytes()).is_some()
-			{
+			if pkg_find(&trans.remove, &name).is_some() {
 				continue;
 			}
-			let msg = [
-				b"pulling ",
-				opt_str(&info.name),
-				b" in target list\n",
-			];
-			logv(cb, Debug, &msg);
-			trans.remove.push(info.dup());
+			let msg =
+				[b"pulling ", &name[..], b" in target list\n"];
+			logv(h.callbacks(), Debug, &msg);
+			if let Some((copy, _)) = pkg_dup(h, &name) {
+				trans.remove.push(copy);
+			}
 		}
-		lp = checkdeps_rev(view, cb, trans);
+		lp = with_view(h, |v, cb| checkdeps_rev(v, cb, trans));
 	}
+}
+
+// _alpm_recursedeps: the removable dependencies selected, then each
+// one logged and dup'ed whole into the removals; a dup that loaded
+// short ends the prepare (the C's return -1 on 1, pm_errno PKG_INVALID
+// from the dup). its walks read the depends of the whole local cache
+fn recurse(
+	h: &mut Handle,
+	trans: &mut Trans,
+	explicit: bool,
+) -> Result<(), PrepareError> {
+	logv(h.callbacks(), Debug, &[b"finding removable dependencies\n"]);
+	load_local_descs(h, &removal_names(trans));
+	let names: Vec<Vec<u8>> = with_view(h, |v, _| {
+		recursedeps(v.local, &trans.remove, explicit)
+			.into_iter()
+			.map(|p| opt_str(&p.name).to_vec())
+			.collect()
+	});
+	for n in names {
+		let msg = [b"adding '", &n[..], b"' to the targets\n"];
+		logv(h.callbacks(), Debug, &msg);
+		match pkg_dup(h, &n) {
+			Some((copy, true)) => trans.remove.push(copy),
+			_ => return Err(Errno::PkgInvalid.into()),
+		}
+	}
+	Ok(())
 }
 
 // remove_prepare_keep_needed (static in C): removals that break a
@@ -176,31 +201,40 @@ fn notify_optdepends(view: &View, cb: &mut dyn Callbacks, trans: &Trans) {
 // _alpm_remove_prepare: -Rs adds what only the targets need (after the
 // cascade with -Rcs), a broken dependency pulls its package in (-Rc),
 // drops the removal that breaks it (-Ru) or fails with the missing
-// dependencies
+// dependencies. the local descs the C getters lazy-load are loaded
+// before the step that reads them (the removals are loaded whole
+// already); with -Rdd none is read
 pub(crate) fn remove_prepare(
-	view: &View,
-	cb: &mut dyn Callbacks,
+	h: &mut Handle,
 	trans: &mut Trans,
 ) -> Result<(), PrepareError> {
+	load_caches(h, false);
 	let flags = trans.flags;
-	let recurse = flags & TRANS_FLAG_RECURSE != 0;
+	let recursing = flags & TRANS_FLAG_RECURSE != 0;
 	let cascading = flags & TRANS_FLAG_CASCADE != 0;
 	let nodeps = flags & TRANS_FLAG_NODEPS != 0;
 	let explicit = flags & TRANS_FLAG_RECURSEALL != 0;
-	if recurse && !cascading {
-		logv(cb, Debug, &[b"finding removable dependencies\n"]);
-		recursedeps(view.local, &mut trans.remove, explicit, cb);
+	if recursing && !cascading {
+		recurse(h, trans, explicit)?;
 	}
 
 	if !nodeps {
-		cb.event(&Event::CheckdepsStart);
-		logv(cb, Debug, &[b"looking for unsatisfied dependencies\n"]);
-		let lp = checkdeps_rev(view, cb, trans);
+		h.with_callbacks(|_, cb| {
+			cb.event(&Event::CheckdepsStart);
+			let msg = b"looking for unsatisfied dependencies\n";
+			logv(cb, Debug, &[msg]);
+		});
+		// alpm_checkdeps reads the depends of every local package
+		// not leaving
+		load_local_descs(h, &removal_names(trans));
+		let lp = with_view(h, |v, cb| checkdeps_rev(v, cb, trans));
 		if !lp.is_empty() {
 			if cascading {
-				cascade(view, cb, trans, lp);
+				cascade(h, trans, lp);
 			} else if flags & TRANS_FLAG_UNNEEDED != 0 {
-				keep_needed(view, cb, trans, lp);
+				with_view(h, |v, cb| {
+					keep_needed(v, cb, trans, lp)
+				});
 			} else {
 				let data = PrepareData::Missing(lp);
 				let e = Errno::UnsatisfiedDeps;
@@ -209,14 +243,15 @@ pub(crate) fn remove_prepare(
 		}
 	}
 
-	if cascading && recurse {
-		logv(cb, Debug, &[b"finding removable dependencies\n"]);
-		recursedeps(view.local, &mut trans.remove, explicit, cb);
+	if cascading && recursing {
+		recurse(h, trans, explicit)?;
 	}
 
 	if !nodeps {
-		notify_optdepends(view, cb, trans);
-		cb.event(&Event::CheckdepsDone);
+		with_view(h, |v, cb| {
+			notify_optdepends(v, cb, trans);
+			cb.event(&Event::CheckdepsDone);
+		});
 	}
 	Ok(())
 }

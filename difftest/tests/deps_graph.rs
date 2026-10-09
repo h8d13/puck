@@ -14,10 +14,10 @@ use std::collections::VecDeque;
 use std::ffi::c_int;
 use std::ptr;
 
-use alpm_core::be_local::INFRQ_DESC;
+use alpm_core::be_local::INFRQ_ALL;
 use alpm_core::callbacks::{Callbacks, LogLevel, Question};
 use alpm_core::db::{
-	DB_USAGE_ALL, DB_USAGE_INSTALL, DB_USAGE_SEARCH, DB_USAGE_UPGRADE,
+	DB_USAGE_ALL, DB_USAGE_INSTALL, DB_USAGE_SEARCH, DB_USAGE_UPGRADE, Db,
 };
 use alpm_core::deps::{
 	DbPkgs, DepMissing, DepsEnv, checkdeps, dep_from_string,
@@ -120,15 +120,9 @@ impl RustSide {
 		handle.set_assumeinstalled(&setup.assumeinstalled).unwrap();
 		let dbext = handle.dbext().to_vec();
 		let db = handle.localdb_mut().unwrap();
-		let names: Vec<Vec<u8>> = db
-			.pkgcache(&dbext, &mut ())
-			.unwrap()
-			.iter()
-			.map(|p| p.name_bytes().to_vec())
-			.collect();
-		for n in &names {
-			db.load_pkg(&dbext, &mut (), n, INFRQ_DESC).unwrap();
-		}
+		// every local entry loaded whole (or marked failed), like the
+		// C side
+		db.load_all(&dbext, &mut (), INFRQ_ALL).unwrap();
 		for d in handle.syncdbs_mut() {
 			d.pkgcache(&dbext, &mut ()).unwrap();
 		}
@@ -238,6 +232,8 @@ impl Callbacks for Script<'_> {
 	}
 }
 
+// without the FUNCTION lines (the lazy loads, dropped by the C's log
+// callback too)
 fn c_calls(mut calls: Calls) -> Calls {
 	calls.logs.retain(|(level, _)| *level != LOG_FUNCTION);
 	calls
@@ -496,18 +492,49 @@ impl Case<'_> {
 		let targs = pick_ids(rng, &self.local, 4);
 		let explicit = rng.below(2) == 0;
 		let ((cret, cnames), cc) = self.c.recursedeps(&targs, explicit);
-		assert_eq!(cret, 0);
 		let mut s = Script::new(self.rs, &[]);
 		let mut list: Vec<Package> = targs
 			.iter()
 			.map(|id| self.rs.get(id).clone())
 			.collect();
-		recursedeps(self.rs.local(), &mut list, explicit, &mut s);
+		// the C's tail loop, as remove.rs runs it: each selected
+		// package logged and dup'ed whole, a short load (no files
+		// list) ends it with -1. the entries are loaded whole already,
+		// so the dup of a clone reads nothing new
+		let local = self.rs.handle.localdb().and_then(Db::local);
+		let local = local.expect("local db");
+		let mut ret = 0;
+		for p in recursedeps(self.rs.local(), &list, explicit) {
+			let line = [
+				&b"adding '"[..],
+				p.name_bytes(),
+				b"' to the targets\n",
+			]
+			.concat();
+			s.log(LogLevel::Debug, &line);
+			let (copy, loaded) =
+				local.dup_pkg(&mut p.clone(), &mut s);
+			if !loaded {
+				ret = -1;
+				break;
+			}
+			list.push(copy);
+		}
+		assert_eq!(
+			cret,
+			ret,
+			"recursedeps ret {:?}",
+			(&targs, explicit)
+		);
 		let names: Vec<Vec<u8>> =
 			list.iter().map(|p| p.name_bytes().to_vec()).collect();
 		let what = (&targs, explicit);
 		assert_eq!(cnames, names, "recursedeps {what:?}");
-		assert_eq!(c_calls(cc), s.calls, "recursedeps calls {what:?}");
+		assert_eq!(
+			c_calls(cc),
+			c_calls(s.calls),
+			"recursedeps calls {what:?}"
+		);
 		let added = &list[targs.len()..];
 		seen.removed += usize::from(!added.is_empty());
 		let asexplicit = added.iter().any(|p| {

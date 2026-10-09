@@ -24,7 +24,7 @@ use std::path::Path;
 use pacman_common::util_common::safe_fgets;
 use rustix::fs::Access;
 
-use crate::be_local::{INFRQ_ALL, INFRQ_DESC};
+use crate::be_local::INFRQ_DESC;
 use crate::callbacks::{Callbacks, Event, HookWhen, LogLevel, logv};
 use crate::conflict::{Conflict, FileConflict};
 use crate::db::{DB_USAGE_INSTALL, DB_USAGE_UPGRADE};
@@ -375,14 +375,17 @@ pub(crate) struct View<'a> {
 	pub sync: Vec<DbPkgs<'a>>,
 }
 
-// loads what View reads: the local cache with INFRQ_DESC, with sync the
-// caches of the dbs used for install or upgrade (a failure marks a sync
-// db invalid like the C's lazy load)
+// loads the caches View reads: the local cache (its entries, no
+// section: what _alpm_db_get_pkgfromcache and the name and version
+// checks need), with sync the caches of the dbs used for install or
+// upgrade (a failure marks a sync db invalid like the C's lazy load).
+// the descs the C getters lazy-load come with load_local_descs, at the
+// step that reads them
 pub(crate) fn load_caches(h: &mut Handle, sync: bool) {
 	let d = h.dbs_mut();
 	let (dbext, cb) = (d.dbext, d.cb);
 	if let Some(db) = d.local {
-		let _ = db.load_all(dbext, cb, INFRQ_DESC);
+		let _ = db.pkgcache(dbext, cb);
 	}
 	if !sync {
 		return;
@@ -392,6 +395,24 @@ pub(crate) fn load_caches(h: &mut Handle, sync: bool) {
 			let _ = db.pkgcache(dbext, cb);
 		}
 	}
+}
+
+// the descs of the local packages not named in skip, loaded into the
+// cache in list order: a C loop over alpm_list_diff(local cache, skip)
+// reading depends, provides or conflicts through the getters
+pub(crate) fn load_local_descs(h: &mut Handle, skip: &[&[u8]]) {
+	let d = h.dbs_mut();
+	if let Some(db) = d.local {
+		let _ = db.load_except(d.dbext, d.cb, INFRQ_DESC, skip);
+	}
+}
+
+// _alpm_pkg_dup of the local cache entry named name (Db::dup_pkg: a
+// force_load with its log lines, the copy, whether every section
+// loaded). None without a local db or that entry
+pub(crate) fn pkg_dup(h: &mut Handle, name: &[u8]) -> Option<(Package, bool)> {
+	let d = h.dbs_mut();
+	d.local?.dup_pkg(d.dbext, d.cb, name).ok()
 }
 
 impl<'a> View<'a> {
@@ -569,27 +590,6 @@ fn sort_targets(view: &View, cb: &mut dyn Callbacks, trans: &mut Trans) {
 	reorder(&mut trans.remove, &order);
 }
 
-// _alpm_pkg_dup force-loads every section of a local package: the
-// removals and oldpkgs a prepare collected are dup'ed again from their
-// fully loaded cache entries, for the commit. not logged: the C reads
-// them when it dups, not here
-fn load_full(h: &mut Handle, trans: &mut Trans) {
-	let d = h.dbs_mut();
-	let (dbext, cb) = (d.dbext, &mut ());
-	let Some(db) = d.local else {
-		return;
-	};
-	let olds = trans.add.iter_mut().filter_map(|t| t.oldpkg.as_mut());
-	for p in trans.remove.iter_mut().chain(olds) {
-		if p.infolevel & INFRQ_ALL == INFRQ_ALL {
-			continue;
-		}
-		if let Ok(full) = db.force_load_pkg(dbext, cb, p.name_bytes()) {
-			*p = full.dup();
-		}
-	}
-}
-
 // alpm_trans_prepare: nothing to do leaves the transaction initialized.
 // file and sync targets go through _alpm_sync_prepare, a removal only
 // through _alpm_remove_prepare; then both lists are sorted unless
@@ -611,18 +611,10 @@ fn prepare(h: &mut Handle, trans: &mut Trans) -> Result<(), PrepareError> {
 		let data = PrepareData::InvalidArch(invalid);
 		return Err(PrepareError::new(Errno::PkgInvalidArch, data));
 	}
-	if trans.add.is_empty() {
-		load_caches(h, false);
-		with_view(h, |v, cb| remove::remove_prepare(v, cb, trans))?;
-	} else {
-		sync::check_dbs(h, &trans.add)?;
-		load_caches(h, false);
-		if with_view(h, |v, _| sync::resolve_needs_sync(v, trans)) {
-			load_caches(h, true);
-		}
-		with_view(h, |v, cb| sync::sync_prepare(v, cb, trans))?;
+	match trans.add.is_empty() {
+		true => remove::remove_prepare(h, trans)?,
+		false => sync::sync_prepare(h, trans)?,
 	}
-	load_full(h, trans);
 	if trans.flags & TRANS_FLAG_NODEPS == 0 {
 		with_view(h, |v, cb| sort_targets(v, cb, trans));
 	}

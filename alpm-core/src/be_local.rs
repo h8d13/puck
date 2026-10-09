@@ -274,6 +274,34 @@ impl LocalDb {
 		Ok(cache)
 	}
 
+	// _alpm_pkg_dup of a local package: its force_load (one
+	// local_db_read of INFRQ_ALL, logged each time) into pkg, then a
+	// dup of what pkg holds. false is the C's 1: a section failed to
+	// load, the warning logged, the copy made all the same; the caller
+	// decides whether that fails (pm_errno PKG_INVALID is its to report)
+	pub fn dup_pkg(
+		&self,
+		pkg: &mut Package,
+		cb: &mut dyn Callbacks,
+	) -> (Package, bool) {
+		let loaded = self.read(pkg, INFRQ_ALL, cb).is_ok();
+		if !loaded {
+			let msg = [
+				b"could not fully load metadata for package ",
+				pkg.name_bytes(),
+				b"-",
+				until_nul(
+					pkg.version
+						.as_deref()
+						.unwrap_or(b"(null)"),
+				),
+				b"\n",
+			];
+			logv(cb, LogLevel::Warning, &msg);
+		}
+		(pkg.dup(), loaded)
+	}
+
 	// local_db_read: loads the sections of inforeq not loaded yet. on
 	// error what was read stays, INFRQ_ERROR is set
 	pub fn read(

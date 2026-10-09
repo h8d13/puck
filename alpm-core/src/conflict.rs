@@ -60,34 +60,29 @@ fn same_name(a: &Package, b: &Package) -> bool {
 	has_name(a, b.name_bytes(), b.name_hash)
 }
 
-// conflict_new: _alpm_pkg_dup force-loads a local package and fails when
-// that fails (INFRQ_ERROR), the conflict is then dropped
+// conflict_new on packages dup'ed as they are: _alpm_pkg_dup
+// force-loads a local package and fails when that fails (INFRQ_ERROR
+// from an earlier read), the conflict is then dropped. a local entry
+// read in place goes through Db::dup_pkg instead (sync's outer
+// conflicts)
 fn dup_fails(pkg: &Package) -> bool {
 	pkg.origin == Some(PkgFrom::LocalDb) && pkg.infolevel & INFRQ_ERROR != 0
 }
 
-// add_conflict: pairs already listed (by both names) are not added again
-fn add_conflict(
+// add_conflict after conflict_new: a pair already listed (by both
+// names) is dropped, else listed and logged
+pub fn add_conflict(
 	baddeps: &mut Vec<Conflict>,
-	pkg1: &Package,
-	pkg2: &Package,
-	reason: &Depend,
+	conflict: Conflict,
 	log: &mut dyn Callbacks,
 ) {
-	if dup_fails(pkg1) || dup_fails(pkg2) {
-		return;
-	}
+	let (pkg1, pkg2) = (&conflict.package1, &conflict.package2);
 	let isin = baddeps.iter().any(|c| {
 		same_name(&c.package1, pkg1) && same_name(&c.package2, pkg2)
 	});
 	if isin {
 		return;
 	}
-	baddeps.push(Conflict {
-		package1: pkg1.dup(),
-		package2: pkg2.dup(),
-		reason: reason.clone(),
-	});
 	let name = |p: &Package| {
 		p.name.as_deref().map_or(&b"(null)"[..], until_nul).to_vec()
 	};
@@ -97,22 +92,23 @@ fn add_conflict(
 		b" conflicts with ",
 		&name(pkg2),
 		b" (by ",
-		&dep_compute_string(reason),
+		&dep_compute_string(&conflict.reason),
 		b")\n",
 	];
 	logv(log, Debug, &line);
+	baddeps.push(conflict);
 }
 
-// check_conflict: the conflicts of each list1 package against every list2
-// package of another name. reversed puts the list2 package first (the
-// C's order < 0)
-fn check_conflict(
-	list1: &[&Package],
-	list2: &[&Package],
-	baddeps: &mut Vec<Conflict>,
+// check_conflict's loops: every (pkg1, pkg2, reason) the C hands to
+// add_conflict, in order, package1 first (the list2 package with
+// reversed, the C's order < 0). the caller makes the conflicts
+// (conflict_new's dups) and adds them
+pub fn check_conflict<'a>(
+	list1: &[&'a Package],
+	list2: &[&'a Package],
 	reversed: bool,
-	log: &mut dyn Callbacks,
-) {
+) -> Vec<(&'a Package, &'a Package, &'a Depend)> {
+	let mut found = Vec::new();
 	for pkg1 in list1 {
 		for conflict in &pkg1.conflicts {
 			for pkg2 in list2 {
@@ -121,24 +117,34 @@ fn check_conflict(
 				{
 					continue;
 				}
-				let (a, b) = match reversed {
-					false => (pkg1, pkg2),
-					true => (pkg2, pkg1),
-				};
-				add_conflict(baddeps, a, b, conflict, log);
+				found.push(match reversed {
+					false => (*pkg1, *pkg2, conflict),
+					true => (*pkg2, *pkg1, conflict),
+				});
 			}
 		}
 	}
+	found
 }
 
-// _alpm_innerconflicts: targets against targets
+// _alpm_innerconflicts: conflicts within packages, dup'ed as they are
 pub fn innerconflicts(
 	packages: &[&Package],
 	log: &mut dyn Callbacks,
 ) -> Vec<Conflict> {
 	let mut baddeps = Vec::new();
 	logv(log, Debug, &[b"check targets vs targets\n"]);
-	check_conflict(packages, packages, &mut baddeps, false, log);
+	for (pkg1, pkg2, reason) in check_conflict(packages, packages, false) {
+		if dup_fails(pkg1) || dup_fails(pkg2) {
+			continue;
+		}
+		let conflict = Conflict {
+			package1: pkg1.dup(),
+			package2: pkg2.dup(),
+			reason: reason.clone(),
+		};
+		add_conflict(&mut baddeps, conflict, log);
+	}
 	baddeps
 }
 
@@ -148,24 +154,6 @@ pub fn checkconflicts(
 	log: &mut dyn Callbacks,
 ) -> Vec<Conflict> {
 	innerconflicts(packages, log)
-}
-
-// _alpm_outerconflicts: targets against the local packages of other
-// names (sorted by name), then those against the targets with the local
-// package first
-pub fn outerconflicts<P: Borrow<Package>>(
-	local: &PkgHash<P>,
-	packages: &[&Package],
-	log: &mut dyn Callbacks,
-) -> Vec<Conflict> {
-	let cache: Vec<&Package> = local.iter().map(Borrow::borrow).collect();
-	let dblist = list_diff(&cache, packages);
-	let mut baddeps = Vec::new();
-	logv(log, Debug, &[b"check targets vs db\n"]);
-	check_conflict(packages, &dblist, &mut baddeps, false, log);
-	logv(log, Debug, &[b"check db vs targets\n"]);
-	check_conflict(&dblist, packages, &mut baddeps, true, log);
-	baddeps
 }
 
 // result of _alpm_db_find_fileconflicts

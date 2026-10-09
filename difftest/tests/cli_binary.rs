@@ -176,11 +176,11 @@ fn cache_files(w: &SyncWorld) {
 	copy_dir(&cache, &w.fx.dir().join("cache.orig"));
 }
 
-fn local_desc(name: &str) -> Vec<u8> {
+fn local_desc(name: &str, version: &str) -> Vec<u8> {
 	let one = |s: &str| vec![s.to_string()];
 	[
 		section("NAME", &one(name)),
-		section("VERSION", &one("1.0-1")),
+		section("VERSION", &one(version)),
 		section("BASE", &one(name)),
 		section("DESC", &one("owns files")),
 		section("ARCH", &one("x86_64")),
@@ -213,10 +213,10 @@ fn unreadable(path: &Path) {
 
 // an installed package owning real files under the root, for -Ql/-Qo/-Qk,
 // and entries the lazy loads fail on, logged between the op's lines: no
-// files list next to an mtree, an unreadable files list or mtree, an
-// empty mtree. the generated entries have no files list either. an
-// unreadable desc is left to difftest query: -S loads every local desc
-// up front (PORTING.md follow-up)
+// files list next to an mtree, an unreadable files list, desc or mtree,
+// an empty mtree. the generated entries have no files list either. an
+// older install of the last sync package without a files list: the
+// oldpkg dup of -Sp/-Sup fails the prepare (invalid package)
 fn owner_pkg(w: &SyncWorld) {
 	let root = w.fx.dir().join("root");
 	fs::create_dir_all(root.join("usr/bin")).unwrap();
@@ -226,18 +226,27 @@ fn owner_pkg(w: &SyncWorld) {
 		("owner", true),
 		("nofiles", false),
 		("badfiles", true),
+		("baddesc", true),
 		("badmtree", true),
 		("emptymtree", true),
 	];
-	let entries: Vec<LocalEntry> = names
+	let mut entries: Vec<LocalEntry> = names
 		.iter()
 		.map(|&(name, has_files)| LocalEntry {
 			dir: format!("{name}-1.0-1"),
-			desc: Some(local_desc(name)),
+			desc: Some(local_desc(name, "1.0-1")),
 			files: has_files.then(|| files.as_bytes().to_vec()),
 			install: false,
 		})
 		.collect();
+	if let Some(last) = w.pkg_names().last() {
+		entries.push(LocalEntry {
+			dir: format!("{last}-0.1-1"),
+			desc: Some(local_desc(last, "0.1-1")),
+			files: None,
+			install: false,
+		});
+	}
 	w.fx.write_local(&entries);
 	let dir = |name: &str| w.fx.local().join(format!("{name}-1.0-1"));
 	for name in ["nofiles", "badmtree"] {
@@ -249,6 +258,7 @@ fn owner_pkg(w: &SyncWorld) {
 	}
 	fs::write(dir("emptymtree").join("mtree"), "").unwrap();
 	unreadable(&dir("badfiles").join("files"));
+	unreadable(&dir("baddesc").join("desc"));
 	unreadable(&dir("badmtree").join("mtree"));
 }
 
@@ -635,8 +645,8 @@ fn local_time() {
 	owner_pkg(&w);
 	let paths = setup(&w, Some("Never"));
 	let dir = w.fx.dir();
-	// %b of a file package: -Sp of an installed sync package stops at
-	// its missing files list in the C, not in the port (reported)
+	// %b of a file package (-Sp of the installed sync package stops
+	// at its missing files list, both sides)
 	let cache = dir.join("cache.orig/foreign-1.0-1-any.pkg.tar.gz");
 	let foreign = cache.display().to_string();
 	let cmds: [&[&str]; 7] = [
