@@ -4,7 +4,7 @@ Safe Rust port of pacman, file by file, checked against upstream C.
 
 References (git submodules):
 - `pacman/`: upstream pacman at `v7.1.0-18-ga6f7467d`, the C reference
-- `alpm/`: official ALPM crates at `0eedcb8` (2026-10-03), kept as the
+- `alpm/`: official ALPM crates at `926abd0` (2026-10-08), kept as the
   reference; none is linked (`METHODOLOGY.md`, "Dependencies")
 
 ## Layout
