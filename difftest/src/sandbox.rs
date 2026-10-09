@@ -627,14 +627,50 @@ impl alpm_core::sandbox::Host for RootHost {
 	fn raise(&mut self, _sig: c_int) {}
 }
 
-// target/<profile>/deps/<test>-<hash> -> target/<profile>/<name>
+// target/<profile>/deps/<test>-<hash> -> target/<profile>/<name>; the
+// test binary found as the port finds itself, so a run without /proc
+// (rerun_without_proc) still has its helpers
 pub fn sibling_bin(name: &str) -> std::path::PathBuf {
-	let exe = std::env::current_exe().unwrap();
+	let exe = alpm_core::sandbox::exe_path().unwrap();
 	exe.parent().unwrap().parent().unwrap().join(name)
 }
 
+const NO_PROC: &str = "DIFFTEST_NO_PROC";
+
+// in a rerun_without_proc child
+pub fn without_proc() -> bool {
+	std::env::var_os(NO_PROC).is_some()
+}
+
+// this test binary run again by unshare(1) in user and mount namespaces
+// (uid 0 inside, so chroot(2) and mounts work) with an empty tmpfs over
+// /proc, the tests matching any of filters on one thread, NO_PROC and
+// envs set; wrapper (fakechroot, fakeroot) runs in front of the binary.
+// the cwd is the difftest crate: a test's C chdir(root) must not leave
+// the process in a root removed after
+pub fn rerun_without_proc(
+	filters: &[&str],
+	wrapper: Option<&str>,
+	envs: &[(&str, &str)],
+) -> std::process::Output {
+	let exe = alpm_core::sandbox::exe_path().unwrap();
+	let mut c = Command::new("unshare");
+	c.args(["--map-root-user", "--mount", "sh", "-c"]);
+	c.arg(
+		"mount -t tmpfs none /proc && test ! -e /proc/self && exec \"$@\"",
+	);
+	c.arg("sh");
+	c.args(wrapper);
+	c.arg(exe)
+		.args(filters)
+		.args(["--nocapture", "--test-threads=1"]);
+	c.env(NO_PROC, "1").envs(envs.iter().copied());
+	c.current_dir(env!("CARGO_MANIFEST_DIR"));
+	c.output().expect("unshare not found")
+}
+
 // run_chroot's child for a Rust handle in tests: Handle's default,
-// /proc/self/exe, is the test binary here
+// helper_program, is the test binary here
 pub fn test_chroot_helper() -> std::path::PathBuf {
 	sibling_bin("sandbox-helper")
 }

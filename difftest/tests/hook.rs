@@ -456,9 +456,31 @@ fn valid_hook(rng: &mut Rng) -> String {
 	s
 }
 
+// match_run_fuzz again where /proc is not mounted: hooks on root "/"
+// (no chroot) with the helper found without /proc/self/exe
+#[test]
+fn without_proc() {
+	if difftest::without_proc() {
+		return;
+	}
+	let out = difftest::rerun_without_proc(
+		&["match_run_fuzz"],
+		None,
+		&[("DIFFTEST_ITERS", "20000")],
+	);
+	print!("{}", String::from_utf8_lossy(&out.stdout));
+	eprint!("{}", String::from_utf8_lossy(&out.stderr));
+	assert!(out.status.success(), "run without /proc: {}", out.status);
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	assert!(stdout.contains("1 passed"), "match_run_fuzz did not run");
+}
+
 // trigger matching and runs: valid hooks, random transactions
 #[test]
 fn match_run_fuzz() {
+	if difftest::without_proc() {
+		assert!(!Path::new("/proc/self").exists(), "/proc is mounted");
+	}
 	let fix = Fix::new("hook-match");
 	let (mut c, mut r) = (fix.c(), fix.r());
 	let mut rng = Rng::new(0x7e57);

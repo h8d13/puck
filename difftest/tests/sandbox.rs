@@ -16,7 +16,7 @@ use std::ffi::{OsString, c_int};
 use std::fs::{self, File};
 use std::io::{self, Cursor, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -492,6 +492,115 @@ impl Host for RootHost {
 	}
 
 	fn raise(&mut self, _: c_int) {}
+}
+
+// the helper program the parent side runs: /proc/self/exe while /proc
+// is mounted (the running image, as the C's fork), the same default in
+// a HelperSandbox, a SandboxExec and a Handle
+#[test]
+fn helper_program_with_proc() {
+	use alpm_core::sandbox::{SandboxExec, exe_path, helper_program};
+	assert!(fs::read_link("/proc/self/exe").is_ok(), "no /proc here");
+	assert_eq!(helper_program(), Path::new("/proc/self/exe"));
+	assert_eq!(exe_path().unwrap(), env::current_exe().unwrap());
+	let sb = HelperSandbox::new(b"me", false, false);
+	assert_eq!(sb.program, helper_program());
+	assert_eq!(SandboxExec::default().program, helper_program());
+	let fx = TempRoot::new("sandbox-program");
+	let h = alpm_core::handle::Handle::initialize(&fx.root(), &fx.dbpath())
+		.unwrap();
+	assert_eq!(h.chroot_helper(), helper_program());
+}
+
+// execvp's lookup of argv[0], on a tree of executables and decoys
+#[test]
+fn exe_from_argv0_cases() {
+	use alpm_core::sandbox::exe_from_argv0;
+	use std::ffi::OsStr;
+	let fx = TempRoot::new("sandbox-argv0");
+	let dir = fx.dir();
+	let exec = |rel: &str| {
+		let p = dir.join(rel);
+		fs::create_dir_all(p.parent().unwrap()).unwrap();
+		fs::write(&p, "#!/bin/sh\n").unwrap();
+		fs::set_permissions(&p, fs::Permissions::from_mode(0o755))
+			.unwrap();
+	};
+	exec("a/tool");
+	exec("b/tool");
+	exec("a/plain");
+	fs::set_permissions(
+		dir.join("a/plain"),
+		fs::Permissions::from_mode(0o644),
+	)
+	.unwrap();
+	fs::create_dir_all(dir.join("a/dirtool")).unwrap();
+	exec("b/dirtool");
+	exec("here");
+	let (a, b) = (dir.join("a"), dir.join("b"));
+	let path = |dirs: &[&Path]| {
+		env::join_paths(dirs.iter().map(|d| d.as_os_str())).unwrap()
+	};
+	let ab = path(&[&a, &b]);
+	let find = |arg0: &str, path: Option<&OsStr>| {
+		exe_from_argv0(OsStr::new(arg0), dir, path)
+	};
+	// a '/' names the file, relative to cwd, absolute as is; no check
+	// of the file (execv reports it)
+	assert_eq!(find("a/tool", Some(&ab)), Some(a.join("tool")));
+	assert_eq!(find("./missing", Some(&ab)), Some(dir.join("missing")));
+	let abs = a.join("tool").display().to_string();
+	assert_eq!(find(&abs, None), Some(a.join("tool")));
+	// PATH order, non-executables and directories passed over
+	assert_eq!(find("tool", Some(&ab)), Some(a.join("tool")));
+	assert_eq!(find("tool", Some(&path(&[&b, &a]))), Some(b.join("tool")));
+	assert_eq!(find("plain", Some(&ab)), None);
+	assert_eq!(find("dirtool", Some(&ab)), Some(b.join("dirtool")));
+	assert_eq!(find("missing", Some(&ab)), None);
+	// an empty entry is cwd; entries are made absolute against cwd
+	let empty_first = OsString::from(format!(":{}", a.display()));
+	assert_eq!(find("here", Some(&empty_first)), Some(dir.join("here")));
+	assert_eq!(find("tool", Some(OsStr::new("a:b"))), Some(a.join("tool")));
+	// no PATH: /bin:/usr/bin
+	assert_eq!(find("sh", None), Some(PathBuf::from("/bin/sh")));
+	assert_eq!(find("", Some(&ab)), None);
+}
+
+// helper_download_vs_c again where /proc is not mounted, and the
+// resolution of the helper program there
+#[test]
+fn without_proc() {
+	if difftest::without_proc() {
+		return;
+	}
+	let out = difftest::rerun_without_proc(
+		&["helper_download_vs_c", "helper_program_without_proc"],
+		None,
+		&[],
+	);
+	print!("{}", String::from_utf8_lossy(&out.stdout));
+	eprint!("{}", String::from_utf8_lossy(&out.stderr));
+	assert!(out.status.success(), "run without /proc: {}", out.status);
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	assert!(stdout.contains("2 passed"), "the tests did not all run");
+}
+
+// in the rerun: this binary by its argv[0] stands in for
+// /proc/self/exe, in every default
+#[test]
+fn helper_program_without_proc() {
+	use alpm_core::sandbox::{SandboxExec, exe_path, helper_program};
+	if !difftest::without_proc() {
+		return;
+	}
+	assert!(!Path::new("/proc/self").exists(), "/proc is mounted");
+	assert!(env::current_exe().is_err());
+	let exe = exe_path().unwrap();
+	assert!(exe.is_absolute(), "{}", exe.display());
+	assert_eq!(exe, PathBuf::from(env::args_os().next().unwrap()));
+	assert_eq!(helper_program(), exe);
+	assert_eq!(HelperSandbox::new(b"me", false, false).program, exe);
+	assert_eq!(SandboxExec::default().program, exe);
 }
 
 fn helper(fs_off: bool, sys_off: bool, ids: (u32, u32)) -> HelperSandbox {
