@@ -1,4 +1,4 @@
-// alpm_core::util::{compute_md5sum, compute_sha256sum, test_checksum}
+// alpm_core::internals::util::{compute_md5sum, compute_sha256sum, test_checksum}
 // against util.c on temp files: sizes around the md5/sha256 block (64)
 // and the C read buffer (8192), random sizes, and paths that fail to open
 // or read
@@ -7,8 +7,12 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
-use alpm_core::package::{PKG_VALIDATION_MD5SUM, PKG_VALIDATION_SHA256SUM};
-use alpm_core::util::{compute_md5sum, compute_sha256sum, test_checksum};
+use alpm_core::internals::package::{
+	PKG_VALIDATION_MD5SUM, PKG_VALIDATION_SHA256SUM,
+};
+use alpm_core::internals::util::{
+	compute_md5sum, compute_sha256sum, test_checksum,
+};
 use difftest::{
 	Rng, c_compute_md5sum, c_compute_sha256sum, c_test_checksum, iters,
 };

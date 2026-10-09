@@ -1,11 +1,11 @@
-// unit tests for alpm_core::handle, on roots under /tmp
+// unit tests for alpm_core::internals::handle, on roots under /tmp
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use alpm_core::db::SIG_USE_DEFAULT;
-use alpm_core::error::Errno;
-use alpm_core::handle::{Handle, set_directory_option};
+use alpm_core::internals::db::SIG_USE_DEFAULT;
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::handle::{Handle, set_directory_option};
 
 // <tmp>/alpm-core-handle-<pid>-<name>/{root,db}, removed on drop
 struct Tmp(PathBuf);

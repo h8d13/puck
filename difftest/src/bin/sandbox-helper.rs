@@ -8,9 +8,12 @@ fn main() {
 		std::thread::sleep(std::time::Duration::from_secs(60));
 		std::process::exit(124);
 	});
-	if let Some(code) = alpm_core::sandbox::helper_entry() {
+	if let Some(code) = alpm_core::internals::sandbox::helper_entry() {
 		std::process::exit(code);
 	}
-	eprintln!("usage: sandbox-helper {}", alpm_core::sandbox::HELPER_ARG);
+	eprintln!(
+		"usage: sandbox-helper {}",
+		alpm_core::internals::sandbox::HELPER_ARG
+	);
 	std::process::exit(2);
 }

@@ -1,4 +1,4 @@
-// alpm_core::be_local against be_local.c: random local databases are
+// alpm_core::internals::be_local against be_local.c: random local databases are
 // written under the temp dir, loaded by the C (alpm_initialize, pkgcache,
 // lazy getters) and by the port; every package field, the cache order and
 // counts and every log line compared. desc/files are generated as bytes:
@@ -13,9 +13,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 
-use alpm_core::be_local::{INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET, LocalDb};
-use alpm_core::callbacks::{Callbacks, LogLevel};
-use alpm_core::package::Package;
+use alpm_core::internals::be_local::{
+	INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET, LocalDb,
+};
+use alpm_core::internals::callbacks::{Callbacks, LogLevel};
+use alpm_core::internals::package::Package;
 use difftest::{CLocalDb, Loads, LocalEntry, Rng, TempRoot, c_local_db, iters};
 
 // one db holds several packages and three files each, far heavier than a
@@ -577,7 +579,8 @@ fn fixed_layout() {
 	let mut entries = Vec::new();
 	for dir in ["dup-1-1", "dup-2-1", "a-b-c-1-1", "x-1:2.0-3", ".h-1-1"] {
 		let (name, ver) =
-			alpm_core::util::splitname(dir.as_bytes()).unwrap();
+			alpm_core::internals::util::splitname(dir.as_bytes())
+				.unwrap();
 		entries.push(LocalEntry {
 			dir: dir.into(),
 			desc: Some(gen_desc(&mut rng, name, ver)),
@@ -633,10 +636,11 @@ fn fuzz_bytes() {
 			// same name, other version: a duplicate entry
 			if !entries.is_empty() && rng.below(8) == 0 {
 				let prev = &entries[rng.below(entries.len())];
-				let (name, _) = alpm_core::util::splitname(
-					prev.dir.as_bytes(),
-				)
-				.unwrap();
+				let (name, _) =
+					alpm_core::internals::util::splitname(
+						prev.dir.as_bytes(),
+					)
+					.unwrap();
 				let ver = version(&mut rng);
 				let dir = [name, b"-", &ver].concat();
 				e.dir = String::from_utf8(dir).unwrap();

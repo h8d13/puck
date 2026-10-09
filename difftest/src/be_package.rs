@@ -6,7 +6,7 @@ use std::path::Path;
 use std::ptr;
 use std::sync::MutexGuard;
 
-use alpm_core::package::Package;
+use alpm_core::internals::package::Package;
 
 use crate::cstr;
 use crate::handle::{

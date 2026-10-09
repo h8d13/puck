@@ -25,7 +25,7 @@ use crate::util::fnmatch;
 use crate::util::{hash_sdbm, until_nul};
 use crate::version::vercmp;
 
-// alpm_depmod_t, discriminants as in alpm.h
+/// alpm_depmod_t, discriminants as in alpm.h
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DepMod {
 	Any = 1,
@@ -36,7 +36,7 @@ pub enum DepMod {
 	Lt,
 }
 
-// alpm_depend_t. NULL strings are None, name is never NULL once parsed
+/// alpm_depend_t. NULL strings are None, name is never NULL once parsed
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Depend {
 	pub name: Box<[u8]>,
@@ -68,7 +68,7 @@ fn vercmp_opt(a: Option<&[u8]>, b: Option<&[u8]>) -> Ordering {
 	}
 }
 
-// dep_vercmp (static in C): does version1 satisfy "mod version2"
+/// dep_vercmp (static in C): does version1 satisfy "mod version2"
 pub fn dep_vercmp(
 	version1: Option<&[u8]>,
 	depmod: DepMod,
@@ -94,8 +94,8 @@ fn same_name(a: &Depend, b: &Depend) -> bool {
 	a.name_hash == b.name_hash && until_nul(&a.name) == until_nul(&b.name)
 }
 
-// _alpm_depcmp_provides: only versioned provisions ("name=ver") can
-// satisfy a versioned dep
+/// _alpm_depcmp_provides: only versioned provisions ("name=ver") can
+/// satisfy a versioned dep
 pub fn depcmp_provides(dep: &Depend, provisions: &[Depend]) -> bool {
 	provisions.iter().any(|p| match (dep.depmod, p.depmod) {
 		(DepMod::Any, _) => same_name(p, dep),
@@ -111,8 +111,8 @@ pub fn depcmp_provides(dep: &Depend, provisions: &[Depend]) -> bool {
 	})
 }
 
-// _alpm_depcmp_literal: pkg is dep by name (hash first, like the C),
-// and its version satisfies dep's
+/// _alpm_depcmp_literal: pkg is dep by name (hash first, like the C),
+/// and its version satisfies dep's
 pub fn depcmp_literal(pkg: &Package, dep: &Depend) -> bool {
 	// the hash alone first: cutting dep.name at its nul before the
 	// mismatch is known cost requiredby a scan per pair
@@ -125,12 +125,12 @@ pub fn depcmp_literal(pkg: &Package, dep: &Depend) -> bool {
 		)
 }
 
-// _alpm_depcmp: the package itself or one of its provisions
+/// _alpm_depcmp: the package itself or one of its provisions
 pub fn depcmp(pkg: &Package, dep: &Depend) -> bool {
 	depcmp_literal(pkg, dep) || depcmp_provides(dep, &pkg.provides)
 }
 
-// alpm_find_satisfier: first package in list order satisfying depstring
+/// alpm_find_satisfier: first package in list order satisfying depstring
 pub fn find_satisfier<'a, I>(pkgs: I, depstring: &[u8]) -> Option<&'a Package>
 where
 	I: IntoIterator<Item = &'a Package>,
@@ -138,8 +138,8 @@ where
 	find_dep_satisfier(pkgs, &dep_from_string(depstring))
 }
 
-// find_dep_satisfier (static in C): first package in list order
-// satisfying dep
+/// find_dep_satisfier (static in C): first package in list order
+/// satisfying dep
 pub fn find_dep_satisfier<'a, I>(pkgs: I, dep: &Depend) -> Option<&'a Package>
 where
 	I: IntoIterator<Item = &'a Package>,
@@ -147,9 +147,9 @@ where
 	pkgs.into_iter().find(|p| depcmp(p, dep))
 }
 
-// alpm_dep_from_string: "name[op version][: desc]". the first ": "
-// starts the description (a bare ':' is an epoch), the operator is
-// searched before it, '<' first, then '>', then '='
+/// alpm_dep_from_string: "name[op version][: desc]". the first ": "
+/// starts the description (a bare ':' is an epoch), the operator is
+/// searched before it, '<' first, then '>', then '='
 pub fn dep_from_string(s: &[u8]) -> Depend {
 	let s = until_nul(s);
 	let (head, desc) = match s.windows(2).position(|w| w == b": ") {
@@ -189,9 +189,9 @@ pub fn dep_from_string(s: &[u8]) -> Depend {
 	}
 }
 
-// alpm_dep_compute_string: version is dropped for Any, a missing
-// version prints nothing after the operator. fields go through %s, so
-// each is cut at its first nul
+/// alpm_dep_compute_string: version is dropped for Any, a missing
+/// version prints nothing after the operator. fields go through %s, so
+/// each is cut at its first nul
 pub fn dep_compute_string(dep: &Depend) -> Vec<u8> {
 	let ver = match dep.depmod {
 		DepMod::Any => &[][..],
@@ -206,7 +206,7 @@ pub fn dep_compute_string(dep: &Depend) -> Vec<u8> {
 	out
 }
 
-// alpm_depmissing_t. causingpkg is set by reverse dependency checks only
+/// alpm_depmissing_t. causingpkg is set by reverse dependency checks only
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepMissing {
 	pub target: Vec<u8>,
@@ -214,9 +214,9 @@ pub struct DepMissing {
 	pub causingpkg: Option<Vec<u8>>,
 }
 
-// a db as the resolver reads it: alpm_db_t usage, the loaded cache
-// (list order for scans, the hash for lookups by name) and its name, what
-// alpm_pkg_get_db gives a provider in the select question
+/// a db as the resolver reads it: alpm_db_t usage, the loaded cache
+/// (list order for scans, the hash for lookups by name) and its name, what
+/// alpm_pkg_get_db gives a provider in the select question
 #[derive(Clone, Copy, Debug)]
 pub struct DbPkgs<'a> {
 	pub usage: c_int,
@@ -224,7 +224,7 @@ pub struct DbPkgs<'a> {
 	pub name: &'a [u8],
 }
 
-// the handle options deps.c reads (Handle::deps_opts)
+/// the handle options deps.c reads (Handle::deps_opts)
 #[derive(Clone, Copy, Debug)]
 pub struct DepsOpts<'a> {
 	pub ignorepkg: &'a [Vec<u8>],
@@ -233,10 +233,10 @@ pub struct DepsOpts<'a> {
 }
 
 impl DepsOpts<'_> {
-	// alpm_pkg_should_ignore: the name or one of the groups matches an
-	// ignorepkg/ignoregroup entry as an fnmatch pattern (alpm_list_find
-	// with _alpm_fnmatch, so no '!' negation). groups as given, the C
-	// getter lazy-loads them for local packages
+	/// alpm_pkg_should_ignore: the name or one of the groups matches an
+	/// ignorepkg/ignoregroup entry as an fnmatch pattern (alpm_list_find
+	/// with _alpm_fnmatch, so no '!' negation). groups as given, the C
+	/// getter lazy-loads them for local packages
 	pub fn should_ignore(&self, pkg: &Package) -> bool {
 		let matches = |pats: &[Vec<u8>], s: &[u8]| {
 			pats.iter().any(|p| fnmatch(p, s))
@@ -248,17 +248,17 @@ impl DepsOpts<'_> {
 	}
 }
 
-// the handle state deps.c reads. packages need depends, provides, groups
-// and reason loaded (the C getters lazy-load local entries)
+/// the handle state deps.c reads. packages need depends, provides, groups
+/// and reason loaded (the C getters lazy-load local entries)
 #[derive(Clone, Copy, Debug)]
 pub struct DepsEnv<'a> {
 	pub opts: DepsOpts<'a>,
-	// handle->trans->flags & ALPM_TRANS_FLAG_NODEPVERSION, false without
-	// a transaction
+	/// handle->trans->flags & ALPM_TRANS_FLAG_NODEPVERSION, false without
+	/// a transaction
 	pub nodepversion: bool,
-	// handle->db_local
+	/// handle->db_local
 	pub local: DbPkgs<'a>,
-	// handle->dbs_sync, registration order
+	/// handle->dbs_sync, registration order
 	pub sync: &'a [DbPkgs<'a>],
 }
 
@@ -279,9 +279,9 @@ fn find_name<'a>(pkgs: &[&'a Package], name: &[u8]) -> Option<&'a Package> {
 	pkg_find(pkgs.iter().copied(), name)
 }
 
-// alpm_list_diff with _alpm_pkg_cmp: both sides merge sorted by name
-// (stable), an equal name cancels one entry on each side. the result is
-// in name order
+/// alpm_list_diff with _alpm_pkg_cmp: both sides merge sorted by name
+/// (stable), an equal name cancels one entry on each side. the result is
+/// in name order
 pub fn list_diff<'a>(
 	lhs: &[&'a Package],
 	rhs: &[&Package],
@@ -317,11 +317,11 @@ fn effective(dep: &Depend, nodepversion: bool) -> Cow<'_, Depend> {
 	}
 }
 
-// alpm_checkdeps: pkglist entries named in rem or upgrade are the
-// modified ones, the rest the untouched db. upgrade depends need a
-// satisfier in upgrade, the untouched db or assumeinstalled. with
-// reversedeps, untouched packages whose depend only a modified package
-// satisfied are broken
+/// alpm_checkdeps: pkglist entries named in rem or upgrade are the
+/// modified ones, the rest the untouched db. upgrade depends need a
+/// satisfier in upgrade, the untouched db or assumeinstalled. with
+/// reversedeps, untouched packages whose depend only a modified package
+/// satisfied are broken
 pub fn checkdeps(
 	env: &DepsEnv,
 	pkglist: &[&Package],
@@ -481,10 +481,10 @@ fn warn_dep_cycle(
 	logv(log, LogLevel::Debug, &line);
 }
 
-// _alpm_sortbydeps: targets reordered so dependencies come first
-// (reverse: last), by an iterative DFS over dep_graph_init's vertices in
-// creation order. local packages only link indirect dependencies, ignore
-// keeps some out. targets are matched by identity like the C pointers
+/// _alpm_sortbydeps: targets reordered so dependencies come first
+/// (reverse: last), by an iterative DFS over dep_graph_init's vertices in
+/// creation order. local packages only link indirect dependencies, ignore
+/// keeps some out. targets are matched by identity like the C pointers
 pub fn sortbydeps<'a>(
 	env: &DepsEnv<'a>,
 	targets: &[&'a Package],
@@ -716,8 +716,8 @@ fn resolvedep<'a>(
 	})
 }
 
-// alpm_find_dbs_satisfier: resolvedep over dbs, asking about ignored
-// packages. an empty dbs is the C's NULL list (WRONG_ARGS)
+/// alpm_find_dbs_satisfier: resolvedep over dbs, asking about ignored
+/// packages. an empty dbs is the C's NULL list (WRONG_ARGS)
 pub fn find_dbs_satisfier<'a>(
 	env: &DepsEnv<'a>,
 	dbs: &[DbPkgs<'a>],
@@ -731,15 +731,15 @@ pub fn find_dbs_satisfier<'a>(
 	resolvedep(env, &dep, dbs, &[], true, cb)
 }
 
-// _alpm_resolvedeps: adds pkg and the sync packages resolving its missing
-// dependencies (depth first) to packages. satisfiers already in packages
-// or preferred come first, then the sync dbs; a dependency an installed
-// package (not in rem) satisfies is fine. on failure packages is restored
-// and the unresolvable entries are appended to data (the C appends only
-// with a data list, here the caller drops them). Err is always
-// UNSATISFIED_DEPS: the pm_errno the C leaves behind is overwritten by
-// later lookups and by its caller (sync.c)
-// _alpm_resolvedeps' own arguments, plus env and callbacks for the handle
+/// _alpm_resolvedeps: adds pkg and the sync packages resolving its missing
+/// dependencies (depth first) to packages. satisfiers already in packages
+/// or preferred come first, then the sync dbs; a dependency an installed
+/// package (not in rem) satisfies is fine. on failure packages is restored
+/// and the unresolvable entries are appended to data (the C appends only
+/// with a data list, here the caller drops them). Err is always
+/// UNSATISFIED_DEPS: the pm_errno the C leaves behind is overwritten by
+/// later lookups and by its caller (sync.c)
+/// _alpm_resolvedeps' own arguments, plus env and callbacks for the handle
 #[allow(clippy::too_many_arguments)]
 pub fn resolvedeps<'a>(
 	env: &DepsEnv<'a>,

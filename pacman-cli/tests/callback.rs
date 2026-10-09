@@ -1,13 +1,12 @@
 // unit tests of pacman_cli::callback and the util.rs prompts: optdepend
 // status lists, unknown download files and pinned outputs of the common paths
 
-use alpm_core::callbacks::{
+use alpm_core::Package;
+use alpm_core::dep_from_string;
+use alpm_core::{
 	Callbacks, DownloadEvent, Event, LogLevel, PackageOp, PackageOperation,
 	Question,
 };
-use alpm_core::deps::dep_from_string;
-use alpm_core::package::Package;
-use alpm_core::util::hash_sdbm;
 use pacman_cli::callback::Frontend;
 use pacman_cli::conf::{Config, LOG_DEBUG, LOG_ERROR, LOG_WARNING};
 use pacman_cli::util::{Output, Term, debug_stamp};
@@ -35,15 +34,11 @@ fn term(input: &[u8]) -> Term<Cursor<Vec<u8>>> {
 
 fn pkg(name: &str, optdeps: &[&str]) -> Package {
 	Package {
-		// depcmp looks at the hash first
-		name_hash: hash_sdbm(name.as_bytes()),
-		name: Some(name.as_bytes().into()),
-		version: Some(b"1-1"[..].into()),
 		optdepends: optdeps
 			.iter()
 			.map(|d| dep_from_string(d.as_bytes()))
 			.collect(),
-		..Package::default()
+		..Package::new(name.as_bytes(), b"1-1")
 	}
 }
 

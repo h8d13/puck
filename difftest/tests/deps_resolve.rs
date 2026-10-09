@@ -1,5 +1,5 @@
-// alpm_core::package::{compute_requiredby, compute_optionalfor,
-// pkg_should_ignore} and alpm_core::deps::find_satisfier against the C on
+// alpm_core::internals::package::{compute_requiredby, compute_optionalfor,
+// pkg_should_ignore} and alpm_core::internals::deps::find_satisfier against the C on
 // real handles. each case writes a fixture (local db, sync dbs "core" and
 // "extra", "gone" registered without a file) read by a C handle and by
 // the Rust Handle + be_local reader; every cached package and some file
@@ -7,14 +7,14 @@
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 
-use alpm_core::be_local::{INFRQ_DESC, LocalDb};
-use alpm_core::deps::{dep_from_string, find_satisfier};
-use alpm_core::handle::Handle;
-use alpm_core::package::{
+use alpm_core::internals::be_local::{INFRQ_DESC, LocalDb};
+use alpm_core::internals::deps::{dep_from_string, find_satisfier};
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::package::{
 	DbCaches, Package, PkgFrom, compute_optionalfor, compute_requiredby,
 	pkg_should_ignore,
 };
-use alpm_core::util::hash_sdbm;
+use alpm_core::internals::util::hash_sdbm;
 use difftest::{
 	CResolve, Comp, LocalEntry, Rng, TarEntry, TempRoot,
 	c_pkg_should_ignore, iters, section, tar_dir, tar_file, ustar,
@@ -433,9 +433,9 @@ fn should_ignore_fuzz() {
 			r,
 			"{what:?}"
 		);
-		let named = ipkg
-			.iter()
-			.any(|q| alpm_core::util::fnmatch(q, pkg.name_bytes()));
+		let named = ipkg.iter().any(|q| {
+			alpm_core::internals::util::fnmatch(q, pkg.name_bytes())
+		});
 		by_name += usize::from(named);
 		by_group += usize::from(r && !named);
 	}

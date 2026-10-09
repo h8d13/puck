@@ -8,7 +8,7 @@ publish = false
 # no workspace lints: this crate is the one place allowed to call C
 
 [dependencies]
-alpm-core = { path = "../alpm-core" }
+alpm-core = { path = "../alpm-core", features = ["internals"] }
 pacman-common = { path = "../pacman-common" }
 pacman-cli = { path = "../pacman-cli" }
 testpkg = { path = "../testpkg" }

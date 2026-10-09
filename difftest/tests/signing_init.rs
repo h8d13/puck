@@ -4,7 +4,7 @@
 // counterpart (PORTING.md): the value after "GPGME version: " is masked
 use std::fs;
 
-use alpm_core::signing::{Keyring, key_in_keychain};
+use alpm_core::internals::signing::{Keyring, key_in_keychain};
 use difftest::{CSigHandle, RecordingCallbacks, TempRoot};
 
 const FPR: &[u8] = b"0123456789ABCDEF0123456789ABCDEF01234567";

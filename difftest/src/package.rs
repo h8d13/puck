@@ -11,10 +11,10 @@ use crate::handle::{alpm_option_set_ignoregroups, alpm_option_set_ignorepkgs};
 use crate::strdup;
 use crate::{CList, alpm_list_add, alpm_list_free, cstr, opt_ptr, take};
 
-use alpm_core::backup::Backup;
-use alpm_core::deps::{DepMod, Depend};
 use alpm_core::filelist::{File, FileList};
-use alpm_core::package::{Package, PkgFrom, PkgReason, PkgXData};
+use alpm_core::internals::backup::Backup;
+use alpm_core::internals::deps::{DepMod, Depend};
+use alpm_core::internals::package::{Package, PkgFrom, PkgReason, PkgXData};
 
 // alpm_pkg_xdata_t
 #[repr(C)]

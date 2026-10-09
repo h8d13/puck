@@ -4,7 +4,7 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use alpm_core::handle::Handle;
+use alpm_core::Handle;
 use pacman_cli::deptest::pacman_deptest;
 use pacman_cli::util::Output;
 

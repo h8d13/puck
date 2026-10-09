@@ -1,15 +1,17 @@
-// unit tests for alpm_core::db, on local dbs and uncompressed sync dbs
+// unit tests for alpm_core::internals::db, on local dbs and uncompressed sync dbs
 // written here
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use alpm_core::be_local::{INFRQ_DESC, INFRQ_ERROR, INFRQ_FILES};
-use alpm_core::db::{CacheError, DB_USAGE_ALL, DB_USAGE_SEARCH, Db, db_cmp};
-use alpm_core::error::Errno;
-use alpm_core::package::{Package, PkgFrom};
-use alpm_core::signing::Keyring;
-use alpm_core::util::hash_sdbm;
+use alpm_core::internals::be_local::{INFRQ_DESC, INFRQ_ERROR, INFRQ_FILES};
+use alpm_core::internals::db::{
+	CacheError, DB_USAGE_ALL, DB_USAGE_SEARCH, Db, db_cmp,
+};
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::package::{Package, PkgFrom};
+use alpm_core::internals::signing::Keyring;
+use alpm_core::internals::util::hash_sdbm;
 
 // a sync db as the handle registers it, without a keyring or callbacks
 fn register_sync(dbpath: &[u8], dbext: &[u8], name: &[u8], level: i32) -> Db {
@@ -230,7 +232,8 @@ fn cache_add_remove() {
 	let mut file = pkg("c", "2");
 	file.origin = Some(PkgFrom::File(b"/x.pkg"[..].into()));
 	file.groups = vec![b"g"[..].into()].into();
-	file.makedepends = vec![alpm_core::deps::dep_from_string(b"m")].into();
+	file.makedepends =
+		vec![alpm_core::internals::deps::dep_from_string(b"m")].into();
 	db.add_pkg_in_cache(&mut (), &file).unwrap();
 	db.add_pkg_in_cache(&mut (), &pkg("a", "1")).unwrap();
 	db.add_pkg_in_cache(&mut (), &pkg("a", "2")).unwrap();

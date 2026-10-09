@@ -1,4 +1,4 @@
-// alpm_core::dload without a network: file:// transfers, server error
+// alpm_core::internals::dload without a network: file:// transfers, server error
 // counting, the fetch callback path, the sandbox hooks with a stand-in
 // Sandbox, the date and host helpers
 #![allow(clippy::panic)]
@@ -10,14 +10,16 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use alpm_core::callbacks::{Callbacks, DownloadEvent, Event, Fetch, LogLevel};
-use alpm_core::dload::{
+use alpm_core::internals::callbacks::{
+	Callbacks, DownloadEvent, Event, Fetch, LogLevel,
+};
+use alpm_core::internals::dload::{
 	DownloadState, Downloader, Payload, ProxyEnv, Sandbox, Settings,
 	download_internal, getdate_capped, gethost, http_date,
 	remove_temporary_download_dir,
 };
-use alpm_core::error::Errno;
-use alpm_core::util::{filecache_find, filecache_setup};
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::util::{filecache_find, filecache_setup};
 
 struct Tmp(PathBuf);
 

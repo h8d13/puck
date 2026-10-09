@@ -1,5 +1,5 @@
-// unit tests for alpm_core::graph
-use alpm_core::graph::{Graph, State};
+// unit tests for alpm_core::internals::graph
+use alpm_core::internals::graph::{Graph, State};
 
 #[test]
 fn new_is_calloc() {

@@ -26,20 +26,20 @@ use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use alpm_core::db::Db;
-use alpm_core::deps::{Depend, dep_compute_string, find_satisfier};
-use alpm_core::handle::Handle;
-use alpm_core::log::local_offset;
+use alpm_core::Db;
+use alpm_core::Handle;
+use alpm_core::local_offset;
+use alpm_core::{Depend, dep_compute_string, find_satisfier};
 // time(NULL)
-pub use alpm_core::log::now_secs;
-use alpm_core::package::{Package, PkgFrom, pkg_cmp, pkg_find};
+pub use alpm_core::now_secs;
 use alpm_core::setlocale;
-use alpm_core::trans::{
+use alpm_core::strerror;
+use alpm_core::{
 	InitError, trans_init as alpm_trans_init,
 	trans_release as alpm_trans_release,
 };
-use alpm_core::util::{strerror, until_nul};
-use pacman_common::util_common::{PATH_MAX, safe_fgets, strtrim};
+use alpm_core::{Package, PkgFrom, pkg_cmp, pkg_find};
+use pacman_common::util_common::{PATH_MAX, safe_fgets, strtrim, until_nul};
 use rustix::termios::{QueueSelector, tcflush, tcgetwinsize};
 use unicode_width::UnicodeWidthChar;
 

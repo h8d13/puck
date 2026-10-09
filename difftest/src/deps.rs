@@ -6,8 +6,8 @@ use std::ptr;
 use crate::package::{CDepend, CPkg, CPkgBox, read_dep};
 use crate::{CList, alpm_list_add, alpm_list_free, cstr, opt_ptr, take};
 
-use alpm_core::deps::Depend;
-use alpm_core::package::Package;
+use alpm_core::internals::deps::Depend;
+use alpm_core::internals::package::Package;
 
 // alpm_list_t, alpm_list.h
 unsafe extern "C" {

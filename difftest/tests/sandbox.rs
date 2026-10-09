@@ -1,4 +1,4 @@
-// alpm_core::sandbox{,_fs,_syscalls} against the C sandbox.c,
+// alpm_core::internals::sandbox{,_fs,_syscalls} against the C sandbox.c,
 // sandbox_fs.c and sandbox_syscalls.c.
 //
 // restrictions run in child processes: this test binary spawned again
@@ -20,15 +20,17 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use alpm_core::callbacks::{Callbacks, DownloadEvent, LogLevel};
-use alpm_core::dload::{DownloadState, Payload, Sandbox, Settings};
-use alpm_core::error::Errno;
-use alpm_core::sandbox::{
+use alpm_core::internals::callbacks::{Callbacks, DownloadEvent, LogLevel};
+use alpm_core::internals::dload::{DownloadState, Payload, Sandbox, Settings};
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::sandbox::{
 	CallbackWriter, HELPER_ARG, HelperSandbox, Host, System,
 	process_callbacks,
 };
-use alpm_core::sandbox_fs::restrict_writes_to;
-use alpm_core::sandbox_syscalls::{DENIED_SYSCALLS, syscalls_filter};
+use alpm_core::internals::sandbox_fs::restrict_writes_to;
+use alpm_core::internals::sandbox_syscalls::{
+	DENIED_SYSCALLS, syscalls_filter,
+};
 use difftest::{
 	CDload, CSandbox, CbRec, Recorder, Reply, Rng, SbRecorder, Server,
 	TempRoot, fs_probe_setup, fs_probes, inject_errors, iters,
@@ -499,7 +501,8 @@ impl Host for RootHost {
 // a HelperSandbox, a SandboxExec and a Handle
 #[test]
 fn helper_program_with_proc() {
-	use alpm_core::sandbox::{SandboxExec, exe_path, helper_program};
+	use alpm_core::SandboxExec;
+	use alpm_core::internals::sandbox::{exe_path, helper_program};
 	assert!(fs::read_link("/proc/self/exe").is_ok(), "no /proc here");
 	assert_eq!(helper_program(), Path::new("/proc/self/exe"));
 	assert_eq!(exe_path().unwrap(), env::current_exe().unwrap());
@@ -507,7 +510,7 @@ fn helper_program_with_proc() {
 	assert_eq!(sb.program, helper_program());
 	assert_eq!(SandboxExec::default().program, helper_program());
 	let fx = TempRoot::new("sandbox-program");
-	let h = alpm_core::handle::Handle::initialize(&fx.root(), &fx.dbpath())
+	let h = alpm_core::Handle::initialize(&fx.root(), &fx.dbpath())
 		.unwrap();
 	assert_eq!(h.chroot_helper(), helper_program());
 }
@@ -515,7 +518,7 @@ fn helper_program_with_proc() {
 // execvp's lookup of argv[0], on a tree of executables and decoys
 #[test]
 fn exe_from_argv0_cases() {
-	use alpm_core::sandbox::exe_from_argv0;
+	use alpm_core::internals::sandbox::exe_from_argv0;
 	use std::ffi::OsStr;
 	let fx = TempRoot::new("sandbox-argv0");
 	let dir = fx.dir();
@@ -589,7 +592,8 @@ fn without_proc() {
 // /proc/self/exe, in every default
 #[test]
 fn helper_program_without_proc() {
-	use alpm_core::sandbox::{SandboxExec, exe_path, helper_program};
+	use alpm_core::SandboxExec;
+	use alpm_core::internals::sandbox::{exe_path, helper_program};
 	if !difftest::without_proc() {
 		return;
 	}

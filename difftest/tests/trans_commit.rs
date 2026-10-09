@@ -1,4 +1,4 @@
-// alpm_core::trans::trans_commit against the C's alpm_trans_commit on
+// alpm_core::internals::trans::trans_commit against the C's alpm_trans_commit on
 // fixture worlds (local db + root files, a sync db on a file:// mirror,
 // a cache dir, package files): removals, installs and upgrades from the
 // mirror or the cache, -U files, DOWNLOADONLY, DBONLY, packages that

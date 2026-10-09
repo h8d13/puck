@@ -1,6 +1,6 @@
 // alpm_core::filelist against the C in filelist.c
 use alpm_core::filelist::{File, FileList};
-use alpm_core::util::until_nul;
+use alpm_core::internals::util::until_nul;
 use difftest::{
 	Rng, c_filelist_contains, c_filelist_difference,
 	c_filelist_intersection, c_filelist_sort, iters,

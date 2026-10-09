@@ -1,34 +1,34 @@
-// glibc's setlocale(LC_ALL, "") as pacman's main calls it (localize),
-// glibc 2.44: locale/setlocale.c, findlocale.c, loadarchive.c,
-// loadlocale.c, intl/explodename.c, l10nflist.c, localealias.c and the
-// codeset alias compare of iconv/gconv_cache.c. what pacman's output
-// takes from the locale is read: LC_TIME (strftime), LC_NUMERIC's
-// decimal point (printf's %f) and LC_CTYPE's codeset and case maps. all
-// twelve categories are resolved and checked like glibc's, which
-// installs all of them or none: one category that fails to load leaves
-// the whole process in "C".
-//
-// per category the name is LC_ALL, LC_<category> or LANG (the first
-// set and non-empty), else "C". "C" and "POSIX" are built in. without
-// LOCPATH the locale archive is tried, then the name's locale.alias
-// expansion there; with LOCPATH the archive is skipped. then the
-// directories (LOCPATH's, then /usr/lib/locale) are searched for
-// <name>/LC_<category>, dropping codeset, normalized codeset, territory
-// and modifier in glibc's order. a name naming a codeset must match the
-// data's codeset through the gconv aliases.
-//
-// translation:
-// - the C maps the files; here they are read with pread, only what is
-//   used: each category's header and index (what _nl_intern_locale_data
-//   checks), then the items read from it
-// - the C caches loaded files and archive entries per process; this
-//   resolves once per call
-// - with GCONV_PATH set or no gconv-modules.cache, glibc reads the text
-//   gconv-modules for aliases; the port knows only glibc's builtin
-//   aliases then (UTF-8, ASCII, UCS-2, UCS-4)
-// - strings end at their nul or at the end of the category data (the C
-//   reads on past the end of corrupt data), a hash chain without an
-//   empty slot ends after one round (the C loops)
+//! glibc's setlocale(LC_ALL, "") as pacman's main calls it (localize),
+//! glibc 2.44: locale/setlocale.c, findlocale.c, loadarchive.c,
+//! loadlocale.c, intl/explodename.c, l10nflist.c, localealias.c and the
+//! codeset alias compare of iconv/gconv_cache.c. what pacman's output
+//! takes from the locale is read: LC_TIME (strftime), LC_NUMERIC's
+//! decimal point (printf's %f) and LC_CTYPE's codeset and case maps. all
+//! twelve categories are resolved and checked like glibc's, which
+//! installs all of them or none: one category that fails to load leaves
+//! the whole process in "C".
+//!
+//! per category the name is LC_ALL, `LC_<category>` or LANG (the first
+//! set and non-empty), else "C". "C" and "POSIX" are built in. without
+//! LOCPATH the locale archive is tried, then the name's locale.alias
+//! expansion there; with LOCPATH the archive is skipped. then the
+//! directories (LOCPATH's, then /usr/lib/locale) are searched for
+//! `<name>/LC_<category>`, dropping codeset, normalized codeset, territory
+//! and modifier in glibc's order. a name naming a codeset must match the
+//! data's codeset through the gconv aliases.
+//!
+//! translation:
+//! - the C maps the files; here they are read with pread, only what is
+//!   used: each category's header and index (what _nl_intern_locale_data
+//!   checks), then the items read from it
+//! - the C caches loaded files and archive entries per process; this
+//!   resolves once per call
+//! - with GCONV_PATH set or no gconv-modules.cache, glibc reads the text
+//!   gconv-modules for aliases; the port knows only glibc's builtin
+//!   aliases then (UTF-8, ASCII, UCS-2, UCS-4)
+//! - strings end at their nul or at the end of the category data (the C
+//!   reads on past the end of corrupt data), a hash chain without an
+//!   empty slot ends after one round (the C loops)
 
 use std::ffi::OsStr;
 use std::fs::File;
@@ -39,9 +39,13 @@ use std::sync::{Arc, OnceLock};
 
 use crate::util::until_nul;
 
+/// the LC_CTYPE category, as an index into `Locale::names`
 pub const LC_CTYPE: usize = 0;
+/// the LC_NUMERIC category
 pub const LC_NUMERIC: usize = 1;
+/// the LC_TIME category
 pub const LC_TIME: usize = 2;
+/// LC_ALL
 pub const LC_ALL: usize = 6;
 // __LC_LAST
 const LC_LAST: usize = 13;
@@ -95,25 +99,39 @@ const WORDS: [&[u32]; LC_LAST] = [
 const CTYPE_TOUPPER: u32 = 1;
 const CTYPE_TOLOWER: u32 = 3;
 const CTYPE_CODESET_NAME: u32 = 14;
-// LC_TIME items
+/// LC_TIME item ABDAY_1, the first of seven abbreviated day names
 pub const ABDAY_1: usize = 0;
+/// DAY_1, the first of seven day names
 pub const DAY_1: usize = 7;
+/// ABMON_1, the first of twelve abbreviated month names
 pub const ABMON_1: usize = 14;
+/// MON_1, the first of twelve month names
 pub const MON_1: usize = 26;
+/// AM_STR
 pub const AM_STR: usize = 38;
+/// PM_STR
 pub const PM_STR: usize = 39;
+/// D_T_FMT, the `%c` format
 pub const D_T_FMT: usize = 40;
+/// D_FMT, the `%x` format
 pub const D_FMT: usize = 41;
+/// T_FMT, the `%X` format
 pub const T_FMT: usize = 42;
+/// T_FMT_AMPM, the `%r` format
 pub const T_FMT_AMPM: usize = 43;
+/// ERA_D_FMT, the `%Ex` format
 pub const ERA_D_FMT: usize = 46;
 const ALT_DIGITS: usize = 47;
+/// ERA_D_T_FMT, the `%Ec` format
 pub const ERA_D_T_FMT: usize = 48;
+/// ERA_T_FMT, the `%EX` format
 pub const ERA_T_FMT: usize = 49;
 const TIME_ERA_NUM_ENTRIES: usize = 50;
 const TIME_ERA_ENTRIES: usize = 51;
 const TIME_CODESET: usize = 110;
+/// ALTMON_1, the first of twelve nominative month names
 pub const ALTMON_1: usize = 111;
+/// ABALTMON_1, the first of twelve abbreviated nominative month names
 pub const ABALTMON_1: usize = 135;
 const TIME_ITEMS: usize = 159;
 
@@ -822,23 +840,23 @@ impl Resolver<'_> {
 	}
 }
 
-// what the port takes from a category of the C locale or a loaded one
+/// what the port takes from a category of the C locale or a loaded one
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Era {
-	// '+' or '-'
+	/// '+' or '-'
 	pub direction: u32,
 	pub offset: i32,
-	// tm_year, tm_mon, tm_mday
+	/// tm_year, tm_mon, tm_mday
 	pub start: [i32; 3],
 	pub stop: [i32; 3],
 	pub name: Vec<u8>,
 	pub format: Vec<u8>,
-	// +1: the era's years count up with time
+	/// +1: the era's years count up with time
 	pub absolute_direction: i32,
 }
 
-// LC_TIME: every item as a string (word items read as such are unused),
-// the 100 alternative digits and the eras
+/// LC_TIME: every item as a string (word items read as such are unused),
+/// the 100 alternative digits and the eras
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LcTime {
 	items: Vec<Vec<u8>>,
@@ -872,6 +890,7 @@ const C_MONTHS: [&str; 12] = [
 ];
 
 impl LcTime {
+	/// the C locale's LC_TIME
 	pub fn c() -> LcTime {
 		let mut items = vec![Vec::new(); TIME_ITEMS];
 		for (i, d) in C_DAYS.iter().enumerate() {
@@ -935,7 +954,7 @@ impl LcTime {
 		})
 	}
 
-	// nl_langinfo of an LC_TIME string item
+	/// nl_langinfo of an LC_TIME string item
 	pub fn item(&self, i: usize) -> &[u8] {
 		&self.items[i]
 	}
@@ -986,27 +1005,27 @@ fn eras(bytes: &[u8], mut ptr: usize, n: u32) -> Option<Vec<Era>> {
 	Some(out)
 }
 
-// ERA_DATE_CMP: a <= b
+/// ERA_DATE_CMP: a <= b
 pub fn era_date_le(a: [i32; 3], b: [i32; 3]) -> bool {
 	a[0] < b[0]
 		|| (a[0] == b[0]
 			&& (a[1] < b[1] || (a[1] == b[1] && a[2] <= b[2])))
 }
 
-// the global locale as far as the port reads it
+/// the global locale as far as the port reads it
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Locale {
 	pub time: LcTime,
-	// LC_NUMERIC's decimal_point, what printf's %f puts for '.'
+	/// LC_NUMERIC's decimal_point, what printf's %f puts for '.'
 	pub decimal_point: Vec<u8>,
-	// LC_CTYPE's codeset name, nl_langinfo(CODESET)
+	/// LC_CTYPE's codeset name, nl_langinfo(CODESET)
 	pub codeset: Vec<u8>,
-	// toupper/tolower for -128..255, None in "C" (ASCII)
+	/// toupper/tolower for -128..255, None in "C" (ASCII)
 	case: Option<(Vec<i32>, Vec<i32>)>,
 }
 
 impl Locale {
-	// the "C" locale (and "POSIX")
+	/// the "C" locale (and "POSIX")
 	pub fn c() -> Locale {
 		Locale {
 			time: LcTime::c(),
@@ -1016,8 +1035,8 @@ impl Locale {
 		}
 	}
 
-	// "C.UTF-8" built in: what the port is before localize, the locale
-	// the in-process C frontend is set to in the equivalence tests
+	/// "C.UTF-8" built in: what the port is before localize, the locale
+	/// the in-process C frontend is set to in the equivalence tests
 	pub fn c_utf8() -> Locale {
 		let mut l = Locale::c();
 		l.codeset = b"UTF-8".to_vec();
@@ -1025,14 +1044,14 @@ impl Locale {
 		l
 	}
 
-	// the C locale's charset, ANSI_X3.4-1968: mbrtowc refuses bytes
-	// past 0x7f
+	/// the C locale's charset, ANSI_X3.4-1968: mbrtowc refuses bytes
+	/// past 0x7f
 	pub fn is_ascii(&self) -> bool {
 		self.codeset == b"ANSI_X3.4-1968"
 	}
 
-	// setlocale(LC_ALL, "") with this environment: None where glibc
-	// fails and the process stays in "C"
+	/// setlocale(LC_ALL, "") with this environment: None where glibc
+	/// fails and the process stays in "C"
 	pub fn from_env(
 		getenv: &dyn Fn(&str) -> Option<Vec<u8>>,
 	) -> Option<Locale> {
@@ -1087,8 +1106,8 @@ impl Locale {
 		Some(l)
 	}
 
-	// toupper/tolower of a byte, through the LC_CTYPE tables. a result
-	// that is no byte is cut to one like the C's store into a char
+	/// toupper/tolower of a byte, through the LC_CTYPE tables. a result
+	/// that is no byte is cut to one like the C's store into a char
 	pub fn toupper(&self, c: u8) -> u8 {
 		match &self.case {
 			Some((up, _)) => up[usize::from(c) + 128] as u8,
@@ -1096,6 +1115,7 @@ impl Locale {
 		}
 	}
 
+	/// tolower(3) in this locale
 	pub fn tolower(&self, c: u8) -> u8 {
 		match &self.case {
 			Some((_, low)) => low[usize::from(c) + 128] as u8,
@@ -1107,9 +1127,9 @@ impl Locale {
 static LOCALIZED: AtomicBool = AtomicBool::new(false);
 static CURRENT: OnceLock<Locale> = OnceLock::new();
 
-// pacman's localize(): setlocale(LC_ALL, "") from the process
-// environment. resolved on first use, the port never changes the
-// environment in between
+/// pacman's localize(): setlocale(LC_ALL, "") from the process
+/// environment. resolved on first use, the port never changes the
+/// environment in between
 pub fn localize() {
 	LOCALIZED.store(true, Ordering::Relaxed);
 }
@@ -1118,8 +1138,8 @@ fn process_env(name: &str) -> Option<Vec<u8>> {
 	std::env::var_os(name).map(|v| v.into_encoded_bytes())
 }
 
-// the global locale: C.UTF-8 until localize (the port's library
-// default), then the environment's or "C" where setlocale fails
+/// the global locale: C.UTF-8 until localize (the port's library
+/// default), then the environment's or "C" where setlocale fails
 pub fn current() -> &'static Locale {
 	CURRENT.get_or_init(|| {
 		if !LOCALIZED.load(Ordering::Relaxed) {

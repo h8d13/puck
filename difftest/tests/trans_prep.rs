@@ -24,18 +24,18 @@ use std::fs;
 use std::io::Cursor;
 use std::rc::Rc;
 
-use alpm_core::callbacks::{Callbacks, Event, LogLevel, Question};
-use alpm_core::db::{
+use alpm_core::internals::callbacks::{Callbacks, Event, LogLevel, Question};
+use alpm_core::internals::db::{
 	DB_USAGE_ALL, DB_USAGE_INSTALL, DB_USAGE_SEARCH, DB_USAGE_UPGRADE,
 };
-use alpm_core::handle::Handle;
-use alpm_core::trans::{
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::trans::{
 	PrepareData, TRANS_FLAG_CASCADE, TRANS_FLAG_DOWNLOADONLY,
 	TRANS_FLAG_NEEDED, TRANS_FLAG_NOCONFLICTS, TRANS_FLAG_NODEPS,
 	TRANS_FLAG_NODEPVERSION, TRANS_FLAG_NOLOCK, TRANS_FLAG_RECURSE,
 	TRANS_FLAG_RECURSEALL, TRANS_FLAG_UNNEEDED, Trans,
 };
-use alpm_core::{add, remove, sync, trans};
+use alpm_core::internals::{add, remove, sync, trans};
 use difftest::{
 	CTx, FrontOp, Rng, TP_GROUPS, TP_SYNC, TempRoot, TpAdd, TpAsk, TpCalls,
 	TpData, TpEvent, TpId, TpRet, TpSetup, TpView, TpWorld, UNPORTED_DEBUG,
@@ -110,7 +110,7 @@ struct Shared {
 // the handle's callbacks: scripted answers, same records as the C
 struct Script(Rc<RefCell<Shared>>);
 
-fn name(p: &alpm_core::package::Package) -> Vec<u8> {
+fn name(p: &alpm_core::internals::package::Package) -> Vec<u8> {
 	p.name.as_deref().unwrap_or_default().to_vec()
 }
 
@@ -205,7 +205,7 @@ struct RustTx {
 	rec: Rc<RefCell<Shared>>,
 }
 
-fn errno(e: alpm_core::error::Errno) -> c_int {
+fn errno(e: alpm_core::internals::error::Errno) -> c_int {
 	e as c_int
 }
 
@@ -241,7 +241,7 @@ impl RustTx {
 		&mut self,
 		db: Option<usize>,
 		n: &[u8],
-	) -> alpm_core::package::Package {
+	) -> alpm_core::internals::package::Package {
 		let dbs = self.h.dbs_mut();
 		let db = match db {
 			None => dbs.local.unwrap(),
@@ -576,9 +576,11 @@ fn run_rust(
 			(Out::Ret(x.map_err(errno)), c)
 		}
 		Op::AddFile(i) => {
-			let Ok(pkg) = alpm_core::be_package::pkg_load(
-				&paths[*i], true,
-			) else {
+			let Ok(pkg) =
+				alpm_core::internals::be_package::pkg_load(
+					&paths[*i], true,
+				)
+			else {
 				return (
 					Out::File(Err(None)),
 					TpCalls::default(),
@@ -705,8 +707,8 @@ fn observe(seen: &mut Seen, op: &Op, s: &Step) {
 			.iter()
 			.any(|e| matches!(e, TpEvent::OptdepRemoval(..))),
 	);
-	let err = |e: alpm_core::error::Errno| e as c_int;
-	use alpm_core::error::Errno;
+	let err = |e: alpm_core::internals::error::Errno| e as c_int;
+	use alpm_core::internals::error::Errno;
 	match &s.out {
 		Out::Prepare(Ok(()), _) => {
 			seen.prepared += 1;

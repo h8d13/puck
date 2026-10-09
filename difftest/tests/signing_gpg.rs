@@ -1,4 +1,4 @@
-// alpm_core::signing (+ the signature parts of be_package and be_sync)
+// alpm_core::internals::signing (+ the signature parts of be_package and be_sync)
 // against C signing.c with gpgme: throwaway keyrings under /tmp (pgp
 // trust like pacman-key, direct trust for "never", a read-only pubring),
 // files signed by trusted, marginal, unknown-trust, never-trusted,
@@ -18,12 +18,12 @@ use std::collections::BTreeMap;
 use std::ffi::c_int;
 use std::fs;
 
-use alpm_core::be_package::{pkg_load_level, pkg_validate};
-use alpm_core::db::Db;
 use alpm_core::digest::{Digest, Sha256, hex};
-use alpm_core::error::Errno;
-use alpm_core::package::Package;
-use alpm_core::signing::*;
+use alpm_core::internals::be_package::{pkg_load_level, pkg_validate};
+use alpm_core::internals::db::Db;
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::package::Package;
+use alpm_core::internals::signing::*;
 use difftest::{
 	CSigHandle, FILES, GpgFixture, HOMES, Home, RecordingCallbacks, Rng,
 	Served, Side, SigCall, c_gpgme_strerror, encode_base64, iters,
@@ -205,7 +205,7 @@ impl Bench {
 		let c = self.c.validate(&path, sync, level);
 		let mut cb = self.cb();
 		let r = pkg_validate(&mut self.kr, &mut cb, &path, sync, level);
-		use alpm_core::be_package::Error;
+		use alpm_core::internals::be_package::PkgLoadError;
 		let r = match r {
 			Ok(v) => rust(
 				0,
@@ -215,7 +215,9 @@ impl Bench {
 			),
 			Err(e) => {
 				let list = match &e {
-					Error::InvalidSig(l) => Some(l.clone()),
+					PkgLoadError::InvalidSig(l) => {
+						Some(l.clone())
+					}
 					_ => None,
 				};
 				// the C leaves validation as far as it got,

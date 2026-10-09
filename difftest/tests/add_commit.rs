@@ -1,4 +1,4 @@
-// alpm_core::add::upgrade_package (commit_single_pkg and the extraction
+// alpm_core::internals::add::upgrade_package (commit_single_pkg and the extraction
 // under it) against the C _alpm_upgrade_packages with one package in the
 // transaction. compared per case: rc, pm_errno, log lines, events and
 // progress in order, the logfile, the root tree (types, modes, link
@@ -8,7 +8,7 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 
-use alpm_core::util::{SCRIPTLET_SHELL, compute_md5sum};
+use alpm_core::internals::util::{SCRIPTLET_SHELL, compute_md5sum};
 use difftest::{
 	AC_C_LOCALE, AC_SDE_EXACT, AcCase, AcFs, AcMeta, AcNode, AcOld, AcRec,
 	AcResult, Comp, Rng, TarNode, TempRoot, ac_owner, c_upgrade,

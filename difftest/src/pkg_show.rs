@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Once;
 
-use alpm_core::deps::dep_compute_string;
-use alpm_core::package::{Package, PkgFrom};
+use alpm_core::internals::deps::dep_compute_string;
+use alpm_core::internals::package::{Package, PkgFrom};
 use pacman_cli::package::format_date_at;
 use pacman_cli::util::ColStr;
 

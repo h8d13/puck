@@ -15,7 +15,7 @@ use crate::deps::Depend;
 use crate::error::Errno;
 use crate::package::Package;
 
-// alpm_loglevel_t, bits as in alpm.h
+/// alpm_loglevel_t, bits as in alpm.h
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(i32)]
 pub enum LogLevel {
@@ -25,7 +25,7 @@ pub enum LogLevel {
 	Function = 1 << 3,
 }
 
-// alpm_package_operation_t
+/// alpm_package_operation_t
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
 pub enum PackageOperation {
@@ -36,7 +36,7 @@ pub enum PackageOperation {
 	Remove,
 }
 
-// alpm_hook_when_t
+/// alpm_hook_when_t
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
 pub enum HookWhen {
@@ -44,8 +44,8 @@ pub enum HookWhen {
 	PostTransaction,
 }
 
-// alpm_event_t: the type with its alpm_event_*_t data. Event::kind is
-// the alpm_event_type_t value
+/// alpm_event_t: the type with its alpm_event_*_t data. Event::kind is
+/// the alpm_event_type_t value
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event<'e> {
 	CheckdepsStart,
@@ -70,7 +70,7 @@ pub enum Event<'e> {
 	DbRetrieveStart,
 	DbRetrieveDone,
 	DbRetrieveFailed,
-	// alpm_event_pkg_retrieve_t on all three, like the C's reused struct
+	/// alpm_event_pkg_retrieve_t on all three, like the C's reused struct
 	PkgRetrieveStart {
 		num: usize,
 		total_size: i64,
@@ -116,10 +116,10 @@ pub enum Event<'e> {
 	HookRunDone(HookRun<'e>),
 }
 
-// alpm_event_package_operation_t: no oldpkg on install, no newpkg on
-// remove. local and pending are what the frontend's make_optstring
-// reads of the handle at an install's or upgrade's DONE: the local db
-// cache and the transaction's add list (empty otherwise)
+/// alpm_event_package_operation_t: no oldpkg on install, no newpkg on
+/// remove. local and pending are what the frontend's make_optstring
+/// reads of the handle at an install's or upgrade's DONE: the local db
+/// cache and the transaction's add list (empty otherwise)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PackageOp<'e> {
 	pub operation: PackageOperation,
@@ -129,7 +129,7 @@ pub struct PackageOp<'e> {
 	pub pending: &'e [&'e Package],
 }
 
-// alpm_event_hook_run_t
+/// alpm_event_hook_run_t
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HookRun<'e> {
 	pub name: &'e [u8],
@@ -139,7 +139,7 @@ pub struct HookRun<'e> {
 }
 
 impl Event<'_> {
-	// alpm_event_type_t
+	/// alpm_event_type_t
 	pub fn kind(&self) -> c_int {
 		match self {
 			Event::CheckdepsStart => 1,
@@ -183,47 +183,44 @@ impl Event<'_> {
 	}
 }
 
-// alpm_question_t. the answer field starts at the C default (0, picks
-// none / no): a callback that leaves it acts like no questioncb
+/// alpm_question_t. the answer field starts at the C default (0, picks
+/// none / no): a callback that leaves it acts like no questioncb
 #[derive(Debug)]
 pub enum Question<'q> {
-	// ALPM_QUESTION_INSTALL_IGNOREPKG: nonzero installs pkg anyway
-	InstallIgnorepkg {
-		install: c_int,
-		pkg: &'q Package,
-	},
-	// ALPM_QUESTION_REPLACE_PKG
+	/// ALPM_QUESTION_INSTALL_IGNOREPKG: nonzero installs pkg anyway
+	InstallIgnorepkg { install: c_int, pkg: &'q Package },
+	/// ALPM_QUESTION_REPLACE_PKG
 	ReplacePkg {
 		replace: c_int,
 		oldpkg: &'q Package,
 		newpkg: &'q Package,
 		newdb: &'q Db,
 	},
-	// ALPM_QUESTION_CONFLICT_PKG: nonzero removes conflict.package2
+	/// ALPM_QUESTION_CONFLICT_PKG: nonzero removes conflict.package2
 	ConflictPkg {
 		remove: c_int,
 		conflict: &'q Conflict,
 	},
-	// ALPM_QUESTION_CORRUPTED_PKG
+	/// ALPM_QUESTION_CORRUPTED_PKG
 	CorruptedPkg {
 		remove: c_int,
 		filepath: &'q [u8],
 		reason: Errno,
 	},
-	// ALPM_QUESTION_REMOVE_PKGS: nonzero skips the packages
+	/// ALPM_QUESTION_REMOVE_PKGS: nonzero skips the packages
 	RemovePkgs {
 		skip: c_int,
 		packages: &'q [&'q Package],
 	},
-	// ALPM_QUESTION_SELECT_PROVIDER: position in providers, out of
-	// range picks none. dbs[i] is the name of providers[i]'s db
+	/// ALPM_QUESTION_SELECT_PROVIDER: position in providers, out of
+	/// range picks none. `dbs[i]` is the name of `providers[i]`'s db
 	SelectProvider {
 		use_index: c_int,
 		providers: &'q [&'q Package],
 		dbs: &'q [&'q [u8]],
 		depend: &'q Depend,
 	},
-	// ALPM_QUESTION_IMPORT_KEY: nonzero imports
+	/// ALPM_QUESTION_IMPORT_KEY: nonzero imports
 	ImportKey {
 		import: c_int,
 		uid: Option<&'q [u8]>,
@@ -232,7 +229,7 @@ pub enum Question<'q> {
 }
 
 impl Question<'_> {
-	// alpm_question_type_t
+	/// alpm_question_type_t
 	pub fn kind(&self) -> c_int {
 		match self {
 			Question::InstallIgnorepkg { .. } => 1,
@@ -245,8 +242,8 @@ impl Question<'_> {
 		}
 	}
 
-	// alpm_question_any_t.answer: the first int after the type in every
-	// variant
+	/// alpm_question_any_t.answer: the first int after the type in every
+	/// variant
 	pub fn answer(&self) -> c_int {
 		match *self {
 			Question::InstallIgnorepkg { install: a, .. }
@@ -259,6 +256,7 @@ impl Question<'_> {
 		}
 	}
 
+	/// the answer field of the alpm_question_*_t, as the C's int
 	pub fn set_answer(&mut self, answer: c_int) {
 		match self {
 			Question::InstallIgnorepkg { install: a, .. }
@@ -272,7 +270,7 @@ impl Question<'_> {
 	}
 }
 
-// alpm_progress_t, discriminants as in alpm.h
+/// alpm_progress_t, discriminants as in alpm.h
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
 pub enum Progress {
@@ -288,23 +286,36 @@ pub enum Progress {
 	KeyringStart,
 }
 
-// alpm_download_event_type_t with its alpm_download_event_*_t data
+/// alpm_download_event_type_t with its alpm_download_event_*_t data
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DownloadEvent {
-	Init { optional: bool },
-	Progress { downloaded: i64, total: i64 },
-	Retry { resume: bool },
-	// result 0 downloaded, 1 up to date, -1 error (optional files too)
-	Completed { total: i64, result: c_int },
+	Init {
+		optional: bool,
+	},
+	Progress {
+		downloaded: i64,
+		total: i64,
+	},
+	Retry {
+		resume: bool,
+	},
+	/// result 0 downloaded, 1 up to date, -1 error (optional files too)
+	Completed {
+		total: i64,
+		result: c_int,
+	},
 }
 
-// logcb (_alpm_log), eventcb (EVENT), questioncb (QUESTION), progresscb
-// (PROGRESS) and dlcb. () is a handle without callbacks
+/// logcb (_alpm_log), eventcb (EVENT), questioncb (QUESTION), progresscb
+/// (PROGRESS) and dlcb. () is a handle without callbacks
 pub trait Callbacks {
-	// one formatted message per _alpm_log call, '\n' included
+	/// logcb: one formatted message per _alpm_log call, '\n' included
 	fn log(&mut self, _level: LogLevel, _msg: &[u8]) {}
+	/// eventcb
 	fn event(&mut self, _event: &Event<'_>) {}
+	/// questioncb: the answer is set on the question
 	fn question(&mut self, _question: &mut Question<'_>) {}
+	/// progresscb: percent of pkg, current of howmany
 	fn progress(
 		&mut self,
 		_progress: Progress,
@@ -314,19 +325,21 @@ pub trait Callbacks {
 		_current: usize,
 	) {
 	}
+	/// dlcb
 	fn download(&mut self, _filename: &[u8], _event: DownloadEvent) {}
 }
 
 impl Callbacks for () {}
 
-// _alpm_log of a message given in parts, joined before the call
+/// _alpm_log of a message given in parts, joined before the call
 pub fn logv(cb: &mut dyn Callbacks, level: LogLevel, parts: &[&[u8]]) {
 	cb.log(level, &parts.concat());
 }
 
-// handle->fetchcb (the frontend's XferCommand): 0 downloaded, 1 up to
-// date, -1 error. dload uses its own downloader when there is none
+/// handle->fetchcb (the frontend's XferCommand): 0 downloaded, 1 up to
+/// date, -1 error. dload uses its own downloader when there is none
 pub trait Fetch {
+	/// fetchcb(url, localpath, force)
 	fn fetch(&mut self, url: &[u8], localpath: &[u8], force: bool)
 	-> c_int;
 }

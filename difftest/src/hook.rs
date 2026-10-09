@@ -15,10 +15,12 @@ use std::ptr;
 use std::rc::Rc;
 use std::sync::MutexGuard;
 
-use alpm_core::callbacks::{Callbacks, Event, HookRun, HookWhen, LogLevel};
-use alpm_core::handle::Handle;
-use alpm_core::package::{DbCaches, Package};
-use alpm_core::trans::TRANS_FLAG_NOLOCK;
+use alpm_core::internals::callbacks::{
+	Callbacks, Event, HookRun, HookWhen, LogLevel,
+};
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::package::{DbCaches, Package};
+use alpm_core::internals::trans::TRANS_FLAG_NOLOCK;
 
 use crate::handle::log_message;
 use crate::handle::{

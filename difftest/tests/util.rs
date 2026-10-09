@@ -1,5 +1,5 @@
-// alpm_core::util helpers against their C counterparts in util.c
-use alpm_core::util::{
+// alpm_core::internals::util helpers against their C counterparts in util.c
+use alpm_core::internals::util::{
 	get_fullpath, hash_sdbm, parsedate, splitname, strip_newline, strtoofft,
 };
 use difftest::{

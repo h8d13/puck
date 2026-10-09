@@ -1,10 +1,10 @@
-// alpm_core::pkghash against the C in pkghash.c: list order, lookups,
+// alpm_core::internals::pkghash against the C in pkghash.c: list order, lookups,
 // removals and table counts after every step of random op sequences
 use std::borrow::Borrow;
 
-use alpm_core::package::Package;
-use alpm_core::pkghash::PkgHash;
-use alpm_core::util::hash_sdbm;
+use alpm_core::internals::package::Package;
+use alpm_core::internals::pkghash::PkgHash;
+use alpm_core::internals::util::hash_sdbm;
 use difftest::{CPkgHash, Rng, iters};
 
 // a pool package with its index, what the C side reports

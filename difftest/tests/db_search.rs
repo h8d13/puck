@@ -1,4 +1,4 @@
-// alpm_core::db::Db::search against C alpm_db_search: fixture roots
+// alpm_core::internals::db::Db::search against C alpm_db_search: fixture roots
 // under /tmp with a local db and sync dbs of random packages (names,
 // descriptions, provides, groups), searched with random needle lists
 // (regex specials, case, the strstr name fallback, invalid patterns)
@@ -8,9 +8,9 @@ use std::ffi::c_int;
 use std::fmt::Write as _;
 use std::fs;
 
-use alpm_core::db::{DB_USAGE_ALL, DB_USAGE_SEARCH, Db};
-use alpm_core::error::Errno;
-use alpm_core::handle::Handle;
+use alpm_core::internals::db::{DB_USAGE_ALL, DB_USAGE_SEARCH, Db};
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::handle::Handle;
 use difftest::{
 	CSearch, LocalEntry, Rng, SearchWorld, TempRoot, iters, loose_sections,
 	section, tar_dir, tar_file, ustar,

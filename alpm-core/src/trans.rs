@@ -99,11 +99,11 @@ pub(crate) fn readable(path: &[u8], cb: &mut dyn Callbacks) -> bool {
 	alpm_access(cb, None, path, Access::READ_OK).is_ok()
 }
 
-// _alpm_runscriptlet: runs `. <copy>; <script> <ver> [<oldver>]` with
-// SCRIPTLET_SHELL -c under handle->root (with its trailing '/'), the copy being
-// filepath (or its .INSTALL entry when is_archive) placed in a fresh
-// root/tmp/alpm_XXXXXX. a missing filepath or a script name that does
-// not appear in it runs nothing. true unless something failed (C 0)
+/// _alpm_runscriptlet: runs `. <copy>; <script> <ver> [<oldver>]` with
+/// SCRIPTLET_SHELL -c under handle->root (with its trailing '/'), the copy being
+/// filepath (or its .INSTALL entry when is_archive) placed in a fresh
+/// root/tmp/alpm_XXXXXX. a missing filepath or a script name that does
+/// not appear in it runs nothing. true unless something failed (C 0)
 pub fn runscriptlet(
 	h: &mut Handle,
 	filepath: &[u8],
@@ -196,25 +196,40 @@ pub fn runscriptlet(
 	ok
 }
 
-// alpm_transflag_t
+/// alpm_transflag_t ALPM_TRANS_FLAG_NODEPS: skip dependency checks
 pub const TRANS_FLAG_NODEPS: c_int = 1;
+/// ALPM_TRANS_FLAG_NOSAVE: remove backup files too
 pub const TRANS_FLAG_NOSAVE: c_int = 1 << 2;
+/// ALPM_TRANS_FLAG_NODEPVERSION: ignore versions in dependency checks
 pub const TRANS_FLAG_NODEPVERSION: c_int = 1 << 3;
+/// ALPM_TRANS_FLAG_CASCADE: remove what depends on removed packages
 pub const TRANS_FLAG_CASCADE: c_int = 1 << 4;
+/// ALPM_TRANS_FLAG_RECURSE: remove unneeded dependencies too
 pub const TRANS_FLAG_RECURSE: c_int = 1 << 5;
+/// ALPM_TRANS_FLAG_DBONLY: touch the database only, no files
 pub const TRANS_FLAG_DBONLY: c_int = 1 << 6;
+/// ALPM_TRANS_FLAG_NOHOOKS: skip the hooks
 pub const TRANS_FLAG_NOHOOKS: c_int = 1 << 7;
+/// ALPM_TRANS_FLAG_ALLDEPS: install everything as a dependency
 pub const TRANS_FLAG_ALLDEPS: c_int = 1 << 8;
+/// ALPM_TRANS_FLAG_DOWNLOADONLY: download, do not install
 pub const TRANS_FLAG_DOWNLOADONLY: c_int = 1 << 9;
+/// ALPM_TRANS_FLAG_NOSCRIPTLET: skip install scriptlets
 pub const TRANS_FLAG_NOSCRIPTLET: c_int = 1 << 10;
+/// ALPM_TRANS_FLAG_NOCONFLICTS: skip conflict checks
 pub const TRANS_FLAG_NOCONFLICTS: c_int = 1 << 11;
+/// ALPM_TRANS_FLAG_NEEDED: skip packages already up to date
 pub const TRANS_FLAG_NEEDED: c_int = 1 << 13;
+/// ALPM_TRANS_FLAG_ALLEXPLICIT: install everything as explicit
 pub const TRANS_FLAG_ALLEXPLICIT: c_int = 1 << 14;
+/// ALPM_TRANS_FLAG_UNNEEDED: skip removals of needed packages
 pub const TRANS_FLAG_UNNEEDED: c_int = 1 << 15;
+/// ALPM_TRANS_FLAG_RECURSEALL: RECURSE including explicit packages
 pub const TRANS_FLAG_RECURSEALL: c_int = 1 << 16;
+/// ALPM_TRANS_FLAG_NOLOCK: do not take the db lock
 pub const TRANS_FLAG_NOLOCK: c_int = 1 << 17;
 
-// alpm_transstate_t
+/// alpm_transstate_t
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransState {
 	Idle,
@@ -226,23 +241,24 @@ pub enum TransState {
 	Interrupted,
 }
 
-// a package of trans->add (or unresolvable) with the alpm_pkg_t fields
-// only transactions use
+/// a package of trans->add (or unresolvable) with the alpm_pkg_t fields
+/// only transactions use
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransPkg {
 	pub pkg: Package,
-	// origin_data.db of a sync package: its position in
-	// Handle::syncdbs(). None for file packages
+	/// origin_data.db of a sync package: its position in
+	/// Handle::syncdbs(). None for file packages
 	pub db: Option<usize>,
-	// pkg->removes: local packages this one replaces or conflicts
-	// with, elected for removal
+	/// pkg->removes: local packages this one replaces or conflicts
+	/// with, elected for removal
 	pub removes: Vec<Package>,
-	// pkg->oldpkg: dup of the installed package of the same name, set
-	// by a successful sync prepare
+	/// pkg->oldpkg: dup of the installed package of the same name, set
+	/// by a successful sync prepare
 	pub oldpkg: Option<Package>,
 }
 
 impl TransPkg {
+	/// a target from a sync db (its position) or a file (None)
 	pub fn new(pkg: Package, db: Option<usize>) -> Self {
 		TransPkg {
 			pkg,
@@ -253,32 +269,33 @@ impl TransPkg {
 	}
 }
 
-// alpm_trans_t
+/// alpm_trans_t
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Trans {
-	// alpm_transflag_t bits
+	/// alpm_transflag_t bits
 	pub flags: c_int,
 	pub state: TransState,
-	// targets dropped by the sync prepare (skipped unresolvable ones,
-	// losers of inner conflicts)
+	/// targets dropped by the sync prepare (skipped unresolvable ones,
+	/// losers of inner conflicts)
 	pub unresolvable: Vec<TransPkg>,
 	pub add: Vec<TransPkg>,
-	// dups of local packages
+	/// dups of local packages
 	pub remove: Vec<Package>,
-	// filled by the commit's file conflict check
+	/// filled by the commit's file conflict check
 	pub skip_remove: Vec<Vec<u8>>,
 }
 
-// why alpm_trans_init failed
+/// why alpm_trans_init failed
 #[derive(Debug)]
 pub enum InitError {
-	// ALPM_ERR_TRANS_NOT_NULL
+	/// ALPM_ERR_TRANS_NOT_NULL
 	NotNull,
-	// ALPM_ERR_HANDLE_LOCK with the errno of the lock attempt
+	/// ALPM_ERR_HANDLE_LOCK with the errno of the lock attempt
 	Lock(std::io::Error),
 }
 
 impl InitError {
+	/// the pm_errno alpm_trans_init leaves
 	pub fn errno(&self) -> Errno {
 		match self {
 			InitError::NotNull => Errno::TransNotNull,
@@ -287,20 +304,20 @@ impl InitError {
 	}
 }
 
-// the data list of a failed alpm_trans_prepare
+/// the data list of a failed alpm_trans_prepare
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum PrepareData {
 	#[default]
 	None,
-	// ALPM_ERR_PKG_INVALID_ARCH: "name-version-arch" strings
+	/// ALPM_ERR_PKG_INVALID_ARCH: "name-version-arch" strings
 	InvalidArch(Vec<Vec<u8>>),
-	// ALPM_ERR_UNSATISFIED_DEPS
+	/// ALPM_ERR_UNSATISFIED_DEPS
 	Missing(Vec<DepMissing>),
-	// ALPM_ERR_CONFLICTING_DEPS: the conflict that stopped it
+	/// ALPM_ERR_CONFLICTING_DEPS: the conflict that stopped it
 	Conflicts(Vec<Conflict>),
 }
 
-// a failed alpm_trans_prepare: pm_errno and *data
+/// a failed alpm_trans_prepare: pm_errno and *data
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrepareError {
 	pub errno: Errno,
@@ -319,20 +336,20 @@ impl From<Errno> for PrepareError {
 	}
 }
 
-// the data list of a failed alpm_trans_commit
+/// the data list of a failed alpm_trans_commit
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum CommitData {
 	#[default]
 	None,
-	// the file conflict check (ALPM_ERR_FILE_CONFLICTS)
+	/// the file conflict check (ALPM_ERR_FILE_CONFLICTS)
 	FileConflicts(Vec<FileConflict>),
-	// filenames of cached packages that failed to load or differ from
-	// their db entry. the C keeps them whatever pm_errno ends up as
+	/// filenames of cached packages that failed to load or differ from
+	/// their db entry. the C keeps them whatever pm_errno ends up as
 	Invalid(Vec<Vec<u8>>),
 }
 
-// a failed alpm_trans_commit: pm_errno as the C leaves it (Ok where it
-// fails without one) and *data
+/// a failed alpm_trans_commit: pm_errno as the C leaves it (Ok where it
+/// fails without one) and *data
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitError {
 	pub errno: Errno,
@@ -446,7 +463,7 @@ impl<'a> View<'a> {
 		}
 	}
 
-	// _alpm_db_get_pkgcache(handle->db_local) as a list
+	/// _alpm_db_get_pkgcache(handle->db_local) as a list
 	pub fn local_list(&self) -> Vec<&'a Package> {
 		self.local.iter().collect()
 	}
@@ -461,8 +478,8 @@ pub(crate) fn with_view<R>(
 	h.with_callbacks(|h, cb| f(&View::new(h, &empty), cb))
 }
 
-// alpm_trans_init: the db lock unless NOLOCK, then an initialized
-// transaction with these flags (not checked, like the C)
+/// alpm_trans_init: the db lock unless NOLOCK, then an initialized
+/// transaction with these flags (not checked, like the C)
 pub fn trans_init(h: &mut Handle, flags: c_int) -> Result<(), InitError> {
 	if h.trans().is_some() {
 		return Err(InitError::NotNull);
@@ -481,23 +498,23 @@ pub fn trans_init(h: &mut Handle, flags: c_int) -> Result<(), InitError> {
 	Ok(())
 }
 
-// alpm_trans_get_flags
+/// alpm_trans_get_flags
 pub fn trans_get_flags(h: &Handle) -> Result<c_int, Errno> {
 	h.trans().map(|t| t.flags).ok_or(Errno::TransNull)
 }
 
-// alpm_trans_get_add
+/// alpm_trans_get_add
 pub fn trans_get_add(h: &Handle) -> Result<&[TransPkg], Errno> {
 	h.trans().map(|t| &t.add[..]).ok_or(Errno::TransNull)
 }
 
-// alpm_trans_get_remove
+/// alpm_trans_get_remove
 pub fn trans_get_remove(h: &Handle) -> Result<&[Package], Errno> {
 	h.trans().map(|t| &t.remove[..]).ok_or(Errno::TransNull)
 }
 
-// alpm_trans_interrupt: only a committing (or already interrupted)
-// transaction
+/// alpm_trans_interrupt: only a committing (or already interrupted)
+/// transaction
 pub fn trans_interrupt(h: &mut Handle) -> Result<(), Errno> {
 	let trans = h.trans_mut().ok_or(Errno::TransNull)?;
 	match trans.state {
@@ -509,8 +526,8 @@ pub fn trans_interrupt(h: &mut Handle) -> Result<(), Errno> {
 	}
 }
 
-// alpm_trans_release: the transaction goes, then the lock unless it was
-// taken without. a failed unlock is only logged, like the C
+/// alpm_trans_release: the transaction goes, then the lock unless it was
+/// taken without. a failed unlock is only logged, like the C
 pub fn trans_release(h: &mut Handle) -> Result<(), Errno> {
 	let trans = h.trans().ok_or(Errno::TransNull)?;
 	if trans.state == TransState::Idle {
@@ -671,12 +688,12 @@ fn logaction(h: &mut Handle, msg: &[u8]) {
 	let _ = h.logaction(CALLER_PREFIX, msg);
 }
 
-// alpm_trans_commit: a prepared transaction that holds the lock. with
-// targets: loaded (downloads, keyring, validation; DOWNLOADONLY stops
-// there) and checked (file conflicts, disk space). then the
-// PreTransaction hooks, the removal or the sync commit, and unless
-// interrupted the PostTransaction hooks. the state ends Committed after
-// a commit that ran, interrupted or not
+/// alpm_trans_commit: a prepared transaction that holds the lock. with
+/// targets: loaded (downloads, keyring, validation; DOWNLOADONLY stops
+/// there) and checked (file conflicts, disk space). then the
+/// PreTransaction hooks, the removal or the sync commit, and unless
+/// interrupted the PostTransaction hooks. the state ends Committed after
+/// a commit that ran, interrupted or not
 pub fn trans_commit(h: &mut Handle) -> Result<(), CommitError> {
 	let trans = h.trans().ok_or(Errno::TransNull)?;
 	if trans.state != TransState::Prepared {

@@ -1,6 +1,6 @@
-// alpm_core::backup against the C in backup.c
-use alpm_core::backup::{Backup, needbackup};
-use alpm_core::package::Package;
+// alpm_core::internals::backup against the C in backup.c
+use alpm_core::internals::backup::{Backup, needbackup};
+use alpm_core::internals::package::Package;
 use difftest::{Rng, c_backup_dup, c_needbackup, c_needbackup_null, iters};
 
 const ALPHABET: &[u8] = b"ab/.\t\t \xc3";

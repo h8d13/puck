@@ -18,9 +18,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
-use alpm_core::db::{DB_USAGE_ALL, DB_USAGE_UPGRADE};
 use alpm_core::digest::{Digest, Md5, Sha256, hex};
-use alpm_core::handle::Handle;
+use alpm_core::internals::db::{DB_USAGE_ALL, DB_USAGE_UPGRADE};
+use alpm_core::internals::handle::Handle;
 use difftest::{
 	CQuery, Comp, QueryWorld, Rng, TempRoot, iters, section, tar_dir,
 	tar_file, tz_utc, unstamp, ustar, write_db,

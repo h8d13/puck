@@ -1,5 +1,5 @@
-// unit tests for alpm_core::version
-use alpm_core::version::*;
+// unit tests for alpm_core::internals::version
+use alpm_core::internals::version::*;
 
 // vectors from test/util/vercmptest.sh
 const CASES: &[(&str, &str, i8)] = &[

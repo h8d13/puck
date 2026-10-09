@@ -13,18 +13,18 @@
 // follows LC_TIME and TZ: format_date. PkgEnv::format_date is where
 // tests plug in a fixed zone and locale (format_date_at).
 
-use alpm_core::backup::Backup;
-use alpm_core::deps::{Depend, dep_compute_string, find_satisfier};
-use alpm_core::error::Errno;
-use alpm_core::package::{
+use alpm_core::Backup;
+use alpm_core::Errno;
+use alpm_core::setlocale::{self, Locale};
+use alpm_core::strftime::{Tm, strftime};
+use alpm_core::tzfile;
+use alpm_core::{
 	DbCaches, PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
 	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, PkgReason,
 	compute_optionalfor, compute_requiredby,
 };
-use alpm_core::setlocale::{self, Locale};
-use alpm_core::strftime::{Tm, strftime};
-use alpm_core::tzfile;
-use alpm_core::util::until_nul;
+use alpm_core::{Depend, dep_compute_string, find_satisfier};
+use pacman_common::util_common::until_nul;
 
 use crate::util::{
 	ColStr, SigResult, decimal, humanize_size, indentprint, list_display,

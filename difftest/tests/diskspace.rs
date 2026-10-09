@@ -1,4 +1,4 @@
-// alpm_core::diskspace against the C. check_diskspace and
+// alpm_core::internals::diskspace against the C. check_diskspace and
 // check_downloadspace run on a C handle and a Rust Handle over the same
 // fixture (root tree with real files, local db) under /tmp, both reading
 // the real mount table and statvfs; return value, pm_errno and every
@@ -11,16 +11,16 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use alpm_core::be_local::INFRQ_FILES;
-use alpm_core::callbacks::{Callbacks, LogLevel, Progress};
-use alpm_core::diskspace::{
+use alpm_core::filelist::{File, FileList};
+use alpm_core::internals::be_local::INFRQ_FILES;
+use alpm_core::internals::callbacks::{Callbacks, LogLevel, Progress};
+use alpm_core::internals::diskspace::{
 	FsInfo, Mounts, SpaceError, System, check_diskspace,
 	check_downloadspace, match_mount_point, mount_point_list, parse_mntent,
 };
-use alpm_core::filelist::{File, FileList};
-use alpm_core::handle::Handle;
-use alpm_core::package::Package;
-use alpm_core::util::hash_sdbm;
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::package::Package;
+use alpm_core::internals::util::hash_sdbm;
 use difftest::{
 	CSpace, CSpaceResult, CbEvent, LocalEntry, Rng, TempRoot, c_getmntent,
 	iters, loose_sections, section,

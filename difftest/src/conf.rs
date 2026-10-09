@@ -601,11 +601,11 @@ pub struct SnapDb {
 }
 
 impl HandleSnap {
-	pub fn of(h: &alpm_core::handle::Handle) -> HandleSnap {
+	pub fn of(h: &alpm_core::internals::handle::Handle) -> HandleSnap {
 		let dep_strs = h
 			.assumeinstalled()
 			.iter()
-			.map(alpm_core::deps::dep_compute_string)
+			.map(alpm_core::internals::deps::dep_compute_string)
 			.collect();
 		let dbs = h
 			.syncdbs()
@@ -727,7 +727,7 @@ unsafe fn c_snap(h: *mut c_void) -> HandleSnap {
 			),
 			assumeinstalled: deps
 				.iter()
-				.map(alpm_core::deps::dep_compute_string)
+				.map(alpm_core::internals::deps::dep_compute_string)
 				.collect(),
 			dbs,
 		}

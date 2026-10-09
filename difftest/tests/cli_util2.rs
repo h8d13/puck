@@ -8,11 +8,11 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use alpm_core::be_local::INFRQ_DSIZE;
-use alpm_core::deps::{Depend, dep_from_string};
-use alpm_core::handle::Handle;
-use alpm_core::package::{Package, PkgFrom};
-use alpm_core::util::hash_sdbm;
+use alpm_core::internals::be_local::INFRQ_DSIZE;
+use alpm_core::internals::deps::{Depend, dep_from_string};
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::package::{Package, PkgFrom};
+use alpm_core::internals::util::hash_sdbm;
 use difftest::{
 	CACHED, CIo, CORE_SERVER, Pty, Rng, UtilWorld, c_colon_printf,
 	c_multiselect_question, c_question, c_rmrf, c_select_question, iters,
@@ -512,7 +512,11 @@ impl Fx {
 	}
 
 	// the db a package of origin and sync index gets
-	fn db(&self, p: &Package, idx: usize) -> Option<&alpm_core::db::Db> {
+	fn db(
+		&self,
+		p: &Package,
+		idx: usize,
+	) -> Option<&alpm_core::internals::db::Db> {
 		match p.origin {
 			Some(PkgFrom::SyncDb) => Some(&self.h.syncdbs()[idx]),
 			Some(PkgFrom::LocalDb) => self.h.localdb(),

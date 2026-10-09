@@ -4,8 +4,8 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use alpm_core::handle::Handle;
-use alpm_core::trans::TRANS_FLAG_ALLDEPS;
+use alpm_core::Handle;
+use alpm_core::TRANS_FLAG_ALLDEPS;
 use pacman_cli::conf::Config;
 use pacman_cli::database::pacman_database;
 use pacman_cli::util::Output;

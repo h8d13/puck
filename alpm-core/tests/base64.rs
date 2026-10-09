@@ -1,5 +1,5 @@
-// unit tests for alpm_core::base64
-use alpm_core::base64::*;
+// unit tests for alpm_core::internals::base64
+use alpm_core::internals::base64::*;
 
 #[test]
 fn rfc4648_vectors() {

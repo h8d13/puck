@@ -4,7 +4,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::process::ExitCode;
 
 use alpm_core::PACKAGE_VERSION;
-use alpm_core::version::vercmp;
+use alpm_core::vercmp;
 
 fn usage() {
 	eprint!("vercmp (pacman) v{PACKAGE_VERSION}\n\n\

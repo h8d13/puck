@@ -1,4 +1,4 @@
-// alpm_core::util::unpack against util.c's _alpm_unpack (libarchive's
+// alpm_core::internals::util::unpack against util.c's _alpm_unpack (libarchive's
 // archive_read_extract): the C and the port each extract the same archive
 // into their own copy of a fixture tree; return value, pm_errno, the log
 // lines (libarchive's error texts cut) and the resulting tree (types,
@@ -9,9 +9,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
-use alpm_core::callbacks::{Callbacks, LogLevel};
-use alpm_core::error::Errno;
-use alpm_core::util::{unpack, unpack_single};
+use alpm_core::internals::callbacks::{Callbacks, LogLevel};
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::util::{unpack, unpack_single};
 use difftest::{
 	COMPS, Comp, FILTERED, Node, Rng, TarNode, TempRoot, c_unpack,
 	force_remove, iters, snapshot, umask_lock, ustar_nodes, write_db,

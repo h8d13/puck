@@ -1,6 +1,6 @@
-// unit tests for alpm_core::group
-use alpm_core::group::Group;
-use alpm_core::package::Package;
+// unit tests for alpm_core::internals::group
+use alpm_core::internals::group::Group;
+use alpm_core::internals::package::Package;
 
 #[test]
 fn new_copies_name() {

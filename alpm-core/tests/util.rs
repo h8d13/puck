@@ -1,5 +1,5 @@
-// unit tests for alpm_core::util
-use alpm_core::util::*;
+// unit tests for alpm_core::internals::util
+use alpm_core::internals::util::*;
 
 #[test]
 fn strip_newline_cases() {
@@ -136,7 +136,7 @@ fn fs_helpers() {
 
 #[test]
 fn checksum_cases() {
-	use alpm_core::package::{
+	use alpm_core::internals::package::{
 		PKG_VALIDATION_MD5SUM, PKG_VALIDATION_SHA256SUM,
 	};
 	let t = TmpDir::new("checksum");

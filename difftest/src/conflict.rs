@@ -8,11 +8,11 @@ use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
 use std::sync::MutexGuard;
 
-use alpm_core::callbacks::LogLevel;
-use alpm_core::conflict::{
+use alpm_core::internals::callbacks::LogLevel;
+use alpm_core::internals::conflict::{
 	Conflict, FileConflict, FileConflictType, FileConflicts,
 };
-use alpm_core::package::Package;
+use alpm_core::internals::package::Package;
 
 use crate::handle::log_message;
 use crate::handle::{

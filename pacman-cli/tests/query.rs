@@ -5,7 +5,7 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use alpm_core::handle::Handle;
+use alpm_core::Handle;
 use pacman_cli::conf::{Config, LOG_ERROR, LOG_WARNING};
 use pacman_cli::pacman::{PKG_LOCALITY_FOREIGN, PKG_LOCALITY_NATIVE};
 use pacman_cli::query::{QueryEnv, pacman_query};

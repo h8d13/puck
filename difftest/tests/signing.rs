@@ -1,5 +1,5 @@
-// alpm_core::signing::decode_signature against C alpm_decode_signature
-use alpm_core::signing::{DecodeError, decode_signature};
+// alpm_core::internals::signing::decode_signature against C alpm_decode_signature
+use alpm_core::internals::signing::{DecodeError, decode_signature};
 use difftest::{Rng, c_decode_signature, encode_base64 as encode, iters};
 
 const ENC: &[u8] =

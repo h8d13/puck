@@ -13,7 +13,7 @@ use std::fs;
 use std::io::Cursor;
 use std::path::Path;
 
-use alpm_core::handle::Handle;
+use alpm_core::internals::handle::Handle;
 use difftest::{
 	CleanWorld, Comp, Node, Rng, c_pacman_sync_clean, cut_archive_text,
 	iters, snapshot, umask_lock, utc_date, write_package,

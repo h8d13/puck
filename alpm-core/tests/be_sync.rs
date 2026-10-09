@@ -1,10 +1,13 @@
-// unit tests for alpm_core::be_sync, on uncompressed dbs written here
+// unit tests for alpm_core::internals::be_sync, on uncompressed dbs written here
 use std::fs;
 use std::path::PathBuf;
 
-use alpm_core::be_sync::{Error, Reason, db_path, get_validation, populate};
-use alpm_core::error::Errno;
-use alpm_core::package::{
+use alpm_core::internals::be_sync::{
+	SyncDbError as Error, SyncDbInvalidReason as Reason, db_path,
+	get_validation, populate,
+};
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
 	PKG_VALIDATION_SIGNATURE, Package, PkgFrom,
 };
@@ -176,9 +179,9 @@ fn estimate_follows_dbext() {
 // sync_db_validate where no gpg runs
 #[test]
 fn validate_without_signature() {
-	use alpm_core::be_sync::sync_db_validate;
-	use alpm_core::callbacks::{Callbacks, LogLevel};
-	use alpm_core::signing::{
+	use alpm_core::internals::be_sync::sync_db_validate;
+	use alpm_core::internals::callbacks::{Callbacks, LogLevel};
+	use alpm_core::internals::signing::{
 		Keyring, SIG_DATABASE, SIG_DATABASE_OPTIONAL,
 	};
 	struct Lines(Vec<Vec<u8>>);

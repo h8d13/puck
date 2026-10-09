@@ -1,4 +1,4 @@
-// alpm_core::be_sync::db_update against the C alpm_db_update, and -Sy/-Fy
+// alpm_core::internals::be_sync::db_update against the C alpm_db_update, and -Sy/-Fy
 // against C pacman_sync/pacman_files: a C and a Rust handle, each on its
 // own fixture root, download from the same scripted HTTP mirrors on
 // 127.0.0.1 (generated sync dbs, signatures from a throwaway keyring).
@@ -16,11 +16,13 @@ use std::path::Path;
 use std::sync::MutexGuard;
 use std::sync::atomic::{AtomicU16, Ordering};
 
-use alpm_core::callbacks::{DownloadEvent, LogLevel};
-use alpm_core::db::{DB_USAGE_ALL, DB_USAGE_SEARCH, SIG_DATABASE};
-use alpm_core::error::Errno;
-use alpm_core::handle::Handle;
-use alpm_core::signing::{SIG_DATABASE_OPTIONAL, SIG_DATABASE_UNKNOWN_OK};
+use alpm_core::internals::callbacks::{DownloadEvent, LogLevel};
+use alpm_core::internals::db::{DB_USAGE_ALL, DB_USAGE_SEARCH, SIG_DATABASE};
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::signing::{
+	SIG_DATABASE_OPTIONAL, SIG_DATABASE_UNKNOWN_OK,
+};
 use difftest::{
 	CRun, CUpdate, DbSpec, DbState, GpgFixture, Home, RUpdate, Reply, Req,
 	Rng, Server, TempRoot, UpdRecord, UpdSetup, c_pacman_files_refresh,

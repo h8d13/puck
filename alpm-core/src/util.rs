@@ -35,14 +35,16 @@ use crate::tar;
 
 pub use pacman_common::util_common::{PATH_MAX, llstat, until_nul};
 
-// _alpm_strip_newline: trailing '\n' only, '\r' stays
+/// _alpm_strip_newline: trailing '\n' only, '\r' stays.
+/// only the tests call it, the port's own paths do not
+#[cfg_attr(not(feature = "internals"), allow(dead_code))]
 pub fn strip_newline(s: &[u8]) -> &[u8] {
 	let s = until_nul(s);
 	let n = s.iter().rev().take_while(|&&c| c == b'\n').count();
 	&s[..s.len() - n]
 }
 
-// _alpm_get_fullpath
+/// _alpm_get_fullpath
 pub fn get_fullpath(path: &[u8], filename: &[u8], suffix: &[u8]) -> Vec<u8> {
 	[until_nul(path), until_nul(filename), until_nul(suffix)].concat()
 }
@@ -60,8 +62,8 @@ pub(crate) fn with_vec<T, R>(
 	r
 }
 
-// _alpm_hash_sdbm. C feeds plain char into the sum, signed on x86_64 and
-// unsigned on aarch64, c_char keeps the same hash per platform
+/// _alpm_hash_sdbm. C feeds plain char into the sum, signed on x86_64 and
+/// unsigned on aarch64, c_char keeps the same hash per platform
 pub fn hash_sdbm(s: &[u8]) -> c_ulong {
 	until_nul(s).iter().fold(0, |hash: c_ulong, &c| {
 		let c = c as c_char as i64 as c_ulong;
@@ -69,7 +71,7 @@ pub fn hash_sdbm(s: &[u8]) -> c_ulong {
 	})
 }
 
-// _alpm_strtoofft: bare decimal digits only, no sign or whitespace
+/// _alpm_strtoofft: bare decimal digits only, no sign or whitespace
 pub fn strtoofft(s: &[u8]) -> Option<u64> {
 	let s = until_nul(s);
 	if s.is_empty() || !s.iter().all(u8::is_ascii_digit) {
@@ -80,7 +82,7 @@ pub fn strtoofft(s: &[u8]) -> Option<u64> {
 	})
 }
 
-// _alpm_parsedate: strtoll base 10 in the C locale, whole string must parse
+/// _alpm_parsedate: strtoll base 10 in the C locale, whole string must parse
 pub fn parsedate(s: &[u8]) -> Option<i64> {
 	let s = until_nul(s);
 	// isspace in the C locale
@@ -105,8 +107,8 @@ pub fn parsedate(s: &[u8]) -> Option<i64> {
 	if neg { Some(n) } else { n.checked_neg() }
 }
 
-// _alpm_splitname: "name-ver-rel[/anything]" split at the second-last '-'
-// before the first '/', name must not be empty
+/// _alpm_splitname: "name-ver-rel[/anything]" split at the second-last '-'
+/// before the first '/', name must not be empty
 pub fn splitname(target: &[u8]) -> Option<(&[u8], &[u8])> {
 	let target = until_nul(target);
 	let end = target
@@ -122,18 +124,18 @@ pub fn splitname(target: &[u8]) -> Option<(&[u8], &[u8])> {
 	Some((&head[..ver], &head[ver + 1..]))
 }
 
-// _alpm_fnmatch: glibc fnmatch(3) with flags 0 in the C locale (byte
-// based, MB_CUR_MAX 1, no collation rules). '*' and '?' match '/' and a
-// leading '.', backslash escapes, ranges compare byte values. '^' negates
-// like '!' (POSIXLY_CORRECT unset, as glibc decides per process).
+/// _alpm_fnmatch: glibc fnmatch(3) with flags 0 in the C locale (byte
+/// based, MB_CUR_MAX 1, no collation rules). '*' and '?' match '/' and a
+/// leading '.', backslash escapes, ranges compare byte values. '^' negates
+/// like '!' (POSIXLY_CORRECT unset, as glibc decides per process).
 pub fn fnmatch(pattern: &[u8], string: &[u8]) -> bool {
 	let (p, s) = (until_nul(pattern), until_nul(string));
 	matches!(fnmatch_at(p, 0, s, 0, false), Fnm::Match)
 }
 
-// _alpm_fnmatch_patterns: last matching pattern wins, a leading '!'
-// inverts it, a leading '\' is dropped so "\!x" matches "!x".
-// None: nothing matched (C -1), Some(inverted) (C 0 or 1)
+/// _alpm_fnmatch_patterns: last matching pattern wins, a leading '!'
+/// inverts it, a leading '\' is dropped so "\!x" matches "!x".
+/// None: nothing matched (C -1), Some(inverted) (C 0 or 1)
 pub fn fnmatch_patterns<P: AsRef<[u8]>>(
 	patterns: &[P],
 	string: &[u8],
@@ -492,14 +494,14 @@ pub(crate) fn c_path(path: &[u8]) -> &Path {
 	Path::new(OsStr::from_bytes(until_nul(path)))
 }
 
-// _alpm_makepath
+/// _alpm_makepath
 pub fn makepath(path: &[u8]) -> io::Result<()> {
 	makepath_mode(path, 0o755)
 }
 
-// _alpm_makepath_mode: mkdir -p. every prefix ending before a '/' that
-// follows a non-'/' byte, then the whole path; EEXIST is fine at any step,
-// even for a non-directory
+/// _alpm_makepath_mode: mkdir -p. every prefix ending before a '/' that
+/// follows a non-'/' byte, then the whole path; EEXIST is fine at any step,
+/// even for a non-directory
 pub fn makepath_mode(path: &[u8], mode: u32) -> io::Result<()> {
 	let path = until_nul(path);
 	for i in 1..path.len() {
@@ -531,9 +533,9 @@ pub(crate) fn mkdir_mode(path: &Path, mode: u32) -> io::Result<()> {
 	Ok(())
 }
 
-// _alpm_copyfile: dest is opened even if src fails (created mode 0000),
-// without O_TRUNC so a longer dest keeps its tail, then gets src's mode.
-// a read error ends the copy like EOF and still counts as success
+/// _alpm_copyfile: dest is opened even if src fails (created mode 0000),
+/// without O_TRUNC so a longer dest keeps its tail, then gets src's mode.
+/// a read error ends the copy like EOF and still counts as success
 pub fn copyfile(src: &[u8], dest: &[u8]) -> io::Result<()> {
 	let input = File::open(c_path(src));
 	let output = OpenOptions::new()
@@ -557,19 +559,19 @@ pub fn copyfile(src: &[u8], dest: &[u8]) -> io::Result<()> {
 	Ok(())
 }
 
-// _alpm_read_file errors, the matching alpm_errno_t
+/// _alpm_read_file errors, the matching alpm_errno_t
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadFileError {
-	// ALPM_ERR_NOT_A_FILE: open or fstat failed
+	/// ALPM_ERR_NOT_A_FILE: open or fstat failed
 	NotAFile,
-	// ALPM_ERR_MEMORY: st_size bytes could not be allocated
+	/// ALPM_ERR_MEMORY: st_size bytes could not be allocated
 	Memory,
-	// ALPM_ERR_SYSTEM: fewer than st_size bytes read
+	/// ALPM_ERR_SYSTEM: fewer than st_size bytes read
 	System,
 }
 
-// _alpm_read_file: exactly st_size bytes. an empty file is an error, as
-// fread of one 0-byte item returns 0
+/// _alpm_read_file: exactly st_size bytes. an empty file is an error, as
+/// fread of one 0-byte item returns 0
 pub fn read_file(path: &[u8]) -> Result<Vec<u8>, ReadFileError> {
 	let f = File::open(c_path(path))
 		.map_err(|_| ReadFileError::NotAFile)?;
@@ -586,9 +588,9 @@ pub fn read_file(path: &[u8]) -> Result<Vec<u8>, ReadFileError> {
 	}
 }
 
-// _alpm_files_in_directory without the handle, used for debug logging
-// only. entries other than "." and "..", counting stops at the first
-// unless full_count. a readdir error ends the count like end of directory
+/// _alpm_files_in_directory without the handle, used for debug logging
+/// only. entries other than "." and "..", counting stops at the first
+/// unless full_count. a readdir error ends the count like end of directory
 pub fn files_in_directory(path: &[u8], full_count: bool) -> io::Result<usize> {
 	let entries = fs::read_dir(c_path(path))?.map_while(Result::ok);
 	Ok(if full_count {
@@ -606,20 +608,22 @@ fn file_digest<D: digest::Digest>(path: &[u8]) -> Option<Vec<u8>> {
 	Some(digest::hex(&sum))
 }
 
-// alpm_compute_md5sum
+/// alpm_compute_md5sum
 pub fn compute_md5sum(path: &[u8]) -> Option<Vec<u8>> {
 	file_digest::<digest::Md5>(path)
 }
 
-// alpm_compute_sha256sum
+/// alpm_compute_sha256sum
 pub fn compute_sha256sum(path: &[u8]) -> Option<Vec<u8>> {
 	file_digest::<digest::Sha256>(path)
 }
 
-// _alpm_test_checksum: kind is exactly PKG_VALIDATION_MD5SUM or
-// PKG_VALIDATION_SHA256SUM. Some(true) matches (C 0), Some(false) differs
-// (C 1), None for another kind, no expected value or no checksum (C -1).
-// expected is compared like strcmp
+/// _alpm_test_checksum: kind is exactly PKG_VALIDATION_MD5SUM or
+/// PKG_VALIDATION_SHA256SUM. Some(true) matches (C 0), Some(false) differs
+/// (C 1), None for another kind, no expected value or no checksum (C -1).
+/// expected is compared like strcmp.
+/// only the tests call it, the port's own paths do not
+#[cfg_attr(not(feature = "internals"), allow(dead_code))]
 pub fn test_checksum(
 	path: &[u8],
 	expected: Option<&[u8]>,
@@ -634,8 +638,8 @@ pub fn test_checksum(
 	Some(until_nul(expected?) == computed?)
 }
 
-// strerror(errno) of an io::Error: std formats "<strerror_r text> (os
-// error N)". errors without errno as std prints them
+/// strerror(errno) of an io::Error: std formats "<strerror_r text> (os
+/// error N)". errors without errno as std prints them
 pub fn strerror(e: &io::Error) -> Vec<u8> {
 	let s = e.to_string();
 	let Some(n) = e.raw_os_error() else {
@@ -656,8 +660,8 @@ fn join_path(a: &[u8], b: &[u8]) -> Vec<u8> {
 	p
 }
 
-// _alpm_access: faccessat of dir and file joined (dir None is the C's
-// NULL), a last symlink not followed, a debug line per refused mode bit
+/// _alpm_access: faccessat of dir and file joined (dir None is the C's
+/// NULL), a last symlink not followed, a debug line per refused mode bit
 pub fn alpm_access(
 	cb: &mut dyn Callbacks,
 	dir: Option<&[u8]>,
@@ -689,10 +693,10 @@ fn access(path: &[u8], mode: Access) -> Result<(), rustix::io::Errno> {
 	accessat(CWD, c_path(path), mode, AtFlags::empty())
 }
 
-// getuid(2), geteuid(2) through libc (rustix use-libc): under fakeroot
-// its LD_PRELOAD answers with the faked ids, as it does for the C. a raw
-// syscall (rustix's default backend, /proc/self/status) shows the real
-// ones
+/// getuid(2), geteuid(2) through libc (rustix use-libc): under fakeroot
+/// its LD_PRELOAD answers with the faked ids, as it does for the C. a raw
+/// syscall (rustix's default backend, /proc/self/status) shows the real
+/// ones
 pub fn getuid() -> u32 {
 	rustix::process::getuid().as_raw()
 }
@@ -707,7 +711,7 @@ pub fn geteuid() -> u32 {
 pub const SCRIPTLET_SHELL: &[u8] = env!("PUCK_SCRIPTLET_SHELL").as_bytes();
 pub const LDCONFIG: &[u8] = env!("PUCK_LDCONFIG").as_bytes();
 
-// ALPM_CALLER_PREFIX, the alpm_logaction prefix of libalpm itself
+/// ALPM_CALLER_PREFIX, the alpm_logaction prefix of libalpm itself
 pub const CALLER_PREFIX: &[u8] = b"ALPM";
 
 const LINE_MAX: usize = 2048;
@@ -852,10 +856,10 @@ fn reset_signals() {
 	}
 }
 
-// the C child of _alpm_run_chroot after its dup2s, in the helper
-// process: chroot(root) unless root is "/" (std's chroot is libc's,
-// which fakechroot wraps), chdir("/"), umask(0022), signals reset,
-// execv(cmd, argv). a failure prints the C child's text and exits 1
+/// the C child of _alpm_run_chroot after its dup2s, in the helper
+/// process: chroot(root) unless root is "/" (std's chroot is libc's,
+/// which fakechroot wraps), chdir("/"), umask(0022), signals reset,
+/// execv(cmd, argv). a failure prints the C child's text and exits 1
 pub fn chroot_main() -> i32 {
 	let mut args = std::env::args_os().skip(2).map(OsString::into_vec);
 	let (Some(root), Some(cmd)) = (args.next(), args.next()) else {
@@ -959,12 +963,12 @@ fn report_status(
 	false
 }
 
-// _alpm_run_chroot: cmd with argv under handle->root (with its trailing
-// '/'), stdin fed from the bytes the C's stdin_cb would hand out in turn.
-// every output line goes through process_output. true when the command
-// exited 0 (C 0). root that cannot be entered logs and counts as success
-// like the C. cmd None is the C's NULL (an empty hook Exec): its execv
-// fails with EFAULT
+/// _alpm_run_chroot: cmd with argv under handle->root (with its trailing
+/// '/'), stdin fed from the bytes the C's stdin_cb would hand out in turn.
+/// every output line goes through process_output. true when the command
+/// exited 0 (C 0). root that cannot be entered logs and counts as success
+/// like the C. cmd None is the C's NULL (an empty hook Exec): its execv
+/// fails with EFAULT
 pub fn run_chroot(
 	h: &mut Handle,
 	cmd: Option<&[u8]>,
@@ -1106,9 +1110,9 @@ pub fn run_chroot(
 	report_status(h, status.code(), status.signal())
 }
 
-// _alpm_ldconfig: LDCONFIG under root when root has etc/ld.so.conf and
-// an executable root + LDCONFIG (the C's "%s%s" keeps the double '/').
-// true when not run (C 0)
+/// _alpm_ldconfig: LDCONFIG under root when root has etc/ld.so.conf and
+/// an executable root + LDCONFIG (the C's "%s%s" keeps the double '/').
+/// true when not run (C 0)
 pub fn ldconfig(h: &mut Handle) -> bool {
 	h.callbacks().log(LogLevel::Debug, b"running ldconfig\n");
 	let conf = join_path(h.root(), b"etc/ld.so.conf");
@@ -1121,8 +1125,8 @@ pub fn ldconfig(h: &mut Handle) -> bool {
 	true
 }
 
-// _alpm_filecache_find: "<cachedir><filename>" of the first cachedir
-// holding it as a regular file, logged
+/// _alpm_filecache_find: "<cachedir><filename>" of the first cachedir
+/// holding it as a regular file, logged
 pub fn filecache_find(
 	cachedirs: &[Vec<u8>],
 	filename: &[u8],
@@ -1163,7 +1167,7 @@ pub fn filecache_find(
 	None
 }
 
-// _alpm_filecache_exists
+/// _alpm_filecache_exists
 pub fn filecache_exists(
 	cachedirs: &[Vec<u8>],
 	filename: &[u8],
@@ -1172,10 +1176,10 @@ pub fn filecache_exists(
 	filecache_find(cachedirs, filename, cb).is_some()
 }
 
-// _alpm_filecache_setup: the first cachedir that exists (or can be made)
-// and is a writable directory with a write bit. without one, "/tmp/" is
-// added to the cachedirs and used. the C takes TMPDIR instead only when
-// stat(TMPDIR) fails and the last cachedir it stat'ed was a directory
+/// _alpm_filecache_setup: the first cachedir that exists (or can be made)
+/// and is a writable directory with a write bit. without one, "/tmp/" is
+/// added to the cachedirs and used. the C takes TMPDIR instead only when
+/// stat(TMPDIR) fails and the last cachedir it stat'ed was a directory
 pub fn filecache_setup(
 	cachedirs: &mut Vec<Vec<u8>>,
 	cb: &mut dyn Callbacks,
@@ -1277,10 +1281,10 @@ const ALPM_BUFFER_SIZE: u64 = 8192;
 // the umask _alpm_unpack extracts under
 const UNPACK_UMASK: u32 = 0o022;
 
-// a tar entry read through the filter (libarchive's tar reader)
+/// a tar entry read through the filter (libarchive's tar reader)
 pub type Entry<'a> = tar::Entry<'a>;
 
-// the rest of an entry's data
+/// the rest of an entry's data
 pub fn content(entry: &mut Entry) -> io::Result<Vec<u8>> {
 	let mut data = Vec::new();
 	entry.read_to_end(&mut data)?;
@@ -1393,22 +1397,22 @@ impl<'e, 'a> ArchiveFgets<'e, 'a> {
 	}
 }
 
-// _alpm_open_archive: the reader over the file and its fstat
+/// _alpm_open_archive: the reader over the file and its fstat
 pub struct Archive {
 	pub reader: tar::Reader,
 	pub meta: fs::Metadata,
-	// how far the decoders read the file, see Filter
+	/// how far the decoders read the file, see Filter
 	pub consumed: Rc<Cell<u64>>,
-	// the filter picked last, None: tar offsets are file offsets
+	/// the filter picked last, None: tar offsets are file offsets
 	pub code: Code,
 }
 
-// the error is errno at the failing step (open, fstat, the first read
-// of archive_read_open_fd: EISDIR for a directory), the filters' error
-// in what archive_read_open reads through the filters libarchive's
-// bidders stack (filter.rs), or no format taking the data. the fd is
-// read in ALPM_BUFFER_SIZE, or st_blksize when larger. of the formats
-// only tar (and empty data) is read
+/// the error is errno at the failing step (open, fstat, the first read
+/// of archive_read_open_fd: EISDIR for a directory), the filters' error
+/// in what archive_read_open reads through the filters libarchive's
+/// bidders stack (filter.rs), or no format taking the data. the fd is
+/// read in ALPM_BUFFER_SIZE, or st_blksize when larger. of the formats
+/// only tar (and empty data) is read
 pub fn open_archive(path: &[u8]) -> io::Result<Archive> {
 	let file = File::open(c_path(path))?;
 	let meta = file.metadata()?;
@@ -1431,20 +1435,23 @@ pub fn open_archive(path: &[u8]) -> io::Result<Archive> {
 	})
 }
 
-// why _alpm_unpack returned 1
+/// why _alpm_unpack returned 1 (the payloads and errno are read by
+/// the tests, the port's callers return 1 whatever the cause)
 #[derive(Debug)]
+#[cfg_attr(not(feature = "internals"), allow(dead_code))]
 pub enum UnpackError {
-	// _alpm_open_archive failed: ALPM_ERR_PKG_OPEN
+	/// _alpm_open_archive failed: ALPM_ERR_PKG_OPEN
 	Open(io::Error),
-	// chdir(prefix) failed, pm_errno untouched
+	/// chdir(prefix) failed, pm_errno untouched
 	Prefix(io::Error),
-	// data of the named entry could not be read (extracted or skipped):
-	// truncated or corrupt archive, pm_errno untouched
+	/// data of the named entry could not be read (extracted or skipped):
+	/// truncated or corrupt archive, pm_errno untouched
 	Read(Vec<u8>, io::Error),
 }
 
 impl UnpackError {
-	// the pm_errno the C sets, None where it leaves it alone
+	/// the pm_errno the C sets, None where it leaves it alone
+	#[cfg_attr(not(feature = "internals"), allow(dead_code))]
 	pub fn errno(&self) -> Option<Errno> {
 		match self {
 			UnpackError::Open(_) => Some(Errno::PkgOpen),
@@ -1865,13 +1872,13 @@ fn pour(
 	Ok(())
 }
 
-// _alpm_unpack: extract the entries of the archive at path into prefix.
-// a non-empty list keeps only the entries whose name up to its first '/'
-// is in it (empty is the C's NULL list: every entry), breakfirst stops
-// after the first extracted one. entries libarchive warned about are
-// logged and do not fail the call. the loop ends at any header that
-// cannot be read, which is no error. logs go to cb like the C's
-// _alpm_log; an fstat failure is logged as an open failure
+/// _alpm_unpack: extract the entries of the archive at path into prefix.
+/// a non-empty list keeps only the entries whose name up to its first '/'
+/// is in it (empty is the C's NULL list: every entry), breakfirst stops
+/// after the first extracted one. entries libarchive warned about are
+/// logged and do not fail the call. the loop ends at any header that
+/// cannot be read, which is no error. logs go to cb like the C's
+/// _alpm_log; an fstat failure is logged as an open failure
 pub fn unpack<L: AsRef<[u8]>>(
 	cb: &mut dyn Callbacks,
 	path: &[u8],
@@ -1969,8 +1976,8 @@ pub(crate) fn enter(dir: &[u8]) -> io::Result<()> {
 	Ok(())
 }
 
-// _alpm_unpack_single: the first entry named filename (or under it, for a
-// name ending in '/')
+/// _alpm_unpack_single: the first entry named filename (or under it, for a
+/// name ending in '/')
 pub fn unpack_single(
 	cb: &mut dyn Callbacks,
 	archive: &[u8],

@@ -18,7 +18,7 @@ fn reopen_tty() -> Result<(), i32> {
 
 fn main() {
 	// the download helper child of the sandbox runs this binary
-	if let Some(c) = alpm_core::sandbox::helper_entry() {
+	if let Some(c) = alpm_core::helper_entry() {
 		std::process::exit(c)
 	}
 	// before the stdin targets are read, like the C's main. the C
@@ -36,7 +36,7 @@ fn main() {
 		let _ = io::stdin().read_to_end(&mut input);
 	}
 	let process = Process {
-		uid: alpm_core::util::getuid(),
+		uid: alpm_core::getuid(),
 		stdin: piped.then_some(&input[..]),
 		reopen_tty,
 	};

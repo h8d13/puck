@@ -14,7 +14,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use alpm_core::signing::{
+use alpm_core::internals::signing::{
 	SIG_PACKAGE, SIG_PACKAGE_MARGINAL_OK, SIG_PACKAGE_OPTIONAL,
 	SIG_PACKAGE_UNKNOWN_OK,
 };

@@ -1,5 +1,5 @@
-// unit tests for alpm_core::error
-use alpm_core::error::{Errno, strerror};
+// unit tests for alpm_core::internals::error
+use alpm_core::internals::error::{Errno, strerror};
 
 #[test]
 fn discriminants_follow_alpm_h() {

@@ -7,7 +7,9 @@
 // each difference and "compared <n> transitions <m>", exits 1 on any
 use std::ffi::CStr;
 
-use alpm_core::log::{LogTime, leader, local_offset, syslog_message};
+use alpm_core::internals::log::{
+	LogTime, leader, local_offset, syslog_message,
+};
 use difftest::{Rng, c_localtime, zone_transitions};
 use pacman_cli::package::format_date;
 use pacman_cli::util::debug_stamp;

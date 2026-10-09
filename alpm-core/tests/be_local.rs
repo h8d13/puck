@@ -2,13 +2,13 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use alpm_core::be_local::{
-	DbError, INFRQ_DESC, INFRQ_ERROR, INFRQ_FILES, INFRQ_SCRIPTLET,
-	LocalDb, ReadError,
+use alpm_core::internals::be_local::{
+	INFRQ_DESC, INFRQ_ERROR, INFRQ_FILES, INFRQ_SCRIPTLET, LocalDb,
+	LocalDbError, LocalDbReadError,
 };
-use alpm_core::deps::DepMod;
-use alpm_core::error::Errno;
-use alpm_core::package::{
+use alpm_core::internals::deps::DepMod;
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::package::{
 	PKG_VALIDATION_SHA256SUM, PKG_VALIDATION_SIGNATURE, PkgFrom, PkgReason,
 };
 
@@ -119,7 +119,7 @@ fn register_version_file() {
 	fs::remove_file(t.local().join("ALPM_DB_VERSION")).unwrap();
 	fs::create_dir(t.local().join("p-1-1")).unwrap();
 	let r = LocalDb::register(&t.dbpath());
-	assert!(matches!(r, Err(DbError::Version)));
+	assert!(matches!(r, Err(LocalDbError::Version)));
 	assert!(!t.local().join("ALPM_DB_VERSION").exists());
 }
 
@@ -203,12 +203,12 @@ fn read_error_is_sticky() {
 	// files first: loaded, then the desc failure blocks later sections
 	db.read(&mut p, INFRQ_FILES, &mut ()).unwrap();
 	let r = db.read(&mut p, INFRQ_DESC, &mut ());
-	assert!(matches!(r, Err(ReadError::XData(_))));
+	assert!(matches!(r, Err(LocalDbReadError::XData(_))));
 	assert_eq!(p.infolevel, INFRQ_FILES | INFRQ_ERROR);
 	// what was read before the error stays, like the C
 	assert_eq!(p.desc.as_deref(), Some(&b"d"[..]));
 	let r = db.read(&mut p, INFRQ_SCRIPTLET, &mut ());
-	assert!(matches!(r, Err(ReadError::Earlier)));
+	assert!(matches!(r, Err(LocalDbReadError::Earlier)));
 	// loaded sections still answer
 	db.read(&mut p, INFRQ_FILES, &mut ()).unwrap();
 	assert_eq!(p.files.files.len(), 4);
@@ -216,5 +216,5 @@ fn read_error_is_sticky() {
 	let mut q = fresh;
 	fs::remove_file(t.local().join("foo-1.0-1/files")).unwrap();
 	let r = db.read(&mut q, INFRQ_FILES, &mut ());
-	assert!(matches!(r, Err(ReadError::Io(_))));
+	assert!(matches!(r, Err(LocalDbReadError::Io(_))));
 }

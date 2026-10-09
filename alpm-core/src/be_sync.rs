@@ -51,54 +51,58 @@ use crate::util::{
 // hard upper limit of a db download
 const DB_MAX_SIZE: i64 = 128 * 1024 * 1024;
 
-// why an entry made the db invalid
+/// why an entry made the db invalid
 #[derive(Debug)]
-pub enum Reason {
-	// _alpm_splitname refused the entry name
+pub enum SyncDbInvalidReason {
+	/// _alpm_splitname refused the entry name
 	Name,
-	// _alpm_pkg_check_meta refused name or version
+	/// _alpm_pkg_check_meta refused name or version
 	Meta,
-	// _alpm_validate_filename refused %FILENAME%
+	/// _alpm_validate_filename refused %FILENAME%
 	Filename,
-	// a data block could not be read, or a line is over 512 KiB
+	/// a data block could not be read, or a line is over 512 KiB
 	Read(io::Error),
-	// the data ended where a value or a list's blank line was due
+	/// the data ended where a value or a list's blank line was due
 	Truncated,
-	// a %DATA% line without '=' (_alpm_pkg_parse_xdata NULL)
+	/// a %DATA% line without '=' (_alpm_pkg_parse_xdata NULL)
 	XData(Vec<u8>),
-	// the cache cannot grow, ALPM_ERR_MEMORY turned into DB_INVALID
+	/// the cache cannot grow, ALPM_ERR_MEMORY turned into DB_INVALID
 	Cache,
 }
 
+/// why a sync db failed to load, with the pm_errno it sets (`errno`)
 #[derive(Debug)]
-pub enum Error {
-	// missing db file: sync_db_validate marks it DB_STATUS_MISSING
+pub enum SyncDbError {
+	/// missing db file: sync_db_validate marks it DB_STATUS_MISSING
 	NotFound,
-	// _alpm_open_archive failed
+	/// _alpm_open_archive failed
 	Open(io::Error),
-	// _alpm_pkghash_create refused the estimate
+	/// _alpm_pkghash_create refused the estimate
 	Memory,
-	// an entry failed to load, the whole db is dropped
-	Invalid { entry: Vec<u8>, reason: Reason },
-	// archive_read_next_header failed
+	/// an entry failed to load, the whole db is dropped
+	Invalid {
+		entry: Vec<u8>,
+		reason: SyncDbInvalidReason,
+	},
+	/// archive_read_next_header failed
 	Archive(io::Error),
 }
 
-impl Error {
-	// pm_errno the C leaves after alpm_db_get_pkgcache
+impl SyncDbError {
+	/// pm_errno the C leaves after alpm_db_get_pkgcache
 	pub fn errno(&self) -> Errno {
 		match self {
-			Error::NotFound => Errno::DbNotFound,
-			Error::Open(_) => Errno::DbOpen,
-			Error::Memory => Errno::Memory,
-			Error::Invalid { .. } => Errno::DbInvalid,
-			Error::Archive(_) => Errno::Libarchive,
+			SyncDbError::NotFound => Errno::DbNotFound,
+			SyncDbError::Open(_) => Errno::DbOpen,
+			SyncDbError::Memory => Errno::Memory,
+			SyncDbError::Invalid { .. } => Errno::DbInvalid,
+			SyncDbError::Archive(_) => Errno::Libarchive,
 		}
 	}
 }
 
-// _alpm_db_path for a sync db: dbpath ends with '/' after
-// alpm_initialize, nothing is added between dbpath and "sync/"
+/// _alpm_db_path for a sync db: dbpath ends with '/' after
+/// alpm_initialize, nothing is added between dbpath and "sync/"
 pub fn db_path(dbpath: &[u8], treename: &[u8], dbext: &[u8]) -> Vec<u8> {
 	[
 		until_nul(dbpath),
@@ -109,12 +113,12 @@ pub fn db_path(dbpath: &[u8], treename: &[u8], dbext: &[u8]) -> Vec<u8> {
 	.concat()
 }
 
-// sync_db_validate on a db neither valid nor invalid yet: Ok(false) when
-// the file at path (its _alpm_db_path) is missing (DB_STATUS_MISSING,
-// the C sends ALPM_EVENT_DATABASE_MISSING), Ok(true) when it exists and
-// passed. siglevel is alpm_db_get_siglevel; with SIG_DATABASE the
-// "<path>.sig" check runs, and again while an offered key import works.
-// Err(DbInvalidSig) marks the db invalid
+/// sync_db_validate on a db neither valid nor invalid yet: Ok(false) when
+/// the file at path (its _alpm_db_path) is missing (DB_STATUS_MISSING,
+/// the C sends ALPM_EVENT_DATABASE_MISSING), Ok(true) when it exists and
+/// passed. siglevel is alpm_db_get_siglevel; with SIG_DATABASE the
+/// "<path>.sig" check runs, and again while an offered key import works.
+/// Err(DbInvalidSig) marks the db invalid
 pub fn sync_db_validate(
 	kr: &mut Keyring,
 	cb: &mut dyn Callbacks,
@@ -286,13 +290,13 @@ fn update_locked(
 	failed.map_or(ret, Err)
 }
 
-// alpm_db_update: the sync dbs at positions dbs of handle.syncdbs() (used
-// for syncing) downloaded into "<dbpath>sync/", with If-Modified-Since
-// unless force or the db is invalid. Ok(true) something was downloaded
-// (C 0), Ok(false) every db was up to date (C 1), Err the pm_errno of
-// the failure (C -1). an empty dbs is the C's NULL list: Err(Errno::Ok),
-// the C leaves pm_errno as it was. umask(0022) from the download dir
-// setup on, like the C: the dbs get 0644 whatever the process umask
+/// alpm_db_update: the sync dbs at positions dbs of handle.syncdbs() (used
+/// for syncing) downloaded into `<dbpath>sync/`, with If-Modified-Since
+/// unless force or the db is invalid. Ok(true) something was downloaded
+/// (C 0), Ok(false) every db was up to date (C 1), Err the pm_errno of
+/// the failure (C -1). an empty dbs is the C's NULL list: Err(Errno::Ok),
+/// the C leaves pm_errno as it was. umask(0022) from the download dir
+/// setup on, like the C: the dbs get 0644 whatever the process umask
 pub fn db_update(
 	handle: &mut Handle,
 	dbs: &[usize],
@@ -331,8 +335,8 @@ pub fn db_update(
 	ret
 }
 
-// _sync_get_validation, what alpm_pkg_get_validation computes on first
-// use. Package::validation stays 0 in the cache like the C field
+/// _sync_get_validation, what alpm_pkg_get_validation computes on first
+/// use. Package::validation stays 0 in the cache like the C field
 pub fn get_validation(pkg: &Package) -> c_int {
 	if pkg.validation != 0 {
 		return pkg.validation;
@@ -364,14 +368,14 @@ fn bytes_per_package(code: Code) -> u64 {
 fn open_archive(
 	path: &[u8],
 	dbext: &[u8],
-) -> Result<(tar::Reader, u64), Error> {
+) -> Result<(tar::Reader, u64), SyncDbError> {
 	// open(2)'s ENOENT only: a filter's program that cannot run fails
 	// with that kind too (filter/program.rs), the C's db open fails then
 	let enoent = Some(rustix::io::Errno::NOENT.raw_os_error());
 	let archive = util::open_archive(path).map_err(|e| {
 		match e.raw_os_error() == enoent {
-			true => Error::NotFound,
-			false => Error::Open(e),
+			true => SyncDbError::NotFound,
+			false => SyncDbError::Open(e),
 		}
 	})?;
 	let size = archive.meta.len();
@@ -447,15 +451,15 @@ impl<'e, 'a> Lines<'e, 'a> {
 	}
 
 	// READ_NEXT, READ_AND_STORE: the end of the data fails too
-	fn next(&mut self) -> Result<&[u8], Reason> {
+	fn next(&mut self) -> Result<&[u8], SyncDbInvalidReason> {
 		match self.fgets() {
 			Ok(true) => Ok(&self.line),
-			Ok(false) => Err(Reason::Truncated),
-			Err(e) => Err(Reason::Read(e)),
+			Ok(false) => Err(SyncDbInvalidReason::Truncated),
+			Err(e) => Err(SyncDbInvalidReason::Read(e)),
 		}
 	}
 
-	fn store(&mut self) -> Result<Option<Box<[u8]>>, Reason> {
+	fn store(&mut self) -> Result<Option<Box<[u8]>>, SyncDbInvalidReason> {
 		Ok(Some(self.next()?.into()))
 	}
 
@@ -467,7 +471,7 @@ impl<'e, 'a> Lines<'e, 'a> {
 		&mut self,
 		out: &mut Vec<T>,
 		f: impl Fn(&[u8]) -> T,
-	) -> Result<(), Reason> {
+	) -> Result<(), SyncDbInvalidReason> {
 		loop {
 			let line = self.next()?;
 			if line.is_empty() {
@@ -483,7 +487,7 @@ impl<'e, 'a> Lines<'e, 'a> {
 		&mut self,
 		out: &mut Box<[T]>,
 		f: impl Fn(&[u8]) -> T,
-	) -> Result<(), Reason> {
+	) -> Result<(), SyncDbInvalidReason> {
 		with_vec(out, |v| self.list(v, f))
 	}
 }
@@ -516,8 +520,8 @@ struct Walk<'a> {
 	cb: &'a mut dyn Callbacks,
 }
 
-fn invalid(entry: &[u8], reason: Reason) -> Error {
-	Error::Invalid {
+fn invalid(entry: &[u8], reason: SyncDbInvalidReason) -> SyncDbError {
+	SyncDbError::Invalid {
 		entry: entry.to_vec(),
 		reason,
 	}
@@ -526,7 +530,10 @@ fn invalid(entry: &[u8], reason: Reason) -> Error {
 impl Walk<'_> {
 	// load_pkg_for_entry: the package named by the entry, created on
 	// first sight with name and version from the entry name
-	fn pkg_for_entry(&mut self, entryname: &[u8]) -> Result<usize, Reason> {
+	fn pkg_for_entry(
+		&mut self,
+		entryname: &[u8],
+	) -> Result<usize, SyncDbInvalidReason> {
 		let Some((name, version)) = splitname(entryname) else {
 			let parts: [&[u8]; 3] = [
 				b"invalid name for database entry '",
@@ -534,13 +541,13 @@ impl Walk<'_> {
 				b"'\n",
 			];
 			logv(self.cb, LogLevel::Error, &parts);
-			return Err(Reason::Name);
+			return Err(SyncDbInvalidReason::Name);
 		};
 		if let Some(&i) = self.index.get(name) {
 			return Ok(i);
 		}
 		if !check_meta(name, version, self.cb) {
-			return Err(Reason::Meta);
+			return Err(SyncDbInvalidReason::Meta);
 		}
 		let parts: [&[u8]; 5] = [
 			b"adding '",
@@ -563,7 +570,10 @@ impl Walk<'_> {
 	}
 
 	// sync_db_read on one non-directory entry
-	fn read_entry(&mut self, entry: &mut Entry) -> Result<(), Reason> {
+	fn read_entry(
+		&mut self,
+		entry: &mut Entry,
+	) -> Result<(), SyncDbInvalidReason> {
 		let entryname = entry.path_bytes().to_vec();
 		let parts: [&[u8]; 3] = [
 			b"loading package data from archive entry ",
@@ -602,7 +612,9 @@ impl Walk<'_> {
 		let r = self.read_data(i, &mut lines);
 		self.bufs = lines.into_bufs();
 		// the filename check returns without this line
-		if r.as_ref().is_err_and(|r| !matches!(r, Reason::Filename)) {
+		if r.as_ref().is_err_and(|r| {
+			!matches!(r, SyncDbInvalidReason::Filename)
+		}) {
 			let parts: [&[u8]; 3] = [
 				b"error parsing database file: ",
 				filename,
@@ -629,7 +641,11 @@ impl Walk<'_> {
 	// the parsing loop of sync_db_read: keys matched as C strings, a
 	// repeated key overwrites a value, appends to a list and replaces
 	// the file list
-	fn read_data(&mut self, i: usize, f: &mut Lines) -> Result<(), Reason> {
+	fn read_data(
+		&mut self,
+		i: usize,
+		f: &mut Lines,
+	) -> Result<(), SyncDbInvalidReason> {
 		let deps = dep_from_string;
 		// read_data only compares against the name, and the key is kept
 		// apart from the line the values overwrite: both once per entry,
@@ -640,7 +656,11 @@ impl Walk<'_> {
 			match f.fgets() {
 				Ok(true) => {}
 				Ok(false) => return Ok(()),
-				Err(e) => return Err(Reason::Read(e)),
+				Err(e) => {
+					return Err(SyncDbInvalidReason::Read(
+						e,
+					));
+				}
 			}
 			key.clear();
 			key.extend_from_slice(&f.line);
@@ -675,7 +695,7 @@ impl Walk<'_> {
 					if !validate_filename(
 						tree, &name, &filename, cb,
 					) {
-						return Err(Reason::Filename);
+						return Err(SyncDbInvalidReason::Filename);
 					}
 				}
 				b"%BASE%" => pkg.base = f.store()?,
@@ -741,7 +761,7 @@ impl Walk<'_> {
 					with_vec(&mut pkg.xdata, |x| {
 						extend_xdata(x, lines)
 					})
-					.map_err(Reason::XData)?;
+					.map_err(SyncDbInvalidReason::XData)?;
 				}
 				_ => {
 					let parts: [&[u8]; 4] = [
@@ -762,28 +782,28 @@ impl Walk<'_> {
 	}
 }
 
-// sync_db_populate: the package cache of the db file at path (its
-// _alpm_db_path), list sorted by name, buckets filled in archive order.
-// dbext is handle->dbext at load time: ".files" divides the size
-// estimate, whatever the path's own extension.
-//
-// errors rank like the C: the walk goes on past an entry that fails, and
-// any such entry makes the db invalid (the first one is returned), even
-// when the archive breaks later; a broken archive with good entries so
-// far is an archive error.
-//
-// logs through cb the C's lines of the walk; the open failures of
-// _alpm_open_archive are not logged
+/// sync_db_populate: the package cache of the db file at path (its
+/// _alpm_db_path), list sorted by name, buckets filled in archive order.
+/// dbext is handle->dbext at load time: ".files" divides the size
+/// estimate, whatever the path's own extension.
+///
+/// errors rank like the C: the walk goes on past an entry that fails, and
+/// any such entry makes the db invalid (the first one is returned), even
+/// when the archive breaks later; a broken archive with good entries so
+/// far is an archive error.
+///
+/// logs through cb the C's lines of the walk; the open failures of
+/// _alpm_open_archive are not logged
 pub fn populate(
 	path: &[u8],
 	dbext: &[u8],
 	treename: &[u8],
 	cb: &mut dyn Callbacks,
-) -> Result<PkgHash<Package>, Error> {
+) -> Result<PkgHash<Package>, SyncDbError> {
 	let path = until_nul(path);
 	logv(cb, LogLevel::Debug, &[b"opening archive ", path, b"\n"]);
 	let (archive, est) = open_archive(path, until_nul(dbext))?;
-	let mut cache = PkgHash::new(est as u32).ok_or(Error::Memory)?;
+	let mut cache = PkgHash::new(est as u32).ok_or(SyncDbError::Memory)?;
 
 	let mut walk = Walk {
 		bufs: Bufs::default(),
@@ -832,14 +852,14 @@ pub fn populate(
 			b")\n",
 		];
 		logv(walk.cb, LogLevel::Error, &parts);
-		return Err(Error::Archive(e));
+		return Err(SyncDbError::Archive(e));
 	}
 	// _alpm_pkghash_add in archive order then alpm_list_msort by name:
 	// names are unique, so add_sorted gives the same buckets and list
 	for pkg in walk.pkgs {
 		cache.add_sorted(pkg).map_err(|p| {
 			let name = p.name.as_deref().unwrap_or_default();
-			invalid(name, Reason::Cache)
+			invalid(name, SyncDbInvalidReason::Cache)
 		})?;
 	}
 	let count = cache.len().to_string();

@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use alpm_core::util::compute_sha256sum;
+use alpm_core::compute_sha256sum;
 use difftest::{
 	Comp, GpgFixture, Home, LocalEntry, Node, Reply, Req, Server, Stamped,
 	TempRoot, c_pacman, closed_port, rust_pacman, section, snapshot,

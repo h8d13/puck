@@ -40,24 +40,31 @@ use err_codes::ERR_CODES;
 
 pub use crate::db::{SIG_DATABASE, SIG_USE_DEFAULT};
 
-// alpm_siglevel_t
+/// alpm_siglevel_t ALPM_SIG_PACKAGE: package signatures are checked
 pub const SIG_PACKAGE: c_int = 1;
+/// ALPM_SIG_PACKAGE_OPTIONAL: a missing package signature passes
 pub const SIG_PACKAGE_OPTIONAL: c_int = 1 << 1;
+/// ALPM_SIG_PACKAGE_MARGINAL_OK: marginal trust passes
 pub const SIG_PACKAGE_MARGINAL_OK: c_int = 1 << 2;
+/// ALPM_SIG_PACKAGE_UNKNOWN_OK: unknown trust passes
 pub const SIG_PACKAGE_UNKNOWN_OK: c_int = 1 << 3;
+/// ALPM_SIG_DATABASE_OPTIONAL: a missing db signature passes
 pub const SIG_DATABASE_OPTIONAL: c_int = 1 << 11;
+/// ALPM_SIG_DATABASE_MARGINAL_OK
 pub const SIG_DATABASE_MARGINAL_OK: c_int = 1 << 12;
+/// ALPM_SIG_DATABASE_UNKNOWN_OK
 pub const SIG_DATABASE_UNKNOWN_OK: c_int = 1 << 13;
 
+/// why alpm_decode_signature refused the base64 text
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
 	InvalidCharacter,
-	// output is capped at 3/4 of the input length, so unpadded input whose
-	// symbol count is not a multiple of 4 fails unless line breaks pad it
+	/// output is capped at 3/4 of the input length, so unpadded input whose
+	/// symbol count is not a multiple of 4 fails unless line breaks pad it
 	BufferTooSmall,
 }
 
-// alpm_decode_signature
+/// alpm_decode_signature
 pub fn decode_signature(b64: &[u8]) -> Result<Vec<u8>, DecodeError> {
 	let b64 = until_nul(b64);
 	let cap = b64.len() * 3 / 4;
@@ -69,7 +76,7 @@ pub fn decode_signature(b64: &[u8]) -> Result<Vec<u8>, DecodeError> {
 	base64::decode(b64).map_err(|_| DecodeError::InvalidCharacter)
 }
 
-// alpm_sigstatus_t
+/// alpm_sigstatus_t
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum SigStatus {
@@ -81,7 +88,7 @@ pub enum SigStatus {
 	Invalid,
 }
 
-// alpm_sigvalidity_t
+/// alpm_sigvalidity_t
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum SigValidity {
@@ -91,9 +98,9 @@ pub enum SigValidity {
 	Unknown,
 }
 
-// alpm_pgpkey_t without the gpgme key behind it. a signature check fills
-// fingerprint to expires, length and revoked only come from a keyserver
-// search
+/// alpm_pgpkey_t without the gpgme key behind it. a signature check fills
+/// fingerprint to expires, length and revoked only come from a keyserver
+/// search
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PgpKey {
 	pub fingerprint: Option<Vec<u8>>,
@@ -106,7 +113,7 @@ pub struct PgpKey {
 	pub revoked: c_uint,
 }
 
-// alpm_sigresult_t
+/// alpm_sigresult_t
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SigResult {
 	pub key: PgpKey,
@@ -114,18 +121,18 @@ pub struct SigResult {
 	pub validity: SigValidity,
 }
 
-// handle->gpgdir, handle->known_keys and the gpg binary gpgme would run
+/// handle->gpgdir, handle->known_keys and the gpg binary gpgme would run
 #[derive(Debug, Clone)]
 pub struct Keyring {
-	// empty is the C's NULL gpgdir: no --homedir, files looked up in cwd
+	/// empty is the C's NULL gpgdir: no --homedir, files looked up in cwd
 	gpgdir: Vec<u8>,
 	gpg: PathBuf,
 	known_keys: Vec<Vec<u8>>,
-	// init_gpgme ran, its keyring warning comes once. the C flag is
-	// process wide, this one per keyring
+	/// init_gpgme ran, its keyring warning comes once. the C flag is
+	/// process wide, this one per keyring
 	init: bool,
-	// what the last key lookup's gpg said on stderr, or why it did not
-	// run: logged when the lookup fails (gpgme drops gpg's stderr)
+	/// what the last key lookup's gpg said on stderr, or why it did not
+	/// run: logged when the lookup fails (gpgme drops gpg's stderr)
 	stderr: Vec<u8>,
 }
 
@@ -141,9 +148,9 @@ const ERR_WRONG_KEY_USAGE: u32 = 125;
 const ERR_KEY_EXPIRED: u32 = 153;
 const ERR_SIG_EXPIRED: u32 = 154;
 
-// gpg_strerror in the C locale: libgpg-error's text for the code
-// (err_codes.rs, sorted), its "Unknown error code" for an unassigned
-// one. codes with GPG_ERR_SYSTEM_ERROR (errno texts) are not mapped
+/// gpg_strerror in the C locale: libgpg-error's text for the code
+/// (err_codes.rs, sorted), its "Unknown error code" for an unassigned
+/// one. codes with GPG_ERR_SYSTEM_ERROR (errno texts) are not mapped
 pub fn gpg_strerror(code: u32) -> &'static [u8] {
 	let code = code & 0xffff;
 	let found = ERR_CODES.binary_search_by_key(&code, |&(c, _)| c);
@@ -991,8 +998,8 @@ fn run(
 }
 
 impl Keyring {
-	// gpgdir is handle->gpgdir with its trailing '/', gpg is looked up
-	// in PATH where gpgme asks gpgconf
+	/// gpgdir is handle->gpgdir with its trailing '/', gpg is looked up
+	/// in PATH where gpgme asks gpgconf
 	pub fn new(gpgdir: &[u8]) -> Keyring {
 		Keyring {
 			gpgdir: until_nul(gpgdir).to_vec(),
@@ -1003,23 +1010,19 @@ impl Keyring {
 		}
 	}
 
-	// gpgme_set_engine_info's file_name
+	/// gpgme_set_engine_info's file_name
 	pub fn set_gpg(&mut self, gpg: impl Into<PathBuf>) {
 		self.gpg = gpg.into();
 	}
 
+	/// alpm_option_get_gpgdir
 	pub fn gpgdir(&self) -> &[u8] {
 		&self.gpgdir
 	}
 
-	// alpm_option_set_gpgdir on a handle in use: known keys stay
+	/// alpm_option_set_gpgdir on a handle in use: known keys stay
 	pub fn set_gpgdir(&mut self, gpgdir: &[u8]) {
 		self.gpgdir = until_nul(gpgdir).to_vec();
-	}
-
-	// keys _alpm_key_in_keychain found, in lookup order
-	pub fn known_keys(&self) -> &[Vec<u8>] {
-		&self.known_keys
 	}
 
 	// gpgme's engine file_name: the gpg Command runs, found in PATH
@@ -1186,8 +1189,8 @@ fn gpg_error(cb: &mut dyn Callbacks, text: &[u8]) {
 	debug(cb, &[b"gpg error: ", text, b"\n"]);
 }
 
-// _alpm_key_in_keychain: Some(true) known (cached from then on),
-// Some(false) unknown or expired, None when the lookup failed (C -1)
+/// _alpm_key_in_keychain: Some(true) known (cached from then on),
+/// Some(false) unknown or expired, None when the lookup failed (C -1)
 pub fn key_in_keychain(
 	kr: &mut Keyring,
 	cb: &mut dyn Callbacks,
@@ -1346,8 +1349,8 @@ fn ask_import(
 	q.answer() != 0
 }
 
-// _alpm_key_import: asked first, then WKD by the uid's address, then the
-// keyservers. true is the C's 0
+/// _alpm_key_import: asked first, then WKD by the uid's address, then the
+/// keyservers. true is the C's 0
 pub fn key_import(
 	kr: &mut Keyring,
 	cb: &mut dyn Callbacks,
@@ -1381,7 +1384,7 @@ pub fn key_import(
 	false
 }
 
-// _alpm_sigpath
+/// _alpm_sigpath
 pub fn sigpath(path: &[u8]) -> Vec<u8> {
 	[until_nul(path), b".sig"].concat()
 }
@@ -1457,10 +1460,10 @@ fn log_key(cb: &mut dyn Callbacks, key: &Key) {
 	debug(cb, &[&parts.concat(), b"\n"]);
 }
 
-// _alpm_gpgme_checksig: the signatures of the file at path, from
-// base64_sig or "<path>.sig". Ok holds a result per signature, whatever
-// they say; Err is the pm_errno (NotAFile, SigMissing, SigInvalid,
-// Gpgme)
+/// _alpm_gpgme_checksig: the signatures of the file at path, from
+/// base64_sig or "<path>.sig". Ok holds a result per signature, whatever
+/// they say; Err is the pm_errno (NotAFile, SigMissing, SigInvalid,
+/// Gpgme)
 pub fn gpgme_checksig(
 	kr: &mut Keyring,
 	cb: &mut dyn Callbacks,
@@ -1571,11 +1574,11 @@ fn acceptable(
 	ok
 }
 
-// _alpm_check_pgp_helper: the check, then the trust policy up to the
-// first refused signature. Err(Some) when the check failed with that
-// pm_errno, Err(None) when a signature is not acceptable. a missing
-// signature is fine when optional. the results come back either way
-// (sigdata)
+/// _alpm_check_pgp_helper: the check, then the trust policy up to the
+/// first refused signature. Err(Some) when the check failed with that
+/// pm_errno, Err(None) when a signature is not acceptable. a missing
+/// signature is fine when optional. the results come back either way
+/// (sigdata)
 pub fn check_pgp_helper(
 	kr: &mut Keyring,
 	cb: &mut dyn Callbacks,
@@ -1604,9 +1607,9 @@ pub fn check_pgp_helper(
 	(if ok { Ok(()) } else { Err(None) }, siglist)
 }
 
-// _alpm_process_siglist: what the user can act on, and the import
-// question for unknown and expired keys. true when an import worked and
-// the validation should be retried
+/// _alpm_process_siglist: what the user can act on, and the import
+/// question for unknown and expired keys. true when an import worked and
+/// the validation should be retried
 pub fn process_siglist(
 	kr: &mut Keyring,
 	cb: &mut dyn Callbacks,
@@ -1681,7 +1684,7 @@ pub fn process_siglist(
 	retry
 }
 
-// alpm_pkg_check_pgp_signature: pkg->filename and pkg->base64_sig
+/// alpm_pkg_check_pgp_signature: pkg->filename and pkg->base64_sig
 pub fn pkg_check_pgp_signature(
 	kr: &mut Keyring,
 	cb: &mut dyn Callbacks,
@@ -1691,7 +1694,7 @@ pub fn pkg_check_pgp_signature(
 	gpgme_checksig(kr, cb, path, pkg.base64_sig.as_deref())
 }
 
-// alpm_db_check_pgp_signature: "<db path>.sig"
+/// alpm_db_check_pgp_signature: `<db path>.sig`
 pub fn db_check_pgp_signature(
 	kr: &mut Keyring,
 	cb: &mut dyn Callbacks,
@@ -1700,12 +1703,12 @@ pub fn db_check_pgp_signature(
 	gpgme_checksig(kr, cb, Some(db.path()), None)
 }
 
-// why alpm_extract_keyid gave up, the two messages it logs
+/// why alpm_extract_keyid gave up, the two messages it logs
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyidError {
-	// "signature format error"
+	/// "signature format error"
 	Format,
-	// "unsupported signature format": partial lengths, not version 4
+	/// "unsupported signature format": partial lengths, not version 4
 	Unsupported,
 }
 
@@ -1865,8 +1868,8 @@ impl Packets<'_> {
 	}
 }
 
-// alpm_extract_keyid: issuer key ids of the signature packets in sig,
-// appended to keys (those found before an error stay, like the C list)
+/// alpm_extract_keyid: issuer key ids of the signature packets in sig,
+/// appended to keys (those found before an error stay, like the C list)
 pub fn extract_keyid(
 	cb: &mut dyn Callbacks,
 	identifier: &[u8],

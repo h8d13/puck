@@ -1,11 +1,11 @@
-// pacman_cli::check (-Qk/-Qkk) and alpm_core::be_local's mtree reading
+// pacman_cli::check (-Qk/-Qkk) and alpm_core::internals::be_local's mtree reading
 // against the C: fixture roots and local dbs under /tmp (desc, files,
 // gzip'd mtree, install files), installed files randomly intact,
 // missing or modified (content, size, mode, mtime, type swapped, link
 // retargeted, unreadable, parents missing or blocked), checked by C
 // check_pkg_fast/check_pkg_full on a real handle and by the port on the
 // same fixture: stdout, stderr and return compared. libarchive's mtree
-// reader is compared with alpm_core::mtree on every fixture, on odd
+// reader is compared with alpm_core::internals::mtree on every fixture, on odd
 // inputs, cut streams and fuzzed mtree text (entries, where it stops and
 // its error text), and on the real local db's mtree files
 use std::fmt::Write as _;
@@ -14,12 +14,12 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use alpm_core::be_local::{
+use alpm_core::digest::{Digest, Md5, Sha256};
+use alpm_core::internals::be_local::{
 	INFRQ_ALL, LocalDb, MtreeEntry, MtreeError, MtreeType, read_mtree,
 };
-use alpm_core::digest::{Digest, Md5, Sha256};
-use alpm_core::handle::Handle;
-use alpm_core::package::Package;
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::package::Package;
 use difftest::{
 	CCheck, CMtreeEntry, CheckWorld, Comp, FILTERED, Rng, compress_bytes,
 	iters, set_mtime_nofollow,

@@ -1,4 +1,4 @@
-// unit tests of alpm_core::sandbox: use_sandbox, the callback pipe format
+// unit tests of alpm_core::internals::sandbox: use_sandbox, the callback pipe format
 // (writer -> parent loop), the helper request, the setup order with a
 // recording ChildOps, the parent side of HelperSandbox against sh(1)
 // stand-ins and a Host that pretends to be root
@@ -9,11 +9,11 @@ use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use alpm_core::callbacks::{Callbacks, DownloadEvent, LogLevel};
-use alpm_core::dload::{DownloadState, Payload, Sandbox, Settings};
-use alpm_core::error::Errno;
-use alpm_core::handle::Handle;
-use alpm_core::sandbox::{
+use alpm_core::internals::callbacks::{Callbacks, DownloadEvent, LogLevel};
+use alpm_core::internals::dload::{DownloadState, Payload, Sandbox, Settings};
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::sandbox::{
 	CB_DOWNLOAD, CB_LOG, CallbackWriter, ChildOps, HelperSandbox, Host,
 	Request, Setup, System, process_callbacks, run_helper, setup_child,
 	use_sandbox,
@@ -694,7 +694,7 @@ fn handle_downloads_use_the_sandbox() {
 	let url = b"file:///nonexistent/a-1-1-any.pkg.tar.zst";
 
 	h.set_sandbox_for(no_user);
-	let r = alpm_core::be_sync::db_update(&mut h, &[0], false);
+	let r = alpm_core::internals::be_sync::db_update(&mut h, &[0], false);
 	assert_eq!(r, Err(Errno::RetrievePrepare));
 	assert_eq!(errors(&rec), std::slice::from_ref(&no_such));
 	assert_eq!(h.fetch_pkgurl(&[url]), Err(Errno::RetrievePrepare));
@@ -705,7 +705,7 @@ fn handle_downloads_use_the_sandbox() {
 		LogLevel::Error,
 		"switching to sandbox user 'root' failed!\n",
 	);
-	let r = alpm_core::be_sync::db_update(&mut h, &[0], false);
+	let r = alpm_core::internals::be_sync::db_update(&mut h, &[0], false);
 	assert_eq!(r, Err(Errno::Retrieve));
 	assert_eq!(errors(&rec), std::slice::from_ref(&switch));
 	assert_eq!(h.fetch_pkgurl(&[url]), Err(Errno::Retrieve));

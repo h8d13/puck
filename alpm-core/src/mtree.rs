@@ -29,19 +29,25 @@ const MAX_LINE_LEN: usize = 1024 * 1024;
 // detect_form: this many entry lines make the data mtree
 const MAX_BID_ENTRY: usize = 3;
 
-// the AE_IF* type of an entry
+/// the AE_IF* type of an entry
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryType {
+	/// AE_IFBLK
 	Block,
+	/// AE_IFCHR
 	Char,
+	/// AE_IFDIR
 	Dir,
+	/// AE_IFIFO
 	Fifo,
+	/// AE_IFREG
 	File,
+	/// AE_IFLNK
 	Link,
 }
 
 impl EntryType {
-	// archive_entry_filetype
+	/// archive_entry_filetype: the S_IF* bits
 	pub fn filetype(self) -> u32 {
 		match self {
 			EntryType::Block => S_IFBLK,
@@ -54,39 +60,39 @@ impl EntryType {
 	}
 }
 
-// what pacman reads of an archive_entry the reader fills
+/// what pacman reads of an archive_entry the reader fills
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
-	// archive_entry_pathname: decoded, with its "./" prefix
+	/// archive_entry_pathname: decoded, with its "./" prefix
 	pub path: Vec<u8>,
 	pub kind: EntryType,
-	// ~AE_IFMT & archive_entry_mode: mode= keeps bits above the type
+	/// ~AE_IFMT & archive_entry_mode: mode= keeps bits above the type
 	pub mode: u32,
 	pub uid: i64,
 	pub gid: i64,
 	pub size: u64,
-	// archive_entry_mtime, 0 when unset
+	/// archive_entry_mtime, 0 when unset
 	pub mtime: i64,
-	// archive_entry_symlink, None when unset
+	/// archive_entry_symlink, None when unset
 	pub link: Option<Vec<u8>>,
-	// the digests as bytes
+	/// the digests as bytes
 	pub sha256: Option<[u8; 32]>,
 	pub md5: Option<[u8; 16]>,
-	// the header returned ARCHIVE_WARN: archive_error_string, the last
-	// error set while reading it
+	/// the header returned ARCHIVE_WARN: archive_error_string, the last
+	/// error set while reading it
 	pub warning: Option<Vec<u8>>,
 }
 
 // where archive_read_open or the first archive_read_next_header fails
 #[derive(Debug)]
 pub enum Error {
-	// the decoder fails inside what the open reads through the filter
+	/// the decoder fails inside what the open reads through the filter
 	Open(io::Error),
-	// archive_read_open_filename's file reader fails: libarchive's text
+	/// archive_read_open_filename's file reader fails: libarchive's text
 	File(Vec<u8>),
-	// choose_format: no bid, "Unrecognized archive format"
+	/// choose_format: no bid, "Unrecognized archive format"
 	Format,
-	// read_mtree returned ARCHIVE_FATAL: libarchive's text
+	/// read_mtree returned ARCHIVE_FATAL: libarchive's text
 	Header(Vec<u8>),
 }
 

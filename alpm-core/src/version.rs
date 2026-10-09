@@ -119,7 +119,7 @@ fn trim_zeros(s: &[u8]) -> &[u8] {
 	&s[n..]
 }
 
-// alpm_pkg_vercmp without the NULL cases, those live in the C ABI layer
+/// alpm_pkg_vercmp without the NULL cases, those live in the C ABI layer
 pub fn vercmp(a: &[u8], b: &[u8]) -> Ordering {
 	let (a, b) = (until_nul(a), until_nul(b));
 	if a == b {

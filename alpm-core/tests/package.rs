@@ -1,9 +1,9 @@
-// unit tests for alpm_core::package
-use alpm_core::package::*;
+// unit tests for alpm_core::internals::package
+use alpm_core::internals::package::*;
 
 fn named(name: &[u8]) -> Package {
 	Package {
-		name_hash: alpm_core::util::hash_sdbm(name),
+		name_hash: alpm_core::internals::util::hash_sdbm(name),
 		name: Some(name.into()),
 		..Package::default()
 	}
@@ -14,10 +14,14 @@ fn dup_drops_uncopied_fields() {
 	let p = Package {
 		base64_sig: Some(b"sig"[..].into()),
 		download_size: 3,
-		checkdepends: vec![alpm_core::deps::dep_from_string(b"a")]
-			.into(),
-		makedepends: vec![alpm_core::deps::dep_from_string(b"b")]
-			.into(),
+		checkdepends: vec![
+			alpm_core::internals::deps::dep_from_string(b"a"),
+		]
+		.into(),
+		makedepends: vec![alpm_core::internals::deps::dep_from_string(
+			b"b",
+		)]
+		.into(),
 		xdata: vec![PkgXData::default()].into(),
 		origin: Some(PkgFrom::File(b"/x"[..].into())),
 		reason: PkgReason::Depend,
@@ -85,7 +89,7 @@ impl DbCaches for Caches {
 }
 
 fn user(name: &[u8], dep: &[u8], opt: bool) -> Package {
-	let d = vec![alpm_core::deps::dep_from_string(dep)];
+	let d = vec![alpm_core::internals::deps::dep_from_string(dep)];
 	match opt {
 		false => Package {
 			depends: d.into(),
@@ -139,9 +143,11 @@ fn should_ignore_cases() {
 		use std::os::unix::ffi::OsStrExt;
 		dir.join(s).as_os_str().as_bytes().to_vec()
 	};
-	let mut h =
-		alpm_core::handle::Handle::initialize(&path(""), &path("db"))
-			.unwrap();
+	let mut h = alpm_core::internals::handle::Handle::initialize(
+		&path(""),
+		&path("db"),
+	)
+	.unwrap();
 	let mut p = named(b"foo");
 	p.groups = vec![b"kde-apps"[..].into()].into();
 	assert!(!pkg_should_ignore(&h, &p));

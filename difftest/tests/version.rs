@@ -1,5 +1,5 @@
-// alpm_core::version::vercmp against C alpm_pkg_vercmp
-use alpm_core::version::vercmp;
+// alpm_core::internals::version::vercmp against C alpm_pkg_vercmp
+use alpm_core::internals::version::vercmp;
 use difftest::{Rng, c_vercmp};
 
 // separators, epoch/release markers, a non-ascii byte (separator in C locale)

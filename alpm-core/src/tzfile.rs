@@ -1,29 +1,29 @@
-// the local zone as glibc's localtime sees it (glibc 2.44 time/tzset.c
-// tzset_internal, __tzset_parse_tz, __tz_compute; time/tzfile.c
-// __tzfile_read, __tzfile_default, __tzfile_compute): tm_isdst, tm_zone
-// and tm_gmtoff of a second. strftime's %Z needs the zone abbreviation,
-// which time's local offset does not give; log.rs takes tm_gmtoff
-// from here too.
-//
-// TZ unset is /etc/localtime, empty is "Universal", a leading ':' is
-// dropped. the value is a TZif file first (relative to TZDIR or
-// /usr/share/zoneinfo), else a POSIX rule string; with no file and no
-// TZ (or TZ naming /etc/localtime) the zone is UTC. a rule string with
-// a DST name but no rules takes posixrules' transitions.
-//
-// translation:
-// - the file is read once, here with std's reads of the same sizes
-// - a TZif zone name runs to its nul or the end of the names (the C
-//   reads on into the next data)
-// - the transition search is a binary search; the C's guess-then-scan
-//   gives the same index on sorted transitions
-// - a failed month rule (M0 or M13) is not computed: the C indexes past
-//   its month table there; the port takes January
-// - the C caches each rule's change per year and starts unparsed rules
-//   at year 0, so a process whose first lookup falls in year 0 sees a
-//   change at second 0; the port always computes it
-// - leap seconds (right/ zones) are leap_correct and leap_hit, which the
-//   C applies to the broken-down time (strftime::Tm::local)
+//! the local zone as glibc's localtime sees it (glibc 2.44 time/tzset.c
+//! tzset_internal, __tzset_parse_tz, __tz_compute; time/tzfile.c
+//! __tzfile_read, __tzfile_default, __tzfile_compute): tm_isdst, tm_zone
+//! and tm_gmtoff of a second. strftime's %Z needs the zone abbreviation,
+//! which time's local offset does not give; log.rs takes tm_gmtoff
+//! from here too.
+//!
+//! TZ unset is /etc/localtime, empty is "Universal", a leading ':' is
+//! dropped. the value is a TZif file first (relative to TZDIR or
+//! /usr/share/zoneinfo), else a POSIX rule string; with no file and no
+//! TZ (or TZ naming /etc/localtime) the zone is UTC. a rule string with
+//! a DST name but no rules takes posixrules' transitions.
+//!
+//! translation:
+//! - the file is read once, here with std's reads of the same sizes
+//! - a TZif zone name runs to its nul or the end of the names (the C
+//!   reads on into the next data)
+//! - the transition search is a binary search; the C's guess-then-scan
+//!   gives the same index on sorted transitions
+//! - a failed month rule (M0 or M13) is not computed: the C indexes past
+//!   its month table there; the port takes January
+//! - the C caches each rule's change per year and starts unparsed rules
+//!   at year 0, so a process whose first lookup falls in year 0 sees a
+//!   change at second 0; the port always computes it
+//! - leap seconds (right/ zones) are leap_correct and leap_hit, which the
+//!   C applies to the broken-down time (strftime::Tm::local)
 
 use std::ffi::OsStr;
 use std::fs::File;
@@ -38,16 +38,16 @@ const TZDIR: &[u8] = b"/usr/share/zoneinfo";
 const TZDEFRULES: &[u8] = b"posixrules";
 const SECSPERDAY: i64 = 86_400;
 
-// what localtime(3) sets besides the date
+/// what localtime(3) sets besides the date
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Local {
 	pub isdst: bool,
-	// tm_zone
+	/// tm_zone
 	pub zone: Vec<u8>,
-	// tm_gmtoff
+	/// tm_gmtoff
 	pub gmtoff: i64,
-	// seconds the leap second records take off the local time, and the
-	// leap seconds t sits on (tm_sec 60 and on)
+	/// seconds the leap second records take off the local time, and the
+	/// leap seconds t sits on (tm_sec 60 and on)
 	pub leap_correct: i64,
 	pub leap_hit: i32,
 }
@@ -769,7 +769,7 @@ impl TzFile {
 	}
 }
 
-// the zone of a process: TZ read once like localtime_r
+/// the zone of a process: TZ read once like localtime_r
 #[derive(Clone, Debug)]
 pub struct Zone(Kind);
 
@@ -780,7 +780,7 @@ enum Kind {
 }
 
 impl Zone {
-	// tzset_internal
+	/// tzset_internal
 	pub fn from_env(getenv: &dyn Fn(&str) -> Option<Vec<u8>>) -> Zone {
 		let mut tz = getenv("TZ");
 		if tz.as_deref() == Some(b"") {
@@ -825,9 +825,9 @@ impl Zone {
 		}
 	}
 
-	// localtime(&t)'s zone fields. a file zone checks only the local
-	// year (past its footer a UTC year out of int falls back on the
-	// last transition), a rule zone the UTC year first
+	/// localtime(&t)'s zone fields. a file zone checks only the local
+	/// year (past its footer a UTC year out of int falls back on the
+	/// last transition), a rule zone the UTC year first
 	pub fn local(&self, t: i64) -> Option<Local> {
 		let l = match &self.0 {
 			Kind::File(f) => f.local(t),
@@ -842,7 +842,7 @@ fn process_env(name: &str) -> Option<Vec<u8>> {
 	std::env::var_os(name).map(|v| v.into_encoded_bytes())
 }
 
-// the process's zone, read on first use
+/// the process's zone, read on first use
 pub fn current() -> &'static Zone {
 	static ZONE: OnceLock<Zone> = OnceLock::new();
 	ZONE.get_or_init(|| Zone::from_env(&process_env))

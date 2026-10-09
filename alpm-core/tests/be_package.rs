@@ -1,16 +1,16 @@
-// unit tests for alpm_core::be_package, on uncompressed packages written
+// unit tests for alpm_core::internals::be_package, on uncompressed packages written
 // here
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use alpm_core::be_package::{
-	Error, Reason, changelog, pkg_load, pkg_load_internal,
-	pkg_validate_internal,
-};
 use alpm_core::digest::{Digest, Sha256, hex};
-use alpm_core::error::Errno;
-use alpm_core::package::{
+use alpm_core::internals::be_package::{
+	PkgInvalidReason as Reason, PkgLoadError as Error, changelog, pkg_load,
+	pkg_load_internal, pkg_validate_internal,
+};
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM, Package, PkgFrom,
 };
 
@@ -177,8 +177,10 @@ fn validate_and_changelog() {
 // optional, an optional one gives empty results
 #[test]
 fn signature_levels_without_sig() {
-	use alpm_core::be_package::{pkg_load_level, pkg_validate};
-	use alpm_core::signing::{Keyring, SIG_PACKAGE, SIG_PACKAGE_OPTIONAL};
+	use alpm_core::internals::be_package::{pkg_load_level, pkg_validate};
+	use alpm_core::internals::signing::{
+		Keyring, SIG_PACKAGE, SIG_PACKAGE_OPTIONAL,
+	};
 	let pkg = Pkg::new("unsigned", &[(b".PKGINFO", b'0', PKGINFO)]);
 	let mut kr = Keyring::new(b"/nonexistent/");
 	kr.set_gpg("/nonexistent/gpg");

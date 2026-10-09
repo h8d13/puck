@@ -53,14 +53,14 @@ use crate::sandbox_fs::restrict_writes_to;
 use crate::sandbox_syscalls::syscalls_filter;
 use crate::util::{PATH_MAX, getuid, until_nul};
 
-// argv[1] of the helper: a download, a command to exec as the sandbox
-// user (EXEC_ARG), or the child of util::run_chroot (CHROOT_ARG ROOT CMD
-// ARGV...)
+/// argv[1] of the helper: a download, a command to exec as the sandbox
+/// user (EXEC_ARG), or the child of util::run_chroot (CHROOT_ARG ROOT CMD
+/// ARGV...)
 pub const HELPER_ARG: &str = "--alpm-sandbox-helper";
 pub const EXEC_ARG: &str = "--alpm-sandbox-exec";
 pub const CHROOT_ARG: &str = "--alpm-chroot-exec";
 
-// _alpm_sandbox_callback_t
+/// _alpm_sandbox_callback_t
 pub const CB_LOG: u32 = 0;
 pub const CB_DOWNLOAD: u32 = 1;
 
@@ -81,8 +81,8 @@ struct EventRetry(c_int);
 #[repr(C)]
 struct EventCompleted(i64, c_int);
 
-// _alpm_use_sandbox: handle->user root, a sandbox user, one of the two
-// restrictions enabled
+/// _alpm_use_sandbox: handle->user root, a sandbox user, one of the two
+/// restrictions enabled
 pub fn use_sandbox(
 	user: u32,
 	sandboxuser: Option<&[u8]>,
@@ -94,9 +94,9 @@ pub fn use_sandbox(
 		&& (!disable_filesystem || !disable_syscalls)
 }
 
-// _alpm_sandbox_cb_log and _alpm_sandbox_cb_dl, the callbacks of the
-// child: every message goes to the pipe. the C child sets eventcb to
-// NULL, events are dropped. write errors are ignored like the C's
+/// _alpm_sandbox_cb_log and _alpm_sandbox_cb_dl, the callbacks of the
+/// child: every message goes to the pipe. the C child sets eventcb to
+/// NULL, events are dropped. write errors are ignored like the C's
 pub struct CallbackWriter<W: Write>(pub W);
 
 impl<W: Write> CallbackWriter<W> {
@@ -190,9 +190,9 @@ fn level_of(raw: u32) -> Option<LogLevel> {
 	})
 }
 
-// _alpm_sandbox_process_cb_log: level, int size (> 0), the text, logged
-// through "%s" (cut at a nul). a level that is no alpm_loglevel_t value
-// is read and dropped: the C passes it on to logcb
+/// _alpm_sandbox_process_cb_log: level, int size (> 0), the text, logged
+/// through "%s" (cut at a nul). a level that is no alpm_loglevel_t value
+/// is read and dropped: the C passes it on to logcb
 pub fn process_cb_log(r: &mut dyn Read, cb: &mut dyn Callbacks) -> bool {
 	let Some(level) = read_u32(r) else {
 		return false;
@@ -213,9 +213,9 @@ pub fn process_cb_log(r: &mut dyn Read, cb: &mut dyn Callbacks) -> bool {
 	true
 }
 
-// _alpm_sandbox_process_cb_download: event type, its struct, size_t
-// name length (< PATH_MAX), the name (cut at a nul), then dlcb. an
-// empty name breaks the stream: read_from_pipe refuses 0 bytes
+/// _alpm_sandbox_process_cb_download: event type, its struct, size_t
+/// name length (< PATH_MAX), the name (cut at a nul), then dlcb. an
+/// empty name breaks the stream: read_from_pipe refuses 0 bytes
 pub fn process_cb_download(r: &mut dyn Read, cb: &mut dyn Callbacks) -> bool {
 	let Some(kind) = read_u32(r) else {
 		return false;
@@ -269,10 +269,10 @@ pub fn process_cb_download(r: &mut dyn Read, cb: &mut dyn Callbacks) -> bool {
 	true
 }
 
-// the parent loop of curl_download_internal_sandboxed: callbacks until
-// the stream ends or breaks. the type comes from one read() like the C
-// (a short or failed read ends the loop), unknown types are skipped.
-// the C's loop only ends in error, so it has nothing to return
+/// the parent loop of curl_download_internal_sandboxed: callbacks until
+/// the stream ends or breaks. the type comes from one read() like the C
+/// (a short or failed read ends the loop), unknown types are skipped.
+/// the C's loop only ends in error, so it has nothing to return
 pub fn process_callbacks(r: &mut dyn Read, cb: &mut dyn Callbacks) {
 	loop {
 		let mut b = [0; 4];
@@ -291,13 +291,13 @@ pub fn process_callbacks(r: &mut dyn Read, cb: &mut dyn Callbacks) {
 	}
 }
 
-// what the helper needs from the parent besides the payloads: the
-// forked C child has its handle and payloads by copy
+/// what the helper needs from the parent besides the payloads: the
+/// forked C child has its handle and payloads by copy
 #[derive(Debug, Default)]
 pub struct Request {
-	// handle->sandboxuser, for the error message
+	/// handle->sandboxuser, for the error message
 	pub user: Vec<u8>,
-	// temporary_localpath: chdir, the one writable dir
+	/// temporary_localpath: chdir, the one writable dir
 	pub localpath: Vec<u8>,
 	pub disable_filesystem: bool,
 	pub disable_syscalls: bool,
@@ -371,8 +371,8 @@ impl Dec<'_> {
 }
 
 impl Request {
-	// the request and the public part of the payloads (the rest is
-	// transfer state the download sets)
+	/// the request and the public part of the payloads (the rest is
+	/// transfer state the download sets)
 	pub fn encode(&self, payloads: &[Payload]) -> Vec<u8> {
 		let mut e = Enc(Vec::new());
 		e.bytes(&self.user);
@@ -415,7 +415,7 @@ impl Request {
 		e.0
 	}
 
-	// None for a malformed request
+	/// None for a malformed request
 	pub fn decode(b: &[u8]) -> Option<(Request, Vec<Payload>)> {
 		let mut d = Dec(b);
 		let user = d.bytes()?;
@@ -470,8 +470,8 @@ impl Request {
 	}
 }
 
-// the system side of the helper's setup, a trait so the order is
-// testable without the kernel
+/// the system side of the helper's setup, a trait so the order is
+/// testable without the kernel
 pub trait ChildOps {
 	// chdir(path)
 	fn chdir(&mut self, path: &[u8]) -> bool;
@@ -487,7 +487,7 @@ pub trait ChildOps {
 	fn syscalls_filter(&mut self, cb: &mut dyn Callbacks) -> bool;
 }
 
-// the running process
+/// the running process
 pub struct Kernel;
 
 impl ChildOps for Kernel {
@@ -513,19 +513,19 @@ impl ChildOps for Kernel {
 	}
 }
 
-// the arguments of alpm_sandbox_setup_child past the user, and the
-// handle flags it reads
+/// the arguments of alpm_sandbox_setup_child past the user, and the
+/// handle flags it reads
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Setup<'a> {
-	// restrict writes to this dir
+	/// restrict writes to this dir
 	pub sandbox_path: Option<&'a [u8]>,
 	pub restrict_syscalls: bool,
 	pub disable_filesystem: bool,
 	pub disable_syscalls: bool,
 }
 
-// alpm_sandbox_setup_child after the user switch: no_new_privs, then
-// landlock and seccomp as far as enabled. false when one of them failed
+/// alpm_sandbox_setup_child after the user switch: no_new_privs, then
+/// landlock and seccomp as far as enabled. false when one of them failed
 pub fn setup_child(
 	ops: &mut dyn ChildOps,
 	cb: &mut dyn Callbacks,
@@ -553,8 +553,8 @@ fn switch_failed(cb: &mut dyn Callbacks, user: &[u8]) {
 	cb.log(LogLevel::Error, &m);
 }
 
-// the C child after the fork: chdir, setup, curl_download_internal.
-// exit status 0 downloaded, 1 nothing to do, 2 error
+/// the C child after the fork: chdir, setup, curl_download_internal.
+/// exit status 0 downloaded, 1 nothing to do, 2 error
 pub fn run_helper(
 	ops: &mut dyn ChildOps,
 	cb: &mut dyn Callbacks,
@@ -588,7 +588,7 @@ pub fn run_helper(
 	}
 }
 
-// the helper process: request on stdin, callbacks on stdout
+/// the helper process: request on stdin, callbacks on stdout
 pub fn helper_main() -> i32 {
 	let mut input = Vec::new();
 	if io::stdin().lock().read_to_end(&mut input).is_err() {
@@ -726,22 +726,22 @@ fn exec_main() -> i32 {
 	127
 }
 
-// why a sandboxed command did not run
+/// why a sandboxed command did not run
 #[derive(Debug)]
 pub enum ExecError {
-	// alpm_sandbox_setup_child failed: not root, no such user
+	/// alpm_sandbox_setup_child failed: not root, no such user
 	Setup,
-	// the helper or the command could not be started: fork, setuid,
-	// execvp errno
+	/// the helper or the command could not be started: fork, setuid,
+	/// execvp errno
 	Spawn(io::Error),
 }
 
-// systemvp's child with alpm_sandbox_setup_child(handle, user, NULL,
-// false): argv run as user with no_new_privs, no write or syscall
-// restriction (XferCommand). the helper in exec mode does the child's
-// part. stdin, stdout and stderr are ours; argv[0] is searched in PATH
+/// systemvp's child with alpm_sandbox_setup_child(handle, user, NULL,
+/// false): argv run as user with no_new_privs, no write or syscall
+/// restriction (XferCommand). the helper in exec mode does the child's
+/// part. stdin, stdout and stderr are ours; `argv[0]` is searched in PATH
 pub struct SandboxExec {
-	// the helper and its arguments (this binary, EXEC_ARG)
+	/// the helper and its arguments (this binary, EXEC_ARG)
 	pub program: PathBuf,
 	pub args: Vec<OsString>,
 	// environment the command inherits through the helper (the C's
@@ -762,8 +762,8 @@ impl Default for SandboxExec {
 }
 
 impl SandboxExec {
-	// the wait status (waitpid's) of argv run as user. the C child's
-	// getuid() and getpwnam checks are made here before spawning
+	/// the wait status (waitpid's) of argv run as user. the C child's
+	/// getuid() and getpwnam checks are made here before spawning
 	pub fn run(
 		&mut self,
 		user: &[u8],
@@ -834,20 +834,23 @@ fn os(p: &[u8]) -> &Path {
 static IGNORED: AtomicBool = AtomicBool::new(false);
 static QUIT_DEFAULT: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
+/// true while a sandboxed command runs and SIGINT/SIGQUIT are ignored
+/// in the parent (the frontend's handler leaves them to the child)
 pub fn signals_ignored() -> bool {
 	IGNORED.load(Ordering::SeqCst)
 }
 
-// true while SIGQUIT keeps its default action
+/// true while SIGQUIT keeps its default action
 pub fn quit_default() -> Arc<AtomicBool> {
 	let f = QUIT_DEFAULT.get_or_init(|| Arc::new(AtomicBool::new(true)));
 	Arc::clone(f)
 }
 
-// the ignoring window, closed on drop
+/// the ignoring window, closed on drop
 pub struct IgnoreSignals(());
 
 impl IgnoreSignals {
+	/// start ignoring, until the value drops
 	pub fn new() -> Self {
 		IGNORED.store(true, Ordering::SeqCst);
 		quit_default().store(false, Ordering::SeqCst);
@@ -868,8 +871,8 @@ impl Drop for IgnoreSignals {
 	}
 }
 
-// what the parent asks the system, a trait for tests that do not run
-// as root
+/// what the parent asks the system, a trait for tests that do not run
+/// as root
 pub trait Host {
 	// getuid()
 	fn uid(&self) -> u32;
@@ -883,8 +886,8 @@ pub trait Host {
 	fn raise(&mut self, sig: c_int);
 }
 
-// the running system. getpwnam through getent(1), which asks NSS like
-// the C; kill through kill(1)
+/// the running system. getpwnam through getent(1), which asks NSS like
+/// the C; kill through kill(1)
 pub struct System;
 
 impl Host for System {
@@ -942,16 +945,16 @@ impl Host for System {
 	}
 }
 
-// the sandbox of a handle's downloads (its default SandboxFor): a
-// HelperSandbox where _alpm_use_sandbox holds for handle->user
+/// the sandbox of a handle's downloads (its default SandboxFor): a
+/// HelperSandbox where _alpm_use_sandbox holds for handle->user
 pub fn handle_sandbox(handle: &Handle) -> Option<Box<dyn Sandbox>> {
 	let sb = HelperSandbox::for_handle(handle, handle.user())?;
 	Some(Box::new(sb))
 }
 
-// the dload::Sandbox of a handle with a DownloadUser
+/// the dload::Sandbox of a handle with a DownloadUser
 pub struct HelperSandbox {
-	// handle->sandboxuser
+	/// handle->sandboxuser
 	pub user: Vec<u8>,
 	pub disable_filesystem: bool,
 	pub disable_syscalls: bool,
@@ -978,8 +981,8 @@ impl HelperSandbox {
 		}
 	}
 
-	// _alpm_use_sandbox on the handle's sandboxuser and flags, uid
-	// standing for handle->user: None when downloads run unsandboxed
+	/// _alpm_use_sandbox on the handle's sandboxuser and flags, uid
+	/// standing for handle->user: None when downloads run unsandboxed
 	pub fn for_handle(handle: &Handle, uid: u32) -> Option<Self> {
 		let user = handle.sandboxuser()?;
 		let fs = handle.disable_sandbox_filesystem() != 0;

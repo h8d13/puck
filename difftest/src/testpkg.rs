@@ -5,7 +5,7 @@
 // and warnings, like output_cb), the failure texts from the C alpm_strerror
 use std::ffi::c_int;
 
-use alpm_core::error::Errno;
+use alpm_core::internals::error::Errno;
 
 use crate::{CSigHandle, c_strerror};
 

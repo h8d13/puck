@@ -27,24 +27,24 @@ use std::io::{self, BufRead, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
 use std::sync::atomic::Ordering;
 
-use alpm_core::add::add_pkg;
-use alpm_core::be_package::pkg_load_level;
-use alpm_core::be_sync::{db_update, get_validation};
-use alpm_core::callbacks::Callbacks;
-use alpm_core::conflict::FileConflictType;
-use alpm_core::db::{DB_USAGE_INSTALL, Db};
-use alpm_core::deps::{DepMissing, DepMod, dep_compute_string};
-use alpm_core::error::Errno;
-use alpm_core::handle::Handle;
-use alpm_core::package::{DbCaches, Package, pkg_find};
-use alpm_core::signing::{decode_signature, extract_keyid};
-use alpm_core::sync::{dbs_satisfier, find_group_pkgs, sync_sysupgrade};
-use alpm_core::trans::{
+use alpm_core::Callbacks;
+use alpm_core::Errno;
+use alpm_core::FileConflictType;
+use alpm_core::Handle;
+use alpm_core::add_pkg;
+use alpm_core::vercmp;
+use alpm_core::{
 	CommitData, CommitError, PrepareData, PrepareError, TransPkg,
 	trans_commit, trans_get_add, trans_get_remove, trans_prepare,
 };
-use alpm_core::util::{PATH_MAX, fnmatch, strerror, until_nul};
-use alpm_core::version::vercmp;
+use alpm_core::{DB_USAGE_INSTALL, Db};
+use alpm_core::{DbCaches, Package, pkg_find};
+use alpm_core::{DepMissing, DepMod, dep_compute_string};
+use alpm_core::{db_update, get_validation};
+use alpm_core::{dbs_satisfier, find_group_pkgs, sync_sysupgrade};
+use alpm_core::{decode_signature, extract_keyid};
+use alpm_core::{fnmatch, strerror};
+use pacman_common::util_common::{PATH_MAX, until_nul};
 
 use crate::conf::{
 	Config, LOG_DEBUG, LOG_ERROR, LOG_WARNING, PM_CLEAN_KEEPCUR,
@@ -414,9 +414,7 @@ fn cleancache_entry<R: BufRead>(
 	}
 	ui.out.flush();
 	// alpm_pkg_load(handle, path, 0, 0): metadata only, siglevel 0
-	let loaded = h.with_callbacks(|h, cb| {
-		pkg_load_level(h.keyring_mut(), cb, &path, false, 0)
-	});
+	let loaded = h.pkg_load(&path, false, 0);
 	let Ok(pkg) = loaded else {
 		let msg = [
 			b"skipping ",

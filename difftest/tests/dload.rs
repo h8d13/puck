@@ -1,4 +1,4 @@
-// alpm_core::dload against the C _alpm_download/alpm_fetch_pkgurl: both
+// alpm_core::internals::dload against the C _alpm_download/alpm_fetch_pkgurl: both
 // download from the same scripted HTTP servers on 127.0.0.1 (and file://
 // urls) into their own dirs of one fixture. compared: return value,
 // pm_errno on failure, download callback events (progress runs reduced
@@ -13,11 +13,11 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use alpm_core::callbacks::{DownloadEvent, LogLevel};
-use alpm_core::dload::{
+use alpm_core::Errno;
+use alpm_core::internals::callbacks::{DownloadEvent, LogLevel};
+use alpm_core::internals::dload::{
 	DownloadState, Downloader, Payload, Settings, getdate_capped,
 };
-use alpm_core::error::Errno;
 use difftest::{
 	CDload, Fetcher, Record, Recorder, Reply, Req, Rng, Server, Style,
 	TempRoot, c_getdate, closed_port, iters, payload_layout_ok,
@@ -89,7 +89,7 @@ fn norm_log(msg: &[u8], dir: &[u8]) -> Vec<u8> {
 	if let Some(i) = s.find(pre) {
 		let at = i + pre.len();
 		let num = s[at..].trim_end_matches('\n');
-		let now = alpm_core::log::now_secs();
+		let now = alpm_core::internals::log::now_secs();
 		if num.parse::<i64>().is_ok_and(|t| (now - t).abs() < 3600) {
 			s.replace_range(at..at + num.len(), "<now>");
 		}
@@ -173,7 +173,9 @@ fn outcome(
 	}
 }
 
-fn rust_ret(r: Result<bool, alpm_core::error::Errno>) -> (c_int, c_int) {
+fn rust_ret(
+	r: Result<bool, alpm_core::internals::error::Errno>,
+) -> (c_int, c_int) {
 	match r {
 		Ok(true) => (0, 0),
 		Ok(false) => (1, 0),
@@ -2142,13 +2144,13 @@ fn filecache_and_dirs() {
 		let r = {
 			let mut rec = Recorder::default();
 			let mut all = rdirs.clone();
-			let found = alpm_core::util::filecache_find(
+			let found = alpm_core::internals::util::filecache_find(
 				&all,
 				b"pkg.tar.zst",
 				&mut rec,
 			);
 			let frec = std::mem::take(&mut rec.0);
-			let setup = alpm_core::util::filecache_setup(
+			let setup = alpm_core::internals::util::filecache_setup(
 				&mut all, &mut rec,
 			);
 			let srec = std::mem::take(&mut rec.0);
@@ -2184,7 +2186,7 @@ fn filecache_and_dirs() {
 	let h = CDload::new(&fx);
 	h.remove_temporary_download_dir(&dir_bytes(&cb.join("tmpdir")));
 	drop(h);
-	alpm_core::dload::remove_temporary_download_dir(&dir_bytes(
+	alpm_core::internals::dload::remove_temporary_download_dir(&dir_bytes(
 		&rb.join("tmpdir"),
 	));
 	assert_eq!(tree(&cb.join("tmpdir")), tree(&rb.join("tmpdir")));
@@ -2193,7 +2195,7 @@ fn filecache_and_dirs() {
 	let h = CDload::new(&fx);
 	h.remove_temporary_download_dir(&dir_bytes(&cb.join("tmpdir")));
 	drop(h);
-	alpm_core::dload::remove_temporary_download_dir(&dir_bytes(
+	alpm_core::internals::dload::remove_temporary_download_dir(&dir_bytes(
 		&rb.join("tmpdir"),
 	));
 	assert_eq!(cb.join("tmpdir").exists(), rb.join("tmpdir").exists());
