@@ -2258,6 +2258,41 @@ fn low_speed_timeout() {
 	assert_eq!(c.ret, 0);
 }
 
+// curl's low-speed check is a speed, not a read timeout: a body
+// trickling a byte every 3 s stays under 1 B/s and fails after 10 s
+// with 3 bytes received, where a stall of 10 s would have been needed
+// per read. the .part goes: the C's zero-length check sees stdio's
+// unflushed size
+#[test]
+fn low_speed_trickle() {
+	let s = srv(&[(
+		"/p.pkg",
+		vec![Reply::Trickle {
+			body: body(20, 1),
+			every: Duration::from_secs(3),
+		}],
+	)]);
+	let mk = |d: &[u8]| vec![pkg_payload(d, "p.pkg", s.url("/p.pkg"))];
+	let case = Case {
+		servers: vec![&s],
+		payloads: &mk,
+		setup: &no_setup,
+		parallel: 1,
+		disable_timeout: false,
+		sorted: false,
+	};
+	let (c, r) = run(&case);
+	assert_eq!(c, r, "{}", explain(&c, &r));
+	assert_eq!(c.ret, -1);
+	let got = c.downloads.iter().find_map(|(_, e)| match e {
+		DownloadEvent::Progress { downloaded, .. } => Some(*downloaded),
+		_ => None,
+	});
+	assert_eq!((got, c.files.len()), (Some(3), 0), "{:?}", c.downloads);
+	let m = String::from_utf8_lossy(errors(&c)[0]).into_owned();
+	assert!(m.contains("Operation too slow"), "{m}");
+}
+
 // the C keeps dload_interrupted and the environment process wide: these
 // cases run in a fresh test process each
 fn in_child(test: &str, env: &[(&str, &str)]) {
@@ -2324,7 +2359,9 @@ fn proxy_env_child() {
 	let pa_noscheme = format!("127.0.0.1:{}", proxy_a.port());
 	let down = format!("http://127.0.0.1:{}", closed_port());
 	// name, environment, path, who serves it (None: nobody could)
-	let cases: Vec<(&str, Vec<(&str, &str)>, &str, Option<usize>)> = vec![
+	type ProxyCase<'a> =
+		(&'a str, Vec<(&'a str, &'a str)>, &'a str, Option<usize>);
+	let cases: Vec<ProxyCase> = vec![
 		("direct", vec![], "/core.db", Some(0)),
 		("http_proxy", vec![("http_proxy", &pa)], "/core.db", Some(1)),
 		(

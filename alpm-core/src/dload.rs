@@ -7,8 +7,8 @@
 // Content-Range check, If-Modified-Since and the time condition, the max
 // file size, file:// urls, 10 redirects, the low-speed abort, the
 // truncation check. error texts copy curl's where libalpm prints them.
-// reqwest only times single waits: the low-speed abort is no byte for
-// 10 s (curl: under 1 B/s on a 5 s average, for 10 s).
+// the low-speed abort is curl's own check (Speeder) over a reader
+// thread, reqwest's read timeout stays as a backstop.
 //
 // handle state is DownloadState (handle->server_errors and the
 // dload_interrupted static, both kept across calls), handle options are
@@ -28,6 +28,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::fs::{PermissionsExt, chown};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError::{Disconnected, Timeout};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -1011,6 +1012,9 @@ struct Transfer {
 	effective_url: Vec<u8>,
 	// size of the file when this attempt started
 	start_len: i64,
+	// when the request of the last hop went out (curl's per-request
+	// progress start)
+	sent: Instant,
 }
 
 type Fail = (Code, Vec<u8>);
@@ -1128,6 +1132,102 @@ fn is_timeout(e: &io::Error) -> bool {
 
 const TOO_SLOW: &str = "Operation too slow. \
 	Less than 1 bytes/sec transferred the last 10 seconds";
+
+// curl's speed records: 6 entries for 5 seconds (CURL_SPEED_RECORDS),
+// a check at least every second (EXPIRE_SPEEDCHECK)
+const SPEED_RECORDS: usize = 6;
+const SPEEDCHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+// progress_calc and pgrs_speedcheck for CURLOPT_LOW_SPEED_LIMIT 1 and
+// CURLOPT_LOW_SPEED_TIME 10: the speed is the bytes between the oldest
+// and the newest of the last records (one per second at most, the
+// overall average until there are two) and the transfer fails once it
+// stayed under 1 B/s for 10 s. body bytes only, like curl's download
+// counter
+struct Speeder {
+	start: Instant,
+	// (bytes so far, microseconds since start)
+	records: [(i64, i64); SPEED_RECORDS],
+	count: usize,
+	current_speed: i64,
+	// state.keeps_speed: since when it is under the limit
+	keeps_speed: Option<Instant>,
+}
+
+impl Speeder {
+	fn new(start: Instant) -> Self {
+		Speeder {
+			start,
+			records: [(0, 0); SPEED_RECORDS],
+			count: 0,
+			current_speed: 0,
+			keeps_speed: None,
+		}
+	}
+
+	// trspeed
+	fn trspeed(size: i64, us: i64) -> i64 {
+		if us < 1 {
+			return size.saturating_mul(1_000_000);
+		}
+		match size.checked_mul(1_000_000) {
+			Some(n) => n / us,
+			None => size / (us / 1_000_000).max(1),
+		}
+	}
+
+	fn calc(&mut self, now: Instant, amount: i64) {
+		let elapsed = now.duration_since(self.start).as_micros() as i64;
+		if self.count == 0 {
+			self.records[0] = (amount, elapsed);
+			self.count = 1;
+			self.current_speed = Self::trspeed(amount, elapsed);
+			return;
+		}
+		let next = self.count % SPEED_RECORDS;
+		let mut latest =
+			next.checked_sub(1).unwrap_or(SPEED_RECORDS - 1);
+		// a new record only once a second has passed
+		if elapsed - self.records[latest].1 < 1_000_000 {
+			return;
+		}
+		self.count += 1;
+		latest = next;
+		self.records[latest] = (amount, elapsed);
+		let oldest = match self.count < SPEED_RECORDS {
+			true => 0,
+			false => (latest + 1) % SPEED_RECORDS,
+		};
+		let amount = self.records[latest].0 - self.records[oldest].0;
+		let duration = (self.records[latest].1
+			- self.records[oldest].1)
+			.max(1);
+		self.current_speed = Self::trspeed(amount, duration);
+	}
+
+	// the records and the check
+	fn update(&mut self, now: Instant, amount: i64) -> Result<(), Fail> {
+		self.calc(now, amount);
+		if self.current_speed >= 1 {
+			self.keeps_speed = None;
+			return Ok(());
+		}
+		match self.keeps_speed {
+			None => self.keeps_speed = Some(now),
+			Some(since)
+				if now.duration_since(since)
+					>= LOW_SPEED_TIME =>
+			{
+				return Err(failed(
+					CURLE_OPERATION_TIMEDOUT,
+					TOO_SLOW,
+				));
+			}
+			Some(_) => {}
+		}
+		Ok(())
+	}
+}
 
 // a request that got no byte of a response because the connection went
 // away: hyper's IncompleteMessage (closed before the status line), or
@@ -1319,6 +1419,7 @@ impl Worker {
 				.file
 				.metadata()
 				.map_or(0, |m| m.len() as i64),
+			sent: Instant::now(),
 		};
 		let file_url = job.url.len() >= 7
 			&& job.url[..7].eq_ignore_ascii_case(b"file://");
@@ -1448,6 +1549,7 @@ impl Worker {
 		loop {
 			let peer = ensure_fetchable(&url, &self.pool.proxies)?;
 			let req = self.request(job, &with_auth(&first, &url));
+			xfer.sent = Instant::now();
 			let resp = match req.send() {
 				Ok(r) => r,
 				Err(e) if connection_died(&e)
@@ -1571,6 +1673,11 @@ impl Worker {
 	}
 
 	// the body, size -1 when unknown
+	// the body, size -1 when unknown. a reader thread blocks on the
+	// response (reqwest's read cannot be interrupted) and hands chunks
+	// over; curl's low-speed check runs here every second and on each
+	// chunk. an aborted transfer leaves the reader until its next read
+	// returns, the connection closes with it
 	fn http_body(
 		&self,
 		job: &mut Job,
@@ -1579,27 +1686,55 @@ impl Worker {
 		size: i64,
 	) -> Result<(), Fail> {
 		let dltotal = size.max(0);
-		let mut buf = vec![0; 64 * 1024];
+		let (tx, rx) = mpsc::channel::<io::Result<Vec<u8>>>();
+		thread::spawn(move || {
+			let mut buf = vec![0; 64 * 1024];
+			loop {
+				let r = resp.read(&mut buf);
+				let more = matches!(r, Ok(n) if n > 0);
+				let chunk = r.map(|n| buf[..n].to_vec());
+				if tx.send(chunk).is_err() || !more {
+					break;
+				}
+			}
+		});
+		let mut speed =
+			self.pool.timeout.then(|| Speeder::new(xfer.sent));
+		if let Some(sp) = &mut speed {
+			// curl's first check, right after the request went out
+			sp.update(xfer.sent, 0)?;
+		}
 		loop {
-			let n = match resp.read(&mut buf) {
-				Ok(0) => break,
-				Ok(n) => n,
-				Err(e) if is_timeout(&e) => {
+			let got = match &speed {
+				Some(_) => rx.recv_timeout(SPEEDCHECK_INTERVAL),
+				None => rx.recv().map_err(|_| Disconnected),
+			};
+			match got {
+				Ok(Ok(chunk)) if chunk.is_empty() => break,
+				Ok(Ok(chunk)) => {
+					self.write_body(
+						job, xfer, &chunk, dltotal,
+					)?;
+				}
+				Ok(Err(e)) if is_timeout(&e) => {
 					return Err(failed(
 						CURLE_OPERATION_TIMEDOUT,
 						TOO_SLOW,
 					));
 				}
-				Err(_) if size < 0 => {
+				Ok(Err(_)) if size < 0 => {
 					return Err(failed(
 						CURLE_PARTIAL_FILE,
 						"transfer closed with outstanding read data \
 						 remaining",
 					));
 				}
-				Err(_) => break,
-			};
-			self.write_body(job, xfer, &buf[..n], dltotal)?;
+				Ok(Err(_)) | Err(Disconnected) => break,
+				Err(Timeout) => {}
+			}
+			if let Some(sp) = &mut speed {
+				sp.update(Instant::now(), xfer.bytes_dl)?;
+			}
 		}
 		if size >= 0 && xfer.bytes_dl < size {
 			let left = size - xfer.bytes_dl;

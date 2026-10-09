@@ -715,6 +715,12 @@ pub enum Reply {
 		pause: Duration,
 		finish: bool,
 	},
+	// Content-Length, then one byte per `every` until the body is out
+	// or the client went away
+	Trickle {
+		body: Vec<u8>,
+		every: Duration,
+	},
 	// that status with a Location
 	Redirect(u16, String),
 	// 200 with these header lines and a Content-Length
@@ -994,6 +1000,21 @@ fn respond(
 			thread::sleep(pause);
 			stalls.fetch_sub(1, Ordering::SeqCst);
 			return finish && s.write_all(&body[at..]).is_ok();
+		}
+		Reply::Trickle { body, every } => {
+			let extra = [format!("Content-Length: {}", body.len())];
+			if s.write_all(&head("200 OK", &extra)).is_err() {
+				return false;
+			}
+			let _ = s.flush();
+			for b in body {
+				thread::sleep(every);
+				if s.write_all(&[b]).is_err() {
+					return false;
+				}
+				let _ = s.flush();
+			}
+			return false;
 		}
 		Reply::Redirect(code, to) => {
 			let extra = [
