@@ -1183,7 +1183,6 @@ impl Speeder {
 		}
 	}
 
-	// trspeed
 	fn trspeed(size: i64, us: i64) -> i64 {
 		if us < 1 {
 			return size.saturating_mul(1_000_000);
