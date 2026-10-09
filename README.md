@@ -21,7 +21,7 @@ Needs rust toolchain + `fakechroot fakeroot`
 git clone --recurse-submodules git@github.com:h8d13/puck.git
 cd puck
 meson setup pacman/build pacman && ninja -C pacman/build
-cargo test --release
+cargo test --release -p something --test specific-test
 ```
 
 Building the C reference follows upstream: `pacman/doc/index.asciidoc`
@@ -31,12 +31,6 @@ Building the C reference follows upstream: `pacman/doc/index.asciidoc`
 
 - `pacman/`, `alpm/`: submodules, upstreams
 - `alpm-core/`, `pacman-common/`, `pacman-cli/`, `vercmp/`: the port
-- `difftest/`: equivalence tests against the C, the only crate calling C
-
-## Docs
-
-- `PORTING.md`: status per C file, milestones, ALPM overlap, notes
-- `METHODOLOGY.md`: rules every port unit follows
-- `UPSTREAM.md`: findings in the C reference, with practical reach
+- `difftest/`: equivalence tests against the C, the only crate calling `unsafe`
 
 ---
