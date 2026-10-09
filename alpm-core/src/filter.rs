@@ -16,7 +16,7 @@
 // liblz4's blocks), compress (.Z) is libarchive's own; lrzip, lzop and
 // grzip run their program like libarchive does without liblzo2.
 // uu and rpm are not decoded: their bidders are not modelled, such data
-// is read as it is (PORTING.md)
+// is read as it is
 
 mod bzip2;
 mod compress;

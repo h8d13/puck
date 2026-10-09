@@ -356,7 +356,7 @@ fn can_remove_file(h: &mut Handle, name: &[u8]) -> bool {
 // shift_pacsave (static in C): file.pacsave.N becomes .N+1 from the
 // highest N down, then file.pacsave becomes file.pacsave.1. N is found
 // by the C's regex built from the unescaped basename and read at the
-// basename's length past the name start (UPSTREAM.md); past the end of
+// basename's length past the name start; past the end of
 // the name it reads as 0 here
 fn shift_pacsave(cb: &mut dyn Callbacks, file: &[u8]) {
 	let dirname = mdirname(file);
@@ -601,7 +601,7 @@ fn unlink_file(
 			logv(h.callbacks(), Debug, &msg);
 		} else {
 			// an unreadable file counts as unmodified. a NULL
-			// hash crashes the C's strcmp (UPSTREAM.md), here
+			// hash crashes the C's strcmp, here
 			// the file counts as modified
 			let modified =
 				compute_md5sum(&file).is_some_and(|sum| {

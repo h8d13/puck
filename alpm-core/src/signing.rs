@@ -1,5 +1,5 @@
 // port of lib/libalpm/signing.c. gpgme is replaced by gpg(1) driven the
-// way gpgme's engine-gpg drives it (METHODOLOGY.md): the same binary,
+// way gpgme's engine-gpg drives it: the same binary,
 // keyring (handle->gpgdir as --homedir) and trust model, the status lines
 // and colon listings gpgme parses, mapped onto what pacman reads from
 // gpgme's results.

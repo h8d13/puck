@@ -11,7 +11,7 @@
 // file order, each with the text of the ARCHIVE_WARN its header returns.
 // the data is seen as one buffer, as archive_read_open_memory hands it
 // out; libarchive's line readers work on read-ahead blocks, where a few
-// line ends depend on block boundaries (UPSTREAM.md). archive_set_error
+// line ends depend on block boundaries. archive_set_error
 // texts are kept where pacman logs them.
 
 use std::fs;
@@ -1040,7 +1040,7 @@ pub fn read(data: &[u8]) -> Result<Vec<Entry>, Error> {
 
 // the data through the filter: what the open reads fails it, after that
 // a failed read is the end of the data to readline (__archive_read_ahead
-// gives NULL, UPSTREAM.md)
+// gives NULL)
 fn read_filtered(mut filter: Filter) -> Result<Vec<Entry>, Error> {
 	let mut data = Vec::new();
 	let _ = filter.read_to_end(&mut data);
