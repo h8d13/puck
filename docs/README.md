@@ -4,7 +4,7 @@
 open merge requests (that are founded), and other yet-to-be discovered details...
 
 - Static binary with dep pins instead of linking (free updates!), + any improvement
-to upstream projects, can we ported without too much difficulty. This means that
+to upstream projects, can be ported without too much difficulty. This means that
 ongoing developments by contributors directly benefits this project.
 
 - Speed, memory usage, syscall counts, and correctness overall are attractive factors
