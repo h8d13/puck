@@ -1,5 +1,6 @@
 // unit tests for alpm_core::mtree (libarchive's mtree reader) and
 // be_local's mtree file reading on top of it
+#![allow(clippy::panic)]
 use std::fs;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;

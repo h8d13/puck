@@ -1,4 +1,5 @@
 // unit tests for alpm_core::signing: the paths that do not reach gpg
+#![allow(clippy::panic)]
 use alpm_core::callbacks::{Callbacks, LogLevel, Question};
 use alpm_core::error::Errno;
 use alpm_core::signing::*;

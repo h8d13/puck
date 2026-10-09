@@ -1,6 +1,7 @@
 // alpm_core::dload without a network: file:// transfers, server error
 // counting, the fetch callback path, the sandbox hooks with a stand-in
 // Sandbox, the date and host helpers
+#![allow(clippy::panic)]
 use std::ffi::c_int;
 use std::fs;
 use std::io;
