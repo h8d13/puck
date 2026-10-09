@@ -182,3 +182,25 @@ fn checksum_cases() {
 		None
 	);
 }
+
+// SCRIPTLET_SHELL and LDCONFIG follow the C reference's config.h
+// (build.rs) when PACMAN_BUILD names one, meson's defaults otherwise.
+// parsed again here, without build.rs: the values are paths, no escapes
+#[test]
+fn build_paths_follow_config_h() {
+	let defined = |name: &str| -> Option<String> {
+		let dir = std::env::var_os("PACMAN_BUILD")?;
+		let path = std::path::Path::new(&dir).join("config.h");
+		let text = std::fs::read_to_string(path).unwrap();
+		let prefix = format!("#define {name} \"");
+		let line = text
+			.lines()
+			.find_map(|l| l.strip_prefix(&prefix))
+			.unwrap();
+		Some(line.strip_suffix('"').unwrap().to_string())
+	};
+	let shell = defined("SCRIPTLET_SHELL").unwrap_or("/bin/sh".into());
+	let ld = defined("LDCONFIG").unwrap_or("/sbin/ldconfig".into());
+	assert_eq!(SCRIPTLET_SHELL, shell.as_bytes());
+	assert_eq!(LDCONFIG, ld.as_bytes());
+}

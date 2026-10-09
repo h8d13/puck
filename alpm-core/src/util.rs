@@ -701,9 +701,11 @@ pub fn geteuid() -> u32 {
 	rustix::process::geteuid().as_raw()
 }
 
-// meson options scriptlet-shell and ldconfig, as in config.h
-pub const SCRIPTLET_SHELL: &[u8] = b"/bin/sh";
-pub const LDCONFIG: &[u8] = b"/sbin/ldconfig";
+// SCRIPTLET_SHELL and LDCONFIG of config.h (meson options scriptlet-shell
+// and ldconfig), set by build.rs from the C reference's config.h when
+// PACMAN_BUILD points at one, meson's defaults otherwise
+pub const SCRIPTLET_SHELL: &[u8] = env!("PUCK_SCRIPTLET_SHELL").as_bytes();
+pub const LDCONFIG: &[u8] = env!("PUCK_LDCONFIG").as_bytes();
 
 // ALPM_CALLER_PREFIX, the alpm_logaction prefix of libalpm itself
 pub const CALLER_PREFIX: &[u8] = b"ALPM";
