@@ -1,6 +1,7 @@
 # puck
 
 > https://en.wikipedia.org/wiki/Pac-Man
+
 Rust port of `pacman`, file by file, checked against the upstream C with
 differential tests.
 
