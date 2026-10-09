@@ -16,9 +16,6 @@
 
 use std::fs;
 use std::io::{self, Read};
-use std::str::FromStr;
-
-use alpm_types::{Md5Checksum, Sha256Checksum};
 
 use crate::filter::{self, Filter};
 use crate::util::{
@@ -72,8 +69,9 @@ pub struct Entry {
 	pub mtime: i64,
 	// archive_entry_symlink, None when unset
 	pub link: Option<Vec<u8>>,
-	pub sha256: Option<Sha256Checksum>,
-	pub md5: Option<Md5Checksum>,
+	// the digests as bytes
+	pub sha256: Option<[u8; 32]>,
+	pub md5: Option<[u8; 16]>,
 	// the header returned ARCHIVE_WARN: archive_error_string, the last
 	// error set while reading it
 	pub warning: Option<Vec<u8>>,
@@ -836,9 +834,14 @@ fn parse_digest(val: &[u8], len: usize) -> Result<&[u8], Vec<u8>> {
 	Ok(val)
 }
 
-// the hex of a parse_digest'ed value
-fn checksum<T: FromStr>(hex: &[u8]) -> Option<T> {
-	T::from_str(std::str::from_utf8(hex).ok()?).ok()
+// the bytes of a parse_digest'ed value
+fn digest<const N: usize>(hex: &[u8]) -> Option<[u8; N]> {
+	let nibble = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+	let mut out = [0; N];
+	for (b, &[hi, lo]) in out.iter_mut().zip(hex.as_chunks().0) {
+		*b = nibble(hi)? << 4 | nibble(lo)?;
+	}
+	Some(out)
 }
 
 fn lossy(b: &[u8]) -> std::borrow::Cow<'_, str> {
@@ -873,14 +876,12 @@ fn parse_keyword(
 		b"gid" => e.gid = atol(val, 10).0.max(0),
 		b"uid" => e.uid = atol(val, 10).0.max(0),
 		b"link" => e.link = Some(parse_escapes(val)),
-		b"md5" | b"md5digest" => {
-			e.md5 = checksum(parse_digest(val, 16)?)
-		}
+		b"md5" | b"md5digest" => e.md5 = digest(parse_digest(val, 16)?),
 		b"rmd160" | b"rmd160digest" | b"sha1" | b"sha1digest" => {
 			parse_digest(val, 20)?;
 		}
 		b"sha256" | b"sha256digest" => {
-			e.sha256 = checksum(parse_digest(val, 32)?);
+			e.sha256 = digest(parse_digest(val, 32)?);
 		}
 		b"sha384" | b"sha384digest" => {
 			parse_digest(val, 48)?;

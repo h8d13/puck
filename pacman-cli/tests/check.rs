@@ -133,8 +133,10 @@ fn entry(t: &Tmp, rel: &str, kind: MtreeType, content: &[u8]) -> MtreeEntry {
 		size: content.len() as u64,
 		mtime: t.mtime(rel),
 		link: (kind == MtreeType::Link).then(|| b"target".to_vec()),
-		sha256: (kind == MtreeType::File)
-			.then(|| Sha256Checksum::calculate_from(content)),
+		sha256: (kind == MtreeType::File).then(|| {
+			let sum = Sha256Checksum::calculate_from(content);
+			sum.inner().try_into().expect("32 bytes")
+		}),
 		md5: None,
 		warning: None,
 	}

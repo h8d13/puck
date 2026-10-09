@@ -15,6 +15,10 @@ use alpm_core::package::Package;
 const SHA: &str =
 	"ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb";
 const MD5: &str = "0cc175b9c0f1b6a831c399e269772661";
+
+fn hex(b: &[u8]) -> String {
+	b.iter().map(|x| format!("{x:02x}")).collect()
+}
 const SET: &str = "#mtree\n/set type=file uid=0 gid=0 mode=644\n";
 
 fn text() -> String {
@@ -53,8 +57,8 @@ fn entries_in_file_order() {
 		(e[1].mode, e[1].uid, e[1].size, e[1].mtime),
 		(0o644, 0, 1, 1)
 	);
-	assert_eq!(e[1].sha256.as_ref().unwrap().to_string(), SHA);
-	assert_eq!(e[1].md5.as_ref().unwrap().to_string(), MD5);
+	assert_eq!(hex(&e[1].sha256.unwrap()), SHA);
+	assert_eq!(hex(&e[1].md5.unwrap()), MD5);
 	assert_eq!(
 		(e[0].kind, e[0].mode, e[0].uid),
 		(EntryType::Dir, 0o755, 1000)
@@ -93,8 +97,8 @@ fn keyword_order() {
 		"{SET}/set sha256={SHA}\n/set sha256digest={other}\n./a\n\
 		./b sha256={other} sha256digest={SHA} sha256={other}\n"
 	));
-	assert_eq!(e[0].sha256.as_ref().unwrap().to_string(), other);
-	assert_eq!(e[1].sha256.as_ref().unwrap().to_string(), SHA);
+	assert_eq!(hex(&e[0].sha256.unwrap()), other);
+	assert_eq!(hex(&e[1].sha256.unwrap()), SHA);
 }
 
 #[test]

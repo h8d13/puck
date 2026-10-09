@@ -296,11 +296,11 @@ fn entry_diff(c: &CMtreeEntry, r: &MtreeEntry) -> Vec<&'static str> {
 	if c.size != i64::try_from(r.size).ok() {
 		d.push("size");
 	}
-	let sha = r.sha256.as_ref().map(|s| s.inner());
+	let sha = r.sha256.as_ref().map(|s| &s[..]);
 	if digest(c.sha256.as_ref().map(|s| &s[..])) != digest(sha) {
 		d.push("sha256");
 	}
-	let md5 = r.md5.as_ref().map(|s| s.inner());
+	let md5 = r.md5.as_ref().map(|s| &s[..]);
 	if digest(c.md5.as_ref().map(|s| &s[..])) != digest(md5) {
 		d.push("md5");
 	}
