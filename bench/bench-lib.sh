@@ -24,22 +24,43 @@
 #   --perf=record      perf record, report saved next to perf.data
 #   --strace           strace -f -c syscall counts
 #
-# per op, results/<script>/<N>/<side>.{out,err,...} keep each side's
-# output and the tool's files (massif.out, callgrind.out, perf.data, ...)
-# from the last run; results/<script>.tsv has one line per op and side.
-# in time mode an op is "not ok" when the sides' rc, stdout or stderr
-# differ, and bench_expect_diff marks a known difference, like git's
-# test_expect_failure; in profiling modes it is "not ok" when memcheck
-# finds errors or definite leaks
+# per op, results/<script>/<N>/<side>.{out,err,state,...} keep each
+# side's output, bench_state's text and the tool's files (massif.out,
+# callgrind.out, perf.data, ...) from the last run; results/<script>.tsv
+# has one line per op and side. in time and strace mode an op is "not
+# ok" when the sides' rc, stdout, stderr or state differ (each side's
+# bench_root spelled ROOT first), and bench_expect_diff marks a known
+# difference, like git's test_expect_failure; in profiling modes it is
+# "not ok" when memcheck finds errors or definite leaks
+#
+# time and peak RSS come from launch.c (built into the trash dir):
+# wait4's rusage of the pacman process and what it waited for, so a
+# bench_wrap (fakechroot, fakeroot) counts on both sides alike. the
+# profiling tools run inside bench_wrap, around pacman
 #
 # script API:
 #   bench_op [PREREQ] ARG...         pacman ARG... on both sides
 #   bench_expect_diff [PREREQ] ARG...  same, output known to differ
+#   bench_label=TEXT                 the next op's label, when its
+#                                    arguments are too long for one
 #   bench_lazy_prereq NAME 'SCRIPT'  NAME holds if SCRIPT succeeds (run
 #                                    once, in the trash dir)
 #   bench_reset SIDE                 redefine: called untimed before
 #                                    every run, in the trash dir, to
-#                                    restore state an op changes
+#                                    restore state an op changes. may
+#                                    set, for that run only:
+#     bench_wrap=(CMD...)            runs before pacman (fakeroot ...)
+#     bench_pre=(ARG...)             pacman options before the op's
+#     bench_root=PATH                a path to mask as ROOT in outputs
+#   bench_state SIDE                 redefine: called untimed after
+#                                    every run, in the trash dir; what
+#                                    it prints is compared across sides
+#                                    like stdout (bench_tree helps)
+#   bench_tree ROOT [FAKED]          the tree under ROOT as text: path,
+#                                    type, mode, owner, size, link and
+#                                    sha256 per entry, pacman.log stamps
+#                                    and local db install dates masked;
+#                                    lstat through fakeroot -i FAKED
 #   bench_done
 
 set -u
@@ -97,7 +118,7 @@ valgrind/callgrind|valgrind/cachegrind) ;;
 *) bail "unknown $mode tool '$tool'" ;;
 esac
 case $mode in
-time) command -v /usr/bin/time >/dev/null || bail "needs GNU time" ;;
+time) command -v cc >/dev/null || bail "needs cc (launch.c)" ;;
 *) command -v "$mode" >/dev/null || bail "needs $mode" ;;
 esac
 case $runs in ''|*[!0-9]*|0) bail "bad run count '$runs'" ;; esac
@@ -125,6 +146,8 @@ ln -s "$BENCH_C" "$TRASH/.bin/c/pacman"
 ln -s "$BENCH_PUCK" "$TRASH/.bin/puck/pacman"
 ln -s "$(type -P true)" "$TRASH/.bin/true/pacman"
 printf '# op\tside\tmode\tvalue\tsummary\n' >"$RESULTS.tsv"
+[ "$mode" != time ] || cc -O2 -o "$TRASH/.bin/launch" "$BENCH_DIR/launch.c" ||
+	bail "launch.c does not build"
 
 bench_cleanup () {
 	if [ -n "$keep" ]; then
@@ -143,6 +166,25 @@ bench_reset () {
 	:
 }
 
+bench_state () {
+	:
+}
+
+bench_wrap=() bench_pre=() bench_root= bench_label=
+
+# before every run: bench_reset fills bench_wrap, bench_pre and
+# bench_root for SIDE's run; root[SIDE] keeps the path for the compare
+bench_prepare () {
+	bench_wrap=() bench_pre=() bench_root=
+	bench_reset "$1"
+	root[$1]=$bench_root
+}
+
+# after every run: BASE.state is what bench_state prints for SIDE
+bench_snapshot () {
+	(cd "$TRASH" && bench_state "$1") >"$2.state"
+}
+
 # bench_exec SIDE BASE CMD...: CMD in the trash dir with "pacman"
 # resolving to SIDE's binary; stdout/stderr to BASE.out/.err, rc in
 # bench_rc
@@ -156,6 +198,46 @@ bench_exec () {
 		exec "$@"
 	) >"$base.out" 2>"$base.err"
 	bench_rc=$?
+}
+
+# tree_sums ROOT: "sha256  path" of every regular file under ROOT,
+# pacman.log without its stamps and with ROOT as ROOT, the local db's
+# desc files with %INSTALLDATE% set to X (pacman stamps both at run time)
+tree_sums () {
+	local root=$1 f
+	find "$root" -type f ! -name pacman.log ! -path '*/local/*/desc' \
+		-print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum |
+		sed "s#  $root/#  #"
+	for f in "$root"/pacman.log; do
+		[ -f "$f" ] || continue
+		printf '%s  %s\n' "$(sed "s/^\[[^]]*\] //; s#$root#ROOT#g" "$f" |
+			sha256sum | cut -d ' ' -f 1)" "${f#"$root"/}"
+	done
+	find "$root" -type f -path '*/local/*/desc' -print0 | LC_ALL=C sort -z |
+	while IFS= read -r -d '' f; do
+		printf '%s  %s\n' "$(sed '/^%INSTALLDATE%$/{n;s/.*/X/}' "$f" |
+			sha256sum | cut -d ' ' -f 1)" "${f#"$root"/}"
+	done
+}
+
+# bench_tree ROOT [FAKED]: one line per entry under ROOT (path, type,
+# mode, owner, size, link target: lstat through fakeroot -i FAKED when
+# given, so the faked owners and modes count), then tree_sums. the
+# masked files' size is not listed: a root path's length differs by side
+bench_tree () {
+	local root=$1 path type mode own size link
+	local -a fr=()
+	[ -z "${2:-}" ] || fr=(fakeroot -i "$2")
+	"${fr[@]}" find "$root" -mindepth 1 \
+		-printf '%P\t%y\t%m\t%U:%G\t%s\t%l\n' | LC_ALL=C sort |
+	while IFS=$'\t' read -r path type mode own size link; do
+		case $type/$path in
+		d/*|f/pacman.log|f/*/local/*/desc) size=- ;;
+		esac
+		printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$path" "$type" "$mode" \
+			"$own" "$size" "$link"
+	done
+	tree_sums "$root"
 }
 
 # numbers: bash only has integers, so values stay in us, KiB, bytes and
@@ -214,48 +296,65 @@ vg_num () {
 	digits "$(sed -n "s/^==$pid==.*$2.*/\\1/p" "$1" | head -n 1)"
 }
 
-# one /usr/bin/time run: wall in us (minus the harness overhead, see
-# calibrate) and peak RSS in KiB of the pacman process alone
+# one launch.c run of CMD...: wall in us (minus the harness overhead,
+# see calibrate) and peak RSS in KiB; rc in bench_rc
 time_run () {
-	local side=$1 base=$2 t0 t1
+	local side=$1 base=$2
 	shift 2
-	t0=${EPOCHREALTIME//[.,]/}
-	bench_exec "$side" "$base" /usr/bin/time -f %M -o "$base.time" \
-		pacman "$@"
-	t1=${EPOCHREALTIME//[.,]/}
-	wall=$((t1 - t0 - overhead))
+	say "$side: $*"
+	read -r bench_rc rss wall _ < <(
+		cd "$TRASH" &&
+		export PATH=$TRASH/.bin/$side:$PATH &&
+		exec "$TRASH/.bin/launch" "$base" "$@"
+	) || bail "launch failed on $side: $*"
+	wall=$((wall - overhead))
 	[ "$wall" -ge 0 ] || wall=0
-	# time puts "Command exited with non-zero status" above the format
-	rss=$(tail -n 1 "$base.time")
 	say "$side: $(fmt_us "$wall") $(fmt_kib "$rss") rc $bench_rc"
 }
 
-# the subshell, fork and two execs around each run cost about the same
-# on both sides; measured once on /usr/bin/true and subtracted, so the
+# the subshell, fork and exec around each run cost about the same on
+# both sides; measured once on /usr/bin/true and subtracted, so the
 # ratios compare the binaries and not the harness
 calibrate () {
 	local i t=()
 	overhead=0
 	for i in 1 2 3 4 5 6 7 8 9 10 11; do
-		time_run true "$TRASH/calibrate"
+		time_run true "$TRASH/calibrate" pacman
 		t+=("$wall")
 	done
 	overhead=$(median "${t[@]}")
 	rm -f "$TRASH"/calibrate.*
 }
 
-# compare the last run's rc and output on both sides: same, DIFF or -
-compare_sides () {
-	local dir=$1
-	if [ "$sides" != "c puck" ]; then
-		echo -
-	elif [ "${rc[c]}" = "${rc[puck]}" ] &&
-		cmp -s "$dir/c.out" "$dir/puck.out" &&
-		cmp -s "$dir/c.err" "$dir/puck.err"; then
-		echo same
+# masked SIDE FILE: FILE with the side's bench_root spelled ROOT, so
+# the sides' paths compare
+masked () {
+	local r=${root[$1]:-}
+	if [ -n "$r" ]; then
+		sed "s#${r//./\\.}#ROOT#g" "$2"
 	else
-		echo DIFF
+		cat "$2"
 	fi
+}
+
+# compare the last run's rc and outputs on both sides: out becomes DIFF
+# and differs lists what differed (rc, out, err, state) over the runs
+compare_sides () {
+	local dir=$1 f
+	[ "$sides" = "c puck" ] || { out=-; return; }
+	[ "${rc[c]}" = "${rc[puck]}" ] || note_diff rc
+	for f in out err state; do
+		cmp -s <(masked c "$dir/c.$f") <(masked puck "$dir/puck.$f") ||
+			note_diff "$f"
+	done
+	[ -z "$differs" ] || out=DIFF
+}
+
+note_diff () {
+	case " $differs " in
+	*" $1 "*) ;;
+	*) differs="$differs $1" ;;
+	esac
 }
 
 # modes: each fills txt[side] (shown), num[side] (the headline number,
@@ -291,23 +390,25 @@ op_time () {
 	local -a c_t=() c_m=() puck_t=() puck_m=()
 	out=same
 	for side in $sides; do
-		bench_reset "$side"
-		time_run "$side" "$dir/$side" "$@"
+		bench_prepare "$side"
+		time_run "$side" "$dir/$side" "${bench_wrap[@]}" pacman \
+			"${bench_pre[@]}" "$@"
 	done
 	for ((i = 0; i < runs; i++)); do
 		for side in $sides; do
-			bench_reset "$side"
-			time_run "$side" "$dir/$side" "$@"
+			bench_prepare "$side"
+			time_run "$side" "$dir/$side" "${bench_wrap[@]}" pacman \
+				"${bench_pre[@]}" "$@"
 			rc[$side]=$bench_rc
+			bench_snapshot "$side" "$dir/$side"
 			if [ "$side" = c ]; then
 				c_t+=("$wall") c_m+=("$rss")
 			else
 				puck_t+=("$wall") puck_m+=("$rss")
 			fi
 		done
-		[ "$(compare_sides "$dir")" != DIFF ] || out=DIFF
+		compare_sides "$dir"
 	done
-	[ "$sides" = "c puck" ] || out=-
 	local ct cm pt pm
 	[ ${#c_t[@]} -eq 0 ] || {
 		ct=$(median "${c_t[@]}") cm=$(median "${c_m[@]}")
@@ -333,9 +434,11 @@ op_valgrind () {
 		callgrind) vg+=(--callgrind-out-file="$b.callgrind") ;;
 		cachegrind) vg+=(--cachegrind-out-file="$b.cachegrind") ;;
 		esac
-		bench_reset "$side"
-		bench_exec "$side" "$b" valgrind "${vg[@]}" pacman "$@"
+		bench_prepare "$side"
+		bench_exec "$side" "$b" "${bench_wrap[@]}" valgrind "${vg[@]}" \
+			pacman "${bench_pre[@]}" "$@"
 		rc[$side]=$bench_rc
+		bench_snapshot "$side" "$b"
 		case $tool in
 		memcheck)
 			e=$(vg_num "$b.vg" 'ERROR SUMMARY: \([0-9,]*\) errors')
@@ -392,14 +495,17 @@ op_perf () {
 	shift
 	for side in $sides; do
 		b=$dir/$side
-		bench_reset "$side"
+		bench_prepare "$side"
 		if [ "$tool" = stat ]; then
-			# :u, user space only: what perf_event_paranoid 2 allows
-			bench_exec "$side" "$b" perf stat -x , -r "$runs" \
-				-o "$b.perf" \
+			# :u, user space only: what perf_event_paranoid 2 allows.
+			# -r repeats inside one bench_reset: only ops that leave
+			# their state as they found it count the same every time
+			bench_exec "$side" "$b" "${bench_wrap[@]}" perf stat -x , \
+				-r "$runs" -o "$b.perf" \
 				-e task-clock,instructions:u,cycles:u,branch-misses:u \
-				pacman "$@"
+				pacman "${bench_pre[@]}" "$@"
 			rc[$side]=$bench_rc
+			bench_snapshot "$side" "$b"
 			# hybrid cpus count per core type (cpu_core/instructions/u,
 			# cpu_atom/...): summed
 			local val ev ms=n/a ins=0
@@ -412,9 +518,11 @@ op_perf () {
 			txt[$side]="${ms} ms $(fmt_count "${ins:-0}") ins"
 			num[$side]=$ins
 		else
-			bench_exec "$side" "$b" perf record -q --all-user \
-				--call-graph dwarf -o "$b.perf.data" pacman "$@"
+			bench_exec "$side" "$b" "${bench_wrap[@]}" perf record -q \
+				--all-user --call-graph dwarf -o "$b.perf.data" \
+				pacman "${bench_pre[@]}" "$@"
 			rc[$side]=$bench_rc
+			bench_snapshot "$side" "$b"
 			perf report -i "$b.perf.data" --stdio --no-children -q \
 				-g none --sort dso,symbol 2>/dev/null >"$b.report"
 			# "  12.34%  dso  [.] symbol  -  -"; symbols hold spaces
@@ -435,10 +543,11 @@ op_strace () {
 	shift
 	for side in $sides; do
 		b=$dir/$side
-		bench_reset "$side"
-		bench_exec "$side" "$b" strace -f -c -S calls -o "$b.strace" \
-			pacman "$@"
+		bench_prepare "$side"
+		bench_exec "$side" "$b" "${bench_wrap[@]}" strace -f -c -S calls \
+			-o "$b.strace" pacman "${bench_pre[@]}" "$@"
 		rc[$side]=$bench_rc
+		bench_snapshot "$side" "$b"
 		# "% time seconds usecs/call calls [errors] syscall": calls is
 		# the 4th field whether errors is empty or not
 		calls=0
@@ -455,7 +564,7 @@ op_strace () {
 		done <"$b.strace"
 		txt[$side]="$calls syscalls" num[$side]=$calls
 	done
-	out=$(compare_sides "$dir")
+	compare_sides "$dir"
 	rat=$(ratio "${num[c]:-}" "${num[puck]:-}")
 }
 
@@ -503,7 +612,8 @@ bench_run_ () {
 	case ${1:-} in
 	[A-Z]*) prereq=$1; shift ;;
 	esac
-	label=$*
+	label=${bench_label:-$*}
+	bench_label=
 	bench_count=$((bench_count + 1))
 	if ! selected "$bench_count"; then
 		bench_skip=$((bench_skip + 1))
@@ -516,8 +626,8 @@ bench_run_ () {
 		echo "ok $bench_count - $label # SKIP missing $missing"
 		return
 	fi
-	local dir=$RESULTS/$bench_count out=- rat='' bad=''
-	local -A txt=() num=() rc=()
+	local dir=$RESULTS/$bench_count out=- rat='' bad='' differs='' f
+	local -A txt=() num=() rc=() root=()
 	mkdir -p "$dir"
 	"op_$mode" "$dir" "$@"
 	for side in $sides; do
@@ -563,7 +673,13 @@ bench_run_ () {
 		done
 	fi
 	if [ "$status" = "not ok" ] && [ -z "$note" ] || [ -n "$bad" ]; then
-		[ "$mode" != time ] || echo "#   diff -u $dir/c.out $dir/puck.out"
+		for f in $differs; do
+			if [ "$f" = rc ]; then
+				echo "#   rc c ${rc[c]} puck ${rc[puck]}"
+			else
+				echo "#   diff -u $dir/c.$f $dir/puck.$f"
+			fi
+		done
 		[ -z "$immediate" ] || { bench_done; }
 	fi
 }
