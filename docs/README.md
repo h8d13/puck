@@ -28,25 +28,21 @@ source file, so regressions can be checked with differential tests against `pacm
 same root, database and package set.
 
 - Drop-in compatibility: same `pacman.conf`, `mirrorlist`, local database, sync databases,
-hooks and cache layout. Nothing to migrate, and you can switch back to `pacman` at any time.
+hooks and cache layout. Nothing to migrate, and can switch back to `pacman` at any time.
 
 - Signature verification without a stateful GnuPG keyring. [VOA](https://voa.archlinux.page/)
 replaces `gpgme` and the `pacman-key` init/populate dance, which is a long-standing source of
 "invalid or corrupted package (PGP signature)" breakage.
 
-- Self-sufficient in a broken system. A partial upgrade that breaks `libarchive`, `curl` or
-`libcrypto` can leave `pacman` unable to run (the reason `pacman-static` exists). With almost
-everything built in, `puck` keeps working when the libraries around it don't.
+- An ideal `puck` could, over-time link more internally and become ideally, fully static.
 
 - Memory safety where it matters most: a root-privileged process that downloads, decompresses
 and parses archives and metadata from the network.
 
-- Correctness is measured, not asserted. Every ported function is differential-tested against
-`pacman` on the same root, database and packages, and the benches compare time, memory and
-syscall counts on real operations.
+- Every ported function is differential-tested against `pacman` on the same root, database
+and packages, and the benches compare time, memory and syscall counts on real operations.
 
-- `libseccomp` sandboxing of the riskier stages (download, decompression, parsing) shrinks
-what a malicious or malformed package can reach.
+- `libseccomp` sandboxing of the riskier stages could be expanded still as new goals.
 
 ---
 
