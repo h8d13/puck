@@ -1,0 +1,4 @@
+docs/** linguist-documentation
+PKGBUILD linguist-detectable=false
+difftest/** linguist-detectable=false
+*/tests/** linguist-detectable=false
