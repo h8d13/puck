@@ -7,6 +7,7 @@
 // db tree afterwards compared
 use std::fmt::Write as _;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 
 use alpm_core::internals::handle::Handle;
 use alpm_core::internals::trans::{TRANS_FLAG_ALLDEPS, TRANS_FLAG_ALLEXPLICIT};
@@ -388,6 +389,41 @@ fn files_owned_thrice() {
 	let err = String::from_utf8_lossy(&c.stderr).into_owned();
 	assert_eq!(err.matches("file owned by").count(), 2, "{err}");
 	assert!(err.contains("'a' conflicts with 'b'"), "{err}");
+}
+
+// a conflict where one package's files list is present (the on-disk
+// check passes) but unreadable: conflict_new force-loads both packages
+// (_alpm_pkg_dup), the short load drops the conflict. innerconflicts'
+// dup as-is would keep it, so this DIFFs before local_conflicts routes
+// the check through Db::dup_pkg
+#[test]
+fn conflict_unreadable_files() {
+	let entry = |name: &str, conflict: &str, file: &str| LocalEntry {
+		dir: format!("{name}-1.0-1"),
+		desc: Some(format!("%NAME%\n{name}\n\n%VERSION%\n1.0-1\n\n\
+					%CONFLICTS%\n{conflict}\n\n")
+		.into_bytes()),
+		files: Some(
+			format!("%FILES%\nusr/\nusr/{file}\n\n").into_bytes()
+		),
+		install: false,
+	};
+	let entries = vec![entry("a", "b", "a"), entry("b", "a", "b")];
+	let p = Pair::new(&entries, false);
+	// b's files present but 0 mode: fopen/File::open fail on both sides
+	let hide = |fx: &TempRoot| {
+		let f = fx.local().join("b-1.0-1").join("files");
+		fs::set_permissions(&f, fs::Permissions::from_mode(0o000))
+			.unwrap();
+	};
+	let mut cfg = Config::new();
+	cfg.op_q_check = 1;
+	cfg.logmask = LOG_ERROR | LOG_WARNING;
+	let c = compare_local(&p, &cfg, &[], &hide, "unreadable files");
+	// the C drops the conflict and reports no database error
+	let err = String::from_utf8_lossy(&c.stderr);
+	assert!(!err.contains("conflicts with"), "{err}");
+	assert_eq!(c.ret, 0, "ret {} stderr {err}", c.ret);
 }
 
 // every message -Dk and -D print, counted by the fuzz

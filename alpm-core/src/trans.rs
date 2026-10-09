@@ -26,9 +26,9 @@ use rustix::fs::Access;
 
 use crate::be_local::INFRQ_DESC;
 use crate::callbacks::{Callbacks, Event, HookWhen, LogLevel, logv};
-use crate::conflict::{Conflict, FileConflict};
+use crate::conflict::{Conflict, FileConflict, add_conflict, check_conflict};
 use crate::db::{DB_USAGE_INSTALL, DB_USAGE_UPGRADE};
-use crate::deps::{DbPkgs, DepMissing, DepsEnv, sortbydeps};
+use crate::deps::{DbPkgs, DepMissing, Depend, DepsEnv, sortbydeps};
 use crate::error::Errno;
 use crate::handle::Handle;
 use crate::hook::{AddTarget, Targets, hook_run};
@@ -476,6 +476,51 @@ pub(crate) fn with_view<R>(
 ) -> R {
 	let empty = PkgHash::new(0).expect("empty table");
 	h.with_callbacks(|h, cb| f(&View::new(h, &empty), cb))
+}
+
+// alpm_checkconflicts over the local db's packages (-Dk's conflict
+// check), conflict_new force-loading both through Db::dup_pkg like -S's
+// outer conflicts, not innerconflicts' dup as-is: a short load (an
+// unreadable files list, a desc that failed earlier) logs the error and
+// warning and drops the conflict, what dup-as-is kept
+pub fn local_conflicts(h: &mut Handle) -> Vec<Conflict> {
+	logv(
+		h.callbacks(),
+		LogLevel::Debug,
+		&[b"check targets vs targets\n"],
+	);
+	// (pkg1 name, pkg2 name, reason) in check_conflict's order
+	let found: Vec<(Vec<u8>, Vec<u8>, Depend)> = with_view(h, |v, _| {
+		let list = v.local_list();
+		check_conflict(&list, &list, false)
+			.into_iter()
+			.map(|(p1, p2, r)| {
+				(
+					p1.name_bytes().to_vec(),
+					p2.name_bytes().to_vec(),
+					r.clone(),
+				)
+			})
+			.collect()
+	});
+	let mut baddeps = Vec::new();
+	for (n1, n2, reason) in found {
+		// conflict_new dups pkg1 then pkg2: a short load of pkg1
+		// drops the pair before pkg2 is dup'd at all
+		let Some((package1, true)) = pkg_dup(h, &n1) else {
+			continue;
+		};
+		let Some((package2, true)) = pkg_dup(h, &n2) else {
+			continue;
+		};
+		let conflict = Conflict {
+			package1,
+			package2,
+			reason,
+		};
+		add_conflict(&mut baddeps, conflict, h.callbacks());
+	}
+	baddeps
 }
 
 /// alpm_trans_init: the db lock unless NOLOCK, then an initialized
