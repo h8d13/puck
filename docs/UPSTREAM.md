@@ -679,7 +679,10 @@ declarations. No existing MR found for it.
   conflict list is freed with `alpm_conflict_free`, passing strings as
   packages (conflict.c:470-472, 653-655). **env**
 - conflict: a conflict is silently dropped when the local package's
-  metadata cannot load (`_alpm_pkg_dup` fails, conflict.c:52-53). **local**
+  metadata cannot load (`_alpm_pkg_dup` fails, conflict.c:52-53): a
+  missing files list too, since the dup force-loads every section (its
+  error and warning lines come first, then nothing). `-S` outer
+  conflicts and `-Dk` alike. **local**
 - conflict: `pathlen` from snprintf is the untruncated length, root + path
   >= PATH_MAX with an existing cut prefix reads/writes past the stack
   buffer (conflict.c:516, 529, 540). **packager**; unchecked malloc
