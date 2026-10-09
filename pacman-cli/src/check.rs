@@ -13,7 +13,7 @@
 //
 // mtree entries come from libarchive's mtree reader (alpm_core::mtree
 // through be_local::read_mtree), in file order. an entry libarchive
-// warns about ends the C's walk silently (UPSTREAM.md), here it is
+// warns about ends the C's walk silently, here it is
 // checked; data that cannot be parsed checks no entries in both.
 
 use std::fs::{self, File};

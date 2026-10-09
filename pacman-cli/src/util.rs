@@ -788,7 +788,6 @@ struct Cell {
 	mode: u8,
 }
 
-// add_table_cell
 fn add_table_cell(row: &mut Vec<Cell>, label: Option<Vec<u8>>, mode: u8) {
 	let len = label.as_deref().map_or(0, string_length);
 	row.push(Cell { label, len, mode });
@@ -942,7 +941,6 @@ impl Target<'_> {
 	}
 }
 
-// create_verbose_header
 fn create_verbose_header(count: usize) -> Vec<Cell> {
 	let mut row = Vec::new();
 	let first = format!("Package ({count})").into_bytes();
@@ -1365,7 +1363,6 @@ pub fn display_optdepends(
 	optdepends_display(out, colstr, title, pkg, &optdeps, installed, cols);
 }
 
-// display_repo_list
 fn display_repo_list(
 	out: &mut Vec<u8>,
 	colstr: &ColStr,

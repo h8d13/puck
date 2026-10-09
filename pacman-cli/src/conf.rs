@@ -622,7 +622,6 @@ impl Config {
 		}
 	}
 
-	// enable_colors
 	pub fn enable_colors(&mut self, colors: u16) {
 		self.colstr = if colors == PM_COLOR_ON {
 			ColStr::COLOR
@@ -663,7 +662,6 @@ impl Config {
 		}
 	}
 
-	// setdefaults
 	pub fn setdefaults<H: Host>(
 		&mut self,
 		host: &mut H,
@@ -1002,7 +1000,6 @@ fn sig_steps(value: &[u8]) -> Option<&'static [(i32, i32, bool)]> {
 	})
 }
 
-// merge_siglevel
 pub fn merge_siglevel(base: i32, over: i32, mask: i32) -> i32 {
 	if mask != 0 {
 		(over & mask) | (base & !mask)
@@ -1410,8 +1407,8 @@ impl<H: Host> Parser<'_, H> {
 		Ok(())
 	}
 
-	// XferCommand: a wordsplit failure drops the argv, keeps command and argc
-	// but keeps the previous command string and argc
+	// XferCommand: a wordsplit failure drops the argv, keeps the previous
+	// command string and argc
 	fn set_xfercommand(
 		&mut self,
 		value: &[u8],

@@ -384,7 +384,7 @@ impl Query {
 	}
 
 	// one directive of [options], false when it cannot be shown. the
-	// C's "DisableSandbox" test appears twice (UPSTREAM.md): the second,
+	// C's "DisableSandbox" test appears twice: the second,
 	// meant for DisableSandboxFilesystem, never matches, so that name
 	// falls through to unknown
 	fn directive(

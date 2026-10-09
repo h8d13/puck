@@ -100,7 +100,6 @@ fn cvtt(x: f64) -> i64 {
 	x as i64
 }
 
-// number_length: decimal digits of n
 fn number_length(n: usize) -> usize {
 	n.to_string().len()
 }
@@ -221,7 +220,6 @@ impl<R: BufRead> Frontend<R> {
 		}
 	}
 
-	// get_update_timediff
 	fn update_timediff(&mut self, first_call: bool) -> i64 {
 		let now = (self.term.now_ms)();
 		if first_call {
@@ -291,7 +289,6 @@ impl<R: BufRead> Frontend<R> {
 		}
 	}
 
-	// flush_output_list
 	fn flush_output_list(&mut self) {
 		self.out.flush();
 		for s in std::mem::take(&mut self.output) {
@@ -336,7 +333,6 @@ impl<R: BufRead> Frontend<R> {
 		self.goto_bar(self.multibar.active.len() as c_int);
 	}
 
-	// init_total_progressbar
 	fn init_total_progressbar(&mut self) {
 		self.totalbar = Some(Bar {
 			filename: b"Total".to_vec(),
@@ -465,7 +461,6 @@ impl<R: BufRead> Frontend<R> {
 		true
 	}
 
-	// update_bar_finalstats
 	fn update_bar_finalstats(now: i64, bar: &mut Bar) {
 		bar.xfered = bar.total_size;
 		bar.sync_xfered = bar.total_size;
@@ -641,7 +636,6 @@ impl<R: BufRead> Frontend<R> {
 		}
 	}
 
-	// cb_event
 	fn cb_event(&mut self, event: &Event<'_>) {
 		if self.config.print != 0 {
 			self.console_cursor_move_end();
@@ -827,7 +821,6 @@ impl<R: BufRead> Frontend<R> {
 		self.out.flush();
 	}
 
-	// cb_question
 	fn cb_question(&mut self, question: &mut Question<'_>) {
 		if self.config.print != 0 {
 			let yes = matches!(
@@ -937,7 +930,6 @@ impl<R: BufRead> Frontend<R> {
 		}
 	}
 
-	// cb_progress
 	fn cb_progress(
 		&mut self,
 		event: Progress,

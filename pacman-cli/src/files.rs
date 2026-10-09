@@ -47,7 +47,6 @@ struct Local<'h> {
 	cb: &'h mut dyn Callbacks,
 }
 
-// print_match
 fn print_match(
 	config: &Config,
 	local: &mut Local,

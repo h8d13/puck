@@ -199,7 +199,6 @@ pub fn format_date_at(t: i64, utcoff: i32) -> Option<Vec<u8>> {
 	Some(strftime(50, b"%c", &tm, &Locale::c()).unwrap_or_default())
 }
 
-// deplist_display
 fn deplist_display(
 	out: &mut Vec<u8>,
 	title: Option<&[u8]>,
