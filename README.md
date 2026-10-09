@@ -12,7 +12,7 @@ cargo build --release -p pacman-cli
 ./target/release/puck --help
 ```
 
-### Testing
+### Testing / Dev
 
 Needs rust toolchain + `fakechroot fakeroot`
 
