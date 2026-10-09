@@ -306,6 +306,22 @@ package, roughly in order of what blocks most. Each row is a unit
 (METHODOLOGY.md applies); the follow-up rows still `todo` under "Notes"
 come along.
 
+As of 2026-10-09: milestones 1-3b are met and milestone 4 (the public
+Rust API) is shaped, with the pacman binary, testpkg and vercmp built
+only on alpm-core's public surface; the one M4 piece left is an example
+front end. Closed since: install names and the PKGBUILD (ships upstream's
+scripts, provides/conflicts pacman), `dload` User-Agent, connection reuse,
+curl's retry/proxy/low-speed and `-U <url>` at binary level, the helper
+re-exec without `/proc`, scriptlet-shell and ldconfig from config.h, the
+keyserver import success path, every `pacman.conf` directive compared at
+the binary level, and the four open follow-ups (the C double free is
+`UPSTREAM.md` "a skipped file target freed twice"). A hostile-mirror
+robustness harness was added (`difftest::IronicEvilMirrorPkger`): both
+binaries reject every malformed input safely, no divergence. Still
+blocking a full replacement: the libalpm C ABI, gettext translations,
+locale collation and other charsets, the risky twin-root steps, WKD
+import success, aarch64, and the `-Dk` checkconflicts follow-up.
+
 | Item | Why it blocks | Start from | State |
 |---|---|---|---|
 | libalpm C ABI (`libalpm.so.16`) | pamac, pyalpm, yay, paru (alpm.rs) and pacman-contrib link libalpm; without it pacman stays installed beside puck. Builds on this milestone's public API | "Later" row; `c_null_contract`, `_alpm_strtoofft` notes | todo |
