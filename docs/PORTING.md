@@ -41,6 +41,9 @@ meson setup pacman/build pacman && ninja -C pacman/build
 cargo test --release
 DIFFTEST_ITERS=5000000 cargo test --release -p difftest
 
+# the public API, as rustdoc renders it (broken links, bare URLs fail)
+RUSTDOCFLAGS='-D warnings' cargo doc --no-deps -p alpm-core
+
 # port crates free of test modules, C access and difftest
 scripts/check-separation.sh
 # one declaration per C symbol across difftest
@@ -229,16 +232,56 @@ Not needed for an English-locale replacement; noted so it is not lost.
 ### 4. Public Rust API
 
 alpm-core as a library for Rust front ends, the counterpart of libalpm
-for Rust: a deliberate `pub` surface (today `pub` often means "difftest
-needs it"), docs and examples, semver, and shapes meant for callers
-rather than the frontend's internals (`dbs_mut` split borrows,
-`with_callbacks`, the `Callbacks` trait). Rust front ends (paru today goes
-through alpm.rs over the C library) could target it natively.
+for Rust. Rust front ends (paru today goes through alpm.rs over the C
+library) could target it natively.
 
-Gate: the pacman binary and a small example front end (query, search,
-sync transaction) built only on the public API; `cargo doc` without
-private items; the difftests reach internals through a test-only feature,
-not through the public surface. State: todo.
+Shape (api-surface unit): the crate root is the counterpart of `alpm.h`,
+one flat namespace with the `alpm_` prefix dropped, like alpm.rs; every
+C-file module is private and `lib.rs` re-exports the public set by C
+file (155 items at the root: 30 structs, 32 enums, 3 traits, 47
+functions, 43 constants). The glibc and libarchive ports the frontend
+shares with the library stay modules (`regex`, `setlocale`, `strftime`,
+`tzfile`, `digest`, `filelist`). The port's own tests and difftest reach
+every module through the cargo feature `internals` (`internals::<cfile>::*`,
+one glob re-export per module in `internals.rs`), enabled by difftest's
+dependency and alpm-core's dev-dependency on itself; it is not a public
+surface. Items the port's own paths never call (`_alpm_strip_newline`,
+`_alpm_test_checksum`, `_alpm_db_cmp`, `alpm_strerror` on a raw value,
+`_alpm_pkg_validate_internal`, `UnpackError`'s payloads) stay for the
+difftests and carry `allow(dead_code)` without the feature; the test
+hooks `Handle::set_sandbox_for`/`set_chroot_helper` exist only with it.
+Shapes: `Handle::pkg_load`, `pkg_check_pgp_signature`, `pkg_changelog`
+(the handle's keyring and callbacks, the C's handle-taking calls);
+`Package::new(name, version)` sets the name hash; `set_trans`,
+`dload_settings`, `chroot_helper`, `Db::is_missing`, `force_load_pkg`
+crate-private; `be_package`/`be_sync` `Error`/`Reason` and be_local's
+error enums renamed unique (`PkgLoadError`, `SyncDbError`, `LocalDb*`)
+since the root is one namespace. Left as they are, deliberately: the
+explicit lazy loads (`INFRQ_*`, `Db::load_pkg_at`/`load_all`/`walk`),
+`DbsMut`/`dbs_mut` and `DepsEnv`/`DbPkgs` (the Rust shape of db calls
+that log through the handle and of `alpm_checkdeps`' environment, 20
+frontend call sites), `with_callbacks` and the keyring-level
+`pkg_load_level` (callers with their own callbacks: testpkg), pub
+`Package`/`Trans` fields (the C structs), `Db::register_*` and the
+`LocalDb` backend methods (the unit tests construct them), `c_int` flag
+sets. Docs: `///` on the public items (the C name each translates),
+`//!` on the public modules; `RUSTDOCFLAGS='-D warnings' cargo doc
+--no-deps -p alpm-core` is the check. Variants and fields that are the
+C's names are not documented one by one.
+
+Version policy: the workspace is 0.1.0 and every crate `publish = false`;
+no semver machinery. Stable in intent: the crate root's names and
+`Errno`, the `Callbacks` trait, the transaction calls, the `c_int` flag
+values (they are the C's). Not stable: `internals`, the pub struct
+fields of `Package`/`Trans`/`Depend`, `DbsMut`/`DepsEnv` and the
+explicit `INFRQ_*` loads, which the C ABI unit ("Later") may reshape.
+A change to a public name is a `ref` commit naming the unit that made it.
+
+Gate: the pacman binary built only on the public API (done: pacman-cli,
+testpkg, vercmp build with alpm-core's default features, difftest with
+`internals`); `cargo doc` without private items (done); a small example
+front end (query, search, sync transaction) on the public API: a
+separate follow-up unit, not started. State: partly done.
 
 ### Handover: remaining for a pacman replacement
 
@@ -651,7 +694,7 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
 - `getopt` keeps glibc 2.44 semantics (optopt starts at 0, nextchar as an
   argv position). `parseargs` returns `Err(exit status)` where the C exits.
   `LIB_VERSION` (meson's) sits next to `PACKAGE_VERSION` in alpm-core;
-  `TRANS_FLAG_*` live in `alpm_core::trans` (alpm.h), not re-exported.
+  `TRANS_FLAG_*` are alpm-core's (alpm.h), at the crate root.
 - `conflict`, `diskspace`, `deps` take handle state as parameters
   (local `PkgHash`, root, overwrite, `DepsEnv`) and report through the
   `Callbacks` they are handed; callers load packages
@@ -754,7 +797,7 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
 - `sandbox`: the download child is a re-exec of the binary
   (`/proc/self/exe --alpm-sandbox-helper`) with `CommandExt::uid`/`gid`;
   the pacman binary's `main` must start with
-  `if let Some(c) = alpm_core::sandbox::helper_entry() { exit(c) }`.
+  `if let Some(c) = alpm_core::helper_entry() { exit(c) }`.
   Request over stdin, callbacks over stdout in the C pipe format.
   no_new_privs comes before landlock (needed unprivileged); getpwnam via
   `getent passwd`; parent sends SIGKILL after the loop (C: SIGTERM).
@@ -860,7 +903,7 @@ Follow-ups raised by port units:
 | `PkgHash::find_mut`/`iter_mut`, lazy loads stick in cached packages | db | done |
 | `be_sync::populate` takes the db path, `Db` uses the current dbext | db | done |
 | shared fixture db generators in `difftest/src` (`fixtures.rs`) | db | done |
-| `alpm_core::util::until_nul` pub, drop the copy in `pacman-cli` | frontend util | done |
+| `until_nul` once, drop the copy in `pacman-cli` | frontend util | done: `pacman_common::util_common::until_nul` for both |
 | `compute_requiredby`/`optionalfor`, `alpm_find_satisfier`, `_alpm_depcmp` | pkgshow, package model | done |
 | `impl DbCaches for Handle` | pkg follow-ups | done |
 | `alpm_find_dbs_satisfier`/`resolvedep` | pkg follow-ups | done (`Questions` trait) |
@@ -869,7 +912,7 @@ Follow-ups raised by port units:
 | checksums (`alpm_compute_md5sum`/`sha256sum`, `_alpm_test_checksum`) via alpm-types `Checksum` | util rest | done (now `alpm-core::digest`) |
 | fixture writer copied into `difftest/tests/deps_resolve.rs`, move to `fixtures.rs` | pkg follow-ups | done |
 | db search (`_alpm_db_search`) on the ported regex | db | done |
-| `LIB_VERSION` next to `PACKAGE_VERSION`, `needs_root` into util.rs, `TRANS_FLAG_*` with trans.c | args | done: frontend and difftest import the flags from `alpm_core::trans` (alpm.h exposes them; no pacman.rs re-export, no difftest copies) |
+| `LIB_VERSION` next to `PACKAGE_VERSION`, `needs_root` into util.rs, `TRANS_FLAG_*` with trans.c | args | done: frontend and difftest import the flags from alpm-core (alpm.h exposes them; no pacman.rs re-export, no difftest copies) |
 | one `check_meta` (be_sync, be_package, package), test ustar builders onto `fixtures::ustar` | be_package | done: `package::check_meta` (its log lines) for be_sync, be_local and be_package; difftest's be_package tars through `fixtures::ustar_nodes`, port tests through `tar::Builder` |
 | precedent cleanup: base64, time, unicode-width, drop split_backup/parse_xdata, ALPM vs C difftest for vercmp/relations | audit | done |
 | regex class/towupper tables -> std `char` methods, divergence counted like wcwidth | audit | done |
