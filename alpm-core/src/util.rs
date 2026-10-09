@@ -1324,14 +1324,27 @@ pub(crate) struct ArchiveFgets<'e, 'a> {
 
 impl<'e, 'a> ArchiveFgets<'e, 'a> {
 	pub(crate) fn new(src: DataBlocks<'e, 'a>) -> Self {
+		Self::with_line(src, Vec::new())
+	}
+
+	// over a line buffer an earlier entry grew, see into_line
+	pub(crate) fn with_line(
+		src: DataBlocks<'e, 'a>,
+		mut line: Vec<u8>,
+	) -> Self {
+		line.clear();
 		ArchiveFgets {
 			src,
 			block: Vec::new(),
 			off: 0,
 			eof: false,
 			started: false,
-			line: Vec::new(),
+			line,
 		}
+	}
+
+	pub(crate) fn into_line(self) -> Vec<u8> {
+		self.line
 	}
 
 	// the next line without its end of line, None at the end. an error
@@ -1349,10 +1362,8 @@ impl<'e, 'a> ArchiveFgets<'e, 'a> {
 				self.off = 0;
 			}
 			let rest = &self.block[self.off..];
-			let eol = rest
-				.iter()
-				.position(|&c| c == b'\n')
-				.or_else(|| rest.iter().position(|&c| c == 0));
+			let eol = memchr::memchr(b'\n', rest)
+				.or_else(|| memchr::memchr(0, rest));
 			let new = eol.unwrap_or(rest.len());
 			let needed = self.line.len() + new + 1;
 			if self.started && needed > MAX_LINE_SIZE {

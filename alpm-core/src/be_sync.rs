@@ -419,11 +419,19 @@ struct Lines<'e, 'a> {
 }
 
 impl<'e, 'a> Lines<'e, 'a> {
-	fn new(entry: &'e mut Entry<'a>) -> Self {
+	// over the buffers of the walk's last entry: every entry is small,
+	// growing two fresh buffers per entry cost more than the C's one
+	// block-sized allocation
+	fn new(entry: &'e mut Entry<'a>, bufs: Bufs) -> Self {
+		let src = DataBlocks::new(entry);
 		Lines {
-			f: ArchiveFgets::new(DataBlocks::new(entry)),
-			line: Vec::new(),
+			f: ArchiveFgets::with_line(src, bufs.0),
+			line: bufs.1,
 		}
+	}
+
+	fn into_bufs(self) -> Bufs {
+		(self.f.into_line(), self.line)
 	}
 
 	// Ok(true) ARCHIVE_OK, Ok(false) ARCHIVE_EOF, Err a failed block
@@ -432,7 +440,9 @@ impl<'e, 'a> Lines<'e, 'a> {
 		let Some(l) = self.f.next()? else {
 			return Ok(false);
 		};
-		self.line = until_nul(l).to_vec();
+		// one buffer for every line, like the C's b->line
+		self.line.clear();
+		self.line.extend_from_slice(until_nul(l));
 		Ok(true)
 	}
 
@@ -492,9 +502,13 @@ fn off_t(s: &[u8]) -> i64 {
 	strtoofft(s).map_or(-1, |v| v as i64)
 }
 
+// line buffers handed from entry to entry
+type Bufs = (Vec<u8>, Vec<u8>);
+
 // the walk state of sync_db_populate. index replaces the lookups in
 // db->pkgcache and likely_pkg: both find the one package of that name
 struct Walk<'a> {
+	bufs: Bufs,
 	pkgs: Vec<Package>,
 	index: HashMap<Vec<u8>, usize>,
 	// db->treename and handle->logcb
@@ -583,8 +597,10 @@ impl Walk<'_> {
 			logv(self.cb, LogLevel::Debug, &parts);
 			return Ok(());
 		}
-		let mut lines = Lines::new(entry);
+		let bufs = std::mem::take(&mut self.bufs);
+		let mut lines = Lines::new(entry, bufs);
 		let r = self.read_data(i, &mut lines);
+		self.bufs = lines.into_bufs();
 		// the filename check returns without this line
 		if r.as_ref().is_err_and(|r| !matches!(r, Reason::Filename)) {
 			let parts: [&[u8]; 3] = [
@@ -770,6 +786,7 @@ pub fn populate(
 	let mut cache = PkgHash::new(est as u32).ok_or(Error::Memory)?;
 
 	let mut walk = Walk {
+		bufs: Bufs::default(),
 		pkgs: Vec::new(),
 		index: HashMap::new(),
 		treename,
@@ -820,9 +837,10 @@ pub fn populate(
 	// _alpm_pkghash_add in archive order then alpm_list_msort by name:
 	// names are unique, so add_sorted gives the same buckets and list
 	for pkg in walk.pkgs {
-		let name = pkg.name.clone().unwrap_or_default();
-		cache.add_sorted(pkg)
-			.map_err(|_| invalid(&name, Reason::Cache))?;
+		cache.add_sorted(pkg).map_err(|p| {
+			let name = p.name.as_deref().unwrap_or_default();
+			invalid(name, Reason::Cache)
+		})?;
 	}
 	let count = cache.len().to_string();
 	let parts: [&[u8]; 5] = [

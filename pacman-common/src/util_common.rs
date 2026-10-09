@@ -7,7 +7,7 @@
 
 use std::ffi::{CStr, OsStr};
 use std::fs::{self, Metadata};
-use std::io::{self, BufRead, Read};
+use std::io::{self, BufRead};
 use std::mem;
 use std::os::unix::ffi::OsStrExt;
 
@@ -16,13 +16,10 @@ use rustix::fs::{AtFlags, CWD, Stat, statat};
 // limits.h on linux, the buffer size of paths and lines in the C
 pub const PATH_MAX: usize = 4096;
 
-// what a C string would see of these bytes. contains() is memchr for
-// bytes: the common nul-free case costs what the C's strlen does
+// what a C string would see of these bytes: up to the first nul, found
+// with memchr like the C's strlen
 pub fn until_nul(s: &[u8]) -> &[u8] {
-	if !s.contains(&0) {
-		return s;
-	}
-	match s.iter().position(|&c| c == 0) {
+	match memchr::memchr(0, s) {
 		Some(i) => &s[..i],
 		None => s,
 	}
@@ -122,9 +119,30 @@ pub fn safe_fgets_into<R: BufRead>(
 	let Some(max) = size.checked_sub(1) else {
 		return Ok(false);
 	};
-	// read_until finds the '\n' with memchr like glibc's fgets, take()
-	// stops it at size - 1; it retries EINTR itself
-	r.by_ref().take(max as u64).read_until(b'\n', out)?;
+	// glibc's fgets: memchr for the '\n' in the buffer, at most
+	// size - 1 bytes, EINTR retried
+	let mut left = max;
+	while left > 0 {
+		let buf = match r.fill_buf() {
+			Ok(b) => b,
+			Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+				continue;
+			}
+			Err(e) => return Err(e),
+		};
+		if buf.is_empty() {
+			break;
+		}
+		let avail = &buf[..buf.len().min(left)];
+		let eol = memchr::memchr(b'\n', avail);
+		let n = eol.map_or(avail.len(), |i| i + 1);
+		out.extend_from_slice(&avail[..n]);
+		r.consume(n);
+		left -= n;
+		if eol.is_some() {
+			break;
+		}
+	}
 	Ok(!(out.is_empty() && max > 0))
 }
 
