@@ -13,11 +13,13 @@ depends=(
   'libgcc'
   'libseccomp'
   'xz'
+  # puck drives the gpg binary directly (not gpgme); SigLevel defaults
+  # to Required, so a normal -Sy/-S invokes it
+  'gnupg'
   # its config, dbs, keyring and hooks are pacman's
   'pacman'
 )
 makedepends=('cmake' 'git' 'rust')
-optdepends=('gnupg: signature checks, like pacman')
 # private for now: ssh with the maintainer's key, "git+$url.git" once public
 source=("$_pkgname::git+ssh://git@github.com/h8d13/puck.git")
 b2sums=('SKIP')
