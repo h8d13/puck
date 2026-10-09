@@ -372,6 +372,7 @@ impl DownloadState {
 	}
 
 	// the error count of a host, None before its first lookup
+	#[cfg_attr(not(feature = "internals"), allow(dead_code))]
 	pub fn server_errors(&self, host: &[u8]) -> Option<i32> {
 		let h = self.server_errors.iter().find(|(h, _)| h == host);
 		h.map(|(_, e)| *e)
@@ -508,6 +509,7 @@ pub struct Payload {
 
 impl Payload {
 	// the size the .part had when the transfer resumed from it
+	#[cfg_attr(not(feature = "internals"), allow(dead_code))]
 	pub fn initial_size(&self) -> i64 {
 		self.initial_size
 	}
