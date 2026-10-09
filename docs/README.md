@@ -3,7 +3,8 @@
 - Bindings are only ever as good as the underlying code. I.e: how many open issues
 open merge requests (that are founded), and other yet-to-be discovered details...
 
-- Static binary with dep pins instead of linking (free updates!), + any improvement
+- Rust deps pinned and built in (only `glibc`, `libgcc`, `libseccomp` and `liblzma` are
+linked dynamically) instead of linking `libarchive`, `curl`, `gpgme`, + any improvement
 to upstream projects, can be ported without too much difficulty. This means that
 ongoing developments by contributors directly benefits this project.
 
