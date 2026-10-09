@@ -278,8 +278,75 @@ come along.
 | signal edges | the handler thread decides after delivery, so a signal at a state edge can land on the other side; no segv/winch handler | `sighandler` note | accepted for now; revisit with the interrupted-commit twin step |
 | helper re-exec through `/proc/self/exe` | chroot exec and the sandbox helper fail without a mounted `/proc` where the C forks (minimal chroots, some containers) | `hook`/`run_chroot` and `sandbox` notes | todo: fall back to argv[0]/`current_exe` or report clearly |
 | aarch64 and other arches | `hash_sdbm`/`pathcmp` follow the platform's `char`, never run there; sandbox syscall list per arch | Notes on `c_char` | todo: run the suites on aarch64 |
-| `-U <url>` with the built-in downloader at binary level | covered through XferCommand only | `cli_binary` xfercommand | todo |
+| `-U <url>` with the built-in downloader at binary level | covered through XferCommand only; hostile `-U <url>` over the built-in downloader now driven at binary level in `evil_mirror` (archive and signature classes) | `cli_binary` xfercommand, `evil_mirror` | partly |
 | open follow-ups | `-Sp` without a local files list (C fails, port prints); unreadable local desc read by `-Sp`/`-Sup`; -Qpc debug in difftest `query`; root cause of the C abort behind `tp_relation` (C bug or difftest free path) | follow-up table | todo |
+
+## Hostile mirror (robustness)
+
+The adversarial sibling of the dload/sandbox difftests. A loopback HTTP
+mirror (`difftest::IronicEvilMirrorPkger`, `difftest/src/evil_mirror.rs`)
+binds `127.0.0.1` on an ephemeral port in-process and serves malformed
+protocol and metadata to C pacman (`PACMAN_BUILD`) and puck, driven with
+`-S` (sync install) and `-U <url>` on fixture roots. Each case is a twin
+run that asserts BOTH binaries end safe (nonzero exit, nothing registered
+in the local db, nothing written outside the configured root) and records
+whether C and puck agree. The reply primitives (`Reply::Truncated`,
+`Chunked`, `Stall`, `Redirect`, `Raw`, raw Content-Length lies) are the
+existing `dload` server's; the cases are
+`difftest/tests/evil_mirror.rs`. The point is that the INPUTS are
+rejected safely, not that any exploit is demonstrated.
+
+Both reject (or, for the bomb, stream-limit) every input; where both
+reject cleanly the honest statement is "both safe, puck without the C's
+unsafe parsing surface", not "puck prevents an exploit C allows". No
+security-relevant divergence was found: no input made either binary write
+outside the root, register a partial install, crash, or exit 0 on a
+hostile input. Two controls (a well-formed unsigned `-S` and a validly
+signed `-U`) install identically, so the rejections are meaningful.
+
+| Case | C | puck | same |
+|---|---|---|---|
+| control `-S` (well-formed) | installs, rc 0 | installs, rc 0 | same |
+| control signed `-U` (trusted key) | installs, rc 0 | installs, rc 0 | same |
+| transport: Content-Length > body | retrieve error, rc 1, not installed | same | same |
+| transport: Content-Length < body | integrity error, rc 1, not installed | same | same |
+| transport: body exceeds `%CSIZE%` | retrieve error, rc 1, not installed | same | same |
+| transport: chunked, unterminated | retrieve error, rc 1, not installed | same | same |
+| transport: redirect loop | retrieve error, rc 1, not installed | same | same |
+| transport: 404 for a listed package | retrieve error, rc 1, not installed | same | same |
+| transport: stall mid-body, then close | retrieve error, rc 1, not installed | same | same |
+| metadata: `%SHA256SUM%` mismatch | corrupt-package error, rc 1, not installed | same | same |
+| metadata: `.PKGINFO` name/version ≠ db | corrupt-package error, rc 1, not installed | same | same |
+| metadata: overflow `%ISIZE%` (CheckSpace) | corrupt-package error, rc 1, not installed | same | same |
+| metadata: `%FILENAME%` path traversal | "database is inconsistent", rc 1, no escape | same | same |
+| archive: decompression bomb (64 MiB) | streams, installs, rc 0, no OOM | same | same |
+| archive: tar `../` and `/` member names | neutralized, no escape, rc 0 | same | same |
+| archive: symlink escape | neutralized, no escape, rc 0 | same | same |
+| archive: duplicate members | handled, rc 0, no escape | same | same |
+| archive: truncated (header / mid) | "cannot open package file", rc 1 | same | same |
+| archive: truncated (tail) | "cannot open ...: (null)", rc 1 | "...: truncated gzip input", rc 1 | differ (message only) |
+| signature: valid sig over other data | rejected, rc 1, not installed | same | same |
+| signature: corrupted detached sig | rejected, rc 1, not installed | same | same |
+| signature: sig over truncated data | rejected, rc 1, not installed | same | same |
+| signature: missing sig, SigLevel Required | retrieve error, rc 255, not installed | same | same |
+
+The only divergence is a message-quality one on a tail-truncated gzip:
+libarchive hands pacman no error string (it prints `(null)`), puck's own
+reader reports `truncated gzip input`. Both exit nonzero and install
+nothing, so it is not security-relevant; puck's text is the more useful
+of the two (noted as a C/libarchive practice nit, not copied into the
+port). The decompression bomb installs on both because the payload is
+otherwise well-formed and both readers stream it (bounded memory under
+the runner's 4 GiB cap); a size lie large enough to matter is caught by
+the diskspace precheck (the overflow-`%ISIZE%` case).
+
+This grounds the README's "memory safety where it matters most"
+(root-privileged parsing of network input), "typed data past the
+readers" and "the download stage ... so a hostile mirror reaches less":
+the observed behaviour is that puck matches C pacman's rejection on every
+hostile input without the C's `char *`/libarchive parsing surface. It
+does NOT support any claim that puck blocks an attack C permits: no such
+case was found; both are safe.
 
 ## Owned readers (replacing ALPM parser patches)
 
