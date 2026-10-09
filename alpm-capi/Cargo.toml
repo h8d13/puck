@@ -1,0 +1,27 @@
+[package]
+name = "alpm-capi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# the libalpm.so.16 C ABI shim: one cdylib on alpm-core's public API
+[lib]
+name = "alpm"
+crate-type = ["cdylib"]
+
+[dependencies]
+alpm-core = { path = "../alpm-core" }
+
+# the only crate besides difftest allowed unsafe: it is the C boundary,
+# not a port crate (check-separation.sh does not scan it). every unsafe
+# carries a // SAFETY: comment
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+dbg_macro = "deny"
+enum_variant_names = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
