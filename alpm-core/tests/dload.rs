@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use alpm_core::callbacks::{Callbacks, DownloadEvent, Event, Fetch, LogLevel};
 use alpm_core::dload::{
-	DownloadState, Downloader, Payload, Sandbox, Settings,
+	DownloadState, Downloader, Payload, ProxyEnv, Sandbox, Settings,
 	download_internal, getdate_capped, gethost, http_date,
 	remove_temporary_download_dir,
 };
@@ -618,4 +618,173 @@ fn cache_dirs() {
 	fs::write(t.p("tmpdir/a.part"), b"a").unwrap();
 	remove_temporary_download_dir(&d("tmpdir"));
 	assert!(!t.p("tmpdir").exists());
+}
+
+// curl's proxy environment rules (proxy_detect_proxy, parse_proxy,
+// proxy_check_noproxy): which variable wins, no_proxy matching
+#[test]
+fn proxy_env_rules() {
+	use reqwest::Url;
+	let env = |vars: &[(&str, &str)]| {
+		let vars: Vec<(String, String)> = vars
+			.iter()
+			.map(|(k, v)| (k.to_string(), v.to_string()))
+			.collect();
+		ProxyEnv::new(move |n| {
+			vars.iter()
+				.find(|(k, _)| k == n)
+				.map(|(_, v)| v.clone())
+		})
+	};
+	let url = |s: &str| Url::parse(s).unwrap();
+	let pick = |vars: &[(&str, &str)], target: &str| {
+		env(vars)
+			.proxy_for(&url(target))
+			.map(|p| p.map(|u| u.to_string()))
+	};
+	let a = Ok(Some("http://a:3128/".to_string()));
+	let b = Ok(Some("http://b:3128/".to_string()));
+	let http = "http://mirror.example.org/x";
+	let https = "https://mirror.example.org/x";
+	// lowercase first; HTTP_PROXY is never read, HTTPS_PROXY is
+	assert_eq!(pick(&[("http_proxy", "http://a:3128")], http), a);
+	assert_eq!(pick(&[("HTTP_PROXY", "http://a:3128")], http), Ok(None));
+	assert_eq!(pick(&[("HTTPS_PROXY", "http://a:3128")], https), a);
+	assert_eq!(
+		pick(
+			&[
+				("https_proxy", "http://a:3128"),
+				("HTTPS_PROXY", "http://b:3128")
+			],
+			https
+		),
+		a
+	);
+	assert_eq!(pick(&[("https_proxy", "http://a:3128")], http), Ok(None));
+	// all_proxy after the scheme's own, ALL_PROXY after all_proxy
+	assert_eq!(
+		pick(
+			&[
+				("http_proxy", "http://a:3128"),
+				("all_proxy", "http://b:3128")
+			],
+			http
+		),
+		a
+	);
+	assert_eq!(pick(&[("all_proxy", "http://b:3128")], http), b);
+	assert_eq!(pick(&[("ALL_PROXY", "http://b:3128")], https), b);
+	assert_eq!(
+		pick(
+			&[
+				("all_proxy", "http://a:3128"),
+				("ALL_PROXY", "http://b:3128")
+			],
+			http
+		),
+		a
+	);
+	// an empty value is unset
+	assert_eq!(
+		pick(
+			&[("http_proxy", ""), ("all_proxy", "http://b:3128")],
+			http
+		),
+		b
+	);
+	// no scheme is http, no port is 1080, socks is not this downloader's
+	assert_eq!(pick(&[("http_proxy", "a:3128")], http), a);
+	assert_eq!(
+		pick(&[("http_proxy", "http://a")], http),
+		Ok(Some("http://a:1080/".to_string()))
+	);
+	assert_eq!(
+		pick(&[("http_proxy", "https://u:p@a")], http),
+		Ok(Some("https://u:p@a:1080/".to_string()))
+	);
+	// a scheme's default port given explicitly stays (the url crate
+	// hides it)
+	assert_eq!(
+		pick(&[("http_proxy", "http://a:80")], http),
+		Ok(Some("http://a/".to_string()))
+	);
+	assert_eq!(
+		pick(&[("http_proxy", "https://u@a:443/x")], http),
+		Ok(Some("https://u@a/x".to_string()))
+	);
+	assert_eq!(
+		pick(&[("http_proxy", "http://[::1]:80")], http),
+		Ok(Some("http://[::1]/".to_string()))
+	);
+	assert_eq!(
+		pick(&[("http_proxy", "http://[::1]")], http),
+		Ok(Some("http://[::1]:1080/".to_string()))
+	);
+	assert_eq!(
+		pick(&[("http_proxy", "socks5h://a:1080")], http),
+		Err("Unsupported proxy scheme for 'socks5h://a:1080'"
+			.to_string())
+	);
+	assert_eq!(
+		pick(&[("http_proxy", "http://")], http),
+		Err("Unsupported proxy syntax in 'http://': Bad hostname"
+			.to_string())
+	);
+	// no_proxy before NO_PROXY, "*" for all, names by tail at a dot,
+	// dots around a token ignored, blanks and empty tokens skipped
+	let np = |no: &str, target: &str| {
+		pick(
+			&[("http_proxy", "http://a:3128"), ("no_proxy", no)],
+			target,
+		) == Ok(None)
+	};
+	assert!(np("*", http));
+	assert!(np("mirror.example.org", http));
+	assert!(np("MIRROR.example.org", http));
+	assert!(np("example.org", http));
+	assert!(np(".example.org", http));
+	assert!(np("example.org.", http));
+	assert!(np(" foo.org , example.org", http));
+	assert!(np("foo.org,,example.org", http));
+	assert!(!np("xample.org", http));
+	assert!(!np("mirror.example.org.uk", http));
+	assert!(!np("example", http));
+	assert!(!np("", http));
+	assert!(np("example.org", "http://mirror.example.org./x"));
+	// a blank ends a token, what follows is not another one
+	assert!(!np("foo.org example.org", http));
+	assert_eq!(
+		pick(
+			&[
+				("http_proxy", "http://a:3128"),
+				("NO_PROXY", "example.org")
+			],
+			http
+		),
+		Ok(None)
+	);
+	assert_eq!(
+		pick(
+			&[
+				("http_proxy", "http://a:3128"),
+				("no_proxy", "other.org"),
+				("NO_PROXY", "example.org"),
+			],
+			http
+		),
+		a
+	);
+	// addresses: exact, or inside the CIDR; brackets off an IPv6 host
+	assert!(np("127.0.0.1", "http://127.0.0.1:8080/x"));
+	assert!(np("127.0.0.0/8", "http://127.0.0.1:8080/x"));
+	assert!(np("10.0.0.0/8,127.0.0.0/8", "http://127.0.0.1/x"));
+	assert!(!np("127.0.0.2", "http://127.0.0.1/x"));
+	assert!(!np("127.0.0.0/33", "http://127.0.0.1/x"));
+	assert!(!np("127.0.0.0/x", "http://127.0.0.1/x"));
+	assert!(!np("127.0.0.1", "http://localhost/x"));
+	assert!(np("::1", "http://[::1]/x"));
+	assert!(np("fe80::/10", "http://[fe80::1]/x"));
+	assert!(!np("fe80::/10", "http://[fec0::1]/x"));
+	assert!(!np("127.0.0.1", "http://[::1]/x"));
+	assert_eq!(ProxyEnv::new(|_| None).proxy_for(&url(http)), Ok(None));
 }

@@ -17,6 +17,8 @@ libseccomp.workspace = true
 lz4_flex.workspace = true
 pacman-common = { path = "../pacman-common" }
 reqwest.workspace = true
+hyper-util.workspace = true
+http.workspace = true
 rustix.workspace = true
 sha2.workspace = true
 # run_chroot's child: _alpm_reset_signals (METHODOLOGY.md)

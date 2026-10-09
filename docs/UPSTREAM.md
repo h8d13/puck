@@ -620,6 +620,11 @@ declarations. No existing MR found for it.
   **none**
 - with POSIXLY_CORRECT set getopt stops at the first non-option, `pacman
   pkg -S` fails. **env**
+- `setuseragent` warns "HTTP_USER_AGENT truncated" through `pm_printf`
+  before `config_new` (pacman.c:286, 1192-1195): `pm_vfprintf` reads
+  `config->logmask` from the NULL `config`, so a uname whose sysname and
+  machine push the agent past 99 bytes crashes at startup instead of
+  warning. **env** (a kernel with such names; the port warns)
 
 ## dates and the locale (package.c, util.c, glibc)
 

@@ -803,15 +803,16 @@ fn locales() {
 	assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-// the fixture XferCommand: logs its cwd and arguments, then fetches $1
-// (or into $2) with curl, under a timeout. "-exit" variants fail with 7
+// the fixture XferCommand: logs its cwd, arguments and the
+// HTTP_USER_AGENT it inherited (setuseragent's), then fetches $1 (or
+// into $2) with curl, under a timeout. "-exit" variants fail with 7
 // before fetching
 fn xfer_script(dir: &Path, name: &str, body: &str) -> String {
 	let path = dir.join(name);
 	let log = dir.join("xfer.log").display().to_string();
-	let script = format!(
-		"#!/bin/sh\nprintf '%s|%s\\n' \"$PWD\" \"$*\" >> '{log}'\n{body}\n"
-	);
+	let script =
+		format!("#!/bin/sh\nprintf '%s|%s|%s\\n' \"$PWD\" \"$*\" \
+		 \"$HTTP_USER_AGENT\" >> '{log}'\n{body}\n");
 	fs::write(&path, script).unwrap();
 	let mut perm = fs::metadata(&path).unwrap().permissions();
 	std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
@@ -860,8 +861,11 @@ fn xfer_conf(dir: &Path, repos: &[&str], options: &str, mirror: &str) {
 // from a loopback HTTP mirror and file://, -U of a url; with %o and
 // without (the command's cwd), a failing and a missing command, --debug,
 // and DownloadUser (the command run through the sandbox exec helper;
-// fakeroot fakes the user switch on both sides). compared: status,
-// stdout, stderr, the fetched dbs, the cache, what the command saw
+// fakeroot fakes the user switch on both sides); the same commands with
+// the built-in downloader, in process and in the sandbox child.
+// compared: status, stdout, stderr, the fetched dbs, the cache, what
+// the command saw (its HTTP_USER_AGENT included), the requests the
+// mirror saw (User-Agent included)
 #[test]
 fn xfercommand() {
 	use difftest::{Reply, Server, TcPkg, tc_package};
@@ -919,6 +923,9 @@ fn xfercommand() {
 	let filem = format!("file://{}", dir.join("mirror").display());
 	let url = String::from_utf8(srv.url(&format!("/p/{pkgname}"))).unwrap();
 	let opts: Vec<(&str, String, &str)> = vec![
+		// the built-in downloader in process
+		("builtin", String::new(), &http),
+		("builtin file", String::new(), &filem),
 		("%o", format!("XferCommand = {fetch} %u %o\n"), &http),
 		("file", format!("XferCommand = {fetch} %u %o\n"), &filem),
 		("cwd", format!("XferCommand = {fetch_cwd} %u\n"), &http),
@@ -982,10 +989,13 @@ fn xfercommand() {
 				let _ = fs::remove_dir_all(dir.join("cache"));
 				fs::create_dir(dir.join("cache")).unwrap();
 				let _ = fs::remove_file(dir.join("xfer.log"));
+				srv.reset();
 				let utc = (true, UTC_C_UTF8);
 				let run = run_in(
 					bin, &args, &dir, utc, xfer_norm,
 				);
+				let mut reqs = srv.requests();
+				reqs.sort();
 				let log = fs::read(dir.join("xfer.log"))
 					.unwrap_or_default();
 				let log = xfer_norm(&log);
@@ -1001,7 +1011,7 @@ fn xfercommand() {
 				synced.retain(|(n, _)| {
 					!n.starts_with("download-")
 				});
-				(run, synced, cache, log)
+				(run, synced, cache, log, reqs)
 			};
 			let (cs, rs) = (side(&c), side(&r));
 			let label = format!("{tag}: {}", cmd.join(" "));
@@ -1012,15 +1022,18 @@ fn xfercommand() {
 			);
 			if cs != rs {
 				failures.push(format!(
-					"{label}\n-- C\n{}\n{}\n{:?}\n{}\n-- Rust\n{}\n{}\n{:?}\n{}",
+					"{label}\n-- C\n{}\n{}\n{:?}\n{}\n{:?}\n\
+					 -- Rust\n{}\n{}\n{:?}\n{}\n{:?}",
 					lossy(&cs.0.out),
 					lossy(&cs.0.err.text),
 					cs.2,
 					lossy(&cs.3),
+					cs.4,
 					lossy(&rs.0.out),
 					lossy(&rs.0.err.text),
 					rs.2,
 					lossy(&rs.3),
+					rs.4,
 				));
 			}
 		}

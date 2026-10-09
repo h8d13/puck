@@ -101,7 +101,7 @@ and are not logged by design (`is_goto_err` in `cli_binary.rs`).
 
 | Part | State |
 |---|---|
-| downloads (`dload.c`): parallel, resume, mirrors, sandbox user | done (`reqwest`, sandbox helper wired into the Handle) |
+| downloads (`dload.c`): parallel, resume, mirrors, sandbox user | done (`reqwest`, sandbox helper wired into the Handle; connection reuse with curl's retry, curl's proxy environment and low-speed rules, `setuseragent`'s User-Agent) |
 | signature verification (`signing.c`) | done (`gpg` over `--status-fd`, argv checked against gpgme's; the Handle owns the keyring, sync dbs and packages validate through it) |
 | db update/validation (`be_sync.c` writing side) | done (`alpm_db_update`, `-Sy`/`-Syy`/`-Fy` with progress bars, sandboxed) |
 
@@ -128,9 +128,9 @@ script tests): meson's 338 ok / 6 expected fail, reproduced by
 `pacman/build`. Progress: 135 ok (start of the owned readers) -> 203
 (`.PKGINFO` reader, `-Sc`) -> 336 (local and sync db readers, master
 18b884f) -> 337 (soft interrupt handler; unchanged by the owned mtree
-reader) -> 338 ok / 6 xfail / 0 fail / 0 unexpected pass (dload
-redirects without connection reuse), vercmptest and the script tests
-included. **Gate met** on master f46c525: `scripts/upstream-suite.sh
+reader) -> 338 ok / 6 xfail / 0 fail / 0 unexpected pass, vercmptest
+and the script tests included (unchanged by connection reuse: pactest's
+server closes after every response, see the `dload` note). **Gate met** on master f46c525: `scripts/upstream-suite.sh
 target/release` exits 0.
 
 ### 3b. Real-system equivalence (rootless)
@@ -270,15 +270,15 @@ come along.
 | PKGBUILD | `check()`, source, deps | PKGBUILD | done: `check()` runs `check-separation.sh`, `check-externs.py`, the port crates' unit tests, upstream's vercmptest and script tests and the pacman-conf drop-in comparison (difftest, pactest and twin-root need the C objects or a chroot: left to the gates); `gnupg` a hard dependency (SigLevel defaults to Required); the pacman/ submodule is a second git source checked out in `prepare()`. Open: source is private ssh until the repo opens (the https line is next to it); x86_64 only (aarch64 row) |
 | gettext translations | non-English users get the English msgids | "Later" row | todo |
 | locale collation and charsets | `strcoll` for Include glob order and regex ranges/`[=e=]`/`[.x.]`; charsets other than UTF-8/ASCII; glibc wcwidth table | "Later" row, `regex` note, divergences table | todo |
-| connection reuse in `dload` | every package and `.sig` opens a new connection (reqwest without a pool, see `dload` note); a real `-Syu` of many packages from one mirror pays a TLS handshake each. benches run on local mirrors and do not show it | `dload` note: curl retries a dead reused connection, reqwest cannot tell reused from fresh | todo: bench `-Sw` of ~200 packages on a remote mirror first |
-| curl features `dload` lacks | `ftp://` servers, `.netrc`, HTTP/2, curl's proxy env rules, curl's low-speed abort | `dload` note | todo: decide which matter for real mirrorlists |
-| User-Agent (`setuseragent`, pacman.c) | the C sets `HTTP_USER_AGENT=pacman/<ver> (<sysname> <machine>) libalpm/<ver>` unless already set; the port never does, so its requests carry no User-Agent and XferCommand children get no `HTTP_USER_AGENT`. twin-root does not compare request headers. std's `set_var` is unsafe (edition 2024): hand the string to the dload settings and to the XferCommand/helper `Command::env` instead | `dload` `user_agent`, pacman.c `setuseragent` | todo |
+| connection reuse in `dload` | every package and `.sig` opened a new connection; `-Sw` of 200 small packages from one https mirror (`bench/dload-remote.sh`): 200 TLS handshakes and 4.6 s against the C's 5 connections and 1.8 s | `dload` note | done: one Client per handle (curl's 118 s idle limit), curl's retry of a request that died on a reused connection; after: 5 connections, 2.0 s |
+| curl features `dload` lacks | `ftp://` servers, `.netrc`, HTTP/2, curl's proxy env rules, curl's low-speed abort | `dload` note | done: proxy environment rules and the low-speed check implemented and difftested; `ftp://`, `.netrc`, HTTP/2 and socks proxies stay divergences (reasons in the `dload` note) |
+| User-Agent (`setuseragent`, pacman.c) | the C sets `HTTP_USER_AGENT=pacman/<ver> (<sysname> <machine>) libalpm/<ver>` unless already set; the port sent none | `dload` `Settings::user_agent`, pacman.c `setuseragent` | done: `Config::user_agent` to the handle, the XferCommand's and the exec helper's environment; difftest dload `user_agent`, cli_binary `xfercommand` (request headers and the command's environment compared) |
 | twin-root steps for risky real cases | gate covers ~20 steps on a fresh root; missing: a `-Syu` across months of updates (old snapshot via the Arch Linux Archive), `replaces`, archlinux-keyring upgraded in the same transaction, mkinitcpio/kernel/dkms hooks, interactive conflict prompts, an interrupted commit (SIGINT mid-extract) and the run after it | `scripts/twin-root.sh` | todo |
 | WKD/keyserver import success path | keyserver done: `GpgFixture`'s HKP server on loopback, dirmngr enabled on the net keyrings (one per side); `keyserver_against_c` compares the 404, html, hang, wrong-key, declined and imported paths, the key id-only index, validation after the import, dirmngr's requests and the keyrings afterwards; no port divergence. WKD success untested: dirmngr resolves `openpgpkey.<domain>` and the SRV record through the system resolver (network) and builds the WKD TLS session from the system CAs only (`hkp-cacert` is for hkps, p11-kit's user config is not merged here), so a loopback HTTPS fixture needs root; `http-proxy` would route the fetch (no target DNS) once trust exists | `signing` note; `difftest/tests/signing_gpg.rs` | keyserver done, WKD failure path only |
 | signal edges | the handler thread decides after delivery, so a signal at a state edge can land on the other side; no segv/winch handler | `sighandler` note | accepted for now; revisit with the interrupted-commit twin step |
 | helper re-exec through `/proc/self/exe` | chroot exec and the sandbox helper failed without a mounted `/proc` where the C forks (minimal chroots, some containers) | `hook`/`run_chroot` and `sandbox` notes | done: `sandbox::helper_program`, decided at startup (`helper_entry`): `/proc/self/exe` while `/proc` is mounted, else argv[0] resolved like execvp (`exe_path`); difftests `run_chroot`/`hook`/`sandbox` `without_proc` reruns and `cli_binary without_proc` (both binaries in a mount namespace without `/proc`); what stays apart is a divergences row |
 | aarch64 and other arches | `hash_sdbm`/`pathcmp` follow the platform's `char`, never run there; sandbox syscall list per arch | Notes on `c_char` | todo: run the suites on aarch64 |
-| `-U <url>` with the built-in downloader at binary level | covered through XferCommand only; hostile `-U <url>` over the built-in downloader now driven at binary level in `evil_mirror` (archive and signature classes) | `cli_binary` xfercommand, `evil_mirror` | partly |
+| `-U <url>` with the built-in downloader at binary level | covered through XferCommand; now also in process at binary level: the built-in downloader (`builtin` tags, http and file://) and hostile `-U <url>` (archive and signature classes) | `cli_binary` xfercommand, `evil_mirror` | done |
 | open follow-ups | `-Sp` without a local files list (C fails, port prints); unreadable local desc read by `-Sp`/`-Sup`; -Qpc debug in difftest `query`; root cause of the C abort behind `tp_relation` (C bug or difftest free path) | follow-up table | todo |
 
 ## Hostile mirror (robustness)
@@ -387,8 +387,9 @@ makes them; METHODOLOGY.md has the rules.
 | lz4_flex 0.14 (`safe-decode`), twox-hash 2 (`xxhash32`) | `filter::lz4` | LZ4 block decoding and xxhash32 under libarchive's own lz4 frame reader (METHODOLOGY.md) | filters unit |
 | md-5 0.11, sha2 0.11 | `alpm-core::digest` (util's checksums, be_package, frontend check, test expectations) | ALPM's digest crates used directly; alpm-types' `Checksum` wrapped only these | replaced alpm-types |
 | tar 0.4 | alpm-core and pacman-cli tests | fixture archives; alpm-core reads tar with `alpm-core::tar` (libarchive's reader) | compress unit; dropped from alpm-core by the xattr unit |
-| reqwest 0.13 blocking, rustls | dload | HTTP downloads (ALPM dev-scripts precedent) | dload unit |
-| rustix 1.1 (`fs`, `process`, `termios`, `net`, `event`; `use-libc`) | util, diskspace, lock, sandbox, frontend util, `filter::program` | statvfs, access, umask, getuid/geteuid, fchdir, tty width, tcflush, SCM_RIGHTS to the exec helper; fsetxattr/lsetxattr, utimensat with ns (`fs`); non-blocking pipes and poll for the filter programs (`event`) | handle unit, process unit, xattr unit, filters unit |
+| reqwest 0.13 blocking, rustls | dload | HTTP downloads (ALPM dev-scripts precedent); no `http2` (dev-scripts has it): see the `dload` note | dload unit |
+| hyper-util 0.1 (`client-legacy`), http 1 | dload | the local address of the connection a failed request went out on (`HttpInfo` on hyper-util's error; reqwest shows it on responses only), which tells a reused connection from a fresh one for curl's retry; both already in reqwest's tree | dload reuse unit |
+| rustix 1.1 (`fs`, `process`, `system`, `termios`, `net`, `event`; `use-libc`) | util, diskspace, lock, sandbox, frontend util, `filter::program`, pacman.c `setuseragent` | statvfs, access, umask, getuid/geteuid, fchdir, tty width, tcflush, SCM_RIGHTS to the exec helper; fsetxattr/lsetxattr, utimensat with ns (`fs`); non-blocking pipes and poll for the filter programs (`event`); uname for the User-Agent (`system`) | handle unit, process unit, xattr unit, filters unit, dload reuse unit |
 | landlock 0.4, libseccomp 0.4 | sandbox | `alpm_sandbox_setup_child` | sandbox unit |
 | signal-hook 0.4 (+ signal-hook-registry) | pacman-cli sighandler, alpm-core's chroot helper (`_alpm_reset_signals`) | SIGINT/SIGHUP soft interrupt (no safe handler API in std/rustix, none in ALPM; tokio's signals use the same registry) | signals unit |
 | memchr 2.8 | pacman-common `until_nul`/`safe_fgets_into`, util `ArchiveFgets` | the nul and '\n' scans of every reader, SIMD like glibc's memchr/strlen/fgets (core's SWAR memchr cost -Dk 9% more instructions than C pacman) | synctime unit |
@@ -489,7 +490,7 @@ vtables (`get_file_pkg_ops`, `get_sync_pkg_ops`, be_local's
 | `lib/libalpm/handle.c` | 1017 | `alpm-core::handle` (trans in `trans`) | options, lock, logfile, callbacks, keyring, cachedirs, hookdirs, gpgdir, sandbox, dload state: difftest option fuzz, lock, logaction; alpm_initialize path checks/normalisation, dbext, architectures, siglevels, ignore/noupgrade/noextract lists + match: difftest |
 | `lib/libalpm/alpm.c` | 132 | `alpm-core::handle` | alpm_initialize is `Handle::initialize` (handle.c row), alpm_release its `Drop`; version/capabilities only exist for a C ABI (Later) |
 | `lib/libalpm/signing.c` | 1201 | `alpm-core::signing` | decode_signature, checksig (.sig and base64), check_pgp_helper, process_siglist, key_in_keychain, key_import (keyring, question, keyserver search and receive through dirmngr against a loopback HKP server: 404, html, hang, wrong key, key id-only index, success and validation after it; WKD compared on its failure path only, see the Handover row), pkg/db_check_pgp_signature, extract_keyid, every `_alpm_log` line (debug included, `_alpm_access`'s via `util::alpm_access`): difftest vs gpgme-backed C on throwaway keyrings (all status/validity pairs, bad/garbage/truncated/armored sigs), results, rc, pm_errno, questions, logs at every level; init_gpgme's lines (`signing_init`); gpg_strerror's table vs gpgme_strerror for every code; gpg argv vs gpgme's; extract_keyid fuzz |
-| `lib/libalpm/dload.c` | 1474 | `alpm-core::dload` | _alpm_download (reqwest, fetchcb path), resume/mirrors/cache servers/server error counting/.sig/max size/time condition, alpm_fetch_pkgurl, download dir + filecache helpers: difftest vs C on scripted 127.0.0.1 HTTP servers and file://; sandbox child behind `Sandbox`: fetch_pkgurl cases and db_update sequences sandboxed vs the C, the binaries under fakeroot with DownloadUser (`cli_binary` xfercommand). Left: the User-Agent is `HTTP_USER_AGENT` from the environment only, the frontend never sets it (pacman.c row) |
+| `lib/libalpm/dload.c` | 1474 | `alpm-core::dload` | _alpm_download (reqwest, fetchcb path), resume/mirrors/cache servers/server error counting/.sig/max size/time condition, alpm_fetch_pkgurl, download dir + filecache helpers: difftest vs C on scripted 127.0.0.1 HTTP servers and file://; sandbox child behind `Sandbox`: fetch_pkgurl cases and db_update sequences sandboxed vs the C, the binaries under fakeroot with DownloadUser (`cli_binary` xfercommand, also the built-in downloader in process and `-U <url>`); connection reuse and curl's retry (stale keep-alive server), proxy environment rules (a loopback proxy, 19 environments), low-speed check (trickling body): difftest |
 | `lib/libalpm/deps.c` | 926 | `alpm-core::deps` | dep_from_string, dep_compute_string, depcmp_provides (+ static dep_vercmp through it), depcmp_literal, depcmp, find_satisfier, checkdeps, sortbydeps, resolvedep/resolvedeps, find_dbs_satisfier, recursedeps: difftest on fixture handles (local + 3 sync dbs, ignore, assumeinstalled, NODEPVERSION, usage), questions/logs compared |
 | `lib/libalpm/graph.c` | 38 | `alpm-core::graph` | via sortbydeps |
 | `lib/libalpm/conflict.c` | 686 | `alpm-core::conflict` | innerconflicts, outerconflicts, checkconflicts, db_find_fileconflicts (both checks, skip_remove, progress, debug lines): difftest on fixture roots (files, dirs, symlinks) and local dbs, 2M fuzz |
@@ -503,14 +504,14 @@ vtables (`get_file_pkg_ops`, `get_sync_pkg_ops`, be_local's
 | regcomp/regexec (glibc, used by db.c, remove.c, files.c) | - | `alpm-core::regex` | difftest fuzz vs glibc (C.UTF-8, 4 flag sets) on agreeing characters; classes/towupper via std, divergence per class counted |
 | `src/common/*.c` | 445 | `pacman-common::{util_common,ini}` | all of util-common.c and ini.c: difftest fuzz (safe_fgets on fmemopen + real file, llstat on /tmp tree, ini via recorded callback) |
 | `src/pacman/*.c` | 10124 | `pacman-cli` | excl. symlinks into `src/common`; per file below |
-| `src/pacman/pacman.c` (in the above) | 1360 | `pacman-cli::{pacman,getopt}` (partial: no setuseragent) | getopt_long: difftest per call vs libc (2M fuzz); parseargs, parsearg_*, checkargs_*, usage, version, needs_root, '-' stdin targets, main, cleanup, exit status, dispatch (-Q/-S/-R/-U/-F/-T, transactions up to the commit): difftest `cli_binary` vs the C binary (stdout/stderr/exit), parsed Config unit-tested; signals: soft interrupt handler installed in main, handle published after setup, removed in cleanup before the release: difftest `sighandler` |
+| `src/pacman/pacman.c` (in the above) | 1360 | `pacman-cli::{pacman,getopt}` | getopt_long: difftest per call vs libc (2M fuzz); parseargs, parsearg_*, checkargs_*, usage, version, needs_root, '-' stdin targets, main, cleanup, exit status, dispatch (-Q/-S/-R/-U/-F/-T, transactions up to the commit): difftest `cli_binary` vs the C binary (stdout/stderr/exit), parsed Config unit-tested; signals: soft interrupt handler installed in main, handle published after setup, removed in cleanup before the release: difftest `sighandler` |
 | `src/pacman/sighandler.c` (in the above) | 146 | `pacman-cli::sighandler` (partial: no segv, winch handler) | soft_interrupt_handler, install/remove: difftest `sighandler` vs the C binary (SIGINT/SIGHUP before the handle, at a prepared transaction's prompt, from Pre/PostTransaction hooks, post_install, pre_remove; exit status, stdout, stderr, root tree, log) |
 | `src/pacman/callback.c` (in the above) | 1155 | `pacman-cli::callback` | cb_event, cb_question, cb_progress (ILoveCandy), cb_download (multibar, total bar), cb_log (delayed under bars): difftest lockstep vs C (every event x 16 configs, 11 questions x 12 configs x 27 inputs, progress/download fuzz, fake coarse clock) |
 | `src/pacman/check.c` (in the above) | 435 | `pacman-cli::check` | check_pkg_fast/full: difftest on fixture roots and dbs (all 22 message kinds); libarchive's mtree reader vs `alpm-core::mtree` (entries, stop, error text) per fixture, ~100 odd inputs, cut streams, fuzzed text (no signature, form D, nul, continuations, devices) and 804 real mtrees all equal |
 | `src/pacman/query.c` (in the above) | 521 | `pacman-cli::query` | every -Q mode, filter and message: difftest vs C pacman_query on fixture roots, both with the frontend's log callback and stderr compared as one stream (op and libalpm lines in order, debug and function levels), desc/files/mtree missing or unreadable, empty/garbage/directory mtrees, -Qt load order on fresh worlds |
 | `src/pacman/deptest.c` (in the above) | 57 | `pacman-cli::deptest` | difftest vs C pacman_deptest |
 | `src/pacman/sync.c` (in the above) | 978 | `pacman-cli::sync` | sync_info, sync_list, sync_group, dispatch, check_syncdbs: difftest vs C pacman_sync (4 db states, warm caches); -Sy/-Syy: difftest vs C pacman_sync with the frontend callbacks (no bars); sync_trans/sync_prepare_execute: difftest `frontend_fuzz` (C never commits: --print or a declined question), the commit and its failure report through pactest; -Sc/-Scc (sync_cleancache, sync_cleandb_all, unlink_verbose under trans_init(0,0)): difftest `sync_clean` vs C pacman_sync with op_s_clean on seeded twin worlds (answers x -c/-cc/-ccc x CleanMethods x lock; rc, stdout, stderr, input read, tree with modes), PATH_MAX edges, cli_binary -Sc/-Scc under fakeroot |
-| `src/pacman/remove.c`, `upgrade.c` | 309 | `pacman-cli::{remove,upgrade}` | difftest `frontend_fuzz` vs C pacman_remove/pacman_upgrade (rc, stdout, stderr, input consumed); -U of a url: `cli_binary` xfercommand (through XferCommand), the built-in downloader's fetch_pkgurl in difftest `dload`, not at the binary level |
+| `src/pacman/remove.c`, `upgrade.c` | 309 | `pacman-cli::{remove,upgrade}` | difftest `frontend_fuzz` vs C pacman_remove/pacman_upgrade (rc, stdout, stderr, input consumed); -U of a url: `cli_binary` xfercommand (through XferCommand, the built-in downloader in process and in the sandbox child), the built-in downloader's fetch_pkgurl in difftest `dload` |
 | `src/pacman/database.c` (in the above) | 305 | `pacman-cli::database` | -D --asdeps/--asexplicit, -Dk, -Dkk: difftest vs C pacman_database on two copies of each fixture (ret, stdout, stderr, local db tree after), -Dkk on sync worlds; unit tests |
 | `src/pacman/files.c` (in the above) | 341 | `pacman-cli::files` | -F, -Fx, -Fq, --machinereadable, -Fl: difftest vs C pacman_files on .files dbs; -Fy: same, with the frontend callbacks |
 | `src/pacman/package.c` (in the above) | 587 | `pacman-cli::package` | dump_pkg_full (all origins, -i/-ii), dump_pkg_backups, dump_pkg_files, print_installed, print_groups, dump_pkg_search: difftest on a real C handle with refilled db caches and real files under the root, strftime %c vs `format_date_utc` fuzz + localtime limits; changelog and gpgme results: unit tests |
@@ -858,26 +859,61 @@ progress meter: dropped from stderr, its rates vary per run. All equal.
   keyserver available" (dirmngr's host table, not the port's doing).
 - `dload`: `Result<bool, Errno>` (Ok(true) = 0, Ok(false) = 1, Err = -1,
   Err(Errno::Ok) where the C fails without pm_errno). `DownloadState`
-  (server error counts, the sticky interrupt) per handle. Divergences
-  from curl: low-speed abort after 10 s without a byte (curl: under 1 B/s
-  over 5 s for 10 s), curl 8.22 error texts copied where libalpm prints
-  them (others reqwest's), no netrc, Basic auth from URL userinfo only,
-  HTTP/1.1, no ftp://, rustls with the platform verifier, reqwest's proxy
-  env handling, the url crate's normalised URL after a redirect,
-  If-Modified-Since left out for an mtime past year 9999 (time's range).
-  Last-Modified goes through curl's parsedate (`getdate_capped`). Redirects are
-  followed by hand like curl's FOLLOWLOCATION (any 3xx with a Location,
-  10 follows, http(s) only, curl's texts for disabled/unknown schemes,
-  connect/resolve errors naming the hop, url credentials kept on the
-  same scheme/host/port). No connection is reused (no idle pool): a
-  server answering HTTP/1.1 without `Connection: close` and then closing
-  (pactest's) left hyper a dead pooled connection for the next hop or
-  .sig, "Empty reply from server"; curl retries such a reused connection
-  on a fresh one, reqwest cannot tell reused from fresh. Pinned in the
-  dload difftest: on such a server curl gives up after 5 reconnects per
-  transfer, so a same-host redirect loop ends in "Connection died, tried
-  5 times before giving up" where the port follows all 10; chunked
-  HTTP/1.0 responses are decoded by curl and a parse error to hyper.
+  (server error counts, the sticky interrupt, the connection cache) per
+  handle. The User-Agent is `Settings::user_agent` (the frontend's
+  `setuseragent` string, `HTTP_USER_AGENT` read like curl when unset).
+  Divergences from curl: curl 8.22 error texts copied where libalpm
+  prints them (others reqwest's), Basic auth from URL userinfo only,
+  rustls with the platform verifier, the url crate's normalised URL
+  after a redirect, If-Modified-Since left out for an mtime past year
+  9999 (time's range). Not provided, with the reason: `ftp://` (Arch's
+  mirrorlist generator offers http, https and rsync; curl's ftp is a
+  second protocol engine), `.netrc` (curl's `CURL_NETRC_OPTIONAL`
+  applies to mirrors with credentials only, which the url userinfo
+  covers; a netrc parser is a unit of its own if anyone needs it),
+  HTTP/2 (reqwest's `http2` would negotiate it over TLS with real
+  mirrors, where nginx's GOAWAY after `keepalive_requests` needs curl's
+  REFUSED_STREAM retry; none of that is observable on loopback, and
+  the connection count in the bench is the same either way), socks
+  proxies (reqwest's `socks` feature is a new dependency; an
+  `http_proxy=socks5h://...` fails the transfer with curl's
+  "Unsupported proxy scheme" text instead of going around the proxy).
+  Last-Modified goes through curl's parsedate (`getdate_capped`).
+  Redirects are followed by hand like curl's FOLLOWLOCATION (any 3xx
+  with a Location, 10 follows, http(s) only, curl's texts for
+  disabled/unknown schemes, connect/resolve errors naming the hop, url
+  credentials kept on the same scheme/host/port). Connections are
+  reused like curl's multi cache (one Client per handle, idle
+  connections dropped after curl's 118 s): a request that gets nothing
+  back on a reused connection (hyper's IncompleteMessage, reset, broken
+  pipe) is retried like Curl_retry_request, 5 times per transfer with
+  redirect hops counted, then "Connection died, tried 5 times before
+  giving up"; on a fresh connection it stays "Empty reply from server".
+  Reused is known from the connection's local address (hyper-util's
+  `HttpInfo`), not guessed. What differs is when a dead pooled
+  connection gets reused at all: curl skips its liveness check for a
+  second after the last one, hyper notices the close while the
+  connection sits idle; on pactest's server (keep-alive promised, closed
+  after every response) curl reuses and dies on every hop, so a
+  same-host redirect loop ends after 6 requests in "Connection died"
+  where the port's hops mostly get a fresh connection and reach
+  "Maximum (10) redirects followed" (`drop_loop_divergence` accepts
+  both). A server that keeps the connection and closes it under the
+  next request (`Style::Stale`) is deterministic on both sides and
+  pins the retry. Proxies follow curl's environment rules
+  (`ProxyEnv`): `http_proxy` (never `HTTP_PROXY`), `https_proxy` then
+  `HTTPS_PROXY`, then `all_proxy`, `ALL_PROXY`; `no_proxy` before
+  `NO_PROXY` with curl's token rules ("*", a name or its tail at a
+  dot, CIDR for addresses); empty values are unset; a proxy without a
+  scheme is http, without a port 1080; the proxy is what gets resolved
+  and named in connect errors ("over proxy", "Could not resolve
+  proxy"). The low-speed abort is curl's check (`Speeder`:
+  progress_calc's records, under 1 B/s for 10 s) run every second and
+  per chunk over a reader thread, since reqwest's read cannot be
+  interrupted; its 10 s read timeout stays as a backstop. The port's
+  connect+headers wait is one 10 s budget where curl has 10 s to
+  connect and the speed check after. Chunked HTTP/1.0 responses are
+  decoded by curl and a parse error to hyper (pinned).
 - `filter`: libarchive 3.8.9's read filters as pacman sets them up
   (archive_read_support_filter_all): choose_filters stacks the best bid
   (the first registered on a tie) up to 25 filters, each filter hands on

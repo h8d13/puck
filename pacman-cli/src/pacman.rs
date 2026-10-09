@@ -26,7 +26,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use alpm_core::handle::Handle;
-use alpm_core::util::strerror;
+use alpm_core::util::{strerror, until_nul};
 use alpm_core::{LIB_VERSION, PACKAGE_VERSION};
 use pacman_common::util_common::{PATH_MAX, mbasename};
 
@@ -261,9 +261,9 @@ impl Host for Io {
 	}
 }
 
-// pm_printf(ALPM_LOG_ERROR, ...)
-fn pm_error(config: &Config, io: &mut Io, parts: &[&[u8]]) {
-	if config.logmask & LOG_ERROR == 0 {
+// pm_printf(level, ...) for ALPM_LOG_ERROR and ALPM_LOG_WARNING
+fn pm_printf_io(config: &Config, io: &mut Io, level: u16, parts: &[&[u8]]) {
+	if config.logmask & level == 0 {
 		return;
 	}
 	// pm_vfprintf's PACMAN_DEBUG stamp, --debug may come first
@@ -271,12 +271,54 @@ fn pm_error(config: &Config, io: &mut Io, parts: &[&[u8]]) {
 		io.err.extend_from_slice(&debug_stamp(now_secs()));
 	}
 	let c = &config.colstr;
-	io.err.extend_from_slice(c.err);
-	io.err.extend_from_slice(b"error: ");
+	let (color, prefix): (&[u8], &[u8]) = match level {
+		LOG_WARNING => (c.warn, b"warning: "),
+		_ => (c.err, b"error: "),
+	};
+	io.err.extend_from_slice(color);
+	io.err.extend_from_slice(prefix);
 	io.err.extend_from_slice(c.nocolor);
 	for p in parts {
 		io.err.extend_from_slice(p);
 	}
+}
+
+fn pm_error(config: &Config, io: &mut Io, parts: &[&[u8]]) {
+	pm_printf_io(config, io, LOG_ERROR, parts);
+}
+
+// setuseragent's agent[100]: "pacman/<ver> (<sysname> <machine>)
+// libalpm/<ver>" cut by snprintf at 99 bytes, true when it was
+pub fn user_agent_string(sysname: &[u8], machine: &[u8]) -> (Vec<u8>, bool) {
+	let mut agent = format!("pacman/{PACKAGE_VERSION} (").into_bytes();
+	agent.extend_from_slice(until_nul(sysname));
+	agent.push(b' ');
+	agent.extend_from_slice(until_nul(machine));
+	agent.extend_from_slice(format!(") libalpm/{LIB_VERSION}").as_bytes());
+	let truncated = agent.len() >= 100;
+	agent.truncate(99);
+	(agent, truncated)
+}
+
+// setuseragent: HTTP_USER_AGENT for the downloader and XferCommand,
+// the environment's own when set (setenv without overwrite). the C
+// warns through pm_printf before config_new made config, which would
+// dereference NULL (UPSTREAM.md); here the fresh config's logmask
+// decides
+pub fn setuseragent(config: &Config, io: &mut Io) -> Vec<u8> {
+	if let Some(env) = std::env::var_os("HTTP_USER_AGENT") {
+		return env.into_vec();
+	}
+	let un = rustix::system::uname();
+	let (agent, truncated) = user_agent_string(
+		un.sysname().to_bytes(),
+		un.machine().to_bytes(),
+	);
+	if truncated {
+		let msg: &[u8] = b"HTTP_USER_AGENT truncated\n";
+		pm_printf_io(config, io, LOG_WARNING, &[msg]);
+	}
+	agent
 }
 
 fn is_space(c: u8) -> bool {
@@ -1420,6 +1462,7 @@ pub fn main_args<F: FnOnce() -> Result<(), i32>>(
 	io: &mut Io,
 ) -> Result<(Config, Vec<Vec<u8>>), i32> {
 	let mut config = Config::new();
+	config.user_agent = setuseragent(&config, io);
 	// no progress bar when the output is redirected
 	if !io.stdout_tty {
 		config.noprogressbar = 1;

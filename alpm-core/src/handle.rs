@@ -81,6 +81,8 @@ pub struct Handle {
 	checkspace: c_int,
 	parallel_downloads: c_uint,
 	disable_dl_timeout: u16,
+	// the frontend's HTTP_USER_AGENT (dload Settings)
+	user_agent: Option<Vec<u8>>,
 	// server_errors and the dload_interrupted static
 	download: DownloadState,
 	// logcb, eventcb, questioncb, progresscb, dlcb
@@ -300,6 +302,7 @@ impl Handle {
 			checkspace: 0,
 			parallel_downloads: 1,
 			disable_dl_timeout: 0,
+			user_agent: None,
 			download: DownloadState::default(),
 			cb: Box::new(()),
 			fetch: None,
@@ -629,7 +632,19 @@ impl Handle {
 			parallel_downloads: self.parallel_downloads,
 			disable_dl_timeout: self.disable_dl_timeout != 0,
 			dbext: self.dbext.clone(),
+			user_agent: self.user_agent.clone(),
 		}
+	}
+
+	// the User-Agent downloads send: the C frontend's setenv of
+	// HTTP_USER_AGENT, read by curl_set_handle_opts; unset, dload reads
+	// the environment itself
+	pub fn user_agent(&self) -> Option<&[u8]> {
+		self.user_agent.as_deref()
+	}
+
+	pub fn set_user_agent(&mut self, agent: Option<&[u8]>) {
+		self.user_agent = agent.map(|a| until_nul(a).to_vec());
 	}
 
 	// handle->user

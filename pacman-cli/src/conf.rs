@@ -15,7 +15,7 @@
 // messages are the untranslated msgids. paths default to the arch build
 // (configure-time CONFFILE, DBPATH, ... in the C).
 
-use std::ffi::{OsStr, c_int};
+use std::ffi::{OsStr, OsString, c_int};
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -170,6 +170,9 @@ pub struct Config {
 	pub gpgdir: Option<Vec<u8>>,
 	pub sysroot: Option<Vec<u8>>,
 	pub sandboxuser: Option<Vec<u8>>,
+	// setuseragent's HTTP_USER_AGENT: the downloader's User-Agent, in
+	// the XferCommand's environment (the C puts it in the process's)
+	pub user_agent: Vec<u8>,
 	pub hookdirs: Vec<Vec<u8>>,
 	pub cachedirs: Vec<Vec<u8>>,
 	pub architectures: Vec<Vec<u8>>,
@@ -566,6 +569,7 @@ impl Config {
 			gpgdir: None,
 			sysroot: None,
 			sandboxuser: None,
+			user_agent: Vec::new(),
 			hookdirs: Vec::new(),
 			cachedirs: Vec::new(),
 			architectures: Vec::new(),
@@ -819,6 +823,9 @@ impl Config {
 		handle.set_noextracts(&self.noextract);
 		handle.set_disable_dl_timeout(self.disable_dl_timeout);
 		let _ = handle.set_parallel_downloads(self.parallel_downloads);
+		if !self.user_agent.is_empty() {
+			handle.set_user_agent(Some(&self.user_agent));
+		}
 		for entry in &self.assumeinstalled {
 			let dep = dep_from_string(entry);
 			// printf("%s", NULL) is "(null)" in glibc
@@ -1894,13 +1901,17 @@ pub struct XferCommand {
 impl XferCommand {
 	// the fetchcb of config, printing to an Output flushed to sink
 	pub fn new(config: &Config, sink: Option<fn(&mut Output)>) -> Self {
+		let mut exec = SandboxExec::default();
+		if let Some(env) = user_agent_env(config) {
+			exec.env.push(env);
+		}
 		XferCommand {
 			config: config.clone(),
 			out: Output {
 				sink,
 				..Output::default()
 			},
-			exec: SandboxExec::default(),
+			exec,
 			sleep: std::thread::sleep,
 		}
 	}
@@ -1926,6 +1937,7 @@ impl XferCommand {
 				.args(argv[1..]
 					.iter()
 					.map(|a| OsStr::from_bytes(a)))
+				.envs(user_agent_env(&self.config))
 				.status()
 				.map_err(ExecError::Spawn),
 		};
@@ -2066,6 +2078,15 @@ impl XferCommand {
 		}
 		0
 	}
+}
+
+// the HTTP_USER_AGENT the command inherits from the C's environment
+fn user_agent_env(config: &Config) -> Option<(OsString, OsString)> {
+	if config.user_agent.is_empty() {
+		return None;
+	}
+	let agent = OsString::from_vec(config.user_agent.clone());
+	Some((OsString::from("HTTP_USER_AGENT"), agent))
 }
 
 impl Fetch for XferCommand {

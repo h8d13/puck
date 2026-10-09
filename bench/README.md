@@ -71,3 +71,15 @@ extraction, scriptlets, hooks and ldconfig under fakechroot. `-Si` DIFF is expec
 master past `bdedf621` (md5sum dropped from repo dbs), which no pacman
 release or Arch snapshot ships yet, so C pacman still prints `MD5 Sum`
 under `Validated By` for old db entries that carry `%MD5SUM%`.
+
+## Downloads from a remote mirror
+
+```
+bench/dload-remote.sh -n 200 -r 2    # -Swdd of 200 small packages, C vs puck
+```
+
+Needs network, fakeroot and strace: wall time of each side into an
+empty cache, then the same run under strace counting connects to the
+mirror. Before connection reuse puck opened one TLS connection per file
+(200 connects, 4.6 s); with it both sides open one per parallel stream
+(5 connects, C 1.8 s, puck 2.0 s).

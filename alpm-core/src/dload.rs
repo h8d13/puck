@@ -7,8 +7,8 @@
 // Content-Range check, If-Modified-Since and the time condition, the max
 // file size, file:// urls, 10 redirects, the low-speed abort, the
 // truncation check. error texts copy curl's where libalpm prints them.
-// reqwest only times single waits: the low-speed abort is no byte for
-// 10 s (curl: under 1 B/s on a 5 s average, for 10 s).
+// the low-speed abort is curl's own check (Speeder) over a reader
+// thread, reqwest's read timeout stays as a backstop.
 //
 // handle state is DownloadState (handle->server_errors and the
 // dload_interrupted static, both kept across calls), handle options are
@@ -17,25 +17,28 @@
 // back in Err, as the C leaves it: it can be Errno::Ok where the C fails
 // without setting it.
 
+use std::collections::HashMap;
 use std::ffi::{OsStr, c_int};
 use std::fs::{self, File, OpenOptions};
 use std::hash::{BuildHasher, RandomState};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::net::ToSocketAddrs;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::fs::{PermissionsExt, chown};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError::{Disconnected, Timeout};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use reqwest::Url;
+use hyper_util::client::legacy::Error as LegacyError;
+use hyper_util::client::legacy::connect::HttpInfo;
 use reqwest::blocking::{Client, RequestBuilder, Response};
-use reqwest::header;
 use reqwest::redirect::Policy;
+use reqwest::{Proxy, Url, header};
 use rustix::fs::{AtFlags, CWD, Timespec, Timestamps};
 use time::OffsetDateTime;
 
@@ -61,6 +64,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LOW_SPEED_TIME: Duration = Duration::from_secs(10);
 const MAX_REDIRS: usize = 10;
 const KEEPALIVE: Duration = Duration::from_secs(60);
+// curl's conn_max_idle_ms: an idle connection older than this is not
+// reused (CURLOPT_MAXAGE_CONN default)
+const CONN_MAX_IDLE: Duration = Duration::from_secs(118);
+// Curl_retry_request's CONN_MAX_RETRIES
+const CONN_MAX_RETRIES: u32 = 5;
+// CURL_DEFAULT_PROXY_PORT
+const DEFAULT_PROXY_PORT: u16 = 1080;
 
 // the sandbox side of the handle, set when _alpm_use_sandbox holds (root,
 // a sandbox user, one of the restrictions enabled)
@@ -95,6 +105,10 @@ pub struct Settings {
 	pub disable_dl_timeout: bool,
 	// handle->dbext, picks the url .sig files are fetched from
 	pub dbext: Vec<u8>,
+	// CURLOPT_USERAGENT: the frontend's HTTP_USER_AGENT (setuseragent
+	// puts it in the environment, curl_set_handle_opts reads it back);
+	// None reads the environment like the C
+	pub user_agent: Option<Vec<u8>>,
 }
 
 impl Default for Settings {
@@ -103,20 +117,255 @@ impl Default for Settings {
 			parallel_downloads: 1,
 			disable_dl_timeout: false,
 			dbext: b".db".to_vec(),
+			user_agent: None,
 		}
 	}
 }
 
-// handle->server_errors (per host, -1 once blocked for good) and the
+impl Settings {
+	// getenv("HTTP_USER_AGENT") unless the frontend handed one over
+	pub fn user_agent(&self) -> Option<Vec<u8>> {
+		self.user_agent.clone().or_else(|| {
+			std::env::var_os("HTTP_USER_AGENT")
+				.map(|v| v.as_bytes().to_vec())
+		})
+	}
+}
+
+// curl's proxy environment (proxy_detect_proxy, proxy_do_not_proxy):
+// the variables as a Client saw them when built; curl_getenv counts an
+// empty value as unset
+#[derive(Clone, Debug, Default)]
+pub struct ProxyEnv {
+	vars: Vec<(&'static str, String)>,
+}
+
+const PROXY_VARS: [&str; 7] = [
+	"http_proxy",
+	"https_proxy",
+	"HTTPS_PROXY",
+	"all_proxy",
+	"ALL_PROXY",
+	"no_proxy",
+	"NO_PROXY",
+];
+
+impl ProxyEnv {
+	// from a getenv
+	pub fn new(getenv: impl Fn(&str) -> Option<String>) -> Self {
+		let vars = PROXY_VARS
+			.iter()
+			.filter_map(|&n| {
+				Some((n, getenv(n).filter(|v| !v.is_empty())?))
+			})
+			.collect();
+		ProxyEnv { vars }
+	}
+
+	pub fn from_env() -> Self {
+		Self::new(|n| std::env::var(n).ok())
+	}
+
+	fn get(&self, name: &str) -> Option<&str> {
+		let v = self.vars.iter().find(|(n, _)| *n == name);
+		v.map(|(_, v)| &v[..])
+	}
+
+	// proxy_detect_proxy: the scheme's variable (lowercase first,
+	// HTTP_PROXY never: CGI can set it), then all_proxy, ALL_PROXY
+	fn detect(&self, scheme: &str) -> Option<&str> {
+		let own: &[&str] = match scheme {
+			"https" => &["https_proxy", "HTTPS_PROXY"],
+			"http" => &["http_proxy"],
+			_ => &[],
+		};
+		own.iter()
+			.chain(&["all_proxy", "ALL_PROXY"])
+			.find_map(|n| self.get(n))
+	}
+
+	// Curl_proxy_init_conn for a url: Ok(None) goes direct, Ok(Some)
+	// through that proxy (its port filled in like curl's parse_proxy),
+	// Err curl's text for a proxy setting its parse refuses or this
+	// downloader cannot use (socks: no socks support here), a
+	// CURLE_COULDNT_RESOLVE_PROXY failure
+	pub fn proxy_for(&self, url: &Url) -> Result<Option<Url>, String> {
+		let host = url.host_str().unwrap_or_default();
+		let host = host
+			.strip_prefix('[')
+			.and_then(|h| h.strip_suffix(']'))
+			.unwrap_or(host);
+		let no_proxy =
+			self.get("no_proxy").or_else(|| self.get("NO_PROXY"));
+		if check_noproxy(host, no_proxy.unwrap_or_default()) {
+			return Ok(None);
+		}
+		let Some(proxy) = self.detect(url.scheme()) else {
+			return Ok(None);
+		};
+		// CURLU_GUESS_SCHEME: no scheme means http
+		let spec = match proxy.contains("://") {
+			true => proxy.to_string(),
+			false => format!("http://{proxy}"),
+		};
+		let parsed =
+			Url::parse(&spec).ok().filter(|u| u.host().is_some());
+		let Some(mut u) = parsed else {
+			return Err(format!(
+				"Unsupported proxy syntax in '{proxy}': Bad hostname"
+			));
+		};
+		if !matches!(u.scheme(), "http" | "https") {
+			return Err(format!(
+				"Unsupported proxy scheme for '{proxy}'"
+			));
+		}
+		// the url crate drops a scheme's default port: the text says
+		// whether one was given
+		if !has_explicit_port(&spec) {
+			let _ = u.set_port(Some(DEFAULT_PROXY_PORT));
+		}
+		Ok(Some(u))
+	}
+}
+
+// whether "scheme://[user@]host[:port]/..." names a port
+fn has_explicit_port(spec: &str) -> bool {
+	let rest = spec.split_once("://").map_or(spec, |(_, r)| r);
+	let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+	let hostport = authority.rsplit('@').next().unwrap_or_default();
+	let after_host = match hostport.rsplit_once(']') {
+		Some((_, tail)) => tail,
+		None => hostport,
+	};
+	after_host.rsplit_once(':').is_some_and(|(_, p)| {
+		!p.is_empty() && p.bytes().all(|c| c.is_ascii_digit())
+	})
+}
+
+// proxy_check_noproxy: comma or blank separated names, "*" for all; a
+// hostname matches a token exactly or as its tail at a dot (leading
+// and trailing dots ignored), an IP by its CIDR
+fn check_noproxy(name: &str, no_proxy: &str) -> bool {
+	if name.is_empty() || no_proxy.is_empty() {
+		return false;
+	}
+	if no_proxy == "*" {
+		return true;
+	}
+	let ip: Option<IpAddr> = name.parse().ok();
+	let name = name.strip_suffix('.').unwrap_or(name);
+	let blank = |c: char| c == ' ' || c == '\t';
+	no_proxy.split(',')
+		.map(|t| t.trim_matches(blank))
+		// a blank inside a token ends it (curl stops the loop there)
+		.map(|t| t.split(blank).next().unwrap_or_default())
+		.filter(|t| !t.is_empty())
+		.any(|t| match ip {
+			Some(ip) => match_ip(ip, t),
+			None => match_host(t, name),
+		})
+}
+
+fn match_host(token: &str, name: &str) -> bool {
+	let token = token.strip_suffix('.').unwrap_or(token);
+	let token = token.strip_prefix('.').unwrap_or(token);
+	if token.len() == name.len() {
+		return token.eq_ignore_ascii_case(name);
+	}
+	if token.len() < name.len() {
+		let at = name.len() - token.len();
+		return name.as_bytes()[at - 1] == b'.'
+			&& token.eq_ignore_ascii_case(&name[at..]);
+	}
+	false
+}
+
+// cidr4_match/cidr6_match: "network[/bits]", bits 0 is the whole address
+fn match_ip(ip: IpAddr, token: &str) -> bool {
+	let (net, bits) = match token.split_once('/') {
+		Some((n, b)) => (n, b.parse::<u32>().ok()),
+		None => (token, Some(0)),
+	};
+	let Some(bits) = bits else {
+		return false;
+	};
+	let Ok(net) = net.parse::<IpAddr>() else {
+		return false;
+	};
+	match (ip, net) {
+		(IpAddr::V4(a), IpAddr::V4(n)) => {
+			if bits > 32 {
+				return false;
+			}
+			if bits == 0 || bits == 32 {
+				return a == n;
+			}
+			let mask = u32::MAX << (32 - bits);
+			(u32::from(a) ^ u32::from(n)) & mask == 0
+		}
+		(IpAddr::V6(a), IpAddr::V6(n)) => {
+			let bits = if bits == 0 { 128 } else { bits };
+			if bits > 128 {
+				return false;
+			}
+			let mask = match bits {
+				128 => u128::MAX,
+				b => u128::MAX << (128 - b),
+			};
+			(u128::from(a) ^ u128::from(n)) & mask == 0
+		}
+		_ => false,
+	}
+}
+
+// the connection cache of handle->curlm: one reqwest Client (hyper's
+// idle pool) kept across the handle's downloads. curl's retry of a
+// request that died on a reused connection needs to tell reused from
+// fresh: every connection a request went out on is remembered by its
+// local address (hyper-util's HttpInfo, on the response or carried by
+// the error), a known one is a reuse
+#[derive(Clone, Debug)]
+struct Pool {
+	client: Client,
+	// the Client's low-speed timeout, rebuilt when the option changes
+	timeout: bool,
+	// local address -> last use; forgotten past curl's idle limit
+	seen: Arc<Mutex<HashMap<SocketAddr, Instant>>>,
+	proxies: Arc<ProxyEnv>,
+}
+
+// handle->server_errors (per host, -1 once blocked for good), the
 // dload_interrupted static: once a download went over its max size,
-// every later transfer aborts
+// every later transfer aborts, and the connection cache
 #[derive(Clone, Debug, Default)]
 pub struct DownloadState {
 	server_errors: Vec<(Vec<u8>, i32)>,
 	interrupted: bool,
+	pool: Option<Pool>,
 }
 
 impl DownloadState {
+	// the handle's Client for these settings, built on first use or
+	// when the timeout option changed (connections are lost then)
+	fn pool(&mut self, settings: &Settings) -> reqwest::Result<Pool> {
+		let timeout = !settings.disable_dl_timeout;
+		if let Some(p) = &self.pool
+			&& p.timeout == timeout
+		{
+			return Ok(p.clone());
+		}
+		let proxies = Arc::new(ProxyEnv::from_env());
+		let pool = Pool {
+			client: build_client(settings, proxies.clone())?,
+			timeout,
+			seen: Arc::default(),
+			proxies,
+		};
+		self.pool = Some(pool.clone());
+		Ok(pool)
+	}
+
 	// whether a download went over its max size
 	pub fn is_interrupted(&self) -> bool {
 		self.interrupted
@@ -141,6 +390,7 @@ impl DownloadState {
 		DownloadState {
 			server_errors: hosts,
 			interrupted,
+			pool: None,
 		}
 	}
 
@@ -719,6 +969,7 @@ pub fn getdate_capped(date: &[u8]) -> i64 {
 // the CURLcodes the transfers end with (curl.h)
 const CURLE_UNSUPPORTED_PROTOCOL: c_int = 1;
 const CURLE_URL_MALFORMAT: c_int = 3;
+const CURLE_COULDNT_RESOLVE_PROXY: c_int = 5;
 const CURLE_COULDNT_RESOLVE_HOST: c_int = 6;
 const CURLE_COULDNT_CONNECT: c_int = 7;
 const CURLE_PARTIAL_FILE: c_int = 18;
@@ -731,6 +982,7 @@ const CURLE_FILE_COULDNT_READ_FILE: c_int = 37;
 const CURLE_ABORTED_BY_CALLBACK: c_int = 42;
 const CURLE_TOO_MANY_REDIRECTS: c_int = 47;
 const CURLE_GOT_NOTHING: c_int = 52;
+const CURLE_SEND_ERROR: c_int = 55;
 const CURLE_RECV_ERROR: c_int = 56;
 const CURLE_FILESIZE_EXCEEDED: c_int = 63;
 
@@ -776,6 +1028,9 @@ struct Transfer {
 	effective_url: Vec<u8>,
 	// size of the file when this attempt started
 	start_len: i64,
+	// when the request of the last hop went out (curl's per-request
+	// progress start)
+	sent: Instant,
 }
 
 type Fail = (Code, Vec<u8>);
@@ -807,14 +1062,15 @@ struct Job {
 	respcode: i64,
 	initial_size: i64,
 	max_size: i64,
-	user_agent: Option<Vec<u8>>,
 	file: File,
 }
 
 // shared by the transfer threads of one download
 #[derive(Clone)]
 struct Worker {
-	client: Client,
+	pool: Pool,
+	// CURLOPT_USERAGENT
+	user_agent: Option<Vec<u8>>,
 	tx: Sender<Msg>,
 	interrupted: Arc<AtomicBool>,
 }
@@ -827,6 +1083,46 @@ fn meets_timecondition(timeofdoc: i64, timevalue: i64) -> bool {
 
 fn header_bytes(r: &Response, name: header::HeaderName) -> Option<&[u8]> {
 	r.headers().get(name).map(|v| v.as_bytes())
+}
+
+fn content_length(r: &Response) -> Option<i64> {
+	let v = header_bytes(r, header::CONTENT_LENGTH)?;
+	std::str::from_utf8(v).ok()?.trim().parse().ok()
+}
+
+// the local address of the connection a failed request went out on:
+// hyper-util attaches the connection's info to its errors
+fn error_local_addr(e: &reqwest::Error) -> Option<SocketAddr> {
+	let mut src: Option<&dyn std::error::Error> = Some(e);
+	while let Some(s) = src {
+		if let Some(h) = s.downcast_ref::<LegacyError>() {
+			let mut ext = http::Extensions::new();
+			h.connect_info()?.get_extras(&mut ext);
+			return ext.get::<HttpInfo>().map(HttpInfo::local_addr);
+		}
+		src = s.source();
+	}
+	None
+}
+
+impl Pool {
+	// conn->bits.reuse of the connection at addr: used before, and
+	// marked used now
+	fn reuse(&self, addr: Option<SocketAddr>) -> bool {
+		let Some(addr) = addr else {
+			return false;
+		};
+		let mut seen = self.seen.lock().unwrap();
+		let now = Instant::now();
+		seen.retain(|_, t| now.duration_since(*t) < CONN_MAX_IDLE);
+		seen.insert(addr, now).is_some()
+	}
+
+	// a response: its connection is known from here on
+	fn saw(&self, resp: &Response) {
+		let info = resp.extensions().get::<HttpInfo>();
+		self.reuse(info.map(HttpInfo::local_addr));
+	}
 }
 
 // curl's Content-Range read: the first number (after any "bytes" or
@@ -853,8 +1149,141 @@ fn is_timeout(e: &io::Error) -> bool {
 const TOO_SLOW: &str = "Operation too slow. \
 	Less than 1 bytes/sec transferred the last 10 seconds";
 
-// the curl error for a failed request (no response)
-fn send_error(e: &reqwest::Error, url: &Url, start: Instant) -> Fail {
+// curl's speed records: 6 entries for 5 seconds (CURL_SPEED_RECORDS),
+// a check at least every second (EXPIRE_SPEEDCHECK)
+const SPEED_RECORDS: usize = 6;
+const SPEEDCHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+// progress_calc and pgrs_speedcheck for CURLOPT_LOW_SPEED_LIMIT 1 and
+// CURLOPT_LOW_SPEED_TIME 10: the speed is the bytes between the oldest
+// and the newest of the last records (one per second at most, the
+// overall average until there are two) and the transfer fails once it
+// stayed under 1 B/s for 10 s. body bytes only, like curl's download
+// counter
+struct Speeder {
+	start: Instant,
+	// (bytes so far, microseconds since start)
+	records: [(i64, i64); SPEED_RECORDS],
+	count: usize,
+	current_speed: i64,
+	// state.keeps_speed: since when it is under the limit
+	keeps_speed: Option<Instant>,
+}
+
+impl Speeder {
+	fn new(start: Instant) -> Self {
+		Speeder {
+			start,
+			records: [(0, 0); SPEED_RECORDS],
+			count: 0,
+			current_speed: 0,
+			keeps_speed: None,
+		}
+	}
+
+	// trspeed
+	fn trspeed(size: i64, us: i64) -> i64 {
+		if us < 1 {
+			return size.saturating_mul(1_000_000);
+		}
+		match size.checked_mul(1_000_000) {
+			Some(n) => n / us,
+			None => size / (us / 1_000_000).max(1),
+		}
+	}
+
+	fn calc(&mut self, now: Instant, amount: i64) {
+		let elapsed = now.duration_since(self.start).as_micros() as i64;
+		if self.count == 0 {
+			self.records[0] = (amount, elapsed);
+			self.count = 1;
+			self.current_speed = Self::trspeed(amount, elapsed);
+			return;
+		}
+		let next = self.count % SPEED_RECORDS;
+		let mut latest =
+			next.checked_sub(1).unwrap_or(SPEED_RECORDS - 1);
+		// a new record only once a second has passed
+		if elapsed - self.records[latest].1 < 1_000_000 {
+			return;
+		}
+		self.count += 1;
+		latest = next;
+		self.records[latest] = (amount, elapsed);
+		let oldest = match self.count < SPEED_RECORDS {
+			true => 0,
+			false => (latest + 1) % SPEED_RECORDS,
+		};
+		let amount = self.records[latest].0 - self.records[oldest].0;
+		let duration = (self.records[latest].1
+			- self.records[oldest].1)
+			.max(1);
+		self.current_speed = Self::trspeed(amount, duration);
+	}
+
+	// the records and the check
+	fn update(&mut self, now: Instant, amount: i64) -> Result<(), Fail> {
+		self.calc(now, amount);
+		if self.current_speed >= 1 {
+			self.keeps_speed = None;
+			return Ok(());
+		}
+		match self.keeps_speed {
+			None => self.keeps_speed = Some(now),
+			Some(since)
+				if now.duration_since(since)
+					>= LOW_SPEED_TIME =>
+			{
+				return Err(failed(
+					CURLE_OPERATION_TIMEDOUT,
+					TOO_SLOW,
+				));
+			}
+			Some(_) => {}
+		}
+		Ok(())
+	}
+}
+
+// a request that got no byte of a response because the connection went
+// away: hyper's IncompleteMessage (closed before the status line), or
+// the socket reset or broken under the request. on a reused connection
+// curl retries these (Curl_retry_request: nothing received, CURLE_OK,
+// CURLE_RECV_ERROR or CURLE_SEND_ERROR with bits.reuse)
+fn connection_died(e: &reqwest::Error) -> bool {
+	if e.is_timeout() || e.is_connect() || e.is_redirect() {
+		return false;
+	}
+	let mut src: Option<&dyn std::error::Error> = Some(e);
+	while let Some(s) = src {
+		// hyper's IncompleteMessage, not re-exported by reqwest
+		if s.to_string()
+			.contains("connection closed before message completed")
+		{
+			return true;
+		}
+		if let Some(io) = s.downcast_ref::<io::Error>() {
+			use io::ErrorKind::*;
+			return matches!(
+				io.kind(),
+				ConnectionReset
+					| ConnectionAborted | BrokenPipe
+					| UnexpectedEof
+			);
+		}
+		src = s.source();
+	}
+	false
+}
+
+// the curl error for a failed request (no response); peer is what was
+// connected to, the url's host or (proxied) its proxy
+fn send_error(
+	e: &reqwest::Error,
+	peer: &Url,
+	proxied: bool,
+	start: Instant,
+) -> Fail {
 	let ms = start.elapsed().as_millis();
 	if e.is_connect() && e.is_timeout() {
 		return failed(
@@ -866,13 +1295,18 @@ fn send_error(e: &reqwest::Error, url: &Url, start: Instant) -> Fail {
 		return failed(CURLE_OPERATION_TIMEDOUT, TOO_SLOW);
 	}
 	if e.is_connect() {
-		let host = url.host_str().unwrap_or_default();
-		let port = url.port_or_known_default().unwrap_or_default();
+		let host = peer.host_str().unwrap_or_default();
+		let port = peer.port_or_known_default().unwrap_or_default();
+		// a forwarding proxy is the connection's origin to curl
+		let via = match proxied {
+			true => format!(" over proxy {host}"),
+			false => String::new(),
+		};
 		return failed(
 			CURLE_COULDNT_CONNECT,
 			format!(
-				"Failed to connect to {host}:{port} after {ms} ms: \
-			 Could not connect to server"
+				"Failed to connect to {host}:{port}{via} after {ms} \
+				 ms: Could not connect to server"
 			),
 		);
 	}
@@ -900,20 +1334,35 @@ const CURL_SCHEMES: &[&str] = &[
 	"sftp", "smtp", "smtps", "telnet", "tftp", "ws", "wss",
 ];
 
-// a url this downloader can request: http(s) and a resolving host,
-// checked before every hop (reqwest's errors do not tell dns from connect)
-fn ensure_fetchable(url: &Url) -> Result<(), Fail> {
+// a url this downloader can request: http(s), and a resolving peer
+// (the host, or the proxy curl's environment rules pick), checked
+// before every hop (reqwest's errors do not tell dns from connect).
+// the peer is returned
+fn ensure_fetchable(url: &Url, proxies: &ProxyEnv) -> Result<Url, Fail> {
 	if !matches!(url.scheme(), "http" | "https") {
 		let m = format!("Protocol \"{}\" not supported", url.scheme());
 		return Err(failed(CURLE_UNSUPPORTED_PROTOCOL, m));
 	}
-	let host = url.host_str().unwrap_or_default();
-	let port = url.port_or_known_default().unwrap_or(80);
+	let proxy = proxies
+		.proxy_for(url)
+		.map_err(|m| failed(CURLE_COULDNT_RESOLVE_PROXY, m))?;
+	let peer = proxy.clone().unwrap_or_else(|| url.clone());
+	let host = peer.host_str().unwrap_or_default();
+	let port = peer.port_or_known_default().unwrap_or(80);
 	if (host, port).to_socket_addrs().is_err() {
-		let m = format!("Could not resolve host: {host}");
-		return Err((Code::Resolve, m.into_bytes()));
+		return Err(match proxy {
+			Some(_) => failed(
+				CURLE_COULDNT_RESOLVE_PROXY,
+				format!("Could not resolve proxy: {host}"),
+			),
+			None => (
+				Code::Resolve,
+				format!("Could not resolve host: {host}")
+					.into_bytes(),
+			),
+		});
 	}
-	Ok(())
+	Ok(peer)
 }
 
 // curl's follow: any 3xx with a non-empty Location, resolved against the
@@ -986,6 +1435,7 @@ impl Worker {
 				.file
 				.metadata()
 				.map_or(0, |m| m.len() as i64),
+			sent: Instant::now(),
 		};
 		let file_url = job.url.len() >= 7
 			&& job.url[..7].eq_ignore_ascii_case(b"file://");
@@ -1080,7 +1530,7 @@ impl Worker {
 
 	// the request curl_set_handle_opts describes
 	fn request(&self, job: &Job, url: &Url) -> RequestBuilder {
-		let mut req = self.client.get(url.clone());
+		let mut req = self.pool.client.get(url.clone());
 		if job.resume_from > 0 {
 			let range = format!("bytes={}-", job.resume_from);
 			req = req.header(header::RANGE, range);
@@ -1091,7 +1541,7 @@ impl Worker {
 				req = req.header(header::IF_MODIFIED_SINCE, d);
 			}
 		}
-		if let Some(ua) = &job.user_agent
+		if let Some(ua) = &self.user_agent
 			&& let Ok(v) = header::HeaderValue::from_bytes(ua)
 		{
 			req = req.header(header::USER_AGENT, v);
@@ -1110,12 +1560,40 @@ impl Worker {
 		let start = Instant::now();
 		let mut url = first.clone();
 		let mut follows = 0;
+		// data->state.retrycount: per transfer, redirects included
+		let mut retries = 0;
 		loop {
-			ensure_fetchable(&url)?;
+			let peer = ensure_fetchable(&url, &self.pool.proxies)?;
 			let req = self.request(job, &with_auth(&first, &url));
-			let resp = req.send();
-			let resp =
-				resp.map_err(|e| send_error(&e, &url, start))?;
+			xfer.sent = Instant::now();
+			let resp = match req.send() {
+				Ok(r) => r,
+				Err(e) if connection_died(&e)
+					&& self.pool.reuse(
+						error_local_addr(&e),
+					) =>
+				{
+					if retries == CONN_MAX_RETRIES {
+						return Err(failed(
+							CURLE_SEND_ERROR,
+							format!(
+								"Connection died, tried \
+								 {CONN_MAX_RETRIES} times \
+								 before giving up"
+							),
+						));
+					}
+					retries += 1;
+					continue;
+				}
+				Err(e) => {
+					let proxied = peer != url;
+					return Err(send_error(
+						&e, &peer, proxied, start,
+					));
+				}
+			};
+			self.pool.saw(&resp);
 			xfer.respcode = i64::from(resp.status().as_u16());
 			let Some(next) = location(&resp, &url) else {
 				if url != first {
@@ -1161,17 +1639,8 @@ impl Worker {
 		}
 		let chunked = header_bytes(&resp, header::TRANSFER_ENCODING)
 			.is_some_and(|v| find_sub(v, b"chunked").is_some());
-		let length = header_bytes(&resp, header::CONTENT_LENGTH)
-			.and_then(|v| {
-				std::str::from_utf8(v).ok()?.trim().parse().ok()
-			});
+		let length = content_length(&resp);
 		let size: i64 = if chunked { -1 } else { length.unwrap_or(-1) };
-		if job.max_size > 0 && size > job.max_size {
-			return Err(failed(
-				CURLE_FILESIZE_EXCEEDED,
-				"Maximum file size exceeded",
-			));
-		}
 		xfer.remote_size = size;
 		// a resumed GET needs its offset back in Content-Range; "*/size"
 		// (or no number) on a 2xx gets everything instead
@@ -1190,30 +1659,47 @@ impl Worker {
 		if status == 416 && resume_from > 0 {
 			return Ok(());
 		}
-		// curl_http_firstwrite
+		// http_firstwrite, then http_size: a transfer done early here
+		// (nothing left to download, the time condition answered) still
+		// fails on the size, and the response code the header callback
+		// recorded is 304 then
+		let mut done = None;
 		if resume_from > 0 && !range_ok {
-			if size == resume_from {
-				// already downloaded, curl's final progress update
-				return self.progress(job, status, 0, size);
+			if size != resume_from {
+				return Err(failed(
+					CURLE_RANGE_ERROR,
+					"HTTP server does not seem to support byte \
+					 ranges. Cannot resume.",
+				));
 			}
-			return Err(failed(
-				CURLE_RANGE_ERROR,
-				"HTTP server does not seem to support byte ranges. \
-				 Cannot resume.",
-			));
-		}
-		if let Some(t) = job.time_cond
-			&& resume_from == 0 && !meets_timecondition(timeofdoc, t)
-		{
+			// already downloaded, curl's final progress update
+			done = Some(self.progress(job, status, 0, size));
+		} else if let Some(t) = job.time_cond
+			&& resume_from == 0 && !meets_timecondition(
+			timeofdoc, t,
+		) {
 			// curl answers for the server: httpcode becomes 304
 			xfer.timecond = true;
 			xfer.respcode = 304;
-			return Ok(());
+			done = Some(Ok(()));
+		}
+		if job.max_size > 0 && size > job.max_size {
+			return Err(failed(
+				CURLE_FILESIZE_EXCEEDED,
+				"Maximum file size exceeded",
+			));
+		}
+		if let Some(r) = done {
+			return r;
 		}
 		self.http_body(job, xfer, resp, size)
 	}
 
-	// the body, size -1 when unknown
+	// the body, size -1 when unknown. a reader thread blocks on the
+	// response (reqwest's read cannot be interrupted) and hands chunks
+	// over; curl's low-speed check runs here every second and on each
+	// chunk. an aborted transfer leaves the reader until its next read
+	// returns, the connection closes with it
 	fn http_body(
 		&self,
 		job: &mut Job,
@@ -1222,27 +1708,55 @@ impl Worker {
 		size: i64,
 	) -> Result<(), Fail> {
 		let dltotal = size.max(0);
-		let mut buf = vec![0; 64 * 1024];
+		let (tx, rx) = mpsc::channel::<io::Result<Vec<u8>>>();
+		thread::spawn(move || {
+			let mut buf = vec![0; 64 * 1024];
+			loop {
+				let r = resp.read(&mut buf);
+				let more = matches!(r, Ok(n) if n > 0);
+				let chunk = r.map(|n| buf[..n].to_vec());
+				if tx.send(chunk).is_err() || !more {
+					break;
+				}
+			}
+		});
+		let mut speed =
+			self.pool.timeout.then(|| Speeder::new(xfer.sent));
+		if let Some(sp) = &mut speed {
+			// curl's first check, right after the request went out
+			sp.update(xfer.sent, 0)?;
+		}
 		loop {
-			let n = match resp.read(&mut buf) {
-				Ok(0) => break,
-				Ok(n) => n,
-				Err(e) if is_timeout(&e) => {
+			let got = match &speed {
+				Some(_) => rx.recv_timeout(SPEEDCHECK_INTERVAL),
+				None => rx.recv().map_err(|_| Disconnected),
+			};
+			match got {
+				Ok(Ok(chunk)) if chunk.is_empty() => break,
+				Ok(Ok(chunk)) => {
+					self.write_body(
+						job, xfer, &chunk, dltotal,
+					)?;
+				}
+				Ok(Err(e)) if is_timeout(&e) => {
 					return Err(failed(
 						CURLE_OPERATION_TIMEDOUT,
 						TOO_SLOW,
 					));
 				}
-				Err(_) if size < 0 => {
+				Ok(Err(_)) if size < 0 => {
 					return Err(failed(
 						CURLE_PARTIAL_FILE,
 						"transfer closed with outstanding read data \
 						 remaining",
 					));
 				}
-				Err(_) => break,
-			};
-			self.write_body(job, xfer, &buf[..n], dltotal)?;
+				Ok(Err(_)) | Err(Disconnected) => break,
+				Err(Timeout) => {}
+			}
+			if let Some(sp) = &mut speed {
+				sp.update(Instant::now(), xfer.bytes_dl)?;
+			}
 		}
 		if size >= 0 && xfer.bytes_dl < size {
 			let left = size - xfer.bytes_dl;
@@ -1352,19 +1866,29 @@ impl Worker {
 	}
 }
 
-// no idle pool: a server that answers HTTP/1.1 without "Connection: close"
-// and then closes (pactest's server, after any response) leaves a dead
-// pooled connection, which hyper writes the next request (a redirect hop
-// or the .sig) to and fails with an empty reply. curl retries such a
-// reused connection on a fresh one when it died before any byte
-// (Curl_retry_request); reqwest cannot tell a reused connection from a
-// fresh one, so every request gets its own and no retry is ever needed
-fn build_client(settings: &Settings) -> reqwest::Result<Client> {
+// the easy handle options curl_set_handle_opts sets once per handle,
+// and the multi's connection cache: idle connections kept for curl's
+// 118 s, reused by the next request to the host (HTTP/1.1 only, see
+// PORTING.md on HTTP/2). a server that promised keep-alive and closed
+// (pactest's, after any response) leaves a dead pooled connection that
+// the next request (a redirect hop, the .sig) may go out on: curl's
+// Curl_retry_request then retries on a fresh connection, see follow
+fn build_client(
+	settings: &Settings,
+	proxies: Arc<ProxyEnv>,
+) -> reqwest::Result<Client> {
 	let timeout = (!settings.disable_dl_timeout).then_some(LOW_SPEED_TIME);
+	// curl's environment rules in place of reqwest's (which honour
+	// HTTP_PROXY and prefer the uppercase names); a refused setting
+	// fails the hop in ensure_fetchable before any request
+	let proxy = Proxy::custom(move |url: &Url| {
+		proxies.proxy_for(url).ok().flatten().map(String::from)
+	});
 	Client::builder()
 		.timeout(timeout)
 		.connect_timeout(CONNECT_TIMEOUT)
-		.pool_max_idle_per_host(0)
+		.proxy(proxy)
+		.pool_idle_timeout(CONN_MAX_IDLE)
 		.redirect(Policy::none())
 		.referer(false)
 		.tcp_keepalive(KEEPALIVE)
@@ -1457,8 +1981,6 @@ impl Engine<'_> {
 			respcode: p.respcode,
 			initial_size: p.initial_size,
 			max_size: p.max_size,
-			user_agent: std::env::var_os("HTTP_USER_AGENT")
-				.map(|v| v.as_bytes().to_vec()),
 			file,
 		}
 	}
@@ -2055,13 +2577,14 @@ pub fn download_internal(
 	cb: &mut dyn Callbacks,
 	payloads: &mut [Payload],
 ) -> Result<bool, Errno> {
-	let Ok(client) = build_client(settings) else {
+	let Ok(pool) = state.pool(settings) else {
 		return Err(Errno::Libcurl);
 	};
 	let (tx, rx) = mpsc::channel();
 	let interrupted = Arc::new(AtomicBool::new(state.interrupted));
 	let worker = Worker {
-		client,
+		pool,
+		user_agent: settings.user_agent(),
 		tx,
 		interrupted: interrupted.clone(),
 	};

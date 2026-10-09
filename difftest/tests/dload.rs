@@ -17,6 +17,7 @@ use alpm_core::callbacks::{DownloadEvent, LogLevel};
 use alpm_core::dload::{
 	DownloadState, Downloader, Payload, Settings, getdate_capped,
 };
+use alpm_core::error::Errno;
 use difftest::{
 	CDload, Fetcher, Record, Recorder, Reply, Req, Rng, Server, Style,
 	TempRoot, c_getdate, closed_port, iters, payload_layout_ok,
@@ -142,9 +143,28 @@ fn outcome(
 	for s in servers {
 		s.reset();
 	}
+	// pm_errno is the last failure's: with several files failing in
+	// parallel that order is each side's own (a dead pooled connection
+	// costs curl a retry where hyper reconnects, see PORTING.md), so
+	// only that something failed is compared then
+	let mut failed: Vec<&[u8]> = logs
+		.iter()
+		.filter(|(l, m)| {
+			*l == LogLevel::Error
+				&& m.starts_with(b"failed retrieving file '")
+		})
+		.map(|(_, m)| m.split(|&c| c == b'\'').nth(1).unwrap_or(b""))
+		.collect();
+	failed.sort();
+	failed.dedup();
+	let errno = match (ret, sorted && failed.len() > 1) {
+		(-1, true) => -1,
+		(-1, false) => errno,
+		_ => 0,
+	};
 	Outcome {
 		ret,
-		errno: if ret == -1 { errno } else { 0 },
+		errno,
 		downloads,
 		logs,
 		files: snapshot(dir),
@@ -1497,6 +1517,59 @@ fn errors(o: &Outcome) -> Vec<&[u8]> {
 	e.map(|l| &l.1[..]).collect()
 }
 
+fn loop_tail(o: &Outcome) -> (usize, Option<String>) {
+	let m = String::from_utf8_lossy(errors(o)[0]).into_owned();
+	(o.requests.len(), m.split(" : ").nth(1).map(str::to_string))
+}
+
+const DIED: &str = "Connection died, tried 5 times before giving up\n";
+
+// a kept connection that dies under the next request: both sides reuse
+// it (curl skips its liveness check for a second after the last), get
+// nothing back and retry on a fresh one, up to curl's 5 per transfer,
+// redirect hops included: 6 requests served, then "Connection died"
+#[test]
+fn stale_loop_retries() {
+	let s = styled(
+		Style::Stale,
+		&[
+			("/a", vec![redir(302, "/b")]),
+			("/b", vec![redir(301, "/a")]),
+		],
+	);
+	let scn = Scn::new("stale loop", vec![s], |d, _| {
+		vec![pkg_payload(d, "x", v("@0/a"))]
+	});
+	let (c, r) = scn.run();
+	assert_eq!(c, r, "{}", explain(&c, &r));
+	assert_eq!(loop_tail(&c), (6, Some(DIED.to_string())));
+	// the retries start over with the next transfer on the handle
+	let sig = body(64, 5);
+	let s = styled(
+		Style::Stale,
+		&[
+			("/p", vec![file(&body(100, 3))]),
+			("/p.sig", vec![file(&sig)]),
+			("/q", vec![file(&body(100, 4))]),
+			("/q.sig", vec![file(&sig)]),
+		],
+	);
+	let scn = Scn::new("stale sigs", vec![s], |d, _| {
+		let mut ps = with_sig(pkg_payload(d, "p", v("@0/p")));
+		ps.extend(with_sig(pkg_payload(d, "q", v("@0/q"))));
+		ps
+	});
+	let (c, r) = scn.run();
+	assert_eq!(c, r, "{}", explain(&c, &r));
+	assert_eq!((c.ret, c.files.len(), c.requests.len()), (0, 4, 4));
+}
+
+// pinned divergence: pactest's server promises keep-alive and closes
+// after every response. curl reuses the dead connection every hop (no
+// liveness check within a second of the last) and gives up after 5
+// retries; hyper notices the close while the connection sits idle, so
+// a hop may get a fresh connection instead, and the loop ends at either
+// limit depending on that race
 #[test]
 fn drop_loop_divergence() {
 	let s = styled(
@@ -1510,14 +1583,12 @@ fn drop_loop_divergence() {
 		vec![pkg_payload(d, "x", v("@0/a"))]
 	});
 	let (c, r) = scn.run();
-	let tail = |o: &Outcome| {
-		let m = String::from_utf8_lossy(errors(o)[0]).into_owned();
-		(o.requests.len(), m.split(" : ").nth(1).map(str::to_string))
-	};
-	let died = "Connection died, tried 5 times before giving up\n";
 	let max = "Maximum (10) redirects followed\n";
-	assert_eq!(tail(&c), (6, Some(died.to_string())));
-	assert_eq!(tail(&r), (11, Some(max.to_string())));
+	assert_eq!(loop_tail(&c), (6, Some(DIED.to_string())));
+	let (n, m) = loop_tail(&r);
+	assert!((6..=11).contains(&n), "{n} requests");
+	let m = m.unwrap_or_default();
+	assert!(m == DIED || m == max, "{m}");
 	assert_eq!((c.ret, c.files.len()), (r.ret, r.files.len()));
 }
 
@@ -2206,6 +2277,41 @@ fn low_speed_timeout() {
 	assert_eq!(c.ret, 0);
 }
 
+// curl's low-speed check is a speed, not a read timeout: a body
+// trickling a byte every 3 s stays under 1 B/s and fails after 10 s
+// with 3 bytes received, where a stall of 10 s would have been needed
+// per read. the .part goes: the C's zero-length check sees stdio's
+// unflushed size
+#[test]
+fn low_speed_trickle() {
+	let s = srv(&[(
+		"/p.pkg",
+		vec![Reply::Trickle {
+			body: body(20, 1),
+			every: Duration::from_secs(3),
+		}],
+	)]);
+	let mk = |d: &[u8]| vec![pkg_payload(d, "p.pkg", s.url("/p.pkg"))];
+	let case = Case {
+		servers: vec![&s],
+		payloads: &mk,
+		setup: &no_setup,
+		parallel: 1,
+		disable_timeout: false,
+		sorted: false,
+	};
+	let (c, r) = run(&case);
+	assert_eq!(c, r, "{}", explain(&c, &r));
+	assert_eq!(c.ret, -1);
+	let got = c.downloads.iter().find_map(|(_, e)| match e {
+		DownloadEvent::Progress { downloaded, .. } => Some(*downloaded),
+		_ => None,
+	});
+	assert_eq!((got, c.files.len()), (Some(3), 0), "{:?}", c.downloads);
+	let m = String::from_utf8_lossy(errors(&c)[0]).into_owned();
+	assert!(m.contains("Operation too slow"), "{m}");
+}
+
 // the C keeps dload_interrupted and the environment process wide: these
 // cases run in a fresh test process each
 fn in_child(test: &str, env: &[(&str, &str)]) {
@@ -2242,6 +2348,224 @@ fn user_agent() {
 		"user_agent_child",
 		&[("HTTP_USER_AGENT", "pacman/7.1.0 (test)")],
 	);
+}
+
+#[test]
+fn proxy_env() {
+	in_child("proxy_env_child", &[]);
+}
+
+// curl's proxy environment rules on loopback: which server gets the
+// request (the proxy sees absolute-form targets), redirects through
+// the proxy, a proxy down or unresolvable; one process per case is not
+// needed, the child is single threaded and both sides read the
+// environment per download
+#[test]
+#[ignore = "run by proxy_env in its own process"]
+fn proxy_env_child() {
+	assert!(std::env::var_os("DLOAD_CHILD").is_some());
+	let b = body(1500, 7);
+	let origin = srv(&[
+		("/core.db", vec![file(&b)]),
+		("/r", vec![redir(302, "/core.db")]),
+	]);
+	let proxy_a = srv(&[
+		("/core.db", vec![file(&b)]),
+		("/r", vec![redir(302, "/core.db")]),
+	]);
+	let proxy_b = srv(&[("/core.db", vec![file(&b)])]);
+	let (pa, pb) = (proxy_a.base(), proxy_b.base());
+	let pa_noscheme = format!("127.0.0.1:{}", proxy_a.port());
+	let down = format!("http://127.0.0.1:{}", closed_port());
+	// name, environment, path, who serves it (None: nobody could)
+	type ProxyCase<'a> =
+		(&'a str, Vec<(&'a str, &'a str)>, &'a str, Option<usize>);
+	let cases: Vec<ProxyCase> = vec![
+		("direct", vec![], "/core.db", Some(0)),
+		("http_proxy", vec![("http_proxy", &pa)], "/core.db", Some(1)),
+		(
+			"HTTP_PROXY ignored",
+			vec![("HTTP_PROXY", &pa)],
+			"/core.db",
+			Some(0),
+		),
+		("all_proxy", vec![("all_proxy", &pa)], "/core.db", Some(1)),
+		("ALL_PROXY", vec![("ALL_PROXY", &pa)], "/core.db", Some(1)),
+		(
+			"http_proxy over all_proxy",
+			vec![("http_proxy", &pa), ("all_proxy", &pb)],
+			"/core.db",
+			Some(1),
+		),
+		(
+			"all_proxy over ALL_PROXY",
+			vec![("all_proxy", &pb), ("ALL_PROXY", &pa)],
+			"/core.db",
+			Some(2),
+		),
+		(
+			"https_proxy alone",
+			vec![("https_proxy", &pa)],
+			"/core.db",
+			Some(0),
+		),
+		("empty", vec![("http_proxy", "")], "/core.db", Some(0)),
+		(
+			"no scheme",
+			vec![("http_proxy", &pa_noscheme)],
+			"/core.db",
+			Some(1),
+		),
+		(
+			"no_proxy exact",
+			vec![("http_proxy", &pa), ("no_proxy", "127.0.0.1")],
+			"/core.db",
+			Some(0),
+		),
+		(
+			"no_proxy cidr",
+			vec![
+				("http_proxy", &pa),
+				("no_proxy", "10.0.0.0/8, 127.0.0.0/8"),
+			],
+			"/core.db",
+			Some(0),
+		),
+		(
+			"no_proxy other",
+			vec![
+				("http_proxy", &pa),
+				("no_proxy", "127.0.0.2,localhost"),
+			],
+			"/core.db",
+			Some(1),
+		),
+		(
+			"no_proxy star",
+			vec![("http_proxy", &pa), ("no_proxy", "*")],
+			"/core.db",
+			Some(0),
+		),
+		(
+			"NO_PROXY",
+			vec![("http_proxy", &pa), ("NO_PROXY", "127.0.0.1")],
+			"/core.db",
+			Some(0),
+		),
+		(
+			"no_proxy over NO_PROXY",
+			vec![
+				("http_proxy", &pa),
+				("no_proxy", "127.0.0.2"),
+				("NO_PROXY", "127.0.0.1"),
+			],
+			"/core.db",
+			Some(1),
+		),
+		(
+			"redirect via proxy",
+			vec![("http_proxy", &pa)],
+			"/r",
+			Some(1),
+		),
+		("proxy down", vec![("http_proxy", &down)], "/core.db", None),
+		(
+			"proxy unresolvable",
+			vec![(
+				"http_proxy",
+				"http://no.such.host.invalid:3128",
+			)],
+			"/core.db",
+			None,
+		),
+	];
+	let all = [
+		"http_proxy",
+		"HTTP_PROXY",
+		"https_proxy",
+		"HTTPS_PROXY",
+		"all_proxy",
+		"ALL_PROXY",
+		"no_proxy",
+		"NO_PROXY",
+	];
+	let set_env = |env: &[(&str, &str)]| {
+		// SAFETY: this process runs this one test on one thread; the
+		// C reads these with getenv on the same thread
+		unsafe {
+			for v in all {
+				std::env::remove_var(v);
+			}
+			for (k, v) in env {
+				std::env::set_var(k, v);
+			}
+		}
+	};
+	for (name, env, path, who) in cases {
+		set_env(&env);
+		let mk = |d: &[u8]| {
+			vec![pkg_payload(d, "core.db", origin.url(path))]
+		};
+		let case = Case {
+			servers: vec![&origin, &proxy_a, &proxy_b],
+			payloads: &mk,
+			setup: &no_setup,
+			parallel: 1,
+			disable_timeout: false,
+			sorted: false,
+		};
+		let (c, r) = run(&case);
+		assert_eq!(c, r, "{name}: {}", explain(&c, &r));
+		let served: Vec<_> =
+			c.requests.iter().map(|q| &q.via).collect();
+		match who {
+			None => assert_eq!(
+				(c.ret, served.len()),
+				(-1, 0),
+				"{name}"
+			),
+			Some(0) => {
+				assert_eq!(c.ret, 0, "{name}");
+				assert!(
+					served.iter().all(|v| v.is_none()),
+					"{name}"
+				);
+			}
+			Some(_) => {
+				assert_eq!(c.ret, 0, "{name}");
+				let authority =
+					format!("127.0.0.1:{}", origin.port());
+				assert!(
+					served.iter().all(|v| **v == Some(
+						authority.clone()
+					)),
+					"{name}: {served:?}"
+				);
+			}
+		}
+	}
+	// Rust only: a socks proxy, which curl would use, fails the
+	// transfer with curl's text for a scheme it cannot use
+	set_env(&[("http_proxy", "socks5h://127.0.0.1:1080")]);
+	let fx = TempRoot::new("dload-socks");
+	let dir = dir_bytes(fx.dir());
+	let settings = Settings::default();
+	let mut state = DownloadState::default();
+	let mut rec = Recorder::default();
+	let mut dl = Downloader {
+		settings: &settings,
+		state: &mut state,
+		cb: &mut rec,
+		fetch: None,
+		sandbox: None,
+	};
+	let mut ps = vec![pkg_payload(&dir, "core.db", origin.url("/core.db"))];
+	assert_eq!(dl.download(&mut ps, &dir, &dir), Err(Errno::Libcurl));
+	let o = outcome(-1, 0, rec.0, fx.dir(), &[&origin], false);
+	let m = String::from_utf8_lossy(errors(&o)[0]).into_owned();
+	let want = "Unsupported proxy scheme for 'socks5h://127.0.0.1:1080'";
+	assert!(m.ends_with(&format!(" : {want}\n")), "{m}");
+	assert!(o.requests.is_empty());
 }
 
 // two _alpm_download calls on one handle: a resumed .part that goes over
@@ -2334,6 +2658,27 @@ fn user_agent_child() {
 	let (c, r) = run(&case);
 	assert_eq!(c, r, "{}", explain(&c, &r));
 	assert_eq!(c.requests[0].agent.as_deref(), Some("pacman/7.1.0 (test)"));
+	// Rust only: the frontend's string (the C's setenv) wins over the
+	// environment of the process
+	let fx = TempRoot::new("dload-ua");
+	let dir = dir_bytes(fx.dir());
+	let settings = Settings {
+		user_agent: Some(b"pacman/7.1.0 (handle)".to_vec()),
+		..Settings::default()
+	};
+	let mut state = DownloadState::default();
+	let mut rec = Recorder::default();
+	let mut dl = Downloader {
+		settings: &settings,
+		state: &mut state,
+		cb: &mut rec,
+		fetch: None,
+		sandbox: None,
+	};
+	let mut ps = mk(&dir);
+	assert_eq!(dl.download(&mut ps, &dir, &dir), Ok(true));
+	let agent = s.requests()[0].agent.clone();
+	assert_eq!(agent.as_deref(), Some("pacman/7.1.0 (handle)"));
 }
 
 // body lengths off 4096 multiples: at an exact stdio block the C's
@@ -2577,7 +2922,12 @@ fn download_fuzz() {
 	for i in 0..n {
 		let scn = fuzz_scn(&mut rng);
 		let (c, r) = scn.run();
-		assert!(c == r, "case {i}\n{}", explain(&c, &r));
+		assert!(
+			c == r,
+			"case {i} parallel {}\n{}",
+			scn.parallel,
+			explain(&c, &r)
+		);
 		seen[(c.ret + 1) as usize] += 1;
 		let has = |f: &dyn Fn(&DownloadEvent) -> bool| {
 			c.downloads.iter().any(|(_, e)| f(e))
@@ -2759,4 +3109,30 @@ fn http_dates() {
 	assert!(bad.is_empty(), "{bad:#?}");
 	// out-of-range fields and free piece sequences leave a third parsed
 	assert!(parsed >= n / 4, "{parsed} of {n} parsed");
+}
+
+// curl answers a time condition (304) before its size check fails the
+// transfer: the response code the header callback kept is 304, which
+// the next attempt on another server reports when it has none of its
+// own (file://)
+#[test]
+fn size_exceeded_after_time_condition() {
+	let b = body(3000, 4);
+	let s = srv(&[("/p.pkg", vec![file(&b)])]);
+	let scn = Scn::new("size after 304", vec![s], |d, _| {
+		let mut p = db_payload(d, "p.pkg", &[v("@0"), furl(d, "repo")]);
+		p.max_size = 100;
+		p.download_signature = true;
+		vec![p]
+	})
+	.setup(move |d| {
+		fs::create_dir(d.join("repo")).unwrap();
+		fs::write(d.join("repo/p.pkg"), &b).unwrap();
+		set_mtime(&d.join("repo/p.pkg"), T0);
+		fs::write(d.join("p.pkg"), b"old").unwrap();
+	});
+	let (c, r) = scn.run();
+	assert_eq!(c, r, "{}", explain(&c, &r));
+	let line = b"p.pkg: response code 304\n";
+	assert!(c.logs.iter().any(|l| l.1 == line), "{:?}", c.logs);
 }

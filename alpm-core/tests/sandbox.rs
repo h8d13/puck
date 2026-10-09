@@ -293,6 +293,9 @@ fn request_round_trip() {
 			parallel_downloads: 5,
 			disable_dl_timeout: true,
 			dbext: b".files".to_vec(),
+			user_agent: Some(
+				b"pacman/7.1.0 (Linux x86_64)".to_vec()
+			),
 		},
 		state: DownloadState::from_hosts(hosts.clone(), true),
 	};
