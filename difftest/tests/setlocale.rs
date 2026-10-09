@@ -81,7 +81,11 @@ fn locales() -> &'static (PathBuf, Vec<String>) {
 		// saying ISO-8859-1 over UTF-8 data
 		let de = dir.join("de_DE.UTF-8");
 		for (name, file, f) in [
-			("cut_CUT.UTF-8", "LC_TIME", cut as fn(&mut Vec<u8>)),
+			(
+				"cut_CUT.UTF-8",
+				"LC_TIME",
+				cut as fn(&[u8]) -> Vec<u8>,
+			),
 			("bad_BAD.UTF-8", "LC_NUMERIC", flip),
 			("mis_MIS.ISO-8859-1", "LC_PAPER", keep),
 		] {
@@ -100,23 +104,24 @@ fn locales() -> &'static (PathBuf, Vec<String>) {
 			let msg = de.join("LC_MESSAGES/SYS_LC_MESSAGES");
 			fs::copy(msg, d.join("LC_MESSAGES/SYS_LC_MESSAGES"))
 				.unwrap();
-			let mut b = fs::read(d.join(file)).unwrap();
-			f(&mut b);
-			fs::write(d.join(file), b).unwrap();
+			let b = fs::read(d.join(file)).unwrap();
+			fs::write(d.join(file), f(&b)).unwrap();
 		}
 		(dir, names)
 	})
 }
 
-fn cut(b: &mut Vec<u8>) {
-	b.truncate(b.len() / 2);
+fn cut(b: &[u8]) -> Vec<u8> {
+	b[..b.len() / 2].to_vec()
 }
 
-fn flip(b: &mut Vec<u8>) {
-	b[0] ^= 1;
+fn flip(b: &[u8]) -> Vec<u8> {
+	[&[b[0] ^ 1][..], &b[1..]].concat()
 }
 
-fn keep(_: &mut Vec<u8>) {}
+fn keep(b: &[u8]) -> Vec<u8> {
+	b.to_vec()
+}
 
 // locale-probe under env (plus LOCPATH unless archive): the last line,
 // all compares equal

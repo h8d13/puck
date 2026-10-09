@@ -1,6 +1,7 @@
 // unit tests for alpm_core::setlocale on locale directories written
 // here in glibc 2.44's compiled format (LOCPATH, so the archive is not
-// read). difftest compares against glibc on localedef's output
+// read). the equivalence tests compare against glibc on localedef's
+// output
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -41,7 +42,7 @@ fn category(cat: u32, n: u32, items: &[(u32, Vec<u8>)]) -> Vec<u8> {
 	let mut data = vec![0u8; 4];
 	let mut idx = vec![data_at; n as usize];
 	for (i, v) in items {
-		while data.len() % 4 != 0 {
+		while !data.len().is_multiple_of(4) {
 			data.push(0);
 		}
 		idx[*i as usize] = data_at + data.len() as u32;

@@ -1,7 +1,7 @@
 // unit tests for alpm_core::tzfile: POSIX rule strings and a TZif file
 // written here, TZDIR pointing into the test's directory
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use alpm_core::tzfile::{Local, Zone};
 
@@ -13,7 +13,7 @@ fn dir(name: &str) -> PathBuf {
 	d
 }
 
-fn zone(tz: Option<&str>, tzdir: &PathBuf) -> Zone {
+fn zone(tz: Option<&str>, tzdir: &Path) -> Zone {
 	let tzdir = tzdir.display().to_string();
 	Zone::from_env(&|name: &str| match name {
 		"TZ" => tz.map(|t| t.as_bytes().to_vec()),

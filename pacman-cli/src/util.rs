@@ -765,7 +765,7 @@ pub fn decimal(s: String) -> Vec<u8> {
 	let point = &setlocale::current().decimal_point;
 	match s.find('.') {
 		Some(i) if point != b"." => {
-			[s[..i].as_bytes(), point, s[i + 1..].as_bytes()]
+			[&s.as_bytes()[..i], point, &s.as_bytes()[i + 1..]]
 				.concat()
 		}
 		_ => s.into_bytes(),

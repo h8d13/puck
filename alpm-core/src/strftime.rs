@@ -260,14 +260,10 @@ fn internal(
 				fmt.get(f).filter(|c| c.is_ascii_digit())
 			{
 				let d = i32::from(c - b'0');
-				s.width = match s
-					.width
-					.checked_mul(10)
-					.and_then(|w| w.checked_add(d))
-				{
-					Some(w) => w,
-					None => i32::MAX,
-				};
+				s.width =
+					s.width.checked_mul(10)
+						.and_then(|w| w.checked_add(d))
+						.unwrap_or(i32::MAX);
 				f += 1;
 			}
 		}

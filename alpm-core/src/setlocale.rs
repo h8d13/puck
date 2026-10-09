@@ -217,8 +217,8 @@ fn intern(cat: usize, blob: Blob) -> Option<Data> {
 	}
 	let raw = blob.read(8, 4 * n as usize)?;
 	let mut idx = Vec::with_capacity(n as usize);
-	for (i, w) in raw.chunks_exact(4).enumerate() {
-		let at = u32::from_ne_bytes([w[0], w[1], w[2], w[3]]);
+	for (i, w) in raw.as_chunks::<4>().0.iter().enumerate() {
+		let at = u32::from_ne_bytes(*w);
 		if u64::from(at) > blob.len {
 			return None;
 		}
@@ -294,8 +294,8 @@ impl Archive {
 		let mut b = [0; 56];
 		file.read_exact_at(&mut b, 0).ok()?;
 		let mut head = [0; 14];
-		for (i, w) in b.chunks_exact(4).enumerate() {
-			head[i] = u32::from_ne_bytes([w[0], w[1], w[2], w[3]]);
+		for (i, w) in b.as_chunks::<4>().0.iter().enumerate() {
+			head[i] = u32::from_ne_bytes(*w);
 		}
 		// calculate_head_size: the tables fit in the file
 		let end = |off: usize, used: usize, size: u64| {
@@ -768,7 +768,7 @@ impl Resolver<'_> {
 		expand_alias(aliases, name)
 	}
 
-	fn from_archive(&mut self, cat: usize, name: &[u8]) -> Option<Data> {
+	fn archived(&mut self, cat: usize, name: &[u8]) -> Option<Data> {
 		let archive = self.archive.get_or_insert_with(Archive::open);
 		let a = archive.as_ref()?;
 		let (base, len) = a.find(name)?[cat];
@@ -790,13 +790,12 @@ impl Resolver<'_> {
 		}
 		let (dirs, loc_name) = match self.locpath.clone() {
 			None => {
-				if let Some(d) = self.from_archive(cat, &name) {
+				if let Some(d) = self.archived(cat, &name) {
 					return Some(Found::Data(d));
 				}
 				let alias = self.alias(&name);
 				if let Some(a) = &alias
-					&& let Some(d) =
-						self.from_archive(cat, a)
+					&& let Some(d) = self.archived(cat, a)
 				{
 					return Some(Found::Data(d));
 				}
@@ -1018,7 +1017,7 @@ impl Locale {
 	}
 
 	// "C.UTF-8" built in: what the port is before localize, the locale
-	// difftest's C side sets for the frontend
+	// the in-process C frontend is set to in the equivalence tests
 	pub fn c_utf8() -> Locale {
 		let mut l = Locale::c();
 		l.codeset = b"UTF-8".to_vec();
@@ -1074,12 +1073,10 @@ impl Locale {
 			let table = |item: u32| -> Option<Vec<i32>> {
 				let off = u64::from(d.idx[item as usize]);
 				let b = d.blob.read(off, 384 * 4)?;
-				Some(b.chunks_exact(4)
-					.map(|w| {
-						i32::from_ne_bytes([
-							w[0], w[1], w[2], w[3],
-						])
-					})
+				Some(b.as_chunks::<4>()
+					.0
+					.iter()
+					.map(|w| i32::from_ne_bytes(*w))
 					.collect())
 			};
 			l.case = Some((
