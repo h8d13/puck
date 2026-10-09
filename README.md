@@ -14,7 +14,7 @@ cargo build --release -p pacman-cli
 
 ### Testing / Dev
 
-Needs rust toolchain + `fakechroot fakeroot`
+Needs rust toolchain (+ `cargo-deny`, `pre-commit`, `fakechroot`, `fakeroot`)
 
 ```shell
 git clone --recurse-submodules git@github.com:h8d13/puck.git
