@@ -1,0 +1,30 @@
+# cargo deny check (same shape as alpm/deny.toml)
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# own crates are GPL-2.0-or-later; the rest is what the lock resolves to
+# (OR expressions pass on any one branch)
+allow = [
+	"Apache-2.0",
+	"BSD-3-Clause",
+	"CDLA-Permissive-2.0",
+	"GPL-2.0-or-later",
+	"ISC",
+	"MIT",
+	"MPL-2.0",
+	"Unicode-3.0",
+	"Zlib",
+	"bzip2-1.0.6",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
