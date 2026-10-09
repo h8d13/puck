@@ -13,3 +13,6 @@ when it comes to the very tool that orchastrates your operating system and maita
 ---
 
 > Most of the documentation in this folder are artifacts from AI porting.
+
+Written by Opus 5.5 in about 48H non-stop and ~100M tokens, Fable 5.1 agent supervising
+sub-agents (through `git-worktree`). All artifacts were left in the repo on purpose...
