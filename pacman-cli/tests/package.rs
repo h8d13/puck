@@ -115,8 +115,13 @@ fn dates() {
 	assert_eq!(d(253_402_300_799), "Fri Dec 31 23:59:59 9999");
 	assert_eq!(d(253_402_300_800), "Sat Jan  1 00:00:00 10000");
 	assert_eq!(d(-377_705_116_801), "Sun Dec 31 23:59:59 -10000");
+	// the last year localtime takes; %Y's tm_year + 1900 wraps in int
+	// like glibc's
+	assert_eq!(
+		d(67_768_036_191_676_799),
+		"Wed Dec 31 23:59:59 -2147481749"
+	);
 	// tm_year past int: localtime fails
-	assert_eq!(d(67_768_036_191_676_799), "Wed Dec 31 23:59:59 2147485547");
 	assert_eq!(format_date_at(67_768_036_191_676_800, 0), None);
 	assert_eq!(format_date_at(i64::MAX, 0), None);
 }
