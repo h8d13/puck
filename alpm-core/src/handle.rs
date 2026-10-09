@@ -273,7 +273,8 @@ impl Handle {
 		Ok(Handle {
 			user: getuid(),
 			sandbox_for: handle_sandbox,
-			chroot_helper: PathBuf::from("/proc/self/exe"),
+			chroot_helper: crate::sandbox::helper_program()
+				.to_path_buf(),
 			root,
 			dbpath,
 			dbext: b".db".to_vec(),
