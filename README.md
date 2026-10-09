@@ -3,7 +3,7 @@
 > https://en.wikipedia.org/wiki/Pac-Man
 
 [Rust](https://rust-lang.org/) port of [`pacman`](https://gitlab.archlinux.org/pacman/pacman), file by file, checked against the upstream C with
-differential tests.
+differential tests. Written by Opus5.5 in about 48H non-stop and 100M tokens.
 
 ## Setup
 
