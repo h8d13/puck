@@ -4,9 +4,10 @@
 // the C forks, restricts the child (landlock, no_new_privs, seccomp),
 // switches it to the DownloadUser and runs curl there; the parent reads
 // the child's log and download callbacks from a pipe. here the child is
-// a helper process: the running binary executed again with HELPER_ARG,
-// as the DownloadUser through CommandExt::uid/gid (std calls setgid,
-// setgroups(0), setuid before the exec, the C's order). the request
+// a helper process: the running binary (helper_program) executed again
+// with HELPER_ARG, as the DownloadUser through CommandExt::uid/gid (std
+// calls setgid, setgroups(0), setuid before the exec, the C's order).
+// the request
 // (handle options, server error counts, payloads) goes over the helper's
 // stdin, the callbacks come back over its stdout in the C's pipe format.
 // a thread cannot be used: uid, landlock and seccomp would apply to the
@@ -23,7 +24,7 @@
 // getpwnam are checked by the parent before spawning. SIGINT/SIGQUIT
 // count as ignored in the parent while the helper runs (IgnoreSignals).
 use std::ffi::{OsStr, OsString, c_int};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 use std::mem::MaybeUninit;
 use std::net::Shutdown;
@@ -36,6 +37,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use rustix::fs::{Access, access};
 use rustix::net::{
 	RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags,
 	SendAncillaryBuffer, SendAncillaryMessage, SendFlags, recvmsg, sendmsg,
@@ -602,15 +604,77 @@ pub fn helper_main() -> i32 {
 	run_helper(&mut Kernel, &mut cb, req, &mut payloads)
 }
 
-// Some(exit status) when this process is the helper
+// Some(exit status) when this process is the helper. a parent decides
+// its helper program here, at startup: before its cwd moves
 pub fn helper_entry() -> Option<i32> {
-	let arg = std::env::args_os().nth(1)?;
-	match arg.to_str()? {
-		HELPER_ARG => Some(helper_main()),
-		EXEC_ARG => Some(exec_main()),
-		CHROOT_ARG => Some(crate::util::chroot_main()),
-		_ => None,
+	let arg = std::env::args_os().nth(1);
+	let code = match arg.as_deref().and_then(OsStr::to_str) {
+		Some(HELPER_ARG) => helper_main(),
+		Some(EXEC_ARG) => exec_main(),
+		Some(CHROOT_ARG) => crate::util::chroot_main(),
+		_ => {
+			helper_program();
+			return None;
+		}
+	};
+	Some(code)
+}
+
+static PROGRAM: OnceLock<PathBuf> = OnceLock::new();
+
+// the program run again as a helper, decided once per process. the C
+// forks: its child is the running image whatever became of the file.
+// "/proc/self/exe" comes closest (the same image after the file was
+// replaced, pacman upgrading itself; no directory for the DownloadUser
+// to traverse) and is kept while /proc is mounted. without /proc (a
+// chroot entered by hand, some containers) exec of the link fails
+// ENOENT, so the file's path is taken from argv[0] as execvp would,
+// while the cwd is still the one argv[0] is relative to. nothing found:
+// the link stays, the spawn reports its ENOENT
+pub fn helper_program() -> &'static Path {
+	PROGRAM.get_or_init(|| {
+		let link = PathBuf::from("/proc/self/exe");
+		match fs::read_link(&link) {
+			Ok(_) => link,
+			Err(_) => exe_path().unwrap_or(link),
+		}
+	})
+}
+
+// the running binary's file: std's current_exe (readlink of
+// /proc/self/exe), else argv[0] resolved like execvp
+pub fn exe_path() -> io::Result<PathBuf> {
+	if let Ok(p) = std::env::current_exe() {
+		return Ok(p);
 	}
+	let arg0 = std::env::args_os().next().unwrap_or_default();
+	let cwd = std::env::current_dir()?;
+	exe_from_argv0(&arg0, &cwd, std::env::var_os("PATH").as_deref())
+		.ok_or(io::ErrorKind::NotFound.into())
+}
+
+// execvp's lookup of arg0 made absolute against cwd: with a '/' it is
+// the file itself, otherwise the first executable regular file of
+// that name in a PATH entry (an empty entry is cwd; unset, confstr's
+// "/bin:/usr/bin"). an empty arg0 is nothing (execvp: ENOENT)
+pub fn exe_from_argv0(
+	arg0: &OsStr,
+	cwd: &Path,
+	path: Option<&OsStr>,
+) -> Option<PathBuf> {
+	if arg0.is_empty() {
+		return None;
+	}
+	if arg0.as_bytes().contains(&b'/') {
+		return Some(cwd.join(arg0));
+	}
+	let path = path.unwrap_or(OsStr::new("/bin:/usr/bin"));
+	std::env::split_paths(path)
+		.map(|dir| cwd.join(dir).join(arg0))
+		.find(|p| {
+			fs::metadata(p).is_ok_and(|m| m.is_file())
+				&& access(p, Access::EXEC_OK).is_ok()
+		})
 }
 
 // the helper in exec mode, after the parent's switch to the sandbox
@@ -684,7 +748,7 @@ pub struct SandboxExec {
 impl Default for SandboxExec {
 	fn default() -> Self {
 		SandboxExec {
-			program: PathBuf::from("/proc/self/exe"),
+			program: helper_program().to_path_buf(),
 			args: vec![EXEC_ARG.into()],
 			host: Box::new(System),
 		}
@@ -884,9 +948,8 @@ pub struct HelperSandbox {
 	pub user: Vec<u8>,
 	pub disable_filesystem: bool,
 	pub disable_syscalls: bool,
-	// the helper and its arguments, by default this binary with
-	// HELPER_ARG; /proc/self/exe still runs after the binary was
-	// replaced on disk (pacman upgrading itself)
+	// the helper and its arguments, by default helper_program with
+	// HELPER_ARG
 	pub program: PathBuf,
 	pub args: Vec<OsString>,
 	pub host: Box<dyn Host>,
@@ -902,7 +965,7 @@ impl HelperSandbox {
 			user: until_nul(user).to_vec(),
 			disable_filesystem,
 			disable_syscalls,
-			program: PathBuf::from("/proc/self/exe"),
+			program: helper_program().to_path_buf(),
 			args: vec![HELPER_ARG.into()],
 			host: Box::new(System),
 		}

@@ -1019,3 +1019,177 @@ fn xfercommand() {
 	restore_local(&dir);
 	assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+// bin on args inside unshare(1): uid 0 in a user namespace, an empty
+// tmpfs over /proc, the host's /usr bound at root/usr so the chroot has
+// a shell, then fakeroot (the DownloadUser switch faked as in
+// xfercommand; its real chown of the download dir to nobody is EINVAL
+// in the namespace, not the EPERM it ignores, so it must not try).
+// LD_LIBRARY_PATH names the C build: its RUNPATH is $ORIGIN, which
+// ld.so expands through /proc/self/exe, and without it the system
+// libalpm would load in silence
+fn run_without_proc(
+	bin: &Path,
+	args: &[String],
+	cwd: &Path,
+	root: &Path,
+) -> Run {
+	let script = "mount -t tmpfs none /proc && test ! -e /proc/self \
+		&& mount --bind /usr \"$NP_ROOT/usr\" && exec fakeroot \"$@\"";
+	let mut cmd = Command::new("unshare");
+	cmd.args(["--map-root-user", "--mount", "sh", "-c", script, "sh"]);
+	cmd.arg(bin).args(args).current_dir(cwd).env_clear();
+	cmd.envs(UTC_C_UTF8.iter().copied());
+	let o = cmd
+		.env("COLUMNS", "80")
+		.env("PATH", "/usr/bin:/bin")
+		.env("NP_ROOT", root)
+		.env("FAKEROOTDONTTRYCHOWN", "1")
+		.env("LD_LIBRARY_PATH", c_pacman().parent().unwrap())
+		.stdin(Stdio::null())
+		.output()
+		.unwrap();
+	Run {
+		status: o.status.code().expect("killed by a signal"),
+		out: o.stdout,
+		err: stamped(&cut(&without_goto_err(&o.stderr))),
+	}
+}
+
+// pacman.log without its "Running '...'" line (argv[0] is each
+// binary's path under fakeroot) and its stamps
+fn log_without_running(log: &[u8]) -> Vec<u8> {
+	let lines = log.split_inclusive(|&c| c == b'\n');
+	let kept = lines.filter(|l| !l.windows(10).any(|w| w == b"] Running "));
+	stamped(&kept.flatten().copied().collect::<Vec<u8>>()).text
+}
+
+// a scriptlet, a hook and a sandboxed download on both binaries where
+// /proc is not mounted (a chroot entered by hand): the C forks its
+// children, the port runs its binary again as a helper, found without
+// /proc/self/exe. compared: status, stdout, stderr, pacman.log, the
+// installed file, the synced dbs
+#[test]
+fn without_proc() {
+	let mut rng = Rng::new(0x9e0c);
+	let w = loop {
+		let w = SyncWorld::generate(&mut rng, "cli-noproc");
+		let valid = !w.repos.is_empty()
+			&& w.dbs.iter().all(|d| {
+				matches!(d, difftest::DbFile::Valid(_))
+			});
+		if valid {
+			break w;
+		}
+	};
+	let paths = setup(&w, Some("Never"));
+	let dir = w.fx.dir().to_path_buf();
+	// a files list for every installed package, as a real local db has:
+	// the port loads them all before the conflict check, the C only the
+	// ones it needs (PORTING.md, "-Sp" follow-up)
+	for e in fs::read_dir(dir.join("local.orig")).unwrap() {
+		let files = e.unwrap().path().join("files");
+		if files.parent().unwrap().is_dir() && !files.exists() {
+			fs::write(files, "%FILES%\n\n").unwrap();
+		}
+	}
+	let root = dir.join("root");
+	fs::create_dir_all(root.join("usr")).unwrap();
+	for (link, to) in
+		[("bin", "usr/bin"), ("lib", "usr/lib"), ("lib64", "usr/lib")]
+	{
+		std::os::unix::fs::symlink(to, root.join(link)).unwrap();
+	}
+	let info = "pkgname = sc\npkgver = 1-1\npkgdesc = scriptlet\n\
+		arch = x86_64\nsize = 2\nbuilddate = 1\npackager = x\n";
+	let install =
+		"post_install() {\n\techo \"scriptlet ran in $(pwd)\"\n}\n";
+	let pkg = dir.join("sc-1-1-x86_64.pkg.tar");
+	write_db(
+		&pkg,
+		Comp::None,
+		&difftest::ustar(&[
+			difftest::tar_file(".PKGINFO", info.as_bytes()),
+			difftest::tar_file(".INSTALL", install.as_bytes()),
+			difftest::tar_dir("opt/"),
+			difftest::tar_dir("opt/sc/"),
+			difftest::tar_file("opt/sc/conf", b"x\n"),
+		]),
+	);
+	fs::write(
+		dir.join("hooks/sc.hook"),
+		"[Trigger]\nOperation = Install\nType = Package\nTarget = sc\n\
+		[Action]\nDescription = sc hook\nWhen = PostTransaction\n\
+		Exec = /bin/sh -c 'echo hook ran'\n",
+	)
+	.unwrap();
+	let filem = format!("file://{}", dir.join("mirror").display());
+	xfer_conf(
+		&dir,
+		&w.repos,
+		"DownloadUser = nobody\nDisableSandboxFilesystem\n",
+		&filem,
+	);
+	let pkgpath = pkg.display().to_string();
+	let cmds: [&[&str]; 2] = [&["-U", &pkgpath, "--noconfirm"], &["-Sy"]];
+	let (c, r) = (c_pacman(), rust_pacman());
+	let mut failures = Vec::new();
+	for cmd in cmds {
+		let mut args: Vec<String> =
+			cmd.iter().map(|s| s.to_string()).collect();
+		args.extend(paths.iter().cloned());
+		let side = |bin: &Path| {
+			restore_sync(&dir);
+			restore_local(&dir);
+			let _ = fs::remove_dir_all(root.join("opt"));
+			let _ = fs::remove_file(dir.join("log/pacman.log"));
+			let run = run_without_proc(bin, &args, &dir, &root);
+			let log = fs::read(dir.join("log/pacman.log"))
+				.unwrap_or_default();
+			let installed = fs::read(root.join("opt/sc/conf")).ok();
+			let mut synced = snapshot_sync(&dir);
+			synced.retain(|(n, _)| !n.starts_with("download-"));
+			(run, log_without_running(&log), installed, synced)
+		};
+		let (cs, rs) = (side(&c), side(&r));
+		let label = cmd.join(" ");
+		println!(
+			"{}  {label}  [{}]",
+			if cs == rs { "equal" } else { "DIFF" },
+			cs.0.status
+		);
+		// the C side ran the children for real
+		assert_eq!(
+			cs.0.status,
+			0,
+			"{label}\n{}",
+			lossy(&cs.0.err.text)
+		);
+		if cmd[0] == "-U" {
+			let log = lossy(&cs.1);
+			assert!(log.contains(
+				"[ALPM-SCRIPTLET] scriptlet ran in /\n"
+			));
+			assert!(
+				log.contains("[ALPM-SCRIPTLET] hook ran\n"),
+				"{log}"
+			);
+		}
+		if cs != rs {
+			failures.push(format!(
+				"{label}\n-- C\n{}\n{}\n{}\n{:?}\n-- Rust\n{}\n{}\n{}\n{:?}",
+				lossy(&cs.0.out),
+				lossy(&cs.0.err.text),
+				lossy(&cs.1),
+				cs.2,
+				lossy(&rs.0.out),
+				lossy(&rs.0.err.text),
+				lossy(&rs.1),
+				rs.2,
+			));
+		}
+	}
+	restore_sync(&dir);
+	restore_local(&dir);
+	assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

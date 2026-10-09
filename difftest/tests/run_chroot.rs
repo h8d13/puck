@@ -56,6 +56,45 @@ fn under_fakechroot() {
 	assert!(stdout.contains("5 passed"), "fc_ tests did not all run");
 }
 
+// the fc_ tests again where /proc is not mounted (a chroot entered by
+// hand): the C forks its child, the port spawns a helper it can no
+// longer find through /proc/self/exe. fc_fixed checks the resolution
+#[test]
+fn without_proc() {
+	if in_child() {
+		return;
+	}
+	let out = difftest::rerun_without_proc(
+		&["fc_"],
+		Some("fakechroot"),
+		&[(CHILD, "1")],
+	);
+	print!("{}", String::from_utf8_lossy(&out.stdout));
+	eprint!("{}", String::from_utf8_lossy(&out.stderr));
+	assert!(out.status.success(), "run without /proc: {}", out.status);
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	assert!(stdout.contains("5 passed"), "fc_ tests did not all run");
+}
+
+// without /proc the helper program is this binary by its argv[0], and
+// a fresh Handle's chroot helper is that program
+fn check_resolution_without_proc() {
+	use alpm_core::sandbox::{exe_path, helper_program};
+	assert!(!Path::new("/proc/self").exists(), "/proc is mounted");
+	assert!(std::env::current_exe().is_err());
+	let exe = exe_path().unwrap();
+	assert!(exe.is_absolute(), "{}", exe.display());
+	assert!(exe.ends_with(Path::new(&std::env::args().next().unwrap())));
+	assert_eq!(helper_program(), exe);
+	let fix = Fix::new("np-resolution");
+	let h = alpm_core::handle::Handle::initialize(
+		&fix.tmp.root(),
+		&fix.tmp.dbpath(),
+	)
+	.unwrap();
+	assert_eq!(h.chroot_helper(), exe);
+}
+
 fn pick<T: Copy>(rng: &mut Rng, items: &[T]) -> T {
 	items[rng.below(items.len())]
 }
@@ -247,6 +286,9 @@ fn fc_fixed() {
 		return;
 	}
 	use difftest::HookRec::{Log, Scriptlet};
+	if difftest::without_proc() {
+		check_resolution_without_proc();
+	}
 	let fix = Fix::new("fc-fixed");
 	let (mut c, mut r) = (fix.c(), fix.r());
 	let line = |s: &str| Scriptlet(s.as_bytes().to_vec());
@@ -338,24 +380,31 @@ fn fc_fixed() {
 	// _alpm_reset_signals: dispositions the process ignores are back
 	// to default in the child (SIGHUP 1, SIGUSR1 10; not SIGCHLD, the
 	// C's waitpid would find no child). the shell's own SigIgn (bash
-	// ignores SIGQUIT) is the run without them
-	let status = "while read -r k v; do \
+	// ignores SIGQUIT) is the run without them. read from the child's
+	// /proc/self/status: nothing to read without /proc
+	if !difftest::without_proc() {
+		let status = "while read -r k v; do \
 		[ \"$k\" = SigIgn: ] && echo \"$v\"; done < /proc/self/status";
-	let argv = vec![b"/bin/sh".to_vec(), b"-c".to_vec(), status.into()];
-	let args: Vec<&[u8]> = argv.iter().map(|a| &a[..]).collect();
-	fix.reset();
-	let plain = c.run_chroot(Some(b"/bin/sh"), &argv, None);
-	let sigs = [1, 10];
-	for sig in sigs {
-		difftest::c_ignore_signal(sig, true);
+		let argv = vec![
+			b"/bin/sh".to_vec(),
+			b"-c".to_vec(),
+			status.into(),
+		];
+		let args: Vec<&[u8]> = argv.iter().map(|a| &a[..]).collect();
+		fix.reset();
+		let plain = c.run_chroot(Some(b"/bin/sh"), &argv, None);
+		let sigs = [1, 10];
+		for sig in sigs {
+			difftest::c_ignore_signal(sig, true);
+		}
+		let cr = c.run_chroot(Some(b"/bin/sh"), &argv, None);
+		let ok = run_chroot(&mut r.h, Some(b"/bin/sh"), &args, None);
+		for sig in sigs {
+			difftest::c_ignore_signal(sig, false);
+		}
+		assert_eq!(cr, plain, "C signals\n{}", show(&cr));
+		assert_eq!(cr, r.take(ok, 1), "signals");
 	}
-	let cr = c.run_chroot(Some(b"/bin/sh"), &argv, None);
-	let ok = run_chroot(&mut r.h, Some(b"/bin/sh"), &args, None);
-	for sig in sigs {
-		difftest::c_ignore_signal(sig, false);
-	}
-	assert_eq!(cr, plain, "C signals\n{}", show(&cr));
-	assert_eq!(cr, r.take(ok, 1), "signals");
 	// a file of no known format: execv fails, no /bin/sh fallback
 	// (execvp's)
 	fix.reset();

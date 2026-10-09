@@ -276,7 +276,7 @@ come along.
 | twin-root steps for risky real cases | gate covers ~20 steps on a fresh root; missing: a `-Syu` across months of updates (old snapshot via the Arch Linux Archive), `replaces`, archlinux-keyring upgraded in the same transaction, mkinitcpio/kernel/dkms hooks, interactive conflict prompts, an interrupted commit (SIGINT mid-extract) and the run after it | `scripts/twin-root.sh` | todo |
 | WKD/keyserver import success path | implemented, only the failure path is compared (difftest keyrings disable dirmngr) | `signing` row; `difftest/tests/signing_gpg.rs` | todo: a local keyserver or WKD fixture |
 | signal edges | the handler thread decides after delivery, so a signal at a state edge can land on the other side; no segv/winch handler | `sighandler` note | accepted for now; revisit with the interrupted-commit twin step |
-| helper re-exec through `/proc/self/exe` | chroot exec and the sandbox helper fail without a mounted `/proc` where the C forks (minimal chroots, some containers) | `hook`/`run_chroot` and `sandbox` notes | todo: fall back to argv[0]/`current_exe` or report clearly |
+| helper re-exec through `/proc/self/exe` | chroot exec and the sandbox helper failed without a mounted `/proc` where the C forks (minimal chroots, some containers) | `hook`/`run_chroot` and `sandbox` notes | done: `sandbox::helper_program`, decided at startup (`helper_entry`): `/proc/self/exe` while `/proc` is mounted, else argv[0] resolved like execvp (`exe_path`); difftests `run_chroot`/`hook`/`sandbox` `without_proc` reruns and `cli_binary without_proc` (both binaries in a mount namespace without `/proc`); what stays apart is a divergences row |
 | aarch64 and other arches | `hash_sdbm`/`pathcmp` follow the platform's `char`, never run there; sandbox syscall list per arch | Notes on `c_char` | todo: run the suites on aarch64 |
 | `-U <url>` with the built-in downloader at binary level | covered through XferCommand only | `cli_binary` xfercommand | todo |
 | open follow-ups | `-Sp` without a local files list (C fails, port prints); unreadable local desc read by `-Sp`/`-Sup`; -Qpc debug in difftest `query`; root cause of the C abort behind `tp_relation` (C bug or difftest free path) | follow-up table | todo |
@@ -757,8 +757,10 @@ installed as `pacman`/`pacman-conf` (handover row "install names").
 - `run_chroot`/`unpack` share one chdir check on effective ids
   (`AT_EACCESS`, like chdir).
 - `hook`/`run_chroot`: the C child's part runs in a helper, the binary
-  re-executed as `/proc/self/exe --alpm-chroot-exec ROOT CMD ARGV...`
-  (`Handle::set_chroot_helper`, tests use difftest's sandbox-helper):
+  re-executed as `<helper_program> --alpm-chroot-exec ROOT CMD ARGV...`
+  (`Handle::set_chroot_helper`, tests use difftest's sandbox-helper;
+  the spawn is the parent's, before any chroot, so the helper's path
+  is the parent's view):
   chroot unless root is "/", chdir("/"), umask(0022), the signal reset,
   exec with the caller's argv[0], each failure as the C child's text
   and exit 1. Equal to the C: argv[0] (`ldconfig: ...`), slash-less
@@ -769,9 +771,17 @@ installed as `pacman`/`pacman-conf` (handover row "install names").
   like the C (2046-byte cut, NUL cuts, unterminated last line delivered
   twice as in the C).
 - `sandbox`: the download child is a re-exec of the binary
-  (`/proc/self/exe --alpm-sandbox-helper`) with `CommandExt::uid`/`gid`;
+  (`<helper_program> --alpm-sandbox-helper`) with `CommandExt::uid`/`gid`;
   the pacman binary's `main` must start with
   `if let Some(c) = alpm_core::sandbox::helper_entry() { exit(c) }`.
+  `sandbox::helper_program` stands for the C's fork: decided once in
+  `helper_entry` (before the cwd moves), `/proc/self/exe` while `/proc`
+  is mounted (the running image, as a fork: the same after the package
+  replaced the file, no directory for the DownloadUser to traverse),
+  otherwise argv[0] made absolute or searched in PATH as execvp does
+  (`exe_path`, `exe_from_argv0`; std's `current_exe` is the link alone).
+  No fexecve in safe std/rustix: an O_PATH fd to the binary would be
+  the fork-like choice but needs `/proc/self/fd` or an unsafe exec.
   Request over stdin, callbacks over stdout in the C pipe format.
   no_new_privs comes before landlock (needed unprivileged); getpwnam via
   `getent passwd`; parent sends SIGKILL after the loop (C: SIGTERM).
@@ -915,7 +925,7 @@ Follow-ups raised by port units:
 | be_package logs libarchive's open/read failures ("could not open file X: ..." for unknown formats and dirs, "error while reading package" for a cut first header, "could not parse package description file" for a cut `.PKGINFO`); `sync_clean` and difftest query filter them today | cleancache | done: header and data read failures log "error while reading package"; difftests cut libarchive's text after the path (`cut_archive_text`, twin-compare's `ARCHIVE_TEXT`) instead of dropping lines: sync_clean's filter and testpkg's log-only tallies gone, cli_binary's cache holds a non-package and a download dir |
 | `be_package::changelog` without callbacks: -Qpc missed "opening archive" | qk | done (cli_binary `-Qpc --debug`) |
 | optdepends' ` [installed]`/` [pending]` after install/upgrade: the binary's `Lookup for ()` had no lists | twin-root | done: `PackageOp::local`/`pending` (local cache, trans->add at DONE; the driver keeps satisfier copies of the targets in trans.add while it lends them out), `Lookup` removed |
-| `-Sp` of an installed sync package whose local entry has no files list: the C fails ("could not open file .../files", invalid package), the port prints | output (cli_binary local_time) | todo (query/lazy-load owner) |
+| `-Sp` of an installed sync package whose local entry has no files list: the C fails ("could not open file .../files", invalid package), the port prints; `-U`/`-S` log "could not open file .../files" for every such entry (`find_fileconflicts` loads all local files lists first, the C's getters only the ones the check reaches) | output (cli_binary local_time), helper-reexec (cli_binary without_proc gives every entry a files list) | todo (query/lazy-load owner) |
 | one `logv(cb, ...)` helper (copies in hook.rs, deps.rs, trans.rs, util's `log_parts`) | integrate2 | done: `callbacks::logv` everywhere (hook, deps, trans, sync, add, remove, util, be_package, conflict, sandbox_fs copies gone) |
 | `-D` dispatch arm: `pacman_database(config, handle, targets, &mut o)` | m1close | done |
 | setup_libalpm's server adds through `Handle::dbs_mut()` (`Db::add_server` takes the callbacks) | m1close | done |
@@ -954,6 +964,7 @@ divergences left with the owned readers.
 | a pax record name past its 512-byte window: the port sees up to the block end, libarchive's copy buffer may hold less or more | "overlarge attribute name" on names past 512 bytes only |
 | fifos made with mknodat, libarchive's mkfifo (glibc's internal mknodat) | none on a system; under fakeroot only the port's is faked |
 | wcwidth: unassigned code points -1 in glibc, 1/2/0 in unicode-width (814641), 84 marks zero width in unicode-width, 8 ambiguous (U+3248-324F), 3 special rules | `string_length`/wrapping differ for such text; the C returns `(size_t)-1` for unassigned |
+| helper processes (chroot exec, sandbox) where the C forks: without `/proc` the helper is the file argv[0] names at spawn time (`sandbox::helper_program`), not the running image; nothing found (argv[0] not a path, the binary removed or exec'd by fd) leaves `/proc/self/exe` | scriptlets, hooks and ldconfig log `could not fork a new process (No such file or directory)` and count as failed, downloads fail with `unexpected error`, where the C runs; after pacman upgraded itself in a run without `/proc` the later hooks run the new file's helper; a DownloadUser must be able to traverse the binary's path (with `/proc` the link needs none) |
 
 ## Divergences from pacman (ALPM parsers)
 
