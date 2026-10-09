@@ -365,7 +365,7 @@ fn sha256(
 		}
 		return 1;
 	};
-	if calc.inner() != want {
+	if calc.as_ref() != want {
 		let what = b"SHA256 checksum mismatch";
 		return mismatch(o, c, pkgname, fp, backup, what);
 	}

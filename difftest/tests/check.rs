@@ -1380,11 +1380,11 @@ fn mtree_line(rng: &mut Rng, path: &str, n: &Node, set: &Set) -> String {
 				);
 				props.push(format!(
 					"md5digest={}",
-					hex(m.inner())
+					hex(m.as_ref())
 				));
 			}
 			let s = Sha256Checksum::calculate_from(&n.content);
-			props.push(format!("sha256digest={}", hex(s.inner())));
+			props.push(format!("sha256digest={}", hex(s.as_ref())));
 		}
 		MtreeType::Link => {
 			let t = escape(rng, &n.target);
@@ -1990,7 +1990,7 @@ fn check_divergences() {
 	assert!(c.contains("p: no mtree file\n"), "{c}");
 	assert_eq!(c, r);
 
-	let sha = hex(Sha256Checksum::calculate_from(b"hello\n").inner());
+	let sha = hex(Sha256Checksum::calculate_from(b"hello\n").as_ref());
 	let (u, g) = me;
 	let mtree =
 		format!("#mtree\n/set type=file uid={u} gid={g} mode=644\n\

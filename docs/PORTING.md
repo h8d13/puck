@@ -197,8 +197,8 @@ root-changing ops under fakechroot + fakeroot (time, CPU, peak RSS,
 strace call counts, output and the resulting tree under faked ids):
 
 ```
-./bench.py [-n RUNS] [-- OP ...]           # C /usr/bin/pacman vs puck
-./bench_trans.py [-n RUNS] [-l] [OP ...]   # -l lists the ops, -k keeps
+bench/bench.py [-n RUNS] [-- OP ...]           # C /usr/bin/pacman vs puck
+bench/bench_trans.py [-n RUNS] [-l] [OP ...]   # -l lists the ops, -k keeps
 ```
 
 Master 8c8d768, puck/C, every output and tree equal:

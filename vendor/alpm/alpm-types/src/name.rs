@@ -80,11 +80,13 @@ impl BuildTool {
     pub fn matches_restriction(&self, restrictions: &[Name]) -> bool {
         restrictions
             .iter()
-            .any(|restriction| restriction.eq(self.inner()))
+            .any(|restriction| restriction.eq(self.as_ref()))
     }
+}
 
-    /// Return a reference to the inner type
-    pub fn inner(&self) -> &Name {
+impl AsRef<Name> for BuildTool {
+    /// Returns a reference to the inner [`Name`].
+    fn as_ref(&self) -> &Name {
         &self.0
     }
 }
@@ -99,7 +101,7 @@ impl FromStr for BuildTool {
 
 impl Display for BuildTool {
     fn fmt(&self, fmt: &mut Formatter) -> std::fmt::Result {
-        write!(fmt, "{}", self.inner())
+        write!(fmt, "{}", self.as_ref())
     }
 }
 
@@ -143,11 +145,6 @@ impl Name {
     pub fn new(name: &str) -> Result<Self, Error> {
         Self::from_str(name)
     }
-
-    /// Return a reference to the inner type
-    pub fn inner(&self) -> &str {
-        &self.0
-    }
 }
 
 impl Name {
@@ -174,6 +171,8 @@ impl Name {
     /// Returns an error if `input` does not begin with a valid [alpm-package-name].
     ///
     /// [alpm-package-name]: https://alpm.archlinux.page/specifications/alpm-package-name.7.html
+    // TODO(cleanup): Investigate the arithmetic_side_effects
+    #[expect(clippy::arithmetic_side_effects)]
     pub(crate) fn parse_name_followed_by_version<'a>(
         delimiter_count: usize,
     ) -> impl Parser<Input<'a>, Self, ErrMode<ParseStack<'a>>> {
@@ -300,13 +299,13 @@ impl FromStr for Name {
 
 impl Display for Name {
     fn fmt(&self, fmt: &mut Formatter) -> std::fmt::Result {
-        write!(fmt, "{}", self.inner())
+        write!(fmt, "{}", self.as_ref())
     }
 }
 
 impl AsRef<str> for Name {
     fn as_ref(&self) -> &str {
-        self.inner()
+        &self.0
     }
 }
 
@@ -413,6 +412,7 @@ mod tests {
     use insta::assert_snapshot;
     use proptest::prelude::*;
     use rstest::rstest;
+    use testresult::TestResult;
 
     use super::*;
     use crate::configure_insta;
@@ -421,7 +421,7 @@ mod tests {
     #[case(
         "bar",
         ["foo".parse(), "bar".parse()].into_iter().flatten().collect::<Vec<Name>>(),
-        Ok(BuildTool::from_str("bar").unwrap()),
+        Ok(BuildTool::from_str("bar")?),
     )]
     #[case(
         "bar",
@@ -434,11 +434,13 @@ mod tests {
         #[case] buildtool: &str,
         #[case] restrictions: Vec<Name>,
         #[case] result: Result<BuildTool, Error>,
-    ) {
+    ) -> TestResult {
         assert_eq!(
             BuildTool::new_with_restriction(buildtool, &restrictions),
             result
         );
+
+        Ok(())
     }
 
     #[rstest]
@@ -448,9 +450,11 @@ mod tests {
         #[case] buildtool: &str,
         #[case] restrictions: Vec<Name>,
         #[case] result: bool,
-    ) {
-        let buildtool = BuildTool::from_str(buildtool).unwrap();
+    ) -> TestResult {
+        let buildtool = BuildTool::from_str(buildtool)?;
         assert_eq!(buildtool.matches_restriction(&restrictions), result);
+
+        Ok(())
     }
 
     #[rstest]
@@ -483,31 +487,33 @@ mod tests {
 
         #[test]
         fn valid_name_from_string(name_str in r"[a-zA-Z0-9_@+]+[a-zA-Z0-9\-._@+]*") {
-            let name = Name::from_str(&name_str).unwrap();
+            let name = Name::from_str(&name_str)?;
             prop_assert_eq!(name_str, format!("{}", name));
         }
 
         #[test]
         fn invalid_name_from_string_start(name_str in r"[-.][a-zA-Z0-9@._+-]*") {
-            let error = Name::from_str(&name_str).unwrap_err();
-            assert!(matches!(error, Error::ParseError(_)));
+            let Err(Error::ParseError(_)) = Name::from_str(&name_str) else {
+                panic!("Expected to return an error, but succeeded instead");
+            };
         }
 
         #[test]
         fn invalid_name_with_invalid_characters(name_str in r"[^\w@._+-]+") {
-            let error = Name::from_str(&name_str).unwrap_err();
-            assert!(matches!(error, Error::ParseError(_)));
+            let Err(Error::ParseError(_)) = Name::from_str(&name_str) else {
+                panic!("Expected to return an error, but succeeded instead");
+            };
         }
     }
 
     #[rstest]
-    #[case("example.so", SharedObjectName("example.so".parse().unwrap()))]
-    #[case("example.so.so", SharedObjectName("example.so.so".parse().unwrap()))]
-    #[case("libexample.1.so", SharedObjectName("libexample.1.so".parse().unwrap()))]
+    #[case("example.so", SharedObjectName("example.so".parse()?))]
+    #[case("example.so.so", SharedObjectName("example.so.so".parse()?))]
+    #[case("libexample.1.so", SharedObjectName("libexample.1.so".parse()?))]
     fn shared_object_name_parser(
         #[case] input: &str,
         #[case] expected_result: SharedObjectName,
-    ) -> testresult::TestResult<()> {
+    ) -> TestResult {
         let shared_object_name = SharedObjectName::new(input)?;
         assert_eq!(expected_result, shared_object_name);
         assert_eq!(input, shared_object_name.as_str());

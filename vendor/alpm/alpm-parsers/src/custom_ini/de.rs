@@ -42,14 +42,13 @@ use std::{
     error,
     fmt::{self, Display},
     marker::PhantomData,
-    num,
-    str,
-    str::{FromStr, ParseBoolError},
+    num::{self, ParseIntError},
+    str::{self, FromStr, ParseBoolError},
 };
 
 use serde::{
     Deserialize,
-    de::{self, DeserializeOwned, IntoDeserializer, Visitor, value::SeqDeserializer},
+    de::{self, DeserializeOwned, Error as _, IntoDeserializer, Visitor, value::SeqDeserializer},
     forward_to_deserialize_any,
 };
 use winnow::Parser;
@@ -310,7 +309,11 @@ impl<'de> de::Deserializer<'de> for SeqItemDeserializer {
     where
         V: Visitor<'de>,
     {
-        visitor.visit_u64(self.0.parse().unwrap())
+        visitor.visit_u64(
+            self.0
+                .parse()
+                .map_err(|source: ParseIntError| Self::Error::custom(source.to_string()))?,
+        )
     }
 
     forward_to_deserialize_any! {
@@ -344,6 +347,7 @@ pub fn from_str<T: DeserializeOwned>(s: &str) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use serde::Deserialize;
+    use testresult::TestResult;
 
     use super::*;
 
@@ -399,9 +403,11 @@ mod tests {
     }
 
     #[test]
-    fn deserialize() {
-        let v = from_str::<TestModel>(TEST_INPUT).unwrap();
+    fn deserialize() -> TestResult {
+        let v = from_str::<TestModel>(TEST_INPUT)?;
         assert_eq!(expected(), v);
+
+        Ok(())
     }
 
     #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -428,8 +434,8 @@ mod tests {
         u64_list = 3
         bool = true";
     #[test]
-    fn deserialize_types() {
-        let value = from_str::<TypeTestModel>(TYPE_TEST_INPUT).unwrap();
+    fn deserialize_types() -> TestResult {
+        let value = from_str::<TypeTestModel>(TYPE_TEST_INPUT)?;
         assert_eq!(
             TypeTestModel {
                 i64: -64,
@@ -442,6 +448,8 @@ mod tests {
             },
             value
         );
+
+        Ok(())
     }
 
     #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -471,16 +479,18 @@ mod tests {
     // This test asserts that the deserialization fails. If the behavior changes in the future,
     // this test should be updated to assert that the deserialization succeeds.
     #[test]
-    fn deserialize_with_flatten() {
+    fn deserialize_with_flatten() -> TestResult {
         let expected = FlattenTestModelInner {
             u64: 42,
             u64_list: vec![1],
         };
 
-        let value = from_str::<FlattenTestModelInner>(FLATTEN_TEST_INPUT).unwrap();
+        let value = from_str::<FlattenTestModelInner>(FLATTEN_TEST_INPUT)?;
         assert_eq!(expected, value);
 
         let value = from_str::<FlattenTestModel>(FLATTEN_TEST_INPUT);
         assert!(value.is_err());
+
+        Ok(())
     }
 }

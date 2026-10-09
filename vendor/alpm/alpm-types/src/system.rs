@@ -45,7 +45,7 @@ use crate::Error;
 /// assert_eq!("x86_64", format!("{}", SystemArchitecture::X86_64));
 /// assert_eq!(
 ///     "custom_arch",
-///     format!("{}", SystemArchitecture::from_str("custom_arch").unwrap())
+///     format!("{}", SystemArchitecture::from_str("custom_arch")?)
 /// );
 /// # Ok(())
 /// # }
@@ -214,13 +214,6 @@ impl<'de> Deserialize<'de> for UnknownArchitecture {
     }
 }
 
-impl UnknownArchitecture {
-    /// Return a reference to the inner type
-    pub fn inner(&self) -> &str {
-        &self.0
-    }
-}
-
 impl From<UnknownArchitecture> for SystemArchitecture {
     /// Converts an [`UnknownArchitecture`] into a [`SystemArchitecture`].
     fn from(value: UnknownArchitecture) -> Self {
@@ -237,13 +230,13 @@ impl From<UnknownArchitecture> for Architecture {
 
 impl Display for UnknownArchitecture {
     fn fmt(&self, fmt: &mut Formatter) -> std::fmt::Result {
-        write!(fmt, "{}", self.inner())
+        write!(fmt, "{}", self.as_ref())
     }
 }
 
 impl AsRef<str> for UnknownArchitecture {
     fn as_ref(&self) -> &str {
-        self.inner()
+        &self.0
     }
 }
 
@@ -560,7 +553,6 @@ mod tests {
     use insta::assert_snapshot;
     use rstest::rstest;
     use strum::ParseError;
-    #[cfg(feature = "serde")]
     use testresult::TestResult;
 
     use super::*;
@@ -631,9 +623,14 @@ mod tests {
 
     #[rstest]
     #[case(SystemArchitecture::Aarch64, "aarch64")]
-    #[case(SystemArchitecture::from_str("f_o_o").unwrap(), "f_o_o")]
-    fn system_architecture_format_string(#[case] arch: SystemArchitecture, #[case] arch_str: &str) {
+    #[case(SystemArchitecture::from_str("f_o_o")?, "f_o_o")]
+    fn system_architecture_format_string(
+        #[case] arch: SystemArchitecture,
+        #[case] arch_str: &str,
+    ) -> TestResult {
         assert_eq!(arch_str, format!("{arch}"));
+
+        Ok(())
     }
 
     #[rstest]
@@ -674,9 +671,14 @@ mod tests {
     #[rstest]
     #[case(Architecture::Any, "any")]
     #[case(SystemArchitecture::Aarch64.into(), "aarch64")]
-    #[case(Architecture::from_str("foo").unwrap(), "foo")]
-    fn architecture_format_string(#[case] arch: Architecture, #[case] arch_str: &str) {
+    #[case(Architecture::from_str("foo")?, "foo")]
+    fn architecture_format_string(
+        #[case] arch: Architecture,
+        #[case] arch_str: &str,
+    ) -> TestResult {
         assert_eq!(arch_str, format!("{arch}"));
+
+        Ok(())
     }
 
     #[rstest]

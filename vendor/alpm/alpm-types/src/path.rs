@@ -55,9 +55,11 @@ impl AbsolutePath {
             false => Err(Error::PathNotAbsolute(path)),
         }
     }
+}
 
-    /// Return a reference to the inner type
-    pub fn inner(&self) -> &Path {
+impl AsRef<Path> for AbsolutePath {
+    /// Returns a reference to the inner [`Path`].
+    fn as_ref(&self) -> &Path {
         &self.0
     }
 }
@@ -80,7 +82,7 @@ impl FromStr for AbsolutePath {
 
 impl Display for AbsolutePath {
     fn fmt(&self, fmt: &mut Formatter) -> std::fmt::Result {
-        write!(fmt, "{}", self.inner().display())
+        write!(fmt, "{}", self.as_ref().display())
     }
 }
 
@@ -246,9 +248,11 @@ impl RelativeFilePath {
         }
         Ok(RelativeFilePath(path))
     }
+}
 
-    /// Return a reference to the inner type
-    pub fn inner(&self) -> &Path {
+impl AsRef<Path> for RelativeFilePath {
+    /// Returns a reference to the inner [`Path`].
+    fn as_ref(&self) -> &Path {
         &self.0
     }
 }
@@ -268,7 +272,7 @@ impl FromStr for RelativeFilePath {
 
 impl Display for RelativeFilePath {
     fn fmt(&self, fmt: &mut Formatter) -> std::fmt::Result {
-        write!(fmt, "{}", self.inner().display())
+        write!(fmt, "{}", self.as_ref().display())
     }
 }
 
@@ -328,9 +332,11 @@ impl Basename {
 
         Ok(Self(path))
     }
+}
 
-    /// Returns a reference to the inner type
-    pub fn inner(&self) -> &Path {
+impl AsRef<Path> for Basename {
+    /// Returns a reference to the inner [`Path`].
+    fn as_ref(&self) -> &Path {
         &self.0
     }
 }
@@ -350,7 +356,7 @@ impl FromStr for Basename {
 
 impl Display for Basename {
     fn fmt(&self, fmt: &mut Formatter) -> std::fmt::Result {
-        write!(fmt, "{}", self.inner().display())
+        write!(fmt, "{}", self.as_ref().display())
     }
 }
 

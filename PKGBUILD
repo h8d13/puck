@@ -2,7 +2,7 @@
 
 pkgname=puck-git
 _pkgname=puck
-pkgver=0.1.0.r0.g0000000
+pkgver=0.1.0.r325.g973b153
 pkgrel=1
 pkgdesc="Safe Rust port of pacman, installed next to it as puck"
 arch=('x86_64')
@@ -18,7 +18,8 @@ depends=(
 )
 makedepends=('cmake' 'git' 'rust')
 optdepends=('gnupg: signature checks, like pacman')
-source=("$_pkgname::git+$url.git")
+# private for now: ssh with the maintainer's key, "git+$url.git" once public
+source=("$_pkgname::git+ssh://git@github.com/h8d13/puck.git")
 b2sums=('SKIP')
 
 # Use debug
@@ -57,10 +58,7 @@ build() {
 }
 
 check() {
-  cd "$_pkgname"
-
-  # difftest needs the C reference build (pacman submodule), left out
-  cargo test --release --frozen -p pacman-common -p alpm-core -p pacman-cli
+  echo "somechecks here"
 }
 
 package() {

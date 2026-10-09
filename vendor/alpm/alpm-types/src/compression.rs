@@ -164,6 +164,7 @@ impl TryFrom<PathBuf> for CompressionAlgorithmFileExtension {
 #[cfg(test)]
 mod tests {
     use rstest::*;
+    use testresult::TestResult;
 
     use super::*;
 
@@ -180,9 +181,11 @@ mod tests {
     fn compression_algorithm_file_extension_from_str(
         #[case] input: &str,
         #[case] expected: CompressionAlgorithmFileExtension,
-    ) {
-        let parsed = CompressionAlgorithmFileExtension::from_str(input).unwrap();
+    ) -> TestResult {
+        let parsed = CompressionAlgorithmFileExtension::from_str(input)?;
         assert_eq!(parsed, expected);
+
+        Ok(())
     }
 
     #[rstest]
@@ -211,7 +214,10 @@ mod tests {
     #[case("noext")]
     fn invalid_compression_file_extension(#[case] filename: &str) {
         let path = Path::new(filename);
-        let error = CompressionAlgorithmFileExtension::try_from(path).unwrap_err();
-        assert!(matches!(error, crate::Error::InvalidVariant(_)));
+        let Err(crate::Error::InvalidVariant(_)) =
+            CompressionAlgorithmFileExtension::try_from(path)
+        else {
+            panic!("Expected an Error::InvalidVariant but succeeded instead");
+        };
     }
 }
