@@ -22,7 +22,8 @@ use crate::be_local::{INFRQ_DSIZE, INFRQ_FILES};
 use crate::be_package::{self, pkg_validate};
 use crate::callbacks::{Callbacks, Event, LogLevel, Progress, Question, logv};
 use crate::conflict::{
-	Conflict, FileCheck, FileConflict, innerconflicts, outerconflicts,
+	Conflict, FileCheck, FileConflict, add_conflict, check_conflict,
+	innerconflicts,
 };
 use crate::db::{DB_USAGE_INSTALL, DB_USAGE_UPGRADE, Db};
 use crate::deps::{
@@ -47,7 +48,8 @@ use crate::trans::{
 	CommitData, CommitError, PrepareData, PrepareError, TRANS_FLAG_DBONLY,
 	TRANS_FLAG_DOWNLOADONLY, TRANS_FLAG_NEEDED, TRANS_FLAG_NOCONFLICTS,
 	TRANS_FLAG_NODEPS, TRANS_FLAG_NODEPVERSION, Trans, TransPkg,
-	TransState, View, load_caches, opt_str, readable, trans_in, with_view,
+	TransState, View, load_caches, load_local_descs, opt_str, pkg_dup,
+	readable, trans_in, with_view,
 };
 use crate::util::{
 	ReadFileError, filecache_find, filecache_setup, get_fullpath,
@@ -587,63 +589,123 @@ fn conflict_err(c: &Conflict) -> PrepareError {
 	PrepareError::new(Errno::ConflictingDeps, data)
 }
 
-// _alpm_sync_prepare after check_dbs: dependencies resolved (targets
+// _alpm_sync_prepare: after check_dbs, dependencies resolved (targets
 // replaced by the resolved list, pulled ones as DEPEND), conflicts
 // between targets and with the local db settled, removals collected,
-// then the whole transaction checked; download sizes and oldpkgs last
+// then the whole transaction checked; download sizes and oldpkgs last.
+// the local descs the C getters lazy-load along the way are loaded
+// before the step that reads them (the sets its walks cover), the
+// removals and oldpkgs are dup'ed with their force_load where the C
+// dups them
 pub(crate) fn sync_prepare(
-	view: &View,
-	cb: &mut dyn Callbacks,
+	h: &mut Handle,
 	trans: &mut Trans,
 ) -> Result<(), PrepareError> {
-	if trans.flags & TRANS_FLAG_NODEPS == 0 {
-		resolve(view, cb, trans)?;
+	check_dbs(h, &trans.add)?;
+	load_caches(h, false);
+	let flags = trans.flags;
+	if flags & TRANS_FLAG_NODEPS == 0 {
+		h.with_callbacks(|_, cb| {
+			event(cb, Event::ResolvedepsStart);
+			logv(
+				cb,
+				Debug,
+				&[b"resolving target's dependencies\n"],
+			);
+		});
+		// the checkdeps walks of resolvedeps read the local packages
+		// neither targets nor leaving (list order, up to a
+		// satisfier), its local fallback (resolvedep over db_local)
+		// every one of them: all here
+		load_local_descs(h, &[]);
+		if with_view(h, |v, _| resolve_needs_sync(v, trans)) {
+			load_caches(h, true);
+		}
+		with_view(h, |v, cb| resolve(v, cb, trans))?;
 	}
-	if trans.flags & TRANS_FLAG_NOCONFLICTS == 0 {
-		event(cb, Event::InterconflictsStart);
-		logv(cb, Debug, &[b"looking for conflicts\n"]);
-		inner_conflicts(cb, trans)?;
-		outer_conflicts(view, cb, trans)?;
-		event(cb, Event::InterconflictsDone);
+	if flags & TRANS_FLAG_NOCONFLICTS == 0 {
+		h.with_callbacks(|_, cb| {
+			event(cb, Event::InterconflictsStart);
+			logv(cb, Debug, &[b"looking for conflicts\n"]);
+			inner_conflicts(cb, trans)
+		})?;
+		// check_conflict's db pass reads the conflicts of every local
+		// package not named by a target (with NODEPS the first read)
+		load_local_descs(h, &target_names(trans));
+		outer_conflicts(h, trans)?;
+		event(h.callbacks(), Event::InterconflictsDone);
 	}
+	remove_list(h, trans);
+	if flags & TRANS_FLAG_NODEPS == 0 {
+		logv(h.callbacks(), Debug, &[b"checking dependencies\n"]);
+		with_view(h, |v, cb| check_transaction(v, cb, trans))?;
+	}
+	sizes_and_oldpkgs(h, trans)
+}
 
-	for t in &trans.add {
-		for rpkg in &t.removes {
+fn target_names(trans: &Trans) -> Vec<&[u8]> {
+	trans.add.iter().map(|t| t.pkg.name_bytes()).collect()
+}
+
+// the "Build trans->remove list" loop: each removes entry not yet a
+// removal joins as a dup of its cache entry; a dup that loaded short
+// only warns (the C tests == -1)
+fn remove_list(h: &mut Handle, trans: &mut Trans) {
+	for i in 0..trans.add.len() {
+		for j in 0..trans.add[i].removes.len() {
+			let rpkg = &trans.add[i].removes[j];
 			if pkg_find(&trans.remove, rpkg.name_bytes()).is_some()
 			{
 				continue;
 			}
-			let msg = [
-				b"adding '",
-				name(rpkg),
-				b"' to remove list\n",
-			];
-			logv(cb, Debug, &msg);
-			trans.remove.push(rpkg.dup());
+			let n = name(rpkg).to_vec();
+			let msg = [b"adding '", &n[..], b"' to remove list\n"];
+			logv(h.callbacks(), Debug, &msg);
+			let copy = pkg_dup(h, &n).map_or_else(
+				|| trans.add[i].removes[j].dup(),
+				|(copy, _)| copy,
+			);
+			trans.remove.push(copy);
 		}
 	}
+}
 
-	if trans.flags & TRANS_FLAG_NODEPS == 0 {
-		logv(cb, Debug, &[b"checking dependencies\n"]);
-		let nodepversion = trans.flags & TRANS_FLAG_NODEPVERSION != 0;
-		let env = view.env(nodepversion);
-		let rem: Vec<&Package> = trans.remove.iter().collect();
-		let add: Vec<&Package> =
-			trans.add.iter().map(|t| &t.pkg).collect();
-		let local = view.local_list();
-		let deps = checkdeps(&env, &local, &rem, &add, true, cb);
-		if !deps.is_empty() {
-			let data = PrepareData::Missing(deps);
-			return Err(PrepareError::new(
-				Errno::UnsatisfiedDeps,
-				data,
-			));
-		}
+// the checkdeps of the whole transaction
+fn check_transaction(
+	view: &View,
+	cb: &mut dyn Callbacks,
+	trans: &Trans,
+) -> Result<(), PrepareError> {
+	let nodepversion = trans.flags & TRANS_FLAG_NODEPVERSION != 0;
+	let env = view.env(nodepversion);
+	let rem: Vec<&Package> = trans.remove.iter().collect();
+	let add: Vec<&Package> = trans.add.iter().map(|t| &t.pkg).collect();
+	let local = view.local_list();
+	let deps = checkdeps(&env, &local, &rem, &add, true, cb);
+	if deps.is_empty() {
+		return Ok(());
 	}
+	let data = PrepareData::Missing(deps);
+	Err(PrepareError::new(Errno::UnsatisfiedDeps, data))
+}
+
+// the last loop: each target's download size, then its installed
+// namesake dup'ed whole as oldpkg. a dup that loaded short is kept
+// and fails the prepare with PKG_INVALID (the C tests != 0)
+fn sizes_and_oldpkgs(
+	h: &mut Handle,
+	trans: &mut Trans,
+) -> Result<(), PrepareError> {
 	for t in &mut trans.add {
-		compute_download_size(view.handle, cb, &mut t.pkg)?;
-		if let Some(lpkg) = view.local.find(t.pkg.name_bytes()) {
-			t.oldpkg = Some(lpkg.dup());
+		h.with_callbacks(|h, cb| {
+			compute_download_size(h, cb, &mut t.pkg)
+		})?;
+		let name = t.pkg.name_bytes().to_vec();
+		if let Some((copy, loaded)) = pkg_dup(h, &name) {
+			t.oldpkg = Some(copy);
+			if !loaded {
+				return Err(Errno::PkgInvalid.into());
+			}
 		}
 	}
 	Ok(())
@@ -687,8 +749,6 @@ fn resolve(
 	cb: &mut dyn Callbacks,
 	trans: &mut Trans,
 ) -> Result<(), PrepareError> {
-	event(cb, Event::ResolvedepsStart);
-	logv(cb, Debug, &[b"resolving target's dependencies\n"]);
 	let nodepversion = trans.flags & TRANS_FLAG_NODEPVERSION != 0;
 	let env = view.env(nodepversion);
 	let add = std::mem::take(&mut trans.add);
@@ -840,20 +900,80 @@ fn inner_conflicts(
 	Ok(())
 }
 
-// step 2: a target against an installed package not already leaving,
-// settled by CONFLICT_PKG (yes elects the local package for removal)
+// _alpm_outerconflicts and what _alpm_sync_prepare does with each
+// conflict: conflict_new dups the target as it is and the local package
+// through its cache entry (a force_load, logged; a short load drops the
+// conflict); a conflict with a package not leaving already asks, a no
+// fails the prepare, a yes elects the local package for removal
 fn outer_conflicts(
+	h: &mut Handle,
+	trans: &mut Trans,
+) -> Result<(), PrepareError> {
+	let line = b"check targets vs db and db vs targets\n";
+	logv(h.callbacks(), Debug, &[line]);
+	let mut deps: Vec<Conflict> = Vec::new();
+	for reversed in [false, true] {
+		let line: &[u8] = match reversed {
+			false => b"check targets vs db\n",
+			true => b"check db vs targets\n",
+		};
+		logv(h.callbacks(), Debug, &[line]);
+		// (target, local package, reason) in the C's order
+		let found: Vec<(Vec<u8>, Vec<u8>, Depend)> =
+			with_view(h, |v, _| {
+				let add: Vec<&Package> = trans
+					.add
+					.iter()
+					.map(|t| &t.pkg)
+					.collect();
+				let dblist = list_diff(&v.local_list(), &add);
+				let (l1, l2) = match reversed {
+					false => (&add, &dblist),
+					true => (&dblist, &add),
+				};
+				check_conflict(l1, l2, reversed)
+					.into_iter()
+					.map(|(p1, p2, r)| {
+						let (n1, n2) = (
+							p1.name_bytes(),
+							p2.name_bytes(),
+						);
+						(
+							n1.to_vec(),
+							n2.to_vec(),
+							r.clone(),
+						)
+					})
+					.collect()
+			});
+		for (target, local, reason) in found {
+			let Some((package2, true)) = pkg_dup(h, &local) else {
+				continue;
+			};
+			let package1 = find_target(&trans.add, &target)
+				.expect(
+					"package1 of an outer conflict is a target",
+				)
+				.pkg
+				.dup();
+			let conflict = Conflict {
+				package1,
+				package2,
+				reason,
+			};
+			add_conflict(&mut deps, conflict, h.callbacks());
+		}
+	}
+	with_view(h, |view, cb| elect_removals(view, cb, trans, &deps))
+}
+
+fn elect_removals(
 	view: &View,
 	cb: &mut dyn Callbacks,
 	trans: &mut Trans,
+	deps: &[Conflict],
 ) -> Result<(), PrepareError> {
-	logv(cb, Debug, &[b"check targets vs db and db vs targets\n"]);
-	let deps = {
-		let add: Vec<&Package> =
-			trans.add.iter().map(|t| &t.pkg).collect();
-		outerconflicts(view.local, &add, cb)
-	};
-	for conflict in &deps {
+	for conflict in deps {
 		let (p1, p2) = (&conflict.package1, &conflict.package2);
 		let n2 = p2.name_bytes();
 		let leaving = pkg_find(&trans.remove, n2).is_some()

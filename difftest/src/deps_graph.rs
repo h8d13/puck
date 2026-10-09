@@ -25,8 +25,9 @@ use crate::handle::{
 	alpm_trans_release,
 };
 use crate::package::{
-	_alpm_pkg_free, CDepend, CPkg, field, list_data, read_dep, read_pkg,
-	with_strs,
+	_alpm_pkg_free, CDepend, CPkg, alpm_pkg_get_depends,
+	alpm_pkg_get_files, alpm_pkg_has_scriptlet, field, list_data, read_dep,
+	read_pkg, with_strs,
 };
 use crate::{CList, alpm_list_add, alpm_list_free, cstr, opt_ptr};
 
@@ -303,6 +304,20 @@ impl CGraph {
 			// go nowhere yet
 			let hash = unsafe { _alpm_db_get_pkgcache_hash(db) };
 			assert!(!hash.is_null(), "db cache failed to load");
+		}
+		// every local entry loaded whole (or marked failed after its
+		// desc, the port's section order) before the callbacks, like
+		// the Rust side: the dups of _alpm_recursedeps then see the
+		// same entry state on both sides
+		// SAFETY: hash is the live local cache table, its packages
+		// belong to h; the getters only load
+		unsafe {
+			let hash = _alpm_db_get_pkgcache_hash(local);
+			for p in list_data((*hash).list) {
+				alpm_pkg_get_depends(p.cast());
+				alpm_pkg_get_files(p.cast());
+				alpm_pkg_has_scriptlet(p.cast());
+			}
 		}
 		let assume = Self::assume(&setup.assumeinstalled);
 		let mut flags = TRANS_FLAG_NOLOCK;

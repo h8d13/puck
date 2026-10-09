@@ -4,7 +4,7 @@ use std::fs;
 
 use alpm_core::callbacks::{Callbacks, Progress};
 use alpm_core::conflict::*;
-use alpm_core::deps::dep_from_string;
+use alpm_core::deps::{dep_from_string, list_diff};
 use alpm_core::filelist::{File, FileList};
 use alpm_core::package::{Package, PkgFrom};
 use alpm_core::pkghash::PkgHash;
@@ -56,13 +56,26 @@ fn inner_dedups_by_name_pair() {
 }
 
 #[test]
-fn outer_checks_both_directions() {
+fn check_conflict_both_directions() {
 	let db = local(vec![pkg("x", &["t"], &[]), pkg("t", &["u"], &[])]);
 	let t = pkg("t", &[], &[]);
 	let u = pkg("u", &["x"], &[]);
 	// t replaces the local t, so only x takes part
-	let got = outerconflicts(&db, &[&t, &u], &mut ());
-	assert_eq!(pairs(&got), [(&b"u"[..], &b"x"[..]), (b"t", b"x")]);
+	let cache: Vec<&Package> = db.iter().collect();
+	let dblist = list_diff(&cache, &[&t, &u]);
+	let found = check_conflict(&[&t, &u], &dblist, false);
+	let names: Vec<_> = found
+		.iter()
+		.map(|(a, b, _)| (a.name_bytes(), b.name_bytes()))
+		.collect();
+	assert_eq!(names, [(&b"u"[..], &b"x"[..])]);
+	// reversed: the target first, as the C's order < 0 swaps them
+	let found = check_conflict(&dblist, &[&t, &u], true);
+	let names: Vec<_> = found
+		.iter()
+		.map(|(a, b, _)| (a.name_bytes(), b.name_bytes()))
+		.collect();
+	assert_eq!(names, [(&b"t"[..], &b"x"[..])]);
 }
 
 #[derive(Default)]

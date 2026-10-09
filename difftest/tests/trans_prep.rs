@@ -1150,7 +1150,9 @@ fn frontend_fuzz() {
 		s.in_conflict,
 		s.group_menu,
 		s.declined,
-		s.nothing,
 	];
 	assert!(counts.iter().all(|&k| k >= n / 20), "{n} cases: {seen:#?}");
+	// bare -Su, -R --unneeded and -U --needed on worlds with nothing
+	// to do: about 5% of cases, its own floor
+	assert!(s.nothing >= n / 40, "{n} cases: {seen:#?}");
 }

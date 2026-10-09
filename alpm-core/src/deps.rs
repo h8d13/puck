@@ -569,16 +569,16 @@ fn select_depends<'a>(
 	}
 }
 
-// _alpm_recursedeps: appends to targs a dup of every package of db only
-// needed by targs (transitively). packages of db with a target's name
-// never count; explicitly installed ones only with include_explicit.
-// db is the cache of the db (remove.c passes the local one)
-pub fn recursedeps(
-	db: &PkgHash<Package>,
-	targs: &mut Vec<Package>,
+// _alpm_recursedeps' selection: every package of db only needed by
+// targs (transitively), in the order the C appends them. packages of db
+// with a target's name never count; explicitly installed ones only with
+// include_explicit. db is the cache of the db (remove.c passes the local
+// one); the caller logs and dups each one into targs, the C's tail loop
+pub fn recursedeps<'a>(
+	db: &'a PkgHash<Package>,
+	targs: &[Package],
 	include_explicit: bool,
-	log: &mut dyn Callbacks,
-) {
+) -> Vec<&'a Package> {
 	let mut keep: Vec<&Package> = db.iter().collect();
 	for t in targs.iter() {
 		let i = keep.iter().position(|k| pkg_cmp(k, t).is_eq());
@@ -605,13 +605,7 @@ pub fn recursedeps(
 		select_depends(&mut rem, &mut keep, p, true);
 		i += 1;
 	}
-
-	for pkg in rem {
-		let line: [&[u8]; 3] =
-			[b"adding '", name_of(pkg), b"' to the targets\n"];
-		logv(log, LogLevel::Debug, &line);
-		targs.push(pkg.dup());
-	}
+	rem
 }
 
 // the ignored-package branch of resolvedep: with prompt the question,

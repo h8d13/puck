@@ -144,7 +144,7 @@ unsafe extern "C" {
 	pub(crate) fn alpm_pkg_get_validation(pkg: *mut CPkg) -> c_int;
 	fn alpm_pkg_get_licenses(pkg: *mut CPkg) -> *mut CList;
 	fn alpm_pkg_get_groups(pkg: *mut CPkg) -> *mut CList;
-	fn alpm_pkg_get_depends(pkg: *mut CPkg) -> *mut CList;
+	pub(crate) fn alpm_pkg_get_depends(pkg: *mut CPkg) -> *mut CList;
 	fn alpm_pkg_get_optdepends(pkg: *mut CPkg) -> *mut CList;
 	fn alpm_pkg_get_checkdepends(pkg: *mut CPkg) -> *mut CList;
 	fn alpm_pkg_get_makedepends(pkg: *mut CPkg) -> *mut CList;

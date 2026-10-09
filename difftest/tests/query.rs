@@ -659,16 +659,11 @@ fn gen_cfg(rng: &mut Rng, base: &Config) -> Config {
 		0 => ColStr::COLOR,
 		_ => ColStr::PLAIN,
 	};
-	// --debug, --debug=2, and the load lines alone (no stamps). not for
-	// -Qpc: be_package::changelog does not log "opening archive"
-	// (PORTING.md follow-up)
-	let debug = c.op_q_isfile == 0 || c.op_q_changelog == 0;
+	// --debug, --debug=2, and the load lines alone (no stamps)
 	c.logmask = match rng.below(10) {
 		0 => 0,
-		1 if debug => LOG_ERROR | LOG_WARNING | LOG_DEBUG,
-		2 if debug => {
-			LOG_ERROR | LOG_WARNING | LOG_DEBUG | LOG_FUNCTION
-		}
+		1 => LOG_ERROR | LOG_WARNING | LOG_DEBUG,
+		2 => LOG_ERROR | LOG_WARNING | LOG_DEBUG | LOG_FUNCTION,
 		3 => LOG_ERROR | LOG_WARNING | LOG_FUNCTION,
 		_ => c.logmask,
 	};

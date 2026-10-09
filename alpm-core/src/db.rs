@@ -16,7 +16,7 @@ use std::ffi::c_int;
 use std::ops::ControlFlow;
 
 use crate::be_local::{
-	DbError, INFRQ_ALL, INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET, LocalDb,
+	DbError, INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET, LocalDb,
 };
 use crate::be_sync;
 use crate::callbacks::{Callbacks, Event, LogLevel, logv};
@@ -577,20 +577,20 @@ impl Db {
 		Ok(pkg)
 	}
 
-	// _alpm_db_get_pkgfromcache, then the force_load of _alpm_pkg_dup:
-	// one local_db_read of INFRQ_ALL (logged each time, INFRQ_DSIZE is
-	// never set)
-	pub fn force_load_pkg(
+	// _alpm_db_get_pkgfromcache, then _alpm_pkg_dup of the entry
+	// (LocalDb::dup_pkg: the force_load into the entry, the copy,
+	// whether every section loaded; a sync entry dups as it is)
+	pub fn dup_pkg(
 		&mut self,
 		dbext: &[u8],
 		cb: &mut dyn Callbacks,
 		name: &[u8],
-	) -> Result<&Package, Errno> {
+	) -> Result<(Package, bool), Errno> {
 		let (backend, pkg) = self.find_pkg(dbext, cb, name)?;
-		if let Backend::Local(local) = backend {
-			let _ = local.read(pkg, INFRQ_ALL, cb);
-		}
-		Ok(pkg)
+		Ok(match backend {
+			Backend::Local(local) => local.dup_pkg(pkg, cb),
+			Backend::Sync => (pkg.dup(), true),
+		})
 	}
 
 	// alpm_db_get_pkg on the local db, then alpm_pkg_set_reason on the
@@ -637,10 +637,24 @@ impl Db {
 		cb: &mut dyn Callbacks,
 		inforeq: c_int,
 	) -> Result<&PkgHash<Package>, Errno> {
+		self.load_except(dbext, cb, inforeq, &[])
+	}
+
+	// load_all over the entries not named in skip: a C loop over
+	// alpm_list_diff(cache, targets) calling a getter per package
+	pub fn load_except(
+		&mut self,
+		dbext: &[u8],
+		cb: &mut dyn Callbacks,
+		inforeq: c_int,
+		skip: &[&[u8]],
+	) -> Result<&PkgHash<Package>, Errno> {
 		self.load_pkgcache(dbext, cb)?;
 		let cache = self.pkgcache.as_mut().expect("cache just loaded");
 		for pkg in cache.iter_mut() {
-			lazy_load(&self.backend, pkg, inforeq, cb);
+			if !skip.contains(&pkg.name_bytes()) {
+				lazy_load(&self.backend, pkg, inforeq, cb);
+			}
 		}
 		Ok(cache)
 	}

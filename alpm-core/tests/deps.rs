@@ -446,14 +446,11 @@ mod resolve {
 			pkg("keeper", &["d2"], &[]),
 		]);
 		let t = db.find(b"t").unwrap().clone();
-		let mut targs = vec![t.clone()];
-		recursedeps(&db, &mut targs, false, &mut ());
-		let n: Vec<&Package> = targs.iter().collect();
+		let targs = vec![t];
+		let n = recursedeps(&db, &targs, false);
 		// d2 is still needed by keeper
-		assert_eq!(names(&n), ["t", "d1"]);
-		let mut targs = vec![t];
-		recursedeps(&db, &mut targs, true, &mut ());
-		let n: Vec<&Package> = targs.iter().collect();
-		assert_eq!(names(&n), ["t", "d1", "e"]);
+		assert_eq!(names(&n), ["d1"]);
+		let n = recursedeps(&db, &targs, true);
+		assert_eq!(names(&n), ["d1", "e"]);
 	}
 }

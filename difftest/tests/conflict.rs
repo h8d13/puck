@@ -15,10 +15,11 @@ use alpm_core::backup::Backup;
 use alpm_core::be_local::{INFRQ_ALL, LocalDb};
 use alpm_core::callbacks::{Callbacks, LogLevel, Progress};
 use alpm_core::conflict::{
-	Conflict, FileCheck, FileConflictType, FileConflicts, checkconflicts,
-	innerconflicts, outerconflicts,
+	Conflict, FileCheck, FileConflictType, FileConflicts, add_conflict,
+	check_conflict, checkconflicts, innerconflicts,
 };
 use alpm_core::deps::dep_from_string;
+use alpm_core::deps::list_diff;
 use alpm_core::filelist::{File, FileList};
 use alpm_core::package::{Package, PkgFrom};
 use alpm_core::pkghash::PkgHash;
@@ -307,6 +308,7 @@ struct Fix {
 	tmp: TempRoot,
 	// handle->root, with the '/' alpm_initialize appends
 	root: Vec<u8>,
+	db: LocalDb,
 	cache: PkgHash<Package>,
 }
 
@@ -324,7 +326,12 @@ impl Fix {
 			let _ = db.read(p, INFRQ_ALL, &mut ());
 		}
 		let root = [&tmp.root()[..], b"/"].concat();
-		Fix { tmp, root, cache }
+		Fix {
+			tmp,
+			root,
+			db,
+			cache,
+		}
 	}
 
 	fn c(&self) -> CConflictHandle {
@@ -459,9 +466,38 @@ fn cmp_deps(
 		c.checkconflicts(pkgs),
 		"check {names:?}"
 	);
-	let outer = outerconflicts(&fix.cache, pkgs, &mut ());
+	let outer = outerconflicts(fix, pkgs);
 	assert_eq!(outer, c.outerconflicts(pkgs), "outer {names:?}");
 	[inner, outer]
+}
+
+// _alpm_outerconflicts as sync.rs runs it: the two check_conflict
+// passes, each conflict's local package dup'ed through the local db
+// (its force_load, here on a clone of the loaded entry), a short load
+// drops the conflict
+fn outerconflicts(fix: &Fix, packages: &[&Package]) -> Vec<Conflict> {
+	let cache: Vec<&Package> = fix.cache.iter().collect();
+	let dblist = list_diff(&cache, packages);
+	let mut baddeps = Vec::new();
+	for (l1, l2, reversed) in [
+		(packages, &dblist[..], false),
+		(&dblist[..], packages, true),
+	] {
+		for (p1, p2, reason) in check_conflict(l1, l2, reversed) {
+			let (package2, loaded) =
+				fix.db.dup_pkg(&mut p2.clone(), &mut ());
+			if !loaded {
+				continue;
+			}
+			let conflict = Conflict {
+				package1: p1.dup(),
+				package2,
+				reason: reason.clone(),
+			};
+			add_conflict(&mut baddeps, conflict, &mut ());
+		}
+	}
+	baddeps
 }
 
 fn mk(name: &str, files: &[&str]) -> Gen {
