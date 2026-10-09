@@ -9,7 +9,8 @@ use std::process::Command;
 use alpm_core::strftime::Tm as PortTm;
 
 use crate::cli_util::setlocale;
-use crate::pkg_show::{Tm, localtime_r, strftime};
+use crate::handle_opts::localtime;
+use crate::pkg_show::strftime;
 
 const LC_ALL: c_int = 6;
 
@@ -44,15 +45,19 @@ pub fn c_tolower(c: u8) -> u8 {
 	unsafe { tolower(c_int::from(c)) as u8 }
 }
 
-// localtime_r(&t) as the port's Tm, None where it fails
+// localtime(&t) as the port's Tm, None where it fails. localtime, not
+// localtime_r, like pacman: it rereads TZ, which matters for a DST name
+// without rules (UPSTREAM.md). its static buffer: callers keep to one
+// thread (the probe binaries)
 pub fn c_localtime_tm(t: i64) -> Option<PortTm> {
-	// SAFETY: tm is written by localtime_r, its tm_zone points into
-	// glibc's string pool, copied at once
+	// SAFETY: localtime's result is copied before the next call, its
+	// tm_zone points into glibc's string pool
 	unsafe {
-		let mut tm: Tm = std::mem::zeroed();
-		if localtime_r(&t, &mut tm).is_null() {
+		let p = localtime(&t);
+		if p.is_null() {
 			return None;
 		}
+		let tm = &*p;
 		let zone = match tm.tm_zone.is_null() {
 			true => Vec::new(),
 			false => CStr::from_ptr(tm.tm_zone).to_bytes().to_vec(),
@@ -75,7 +80,8 @@ pub fn c_localtime_tm(t: i64) -> Option<PortTm> {
 }
 
 // strftime(buf, max, fmt, localtime(&t)) into a zeroed buffer like
-// pacman's: the return value and the buffer up to its first nul
+// pacman's: the return value and the buffer up to its first nul. one
+// thread, like c_localtime_tm
 pub fn c_strftime_local(
 	t: i64,
 	max: usize,
@@ -83,14 +89,14 @@ pub fn c_strftime_local(
 ) -> Option<(usize, Vec<u8>)> {
 	let fmt = crate::cstr(fmt);
 	let mut buf = vec![0 as c_char; max.max(1)];
-	// SAFETY: tm from localtime_r, buf holds max bytes and strftime
+	// SAFETY: tm from localtime, buf holds max bytes and strftime
 	// writes at most max
 	unsafe {
-		let mut tm: Tm = std::mem::zeroed();
-		if localtime_r(&t, &mut tm).is_null() {
+		let tm = localtime(&t);
+		if tm.is_null() {
 			return None;
 		}
-		let n = strftime(buf.as_mut_ptr(), max, fmt.as_ptr(), &tm);
+		let n = strftime(buf.as_mut_ptr(), max, fmt.as_ptr(), tm);
 		let s = CStr::from_ptr(buf.as_ptr()).to_bytes().to_vec();
 		Some((n, s))
 	}

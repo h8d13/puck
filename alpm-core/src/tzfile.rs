@@ -492,9 +492,8 @@ struct TzFile {
 	// transition, correction
 	leaps: Vec<(i64, i64)>,
 	tzspec: Option<Vec<u8>>,
-	// rule_stdoff and rule_dstoff after the read
+	// rule_stdoff after the read
 	rule_stdoff: i64,
-	rule_dstoff: i64,
 }
 
 fn be32(b: &[u8]) -> u32 {
@@ -636,12 +635,10 @@ fn tzfile_read(
 	if types.is_empty() {
 		return None;
 	}
-	// rule_dstoff is only set without transitions, it stays the
-	// process's first value (0) otherwise
-	let (mut stdoff, mut dstoff) = (0, 0);
+	// rule_stdoff: the last standard type transitioned to
+	let mut stdoff = 0;
 	if transitions.is_empty() {
 		stdoff = i64::from(types[0].offset);
-		dstoff = stdoff;
 	} else if let Some(&i) = type_idxs
 		.iter()
 		.rev()
@@ -657,7 +654,6 @@ fn tzfile_read(
 		leaps,
 		tzspec,
 		rule_stdoff: stdoff,
-		rule_dstoff: dstoff,
 	})
 }
 
@@ -728,24 +724,24 @@ impl TzFile {
 	}
 
 	// __tzfile_default: posixrules' transitions moved to the user's
-	// offsets (with the C's signs and its rule_dstoff), names and
-	// offsets of types 0 and 1 replaced
+	// offsets with the C's signs, names and offsets of types 0 and 1
+	// replaced. localtime reruns this on every call with rule_dstoff
+	// left at the previous run's dstoff, so DST ends stay where
+	// posixrules has them; the process's first localtime (and every
+	// localtime_r) has 0 there, which is not modelled
 	fn with_default(mut self, std: &Rule, dst: &Rule) -> Option<TzFile> {
 		if self.types.len() < 2 {
 			return None;
 		}
-		let (stdoff, dstoff) =
-			(i64::from(std.offset), i64::from(dst.offset));
+		let stdoff = i64::from(std.offset);
 		let mut isdst = false;
 		for i in 0..self.transitions.len() {
 			let ty = self.types[usize::from(self.type_idxs[i])]
 				.clone();
 			self.type_idxs[i] = u8::from(ty.isdst);
-			if ty.isgmt {
-			} else if isdst && !ty.isstd {
-				self.transitions[i] +=
-					dstoff - self.rule_dstoff;
-			} else {
+			// UTC transitions stay; so do DST ends, corrected by
+			// dstoff - rule_dstoff, the previous run's dstoff
+			if !ty.isgmt && !(isdst && !ty.isstd) {
 				self.transitions[i] +=
 					stdoff - self.rule_stdoff;
 			}
@@ -769,7 +765,6 @@ impl TzFile {
 			isgmt: self.types[1].isgmt,
 		};
 		self.rule_stdoff = stdoff;
-		self.rule_dstoff = dstoff;
 		Some(self)
 	}
 }

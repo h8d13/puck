@@ -598,9 +598,11 @@ declarations. No existing MR found for it.
   name and no rules (`CET-1CEST`, `AAA3BBB`): the transitions of
   posixrules are moved with the signs of tzcode's west-positive offsets on
   glibc's east-positive ones, and `rule_dstoff` is never set by
-  `__tzfile_read` when the file has transitions (0 in a fresh process).
-  `TZ=AAA3BBB` starts DST at 06:00 local instead of 02:00 (09:00 UTC,
-  checked with localtime on glibc 2.44). **env**
+  `__tzfile_read` when the file has transitions: 0 at the process's first
+  run, the previous run's dstoff after. `localtime` (pacman's) reruns it
+  on every call, so the first date of a process can differ from the same
+  date later, `localtime_r` keeps the first. `TZ=AAA3BBB` starts DST at
+  06:00 local instead of 02:00 (09:00 UTC, glibc 2.44). **env**
 - glibc `__tzfile_compute` (time/tzfile.c:648): the test meant to keep the
   user's names after posixrules' last transition compares `zone_names`
   with `&leaps[num_leaps]`, which `__tzfile_default` never sets: from then

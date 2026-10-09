@@ -147,7 +147,8 @@ fn file() {
 	fs::write(d.join("Bad"), bad).unwrap();
 	assert_eq!(zone(Some("Bad"), &d).local(0), local(false, "Bad", 0));
 	// posixrules for a DST name without rules: its transitions with the
-	// user's names, moved by the C's (sign-swapped) correction
+	// user's names, DST starts moved by the C's (sign-swapped)
+	// correction, DST ends kept (localtime's steady state)
 	let rules = tzif(
 		&[(MAR8 + 7 * 3600, 1), (NOV1 + 6 * 3600, 0)],
 		&[(-18000, 0, 0), (-14400, 1, 4)],
@@ -158,10 +159,10 @@ fn file() {
 	let z = zone(Some("AAA3BBB"), &d);
 	assert_eq!(z.local(MAR8 + 9 * 3600 - 1), local(false, "AAA", -10800));
 	assert_eq!(z.local(MAR8 + 9 * 3600), local(true, "BBB", -7200));
-	assert_eq!(z.local(NOV1 + 4 * 3600 - 1), local(true, "BBB", -7200));
+	assert_eq!(z.local(NOV1 + 6 * 3600 - 1), local(true, "BBB", -7200));
 	// from the last transition on posixrules' footer, its names and
-	// offsets: still EDT until 06:00 UTC
-	assert_eq!(z.local(NOV1 + 4 * 3600), local(true, "EDT", -14400));
+	// offsets
+	assert_eq!(z.local(NOV1 + 6 * 3600), local(false, "EST", -18000));
 	assert_eq!(z.local(NOV1 + 86400 * 400).unwrap().zone, b"EST");
 	fs::remove_dir_all(d).unwrap();
 }
