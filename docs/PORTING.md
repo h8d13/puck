@@ -445,6 +445,81 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
 The PKGBUILD ships them built by meson from `pacman/`, next to the port
 installed as `pacman`/`pacman-conf` (handover row "install names").
 
+## Configuration matrix
+
+Every pacman.conf(5) directive, where its effect is compared with the C
+and by which difftest. "parse" is difftest `conf` (parseconfig,
+setdefaults and setup_libalpm on random config trees, the handle read
+back) and `pacman_conf` (the pacman-conf binary); "binary" is difftest
+`conf_matrix`: both binaries run the same operation on twin copies of a
+fixture world with the directive set, compared on rc, stdout, stderr,
+the tree, the local db, pacman.log, the HTTP requests and the peak of
+concurrent ones. Every `conf_matrix` case proves itself: the C is run
+once more without the directive and that outcome must differ. Each
+command line option that overrides a directive has its case next to it.
+
+| Directive | Compared | Cases (`conf_matrix` unless named) |
+|---|---|---|
+| RootDir | parse; binary | directives `RootDir: -Qk`, `--root wins`; sysroot `--sysroot: -Q`, `-Qk` |
+| DBPath | parse; binary | directives `DBPath: -Q`, `first wins`, `--dbpath wins`; sysroot (the default under it) |
+| CacheDir (repeatable) | parse; binary | directives `-Scc cleans the file's dir too` (next to `--cachedir`), `-Sw finds the file in the second dir`; sysroot |
+| HookDir (repeatable) | parse; binary | directives `hooks of the file's dir run` (next to `--hookdir`, fakechroot); sysroot |
+| GPGDir | parse; binary | directives `-Sy of a signed db` (fixture keyring), `--gpgdir wins` |
+| LogFile | parse; binary | directives `-D --asdeps`, `first wins`, `--logfile wins`; sysroot |
+| HoldPkg | parse; binary | directives `-R asks` (no stdin: no), `-R --noconfirm` (the default, no) |
+| IgnorePkg | parse; binary | directives `-Sup`, `-Sp asks`, `--ignore adds` |
+| IgnoreGroup | parse; binary | directives `-Sup`, `--ignoregroup adds` |
+| Architecture (`auto`) | parse (uname); binary | directives `x86_64 refuses armv7h`, `auto refuses armv7h`, `two lines allow both`, `--arch adds`, `auto in $arch` (`-Sy` through `file://.../$arch/$repo`) |
+| XferCommand | parse; binary | `cli_binary` xfercommand (fixture scripts, signals, DownloadUser); xfercommand: see below |
+| NoUpgrade (`!`) | parse; `add_commit`; binary | directives `.pacnew`, `! negation` (fakechroot) |
+| NoExtract (`!`) | parse; `add_commit`; binary | directives `doc left out`, `! negation` |
+| CleanMethod | parse; `sync_clean`; binary | directives `KeepCurrent`, `KeepInstalled KeepCurrent` (`-Sc` under fakeroot) |
+| SigLevel | parse; `signing`; `cli_binary` (Never vs default); binary | signatures `Never`, `Optional`, `DatabaseOptional PackageRequired`, `Required, signed db, keyring`, `TrustAll on marginal trust`, `TrustedOnly on marginal trust`, `per repo Never`, `per repo PackageNever keeps the db check` |
+| LocalFileSigLevel | parse; binary | signatures `Required on an unsigned file`, `Required on a signed file, keyring`, `Optional, signed and unsigned` (`-Up`) |
+| RemoteFileSigLevel | parse; binary | signatures `Required on an unsigned url`, `LocalFileSigLevel does not apply to urls` (`-Up <url>`, built-in downloader) |
+| UseSyslog | parse; `handle_opts` (setter); `log` (packet); binary | syslog `-Sy`, `-D --asdeps`: the packets at a `/dev/log` bound in a user namespace (stamp cut) |
+| Color | parse (isatty); binary | terminal `-Ss on a tty`, `-Qi on a tty`, `--color=never wins` (script(1) pty) |
+| NoProgressBar | binary | terminal `-Sy on a tty`, `-U on a tty`, `--noprogressbar`; the bars themselves vary with the rate: `callback` compares them on a fake clock |
+| CheckSpace | parse; `diskspace`; binary | directives `CheckSpace: -U` |
+| VerbosePkgLists | `cli_util` (table); binary | directives `-S`, `-R` (the table before the prompt) |
+| DisableDownloadTimeout | parse; `dload` low_speed_timeout; binary | downloads `a stalled db` (11.5 s past curl's 10 s), `--disable-download-timeout`; xfercommand `no effect` |
+| ParallelDownloads | parse; `dload`; binary | downloads `2 streams` (peak at the server), `last line wins`, `300 is accepted`; xfercommand `serial`; errors `0`, `-1`, `abc`, `2147483648`, empty |
+| DownloadUser | parse; `sandbox`; `cli_binary` xfercommand; binary | downloads `first line wins`, the DisableSandbox cases; xfercommand `DownloadUser with XferCommand`, `environment of the command as DownloadUser` (fakeroot) |
+| DisableSandbox, DisableSandboxFilesystem, DisableSandboxSyscalls | parse; `sandbox`; binary | downloads `DisableSandbox: DownloadUser -Sy --debug`, `DisableSandboxFilesystem: seccomp stays on`, `--disable-sandbox`. gap: DisableSandboxSyscalls alone (landlock on) is not comparable rootless, the C applies landlock before no_new_privs (UPSTREAM.md); twin-root (uid 0) covers it |
+| ILoveCandy | `callback`; binary | terminal `-U on a tty` |
+| Include (globs, nested) | parse (glob vs libc, recursion, fuzz); binary | downloads `glob and nested`, `a repo section opened in the include`, `missing file`, `glob matching nothing`, `self include` |
+| Server (repeatable, `$repo`, `$arch`) | parse; `dload`; `cli_binary`; binary | downloads `second after a refused connection`, `second after a 404`, `$repo`; directives `auto in $arch` |
+| CacheServer | parse; `dload`; binary | downloads `-Sw from the cache server`, `-Sy never from it`, `404 falls back, server kept` |
+| Usage | parse; `db`; binary | downloads `Search finds`, `Search does not install`, `Sync alone is not searched`, `Install alone is not refreshed`, `Install upgrades nothing`, `Upgrade installs nothing`, `Upgrade upgrades`, `two lines add up` |
+| repo SigLevel | parse; binary | signatures `per repo Never`, `per repo PackageNever keeps the db check` |
+| `--sysroot` | parse; `pacman_conf`; binary | sysroot `-Sy`, `-Q`, `-Qk` (RootDir, CacheDir, LogFile, HookDir and a `file://` Server under it; DBPath and GPGDir are realpath'd on the host before the prefix, UPSTREAM.md) |
+| error paths | parse (fuzz); `pacman_conf`; binary | errors: unknown directive and flag, `Server` in `[options]`, `NoUpgrade` in a repo, `Server`/`Usage`/`IgnorePkg`/`Include` without a value, a directive before any section, every bad ParallelDownloads, `CleanMethod foo`, `SigLevel garbage` (options, repo, LocalFile), `Usage garbage`, an unbalanced XferCommand quote, a missing RootDir, `$arch` without Architecture, an empty file, a lowercase directive, a `[local]` repo |
+
+XferCommand (`conf_matrix` xfercommand) with curl in every documented
+shape, each on `-Sy`, `-Sw`, `-U <url>` (HTTP) and `-Sy` (file://):
+pacman.conf(5)'s `/usr/bin/curl -L -C - -f -o %o %u`, the shipped
+pacman.conf's `/usr/bin/curl -fC - --retry 3 --retry-delay 3 -o %o %u`,
+the wiki's wget line as `curl -C - -o %o %u` (`-c` is `-C -`, `-O` is
+`-o`) and its aria2c line as `curl --retry=2 --max-time=15 --remote-time
+--output-dir / -o %o %u` (long options with `=`, the output as a dir plus
+a name), a command without `%o` (`curl -O %u`: the file lands in the
+command's cwd, the download dir, under the url's basename), a relative
+command through PATH, quotes and spaces (a quoted `%o` is still the
+whole argument, a quoted agent with a space reaches the server), `%o`
+inside a word (not replaced), the last line winning, a command not found
+(absolute, through PATH, not executable: "fork failed"), exit 22 on a
+404 (the status in `--debug`), a partial file then the next server
+(resumed with `-C -`: the Range request; restarted without), a `.part`
+already in the cache (resumed; refused by curl where the server has no
+ranges), the `.sig` fetched by the command (DatabaseOptional on a 404,
+Required verified against the keyring), DownloadUser (the command as the
+user through the sandbox exec path), ParallelDownloads (serial),
+DisableDownloadTimeout (no effect) and the command's environment (equal,
+HTTP_USER_AGENT apart: the C sets `pacman/7.1.0 (Linux x86_64)
+libalpm/16.0.1`, the port nothing, handover row "User-Agent";
+`user_agent_note` prints both). The curl forms without `-s` print curl's
+progress meter: dropped from stderr, its rates vary per run. All equal.
+
 ## Notes
 
 - `vercmp` works on bytes: C `ctype` runs in the C locale, so ASCII

@@ -1040,6 +1040,12 @@ Found through the conf difftest aborting only with longer TMPDIR paths.
 
 - CacheServer `file://` URLs do not get the sysroot, Server ones do
   (conf.c:1344). **real (rare)**, with `--sysroot`
+- RootDir, DBPath and GPGDir of a sysroot's config are realpath'd on the
+  host at parse time (`resolve_path`, conf.c:686-709), the sysroot only
+  prepended afterwards (conf.c:1429): `DBPath = /srv/db` fails with
+  "failed to resolve path" unless the host has that path too, and a
+  symlink there is followed on the host. **real (rare)**, with
+  `--sysroot`; difftest `conf_matrix` sysroot keeps to `RootDir = /`
 - `resolve_path` message has a stray leading quote and no `_()`
   (util.c:1977). **real**, cosmetic
 - Include order follows the locale (glibc glob sorts with strcoll).
