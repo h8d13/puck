@@ -9,3 +9,12 @@
 	path = justpkg
 	url = https://gitlab.archlinux.org/dvzrv/justpkg.git
 
+[submodule "consumers/pyalpm"]
+	path = consumers/pyalpm
+	url = https://gitlab.archlinux.org/archlinux/pyalpm.git
+[submodule "consumers/alpm.rs"]
+	path = consumers/alpm.rs
+	url = https://gitlab.archlinux.org/archlinux/alpm.rs.git
+[submodule "consumers/go-alpm"]
+	path = consumers/go-alpm
+	url = https://github.com/Jguer/go-alpm.git
