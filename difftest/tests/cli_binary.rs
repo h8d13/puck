@@ -23,7 +23,7 @@ use difftest::{
 // GOTO_ERR logs "got error <n> at <func> (<C file>: <line>)" with
 // --debug (signing.c with the default SigLevel, _cache_mtree_open on a
 // bad mtree), the C's source position, which the port does not log by
-// design (PORTING.md). those lines alone are dropped from the C's
+// design. those lines alone are dropped from the C's
 // stderr, in any run; the rest compares
 fn is_goto_err(line: &[u8]) -> bool {
 	let key = b"got error ";
@@ -197,8 +197,7 @@ fn local_desc(name: &str, version: &str) -> Vec<u8> {
 
 // an mtree with a missing file before an existing one: -Qkk warns, then
 // the backup check of the second loads the files list. the digest is
-// not the file's (one left out reads as a mismatch in the C only,
-// UPSTREAM.md)
+// not the file's (one left out reads as a mismatch in the C only)
 const MTREE: &str = concat!(
 	"#mtree\n/set type=file uid=0 gid=0 mode=644\n",
 	"./usr/bin/gone time=1.0 size=1\n",
@@ -951,7 +950,7 @@ fn xfercommand() {
 		),
 		// the built-in downloader in the sandbox child (seccomp on).
 		// landlock stays off: the C applies it before no_new_privs,
-		// which only real root may (UPSTREAM.md)
+		// which only real root may
 		(
 			"sandbox",
 			"DownloadUser = nobody\nDisableSandboxFilesystem\n".into(),
@@ -1006,7 +1005,7 @@ fn xfercommand() {
 						.collect();
 				cache.sort();
 				// the C keeps a sandbox download dir after a failed
-				// fetchcb, the port removes it (UPSTREAM.md)
+				// fetchcb, the port removes it
 				let mut synced = snapshot_sync(&dir);
 				synced.retain(|(n, _)| {
 					!n.starts_with("download-")
@@ -1109,7 +1108,7 @@ fn without_proc() {
 	let dir = w.fx.dir().to_path_buf();
 	// a files list for every installed package, as a real local db has:
 	// the port loads them all before the conflict check, the C only the
-	// ones it needs (PORTING.md, "-Sp" follow-up)
+	// ones it needs
 	for e in fs::read_dir(dir.join("local.orig")).unwrap() {
 		let files = e.unwrap().path().join("files");
 		if files.parent().unwrap().is_dir() && !files.exists() {

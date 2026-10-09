@@ -581,7 +581,7 @@ fn long_line(rng: &mut Rng) -> Vec<u8> {
 // byte-level changes to an entry text. lines of 512 bytes and more only
 // go into texts whose sections all keep their blank line, right after a
 // header that starts no relation list: READ_AND_SPLITDEP parses the
-// freed line buffer once a longer line grows it (UPSTREAM.md), so a
+// freed line buffer once a longer line grows it, so a
 // relation section never holds one
 fn mutate(rng: &mut Rng, data: &[u8]) -> Vec<u8> {
 	let mut lines = split_lines(data);

@@ -1459,7 +1459,7 @@ fn fr_real_packages() {
 		c.file = Some(path.into());
 		c.flags = 1 << 10; // NOSCRIPTLET
 		// progress of a compressed package read in many blocks is
-		// approximate (PORTING.md)
+		// approximate
 		let not_progress =
 			|r: &AcRec| !matches!(r, AcRec::Progress(..));
 		let r = compare_by(

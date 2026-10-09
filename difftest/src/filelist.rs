@@ -152,7 +152,7 @@ pub fn c_filelist_difference(a: &FileList, b: &FileList) -> Vec<usize> {
 	merge(_alpm_filelist_difference, a, b)
 }
 
-// C precondition: no empty names, see UPSTREAM.md
+// C precondition: no empty names
 pub fn c_filelist_intersection(a: &FileList, b: &FileList) -> Vec<usize> {
 	let empty = a.files.iter().chain(&b.files).any(|f| f.name().is_empty());
 	assert!(!empty, "empty name, C would read out of bounds");

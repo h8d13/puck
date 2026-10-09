@@ -750,7 +750,7 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 
 // stderr without what the port does not log: the C's RET_ERR/GOTO_ERR
 // debug lines (C source position) and libarchive's text in be_package's
-// open failure of a -Qp file (PORTING.md), cut after the path
+// open failure of a -Qp file, cut after the path
 fn norm(err: &[u8], pkgs: &[u8]) -> Vec<u8> {
 	let open = [&b"could not open file "[..], pkgs].concat();
 	let mut out = Vec::new();

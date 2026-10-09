@@ -36,7 +36,7 @@ const VERSIONS: [&str; 3] = ["1.0-1", "2:0.5-3", "1.0.1-1"];
 // path nodes, parents first. backup names carry ERE metacharacters for
 // shift_pacsave's unescaped regex ('.' any byte, '+', '[' fails to
 // compile); none of them can match a name shorter than itself, where
-// the C reads past the name (UPSTREAM.md)
+// the C reads past the name
 const TREE: [&str; 17] = [
 	"etc",
 	"etc/a.conf",

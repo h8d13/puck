@@ -290,9 +290,9 @@ impl PkgWorld {
 
 	// C preconditions: name set (strcmp in _alpm_depcmp); no unset
 	// origin with extra (compute_requiredby reads origin_data.db); dates
-	// localtime can take; list items string_length can take (see
-	// UPSTREAM.md); file packages without base64_sig, filename a readable
-	// file without .sig: the C reaches neither gpgme (keyring, gpg
+	// localtime can take; list items string_length can take; file
+	// packages without base64_sig, filename a readable file without
+	// .sig: the C reaches neither gpgme (keyring, gpg
 	// processes) nor the early return that leaves its siglist
 	// uninitialized. sync -ii: base64_sig invalid or decoding to
 	// well-formed signature packets, alpm_extract_keyid is not fuzzed

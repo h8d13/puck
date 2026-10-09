@@ -1735,7 +1735,7 @@ fn fixed_archive() {
 			["same", "same"],
 		),
 		// the C marks the scriptlet from a .MTREE it then drops for
-		// the archive list (UPSTREAM.md)
+		// the archive list
 		(
 			"mtree install",
 			vec![

@@ -482,7 +482,7 @@ pub fn compress_bytes(comp: Comp, data: &[u8], fast: bool) -> Vec<u8> {
 		Comp::Compress => c_filter_write("compress", "", data),
 		Comp::Lzma => c_filter_write("lzma", "", data),
 		Comp::Lzip => c_filter_write("lzip", "", data),
-		// libarchive's lz4 writer crashes on no data (UPSTREAM.md)
+		// libarchive's lz4 writer crashes on no data
 		Comp::Lz4 if data.is_empty() => {
 			let enc =
 				lz4_flex::frame::FrameEncoder::new(Vec::new());
@@ -512,8 +512,7 @@ pub const REPOS: [&str; 3] = ["core", "extra", "multilib"];
 pub const NAMES: [&str; 8] =
 	["a", "b", "foo", "bar", "x-y", "lib32-z", "q", "foo2"];
 pub const GROUPS: [&str; 4] = ["base", "kde", "g1", "g-2"];
-// file names, case pairs of the same UTF-8 length (see regex in
-// PORTING.md)
+// file names, case pairs of the same UTF-8 length
 pub const BASENAMES: [&str; 9] = [
 	"foo",
 	"Foo",
@@ -634,7 +633,7 @@ fn gen_pkg(rng: &mut Rng, name: &str) -> GenPkg {
 		section("ISIZE", &one(format!("{}", rng.next_u64() >> 30))),
 		section("SHA256SUM", &one("ab".repeat(32))),
 		section("ARCH", &one(arch.to_string())),
-		// localtime takes these, see UPSTREAM.md
+		// localtime takes these
 		section("BUILDDATE", &one(format!("{}", rng.next_u64() >> 31))),
 		section("PACKAGER", &one("A B <a@b.org>".to_string())),
 		section("GROUPS", &groups),

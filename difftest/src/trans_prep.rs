@@ -194,7 +194,7 @@ fn gen_pkg(rng: &mut Rng, name: &'static str, sync: bool) -> TpPkg {
 // and no world package is ignored, so the resolver never fails below a
 // target. the C frontend reads every data entry of a CONFLICTING_DEPS
 // failure as a conflict, and a failure below a target leaves stale
-// depmissing entries in that list (UPSTREAM.md, deps)
+// depmissing entries in that list
 pub fn gen_world(rng: &mut Rng, resolvable: bool) -> TpWorld {
 	let mut names = NAMES.to_vec();
 	names.retain(|_| rng.below(2) == 0);
@@ -888,7 +888,7 @@ impl CTx {
 	// a file target that failed to resolve on its own turn and was
 	// pulled by a later target sits on trans->add and
 	// trans->unresolvable both, and _alpm_trans_free frees it twice
-	// (UPSTREAM.md "a skipped file target freed twice"): its
+	// ("a skipped file target freed twice"): its
 	// unresolvable node loses its data, _alpm_pkg_free_trans(NULL)
 	// returns. after the test read its view, before any release
 	fn disarm_double_free(&self) {

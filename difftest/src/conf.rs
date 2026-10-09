@@ -888,7 +888,7 @@ impl ConfTree {
 		} else {
 			format!("pacman-conf-dt-{}-{tag}", std::process::id())
 		};
-		// C precondition (UPSTREAM.md): escape_chars writes its nul one
+		// C precondition: escape_chars writes its nul one
 		// byte past malloc(len + escaped). keep that size (with and
 		// without a trailing '/') off 16k+8, where glibc's chunk has no
 		// slack, so the stray byte stays inside the allocation

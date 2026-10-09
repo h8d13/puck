@@ -97,7 +97,7 @@ fn assert_same(b64: &[u8]) -> Vec<Class> {
 	assert_eq!(c.rc == 0, r.is_ok(), "{show:?} c={} rust={r:?}", c.rc);
 	match (c.data, &r) {
 		(Some(cd), Ok(rd)) => assert_eq!(&cd, rd, "{show:?}"),
-		// C divergence, see UPSTREAM.md
+		// C divergence
 		(None, Ok(rd)) => {
 			assert!(rd.is_empty(), "{show:?}");
 			assert_eq!(c.len, b64.len() * 3 / 4, "{show:?}");

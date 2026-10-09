@@ -95,7 +95,7 @@ pub fn c_parsedate(s: &[u8]) -> i64 {
 	unsafe { _alpm_parsedate(s.as_ptr()) }
 }
 
-// C precondition: two '-' before the first '/', see UPSTREAM.md
+// C precondition: two '-' before the first '/'
 pub fn c_splitname(target: &[u8]) -> Option<(Vec<u8>, Vec<u8>, c_ulong)> {
 	let end = target
 		.iter()

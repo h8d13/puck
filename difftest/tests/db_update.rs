@@ -477,7 +477,7 @@ fn sequences() {
 		p.check("subset", &sv, &[1], false);
 		// one db twice races its own files; sandboxed, the helper's
 		// exit 2 is RETRIEVE where the plain C can leave ALPM_ERR_OK
-		// (UPSTREAM.md) and the rename error names the temporary dir
+		// and the rename error names the temporary dir
 		if !sandbox {
 			p.check("subset twice", &sv, &[1, 1], true);
 		}
@@ -679,7 +679,7 @@ fn signatures() {
 		assert!(core_req.is_some_and(|r| r.ims.is_none()), "{o:?}");
 
 		// optional, no .sig upstream: the one of the last sync stays
-		// and fails the new db (UPSTREAM.md)
+		// and fails the new db
 		extra(1, not_found());
 		let o = p.check("optional missing", &sv, &[0, 1, 2], false);
 		assert_eq!(o.ret, -1, "{o:#?}");
@@ -702,7 +702,7 @@ fn signatures() {
 	}
 }
 
-// UPSTREAM.md: a later db with a missing optional signature resets the
+// a later db with a missing optional signature resets the
 // pm_errno an earlier failed validation set (signing.c:817), the C fails
 // with ALPM_ERR_OK. the port keeps DB_INVALID_SIG; all else equal
 #[test]
@@ -806,7 +806,7 @@ fn route_db(srv: &Server, sd: &Signed, ext: &str, name: &str, how: Serve) {
 fn fuzz_serve(rng: &mut Rng, n: usize) -> Serve {
 	let b = rng.below(n);
 	// no non-archive bodies: the be_sync reader fails those at the
-	// first header (LIBARCHIVE), the C at open (DB_OPEN), PORTING.md
+	// first header (LIBARCHIVE), the C at open (DB_OPEN)
 	match rng.below(11) {
 		0 => Serve::BadSig(b),
 		1 => Serve::NoSig(b),

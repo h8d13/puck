@@ -147,7 +147,7 @@ pub fn c_gpgme_strerror(code: u32) -> Vec<u8> {
 pub struct CDecoded {
 	pub rc: i32,
 	pub len: usize,
-	// None where the C buffer is not initialized, see UPSTREAM.md
+	// None where the C buffer is not initialized
 	pub data: Option<Vec<u8>>,
 }
 
@@ -781,7 +781,7 @@ impl CSigHandle {
 
 	// alpm_extract_keyid. the buffer has one byte more than len: the C
 	// reads the unhashed length one byte past a signature whose hashed
-	// area ends there (UPSTREAM.md), the outcome does not depend on it.
+	// area ends there, the outcome does not depend on it.
 	// sig must pass keyid_input_defined
 	pub fn extract_keyid(
 		&self,
@@ -820,7 +820,7 @@ impl Drop for CSigHandle {
 
 // makes sig an alpm_extract_keyid input the C is defined on: a 4-byte
 // length (after 0xff, or after an old format tag of length type 2) with
-// its top byte >= 0x80 overflows a signed int shift there (UPSTREAM.md).
+// its top byte >= 0x80 overflows a signed int shift there.
 // clears that bit wherever such a length could start
 pub fn keyid_input_defined(sig: &mut [u8]) {
 	for i in 1..sig.len() {

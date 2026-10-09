@@ -10,7 +10,7 @@
 // net keyrings (one per side) get their keys from the fixture's HKP
 // server on loopback, WKD is never tried on them (the uid's domain
 // would go to the system resolver). WKD success is untested: dirmngr
-// trusts only the system CAs for it (PORTING.md).
+// trusts only the system CAs for it.
 //
 // gpg runs a few times per call: the fuzz does DIFFTEST_ITERS / 1000
 // calls (200 at 200000).
