@@ -4,8 +4,9 @@ Behaviour in the C reference noticed while porting. Kept out of the port
 source; the port implements the in-bounds/defined behaviour only, and
 `difftest` avoids or pins these cases explicitly.
 
-Reference: `pacman/` at `v7.1.0-18-ga6f7467d`. Nothing here has been
-reported upstream yet.
+Reference: `pacman/` at `v7.1.0-18-ga6f7467d`. Findings carry an
+`upstream:` cross-reference where an existing pacman/alpm issue or MR
+covers the same bug (searched the trackers); the rest are unreported.
 
 ## Practice
 
@@ -69,6 +70,8 @@ compare as `unsigned char`.
 - port: mirrors the C via `c_char`
 - difftest: edge case pins it
 
+upstream: no report found
+
 ## `_alpm_pkg_dup` copies a subset
 
 Practice: **real, long-lived API users**. The cache entry is per process;
@@ -81,6 +84,8 @@ package.c:588-641 does not copy `base64_sig`, `download_size`,
 by `_alpm_db_add_pkgincache` (db.c:622).
 
 - port: `dup()` mirrors the subset, `Clone` is complete
+
+upstream: no report found
 
 ## local db lines over 1023 bytes split
 
@@ -102,6 +107,8 @@ conf.c:1237-1254: with `GLOB_NOCHECK` and no errfunc, the GLOB_NOMATCH and
 GLOB_ABORTED branches are dead and the "Ignore include failures" comment
 is wrong: the pattern comes back verbatim and fails with "could not be
 read".
+
+upstream: no report found
 
 ## `READ_AND_SPLITDEP` reads a freed buffer
 
@@ -206,6 +213,9 @@ fail to unlink later are only counted, with the same outcome.
 - port: same behaviour, the files result returned
 - difftest: unlink/rmdir/rename failures in 0555 dirs compared
 
+upstream: pacman#49 (open), same bug (R on FS error leaves all files
+unowned, exit success).
+
 ## `-Fx -l` conflict check is dead
 
 Practice: **real**. Ordinary flags reach it; the effect is missing
@@ -213,6 +223,8 @@ validation only.
 
 pacman.c:878 `checkargs_files` tests `op_q_search`, which -F never sets
 (should be `op_f_regex`), so `--regex --list` is never rejected.
+
+upstream: no report found
 
 ## a skipped file target freed twice
 
@@ -246,6 +258,8 @@ record a target as unresolvable until the whole loop is done.
   of NULL returns); the frontend fuzz has not reached the case (its
   resolvable worlds, no IgnorePkg)
 
+upstream: no report found
+
 ## `_alpm_pkg_check_meta` name check swapped
 
 Practice: **packager**. makepkg refuses invalid package names, so only a
@@ -272,6 +286,9 @@ no complete `\033[<digit>[0-9;]*m` sequence gets stripped.
 
 - port: no buffer, slices
 - difftest: input filtered to complete sequences (`string_length_in_bounds`)
+
+upstream: pacman#82 (closed, TOB-PACMAN-4), fix MR!135 (merged) kept the
+`malloc(strlen(s))` sizing.
 
 ## `_alpm_splitname` precondition
 
@@ -310,6 +327,8 @@ uninitialized buffer as success (e.g. `"\n\n\n\n"` gives 3 bytes).
 
 - port: returns empty
 - difftest: `c_decode_signature` does not read the buffer in that case
+
+upstream: no report found
 
 ## `_alpm_filelist_intersection` on empty names
 
@@ -518,7 +537,8 @@ declarations. No existing MR found for it.
   8` can underflow (1197); 4-byte lengths shift a signed int, a top byte
   >= 0x80 is UB and can wrap `pos` backwards (1052, 1112, 1143), reached
   from `alpm_pkg_load` on a crafted `.sig` before verification.
-  **packager**
+  **packager**. the `sig[pos+1]` over-read: upstream pacman#270 (closed),
+  fix MR!297 (merged); the shift UB / underflow appear unreported.
 - the `-1` "unset date" check never matches, missing dates print as
   1970-01-01 instead of "None" (package.c:202, 206). **packager / local**,
   cosmetic
@@ -771,6 +791,9 @@ synchronize all databases (unexpected error)".
 - port: keeps the last failure's errno
 - difftest: `errno_reset_pinned`
 
+upstream: no report found (cf. pacman#156/MR!199, a different
+"unexpected error" path, already fixed)
+
 ## stale `.sig` kept after a sync
 
 Practice: **real (rare)**. Needs a repo with optional signatures that
@@ -783,6 +806,9 @@ place, the new db is checked against it and turns invalid.
 - port: same behaviour
 - difftest: `signatures` ("optional missing")
 
+upstream MR: pacman!184 (open), same scenario (repo+sig, sync, remove sig,
+resync -> stale sig fails the check).
+
 ## `%BACKUP%` written with a `(null)` hash
 
 Practice: **real**. 15/804 entries in a real local db carry it.
@@ -793,6 +819,9 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
 
 - port: writes `(null)` like the C, the reader keeps it as the hash
 - difftest: `be_local_write`
+
+upstream: no report found (reader side); the ALPM-side consequence is
+alpm MR!496 (merged)
 
 ## local db writing and `_alpm_unpack` minor
 
@@ -831,7 +860,8 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
   symlink to a directory replaces the link with a real directory;
   conflict.c (~521) only flags it when the package lists the `usr/lib/`
   entry, which makepkg always does. **packager**, or real with
-  `--overwrite`
+  `--overwrite`. related: pacman#331 (open) — same libarchive
+  UNLINK|SECURE_SYMLINKS unlink, but for a dbpath `local/` symlink
 - the commit hangs on a fifo: `alpm_compute_md5sum` opens a backup path,
   its `.pacnew` or a symlink to a fifo and `open(2)` blocks forever
   (add.c:335, 357-358). **packager** (port: same)
@@ -888,7 +918,7 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
   debug level (sync.c:260-267), but `alpm_pkg_load` has already logged
   "could not open file ...: Error reading fd N" (util.c:291) as an error
   for every directory, e.g. the leftover `download-XXXXXX` dirs (`dload.c`
-  minor). **real**, cosmetic
+  minor). **real**, cosmetic. upstream: pacman#214 (closed)
 
 ## transaction prepare minor
 
@@ -929,7 +959,9 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
 - `ASSERT(chown(...), return)` returns when chown succeeds
   (dload.c:1194): with DownloadUser set (Arch's pacman.conf sets it),
   later payloads lose If-Modified-Since (dbs re-downloaded) and their
-  `.part` files are not moved (resume lost). **real**
+  `.part` files are not moved (resume lost). **real**. upstream: pacman#194
+  / MR!274 touch the same chown but for the NFS-squash *failure*, not this
+  inverted ASSERT — apparently unreported.
 - "delete zero length downloads" fstats an unflushed FILE (dload.c:599-
   601): a last failed attempt under one stdio block unlinks a `.part`
   that has data. **real**, harmless
@@ -957,6 +989,7 @@ no md5 for that file; glibc writes `(null)`. The reader then keeps
   per install step). **real**
   Seen on a real system: 58 leftover `download-*` dirs in
   `/var/cache/pacman/pkg` (Arch default DownloadUser, C pacman 7.1).
+  upstream: pacman#264 (closed), MR!351 (closed, fix attempt).
 - sandboxed downloads count server errors in the forked child's copy of
   the handle (dload.c:920-1060): a mirror failing during `-Sy` is not
   remembered for the package downloads of the same `-Syu`, unlike
@@ -1266,7 +1299,8 @@ below came from patches dropped with the owned readers (PORTING.md
 - alpm-db-files' "Empty lines are ignored" contradicts upstream's own
   `empty_line_in_list_of_paths` fixture. **none** (spec wording)
 - keeping `(null)` backups needs an exemption from the not-in-`%FILES%`
-  check, pacman writes them for exactly those paths. **real** (2/804)
+  check, pacman writes them for exactly those paths. **real** (2/804).
+  upstream MR: alpm!496 (merged)
 - layer strings swapped between alpm-db and alpm-repo-db ("alpm-repo-desc
   file value section" in alpm-db and the reverse). **none**
 
@@ -1290,9 +1324,11 @@ pacman's formats. Same practice labels, judged against real databases.
   no-break spaces, U+0085, U+2028/9, titlecase letters, 27 Greek
   ypogegrammeni letters under icase. **real (rare)** for -Ss/-Qs
 - alpm-types `Packager` rejects `Unknown Packager`, makepkg's default,
-  so the whole desc becomes unreadable. **real** (1 of 804 local packages)
+  so the whole desc becomes unreadable. **real** (1 of 804 local packages).
+  upstream: alpm#268 (open)
 - alpm-db files: backups sorted by path, entries with hash `(null)`
-  dropped (real local db: 15 and 2 of 804). **real**
+  dropped (real local db: 15 and 2 of 804). **real**.
+  upstream MR: alpm!496 (merged, "Ignore backup entries with null digest")
 - alpm-types `Url` normalizes (empty path gets '/'), no round trip.
   **real** (82/804 local, 1330/15334 sync)
 - alpm-types `RelationOrSoname` rejects valid relation names with 2+
@@ -1364,7 +1400,7 @@ pacman's formats. Same practice labels, judged against real databases.
 - sync.c:942 check_keyring: `keyinfo->uid = strdup(pkg->packager)` on a
   sync entry without `%PACKAGER%` is strdup(NULL). Practice: **packager**
   (a crafted repo db with package signatures required). The port passes
-  no uid.
+  no uid. upstream: pacman#334 (open).
 - sync.c:804 download_files: a failed CALLOC of the download sizes jumps
   to `finish` with ret still 0, so the downloads are skipped and the load
   goes on as if they had worked. Practice: **env** (OOM).
