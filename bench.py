@@ -39,8 +39,9 @@ DEFAULT_OPS = [
 ]
 
 
-# launcher: fork, exec argv[2..] with argv[0] "pacman" and stdout/stderr
-# to argv[1].out/.err, then print "<status> <maxrss KiB> <wall ns>"
+# launcher BASE PATH ARGV...: fork, execv(PATH, ARGV) with stdout/stderr
+# to BASE.out/.err, then print "<status> <maxrss KiB> <wall ns> <user us>
+# <sys us>" (rusage of the child and the descendants it waited for)
 LAUNCHER = r'''
 #include <fcntl.h>
 #include <stdio.h>
@@ -62,15 +63,15 @@ int main(int argc, char **argv)
 	if(pid == 0) {
 		dup2(open(out, O_WRONLY | O_CREAT | O_TRUNC, 0600), 1);
 		dup2(open(err, O_WRONLY | O_CREAT | O_TRUNC, 0600), 2);
-		char *bin = argv[2];
-		argv[2] = "pacman";
-		execv(bin, argv + 2);
+		execv(argv[2], argv + 3);
 		_exit(127);
 	}
 	wait4(pid, &st, 0, &ru);
 	clock_gettime(CLOCK_MONOTONIC, &b);
-	printf("%d %ld %lld\n", st, ru.ru_maxrss,
-		(b.tv_sec - a.tv_sec) * 1000000000LL + (b.tv_nsec - a.tv_nsec));
+	printf("%d %ld %lld %ld %ld\n", st, ru.ru_maxrss,
+		(b.tv_sec - a.tv_sec) * 1000000000LL + (b.tv_nsec - a.tv_nsec),
+		ru.ru_utime.tv_sec * 1000000L + ru.ru_utime.tv_usec,
+		ru.ru_stime.tv_sec * 1000000L + ru.ru_stime.tv_usec);
 	return 0;
 }
 '''
@@ -84,18 +85,26 @@ def build_launcher(tmp):
 	return exe
 
 
-# one run: wall seconds, peak RSS KiB, exit status, stdout, stderr
-def run(launcher, binary, args, tmp):
+# one run of path with the full argv: wall seconds, peak RSS KiB, exit
+# status, (stdout, stderr), user and sys CPU seconds
+def launch(launcher, path, argv, tmp, env=None, cwd=None):
 	base = os.path.join(tmp, "run")
-	env = dict(os.environ, COLUMNS="80")
-	r = subprocess.run([launcher, base, binary, *args], env=env,
+	env = env or dict(os.environ, COLUMNS="80")
+	r = subprocess.run([launcher, base, path, *argv], env=env, cwd=cwd,
 		capture_output=True, check=True)
-	st, rss, ns = (int(x) for x in r.stdout.split())
+	st, rss, ns, us, ss = (int(x) for x in r.stdout.split())
 	data = []
 	for ext in ("out", "err"):
 		with open(f"{base}.{ext}", "rb") as f:
 			data.append(f.read())
-	return ns / 1e9, rss, st, data
+	return ns / 1e9, rss, st, data, us / 1e6, ss / 1e6
+
+
+# one run with argv[0] "pacman" so usage and messages compare
+def run(launcher, binary, args, tmp):
+	w, rss, st, data, _, _ = launch(launcher, binary,
+		["pacman", *args], tmp)
+	return w, rss, st, data
 
 
 def fmt_time(s):
