@@ -744,8 +744,12 @@ fn run(bin: &Path, case: &Case, w: &World) -> Outcome {
 	let env = String::from_utf8_lossy(&norm(&env, bin, w.dir()))
 		.lines()
 		.filter(|l| !l.starts_with("HTTP_USER_AGENT="))
-		// fakeroot's key is random per session
-		.filter(|l| !l.starts_with("FAKEROOTKEY="))
+		// fakeroot's own vars: the random session key, and the fake
+		// id set it records at a setuid (DownloadUser). the C forks and
+		// setuids in place; the port setuids one exec hop away in its
+		// helper, so fakeroot records them at a different point. harness
+		// state, absent without fakeroot: masked
+		.filter(|l| !l.starts_with("FAKEROOT"))
 		.map(str::to_string)
 		.collect();
 	Outcome {
