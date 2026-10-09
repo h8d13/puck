@@ -13,6 +13,8 @@ exclude = ["pacman", "alpm", "vendor"]
 
 [workspace.package]
 version = "0.1.0"
+# ships through the PKGBUILD, not crates.io
+publish = false
 edition = "2024"
 # derived from pacman sources, same license
 license = "GPL-2.0-or-later"

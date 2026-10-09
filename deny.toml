@@ -24,6 +24,8 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# workspace path deps carry no version
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
