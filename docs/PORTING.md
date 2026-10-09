@@ -251,8 +251,8 @@ come along.
 | Item | Why it blocks | Start from | State |
 |---|---|---|---|
 | libalpm C ABI (`libalpm.so.16`) | pamac, pyalpm, yay, paru (alpm.rs) and pacman-contrib link libalpm; without it pacman stays installed beside puck. Builds on this milestone's public API | "Later" row; `c_null_contract`, `_alpm_strtoofft` notes | todo |
-| install names `pacman`, `pacman-conf` | makepkg, pacman-key, pacman-db-upgrade, completions and paccache call them by name; the PKGBUILD installs `puck`/`puck-conf`, `depends=('pacman')`, no `provides`/`conflicts` | PKGBUILD `package()`; `scripts/pacman-conf-dropin.sh` | todo: the bash tools (makepkg, libmakepkg, pacman-key, repo-add, pacman-db-upgrade, the wrapper) stay upstream's, not ported or renamed: replacing the package means shipping them built from `pacman/` (meson substitutes the `.in` files) next to binaries named `pacman`/`pacman-conf` |
-| PKGBUILD | `check()` is a stub; source is private ssh; `gnupg` optional while signature checks default to Required (pacman's deps pull it in today); x86_64 only | PKGBUILD | todo |
+| install names `pacman`, `pacman-conf` | makepkg, pacman-key, pacman-db-upgrade, completions and paccache call them by name | PKGBUILD `package()`; `scripts/pacman-conf-dropin.sh` | done: the crate keeps `puck`/`puck-conf` (difftests, scripts), the package installs them as `pacman`/`pacman-conf` with `vercmp`/`testpkg`, `provides=('pacman=7.1.0')`, `conflicts=('pacman')`. The bash tools (makepkg, libmakepkg, pacman-key, repo-add, pacman-db-upgrade, makepkg-template), completions, man pages, `/etc` configs and `pacman-scripts.mo` ship built from `pacman/` by meson (Arch's options, doxygen off); the C binaries, libalpm and its catalogs are dropped from the install. Open: the port hard-codes `SCRIPTLET_SHELL=/bin/sh` and `LDCONFIG=/sbin/ldconfig` (`alpm-core::util`) where Arch builds the C with `/usr/bin/bash` and `/usr/bin/ldconfig`; Arch's own `pacman.conf`/`makepkg.conf`, `alpm.sysusers` (DownloadUser) and the gnupg socket units are packaging, not upstream, and are not shipped |
+| PKGBUILD | `check()`, source, deps | PKGBUILD | done: `check()` runs `check-separation.sh`, `check-externs.py`, the port crates' unit tests, upstream's vercmptest and script tests and the pacman-conf drop-in comparison (difftest, pactest and twin-root need the C objects or a chroot: left to the gates); `gnupg` a hard dependency (SigLevel defaults to Required); the pacman/ submodule is a second git source checked out in `prepare()`. Open: source is private ssh until the repo opens (the https line is next to it); x86_64 only (aarch64 row) |
 | gettext translations | non-English users get the English msgids | "Later" row | todo |
 | locale collation and charsets | `strcoll` for Include glob order and regex ranges/`[=e=]`/`[.x.]`; charsets other than UTF-8/ASCII; glibc wcwidth table | "Later" row, `regex` note, divergences table | todo |
 | connection reuse in `dload` | every package and `.sig` opens a new connection (reqwest without a pool, see `dload` note); a real `-Syu` of many packages from one mirror pays a TLS handshake each. benches run on local mirrors and do not show it | `dload` note: curl retries a dead reused connection, reqwest cannot tell reused from fresh | todo: bench `-Sw` of ~200 packages on a remote mirror first |
@@ -442,6 +442,8 @@ repo-add/repo-remove, pacman-key, pacman-db-upgrade, the wrapper (bash)
 and makepkg-template (Perl). They call `pacman` and `pacman-conf` as
 binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
 `pacman-key --init`/`--populate` and `repo-add` against the Rust binaries.
+The PKGBUILD ships them built by meson from `pacman/`, next to the port
+installed as `pacman`/`pacman-conf` (handover row "install names").
 
 ## Notes
 

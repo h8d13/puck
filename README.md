@@ -12,6 +12,11 @@ cargo build --release -p pacman-cli
 ./target/release/puck --help
 ```
 
+As a package (`makepkg`, from the `PKGBUILD`): the binaries install as
+`pacman`, `pacman-conf`, `vercmp` and `testpkg`, next to upstream's
+makepkg, pacman-key and repo-add built from `pacman/`; it provides and
+conflicts with `pacman`.
+
 ### Testing / Dev
 
 Needs rust toolchain (+ `cargo-deny`, `pre-commit`, `fakechroot`, `fakeroot`)
