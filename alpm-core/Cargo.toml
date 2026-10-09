@@ -6,27 +6,27 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-alpm-types.workspace = true
 base64.workspace = true
 bzip2.workspace = true
 flate2.workspace = true
 landlock.workspace = true
 liblzma.workspace = true
+md-5.workspace = true
 memchr.workspace = true
 libseccomp.workspace = true
 lz4_flex.workspace = true
 pacman-common = { path = "../pacman-common" }
 reqwest.workspace = true
 rustix.workspace = true
+sha2.workspace = true
 # run_chroot's child: _alpm_reset_signals (METHODOLOGY.md)
 signal-hook.workspace = true
 time.workspace = true
 twox-hash.workspace = true
 zstd.workspace = true
 
-# test fixtures: archives in every compression
+# test fixtures: tar archives
 [dev-dependencies]
-alpm-compress.workspace = true
 tar.workspace = true
 
 [lints]

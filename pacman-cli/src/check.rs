@@ -21,9 +21,8 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
 use alpm_core::backup::Backup;
-use alpm_core::be_local::{
-	LocalDb, MtreeEntry, MtreeError, MtreeType, Sha256Checksum,
-};
+use alpm_core::be_local::{LocalDb, MtreeEntry, MtreeError, MtreeType};
+use alpm_core::digest::{self, Sha256};
 use alpm_core::filelist;
 use alpm_core::handle::Handle;
 use alpm_core::package::Package;
@@ -336,9 +335,9 @@ fn mismatch(
 }
 
 // alpm_compute_sha256sum: None where the file cannot be opened or read
-fn sha256_file(fp: &[u8]) -> Option<Sha256Checksum> {
+fn sha256_file(fp: &[u8]) -> Option<[u8; 32]> {
 	let f = File::open(os(fp)).ok()?;
-	Sha256Checksum::calculate_from_reader(f).ok()
+	Some(digest::of_reader::<Sha256>(f).ok()?.into())
 }
 
 // check_file_sha256sum + check_file_cksum
@@ -365,7 +364,7 @@ fn sha256(
 		}
 		return 1;
 	};
-	if calc.as_ref() != want {
+	if calc != *want {
 		let what = b"SHA256 checksum mismatch";
 		return mismatch(o, c, pkgname, fp, backup, what);
 	}

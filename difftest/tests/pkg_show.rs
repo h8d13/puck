@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use alpm_core::backup::Backup;
 use alpm_core::deps::{DepMod, Depend, dep_compute_string, find_satisfier};
+use alpm_core::digest::{Digest, Md5, hex};
 use alpm_core::error::Errno;
 use alpm_core::filelist::{File, FileList};
 use alpm_core::package::{
@@ -16,7 +17,6 @@ use alpm_core::package::{
 	compute_requiredby, pkg_find,
 };
 use alpm_core::util::hash_sdbm;
-use alpm_types::Md5Checksum;
 use difftest::{
 	CShown, PkgWorld, Rng, SYNC_DBS, c_print_groups, c_strftime_c,
 	encode_base64, iters, random_sig, sig_packet, utc_date, widths_agree,
@@ -110,7 +110,7 @@ const BACKUP_NAMES: &[&[u8]] = &[
 ];
 
 fn md5(b: &[u8]) -> Vec<u8> {
-	Md5Checksum::calculate_from(b).to_string().into_bytes()
+	hex(&Md5::digest(b))
 }
 
 // pieces of display text: words, spaces, wide (2), combining (0), non

@@ -9,6 +9,7 @@ pub mod callbacks;
 pub mod conflict;
 pub mod db;
 pub mod deps;
+pub mod digest;
 pub mod diskspace;
 pub mod dload;
 pub mod error;

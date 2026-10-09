@@ -17,10 +17,10 @@ use std::fs;
 
 use alpm_core::be_package::{pkg_load_level, pkg_validate};
 use alpm_core::db::Db;
+use alpm_core::digest::{Digest, Sha256, hex};
 use alpm_core::error::Errno;
 use alpm_core::package::Package;
 use alpm_core::signing::*;
-use alpm_types::Sha256Checksum;
 use difftest::{
 	CSigHandle, FILES, GpgFixture, HOMES, Home, RecordingCallbacks, Rng,
 	SigCall, c_gpgme_strerror, encode_base64, iters, keyid_input_defined,
@@ -295,8 +295,7 @@ impl Bench {
 		let data = fs::read(
 			String::from_utf8(self.fx.file(name)).unwrap(),
 		);
-		let sum = Sha256Checksum::calculate_from(data.unwrap());
-		sum.to_string().into_bytes()
+		hex(&Sha256::digest(data.unwrap()))
 	}
 }
 

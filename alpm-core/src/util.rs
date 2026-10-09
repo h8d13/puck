@@ -27,6 +27,7 @@ use rustix::fs::{
 };
 
 use crate::callbacks::{Callbacks, Event, LogLevel, logv};
+use crate::digest;
 use crate::error::Errno;
 use crate::filter::{self, Code};
 use crate::handle::Handle;
@@ -597,23 +598,22 @@ pub fn files_in_directory(path: &[u8], full_count: bool) -> io::Result<usize> {
 	})
 }
 
-// md5_file/sha256_file + hex_representation through alpm-types (md-5,
-// sha2), lowercase hex. None when the file cannot be opened or a read
-// fails (EINTR retried like the C loop)
-fn file_digest<D: alpm_types::digests::Digest>(path: &[u8]) -> Option<Vec<u8>> {
+// md5_file/sha256_file + hex_representation, lowercase hex. None when
+// the file cannot be opened or a read fails
+fn file_digest<D: digest::Digest>(path: &[u8]) -> Option<Vec<u8>> {
 	let f = File::open(c_path(path)).ok()?;
-	let sum = alpm_types::Checksum::<D>::calculate_from_reader(f).ok()?;
-	Some(sum.to_string().into_bytes())
+	let sum = digest::of_reader::<D>(f).ok()?;
+	Some(digest::hex(&sum))
 }
 
 // alpm_compute_md5sum
 pub fn compute_md5sum(path: &[u8]) -> Option<Vec<u8>> {
-	file_digest::<alpm_types::digests::Md5>(path)
+	file_digest::<digest::Md5>(path)
 }
 
 // alpm_compute_sha256sum
 pub fn compute_sha256sum(path: &[u8]) -> Option<Vec<u8>> {
-	file_digest::<alpm_types::digests::Sha256>(path)
+	file_digest::<digest::Sha256>(path)
 }
 
 // _alpm_test_checksum: kind is exactly PKG_VALIDATION_MD5SUM or

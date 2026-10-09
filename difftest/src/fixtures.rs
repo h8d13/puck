@@ -1,7 +1,7 @@
 // fixture trees shared by the db difftests: a temp root with root/ and
 // db/{local,sync}/, local db entries (desc, files, install) and sync db
-// archives (ustar, every compression pacman reads; libarchive's writers
-// for those alpm-compress has no encoder for), and the read-only sync
+// archives (ustar, every compression pacman reads; the codec crates'
+// encoders, libarchive's writers for the rest), and the read-only sync
 // worlds (SyncWorld). what goes into the files is up to each test's
 // generators.
 use std::fmt::Write as _;
@@ -12,11 +12,9 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use alpm_compress::compression::{
-	Bzip2CompressionLevel, CompressionEncoder, CompressionSettings,
-	GzipCompressionLevel, XzCompressionLevel, ZstdCompressionLevel,
-	ZstdThreads,
-};
+use bzip2::write::BzEncoder;
+use flate2::write::GzEncoder;
+use liblzma::write::XzEncoder;
 
 use crate::signing::random_sig;
 use crate::{Rng, c_filter_write};
@@ -438,62 +436,64 @@ pub const FILTERED: [Comp; 9] = [
 	Comp::GzipInGzip,
 ];
 
-// data compressed with comp: alpm-compress's encoders (fast: their
-// lowest levels), libarchive's write filters for the rest (filter.rs)
+// data compressed with comp: the codec crates' encoders as alpm-compress
+// drives them (fast: their lowest levels; xz parallel, zstd one worker),
+// libarchive's write filters for the rest (filter.rs)
 pub fn compress_bytes(comp: Comp, data: &[u8], fast: bool) -> Vec<u8> {
-	let level = |low: u8, default: u8| if fast { low } else { default };
-	let settings = match comp {
-		Comp::None => return data.to_vec(),
-		Comp::Gzip => CompressionSettings::Gzip {
-			compression_level: GzipCompressionLevel::new(level(
-				1, 6,
-			))
-			.unwrap(),
-		},
-		Comp::Bzip2 => CompressionSettings::Bzip2 {
-			compression_level: Bzip2CompressionLevel::new(level(
-				1, 9,
-			))
-			.unwrap(),
-		},
-		Comp::Xz => CompressionSettings::Xz {
-			compression_level: XzCompressionLevel::new(level(0, 6))
-				.unwrap(),
-		},
-		Comp::Zstd => CompressionSettings::Zstd {
-			compression_level: ZstdCompressionLevel::new(level(
-				1, 3,
-			))
-			.unwrap(),
-			threads: ZstdThreads::new(1),
-		},
-		Comp::Compress => return c_filter_write("compress", "", data),
-		Comp::Lzma => return c_filter_write("lzma", "", data),
-		Comp::Lzip => return c_filter_write("lzip", "", data),
+	let level = |low: u32, default: u32| if fast { low } else { default };
+	fn done<W: Write>(
+		mut w: W,
+		data: &[u8],
+		finish: impl FnOnce(W) -> std::io::Result<Vec<u8>>,
+	) -> Vec<u8> {
+		w.write_all(data).unwrap();
+		finish(w).unwrap()
+	}
+	match comp {
+		Comp::None => data.to_vec(),
+		Comp::Gzip => {
+			let c = flate2::Compression::new(level(1, 6));
+			done(GzEncoder::new(Vec::new(), c), data, |e| {
+				e.finish()
+			})
+		}
+		Comp::Bzip2 => {
+			let c = bzip2::Compression::new(level(1, 9));
+			done(BzEncoder::new(Vec::new(), c), data, |e| {
+				e.finish()
+			})
+		}
+		Comp::Xz => {
+			let e = XzEncoder::new_parallel(
+				Vec::new(),
+				level(0, 6),
+			);
+			done(e, data, |e| e.finish())
+		}
+		Comp::Zstd => {
+			let mut e = zstd::Encoder::new(
+				Vec::new(),
+				level(1, 3) as i32,
+			)
+			.unwrap();
+			e.multithread(1).unwrap();
+			done(e, data, |e| e.finish())
+		}
+		Comp::Compress => c_filter_write("compress", "", data),
+		Comp::Lzma => c_filter_write("lzma", "", data),
+		Comp::Lzip => c_filter_write("lzip", "", data),
 		// libarchive's lz4 writer crashes on no data (UPSTREAM.md)
 		Comp::Lz4 if data.is_empty() => {
 			let enc =
 				lz4_flex::frame::FrameEncoder::new(Vec::new());
-			return enc.finish().unwrap();
+			enc.finish().unwrap()
 		}
-		Comp::Lz4 => return c_filter_write("lz4", "", data),
+		Comp::Lz4 => c_filter_write("lz4", "", data),
 		Comp::GzipInGzip => {
 			let inner = compress_bytes(Comp::Gzip, data, fast);
-			return compress_bytes(Comp::Gzip, &inner, fast);
+			compress_bytes(Comp::Gzip, &inner, fast)
 		}
-	};
-	// the encoders write to a File only
-	static N: AtomicUsize = AtomicUsize::new(0);
-	let n = N.fetch_add(1, Ordering::Relaxed);
-	let path = std::env::temp_dir()
-		.join(format!("difftest-comp-{}-{n}", std::process::id()));
-	let f = fs::File::create(&path).unwrap();
-	let mut enc = CompressionEncoder::new(f, &settings).unwrap();
-	enc.write_all(data).unwrap();
-	enc.finish().unwrap();
-	let out = fs::read(&path).unwrap();
-	fs::remove_file(&path).unwrap();
-	out
+	}
 }
 
 // tar compressed with comp into path

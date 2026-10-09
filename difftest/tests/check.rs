@@ -17,9 +17,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use alpm_core::be_local::{
 	INFRQ_ALL, LocalDb, MtreeEntry, MtreeError, MtreeType, read_mtree,
 };
+use alpm_core::digest::{Digest, Md5, Sha256};
 use alpm_core::handle::Handle;
 use alpm_core::package::Package;
-use alpm_types::Sha256Checksum;
 use difftest::{
 	CCheck, CMtreeEntry, CheckWorld, Comp, FILTERED, Rng, compress_bytes,
 	iters, set_mtime_nofollow,
@@ -1375,16 +1375,11 @@ fn mtree_line(rng: &mut Rng, path: &str, n: &Node, set: &Set) -> String {
 		MtreeType::File => {
 			props.push(format!("size={}", n.content.len()));
 			if rng.below(4) == 0 {
-				let m = alpm_types::Md5Checksum::calculate_from(
-					&n.content,
-				);
-				props.push(format!(
-					"md5digest={}",
-					hex(m.as_ref())
-				));
+				let m = Md5::digest(&n.content);
+				props.push(format!("md5digest={}", hex(&m)));
 			}
-			let s = Sha256Checksum::calculate_from(&n.content);
-			props.push(format!("sha256digest={}", hex(s.as_ref())));
+			let s = Sha256::digest(&n.content);
+			props.push(format!("sha256digest={}", hex(&s)));
 		}
 		MtreeType::Link => {
 			let t = escape(rng, &n.target);
@@ -1990,7 +1985,7 @@ fn check_divergences() {
 	assert!(c.contains("p: no mtree file\n"), "{c}");
 	assert_eq!(c, r);
 
-	let sha = hex(Sha256Checksum::calculate_from(b"hello\n").as_ref());
+	let sha = hex(&Sha256::digest(b"hello\n"));
 	let (u, g) = me;
 	let mtree =
 		format!("#mtree\n/set type=file uid={u} gid={g} mode=644\n\

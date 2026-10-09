@@ -15,6 +15,7 @@ use alpm_core::be_package::{
 	Error, changelog, pkg_load, pkg_load_level, pkg_validate_internal,
 };
 use alpm_core::callbacks::{Callbacks, LogLevel};
+use alpm_core::digest::{Digest, Sha256, hex};
 use alpm_core::package::Package;
 use alpm_core::signing::Keyring;
 use difftest::{
@@ -2078,13 +2079,12 @@ fn fixed_other_compressions() {
 // _alpm_pkg_validate_internal's checksum part
 #[test]
 fn fixed_validate() {
-	use alpm_types::Sha256Checksum;
 	let fx = Fixture::new();
 	let h = fx.handle();
 	let path = fx.pkg("v.pkg.tar");
 	write_pkg(&path, Comp::Zstd, &[file(b".PKGINFO", PKGINFO.as_bytes())]);
-	let sum = Sha256Checksum::calculate_from(fs::read(&path).unwrap())
-		.to_string();
+	let sum = hex(&Sha256::digest(fs::read(&path).unwrap()));
+	let sum = String::from_utf8(sum).unwrap();
 	let sync = |s: Option<&str>| Package {
 		sha256sum: s.map(|s| s.as_bytes().into()),
 		..Package::default()

@@ -8,6 +8,7 @@ use alpm_core::be_package::{
 	Error, Reason, changelog, pkg_load, pkg_load_internal,
 	pkg_validate_internal,
 };
+use alpm_core::digest::{Digest, Sha256, hex};
 use alpm_core::error::Errno;
 use alpm_core::package::{
 	PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM, Package, PkgFrom,
@@ -158,11 +159,9 @@ fn validate_and_changelog() {
 		pkg_validate_internal(pkg.path(), Some(&bad)),
 		Err(Error::Checksum)
 	));
-	let sum = alpm_types::Sha256Checksum::calculate_from(
-		fs::read(&pkg.0).unwrap(),
-	);
+	let sum = hex(&Sha256::digest(fs::read(&pkg.0).unwrap()));
 	let good = Package {
-		sha256sum: Some(sum.to_string().into_bytes().into()),
+		sha256sum: Some(sum.into()),
 		..Package::default()
 	};
 	assert_eq!(

@@ -9,7 +9,7 @@ members = [
 	"difftest",
 ]
 # submodules: C reference and ALPM (its own workspace)
-exclude = ["pacman", "alpm", "vendor"]
+exclude = ["pacman", "alpm"]
 
 [workspace.package]
 version = "0.1.0"
@@ -19,22 +19,18 @@ edition = "2024"
 # derived from pacman sources, same license
 license = "GPL-2.0-or-later"
 
-# official Arch ALPM crates, vendored (vendor/alpm = alpm/ submodule +
-# vendor/patches, scripts/vendor-alpm.sh), used instead of re-porting
-# what they already implement
+# crates ALPM (alpm/ submodule, the reference) itself depends on, same
+# versions; see METHODOLOGY.md
 [workspace.dependencies]
-alpm-compress = { path = "vendor/alpm/alpm-compress" }
-# serde off: the port only uses its digests
-alpm-types = { path = "vendor/alpm/alpm-types", default-features = false }
-# crates ALPM itself depends on, same versions
 base64 = "0.23.0"
 bzip2 = "0.6.0"
 # zlib-rs: zlib's inflate (libarchive links zlib), not miniz_oxide
 flate2 = { version = "1", features = ["zlib-rs"] }
 liblzma = "0.4.1"
-# through alpm-types (aho-corasick, bstr): glibc's SIMD memchr for the
-# readers' line and nul scans
+md-5 = "0.11.0"
+# glibc's SIMD memchr for the readers' line and nul scans
 memchr = "2.8"
+sha2 = "0.11.0"
 tar = "0.4.44"
 time = "0.3.47"
 unicode-width = "0.2"

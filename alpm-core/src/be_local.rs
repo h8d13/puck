@@ -664,7 +664,6 @@ fn read_files(pkg: &mut Package, f: &mut Lines) {
 // warning
 
 pub use crate::mtree::{Entry as MtreeEntry, EntryType as MtreeType};
-pub use alpm_types::{Md5Checksum, Sha256Checksum};
 
 #[derive(Debug)]
 pub enum MtreeError {

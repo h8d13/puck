@@ -19,8 +19,8 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
 use alpm_core::db::{DB_USAGE_ALL, DB_USAGE_UPGRADE};
+use alpm_core::digest::{Digest, Md5, Sha256, hex};
 use alpm_core::handle::Handle;
-use alpm_types::{Md5Checksum, Sha256Checksum};
 use difftest::{
 	CQuery, Comp, QueryWorld, Rng, TempRoot, iters, section, tar_dir,
 	tar_file, tz_utc, unstamp, ustar, write_db,
@@ -221,11 +221,11 @@ fn content(path: &str) -> String {
 }
 
 fn md5(data: &[u8]) -> String {
-	Md5Checksum::calculate_from(data).to_string()
+	String::from_utf8(hex(&Md5::digest(data))).unwrap()
 }
 
 fn sha256(data: &[u8]) -> String {
-	Sha256Checksum::calculate_from(data).to_string()
+	String::from_utf8(hex(&Sha256::digest(data))).unwrap()
 }
 
 fn local_files(p: &Pkg) -> String {

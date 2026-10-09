@@ -16,19 +16,18 @@
 // the signature messages only.
 
 use std::ffi::{OsStr, c_int};
-use std::fmt::Display;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use alpm_types::Sha256Checksum;
 use rustix::fs::Access;
 
 use crate::backup::Backup;
 use crate::be_local::{INFRQ_BASE, INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET};
 use crate::callbacks::{Callbacks, LogLevel, logv};
 use crate::deps::{Depend, dep_from_string};
+use crate::digest::{self, Sha256};
 use crate::error::Errno;
 use crate::filelist::{File as PkgFile, FileList};
 use crate::mtree;
@@ -150,10 +149,6 @@ fn open_archive(
 		open_err(e)
 	})?;
 	Ok((archive.reader, archive.meta.len() as i64))
-}
-
-fn text(v: &impl Display) -> Vec<u8> {
-	v.to_string().into_bytes()
 }
 
 // the list keys of a .PKGINFO while it is read, appended to the
@@ -510,8 +505,8 @@ pub fn pkg_load_internal(
 // alpm_compute_sha256sum as lowercase hex, None when unreadable
 fn sha256_hex(path: &[u8]) -> Option<Vec<u8>> {
 	let file = File::open(os(path)).ok()?;
-	let sum = Sha256Checksum::calculate_from_reader(file).ok()?;
-	Some(text(&sum))
+	let sum = digest::of_reader::<Sha256>(file).ok()?;
+	Some(digest::hex(&sum))
 }
 
 // a validation that passed: the validation bits (PKG_VALIDATION_NONE

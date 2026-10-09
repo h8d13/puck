@@ -6,7 +6,8 @@ use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::PathBuf;
 
 use alpm_core::backup::Backup;
-use alpm_core::be_local::{MtreeEntry, MtreeError, MtreeType, Sha256Checksum};
+use alpm_core::be_local::{MtreeEntry, MtreeError, MtreeType};
+use alpm_core::digest::{Digest, Sha256};
 use alpm_core::filelist::{File, FileList};
 use alpm_core::package::Package;
 use pacman_cli::check::*;
@@ -133,11 +134,8 @@ fn entry(t: &Tmp, rel: &str, kind: MtreeType, content: &[u8]) -> MtreeEntry {
 		size: content.len() as u64,
 		mtime: t.mtime(rel),
 		link: (kind == MtreeType::Link).then(|| b"target".to_vec()),
-		sha256: (kind == MtreeType::File).then(|| {
-			let sum = Sha256Checksum::calculate_from(content);
-			let bytes: &[u8] = sum.as_ref();
-			bytes.try_into().expect("32 bytes")
-		}),
+		sha256: (kind == MtreeType::File)
+			.then(|| Sha256::digest(content).into()),
 		md5: None,
 		warning: None,
 	}

@@ -12,8 +12,12 @@ alpm-core = { path = "../alpm-core" }
 pacman-common = { path = "../pacman-common" }
 pacman-cli = { path = "../pacman-cli" }
 testpkg = { path = "../testpkg" }
-alpm-compress.workspace = true
-alpm-types.workspace = true
+# fixture encoders, driven like alpm-compress does: xz parallel,
+# zstd with a worker
+bzip2.workspace = true
+flate2.workspace = true
+liblzma = { workspace = true, features = ["parallel"] }
+zstd = { workspace = true, features = ["zstdmt"] }
 # lz4 legacy frames (lz4 -l), which libarchive does not write
 lz4_flex = { workspace = true, features = ["frame"] }
 # pty pairs for the terminal tests (getcols, flush_term_input)

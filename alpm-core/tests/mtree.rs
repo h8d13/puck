@@ -6,12 +6,11 @@ use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use alpm_compress::compression::{
-	CompressionEncoder, CompressionSettings, GzipCompressionLevel,
-};
 use alpm_core::be_local::{LocalDb, MtreeError, read_mtree};
 use alpm_core::mtree::{Entry, EntryType, Error, read, read_memory};
 use alpm_core::package::Package;
+use flate2::write::GzEncoder;
+use liblzma::write::XzEncoder;
 
 const SHA: &str =
 	"ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb";
@@ -308,12 +307,9 @@ fn memory_and_files() {
 	let b = read_mtree(gz.as_os_str().as_bytes()).unwrap();
 	assert_eq!(a, b);
 	assert_eq!(read_memory(fs::read(&gz).unwrap()).unwrap(), a);
-	// any filter alpm-compress knows, picked by magic bytes
+	// another filter, picked by magic bytes
 	let xz = t.0.join("xz");
-	let settings = CompressionSettings::Xz {
-		compression_level: Default::default(),
-	};
-	compress(&xz, text().as_bytes(), &settings);
+	xz_write(&xz, text().as_bytes());
 	assert_eq!(read_mtree(xz.as_os_str().as_bytes()).unwrap(), a);
 	let none = t.0.join("none");
 	let r = read_mtree(none.as_os_str().as_bytes());
@@ -380,16 +376,15 @@ impl Drop for Tmp {
 	}
 }
 
-fn compress(path: &PathBuf, data: &[u8], settings: &CompressionSettings) {
-	let f = fs::File::create(path).unwrap();
-	let mut enc = CompressionEncoder::new(f, settings).unwrap();
+fn gzip(path: &PathBuf, data: &[u8]) {
+	let mut enc =
+		GzEncoder::new(Vec::new(), flate2::Compression::default());
 	enc.write_all(data).unwrap();
-	enc.finish().unwrap();
+	fs::write(path, enc.finish().unwrap()).unwrap();
 }
 
-fn gzip(path: &PathBuf, data: &[u8]) {
-	let settings = CompressionSettings::Gzip {
-		compression_level: GzipCompressionLevel::default(),
-	};
-	compress(path, data, &settings);
+fn xz_write(path: &PathBuf, data: &[u8]) {
+	let mut enc = XzEncoder::new(Vec::new(), 6);
+	enc.write_all(data).unwrap();
+	fs::write(path, enc.finish().unwrap()).unwrap();
 }
