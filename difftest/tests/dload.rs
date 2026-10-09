@@ -2334,6 +2334,27 @@ fn user_agent_child() {
 	let (c, r) = run(&case);
 	assert_eq!(c, r, "{}", explain(&c, &r));
 	assert_eq!(c.requests[0].agent.as_deref(), Some("pacman/7.1.0 (test)"));
+	// Rust only: the frontend's string (the C's setenv) wins over the
+	// environment of the process
+	let fx = TempRoot::new("dload-ua");
+	let dir = dir_bytes(fx.dir());
+	let settings = Settings {
+		user_agent: Some(b"pacman/7.1.0 (handle)".to_vec()),
+		..Settings::default()
+	};
+	let mut state = DownloadState::default();
+	let mut rec = Recorder::default();
+	let mut dl = Downloader {
+		settings: &settings,
+		state: &mut state,
+		cb: &mut rec,
+		fetch: None,
+		sandbox: None,
+	};
+	let mut ps = mk(&dir);
+	assert_eq!(dl.download(&mut ps, &dir, &dir), Ok(true));
+	let agent = s.requests()[0].agent.clone();
+	assert_eq!(agent.as_deref(), Some("pacman/7.1.0 (handle)"));
 }
 
 // body lengths off 4096 multiples: at an exact stdio block the C's

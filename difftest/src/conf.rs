@@ -341,6 +341,8 @@ unsafe fn read_config(c: &ConfigC) -> Config {
 			gpgdir: opt_bytes(c.gpgdir),
 			sysroot: opt_bytes(c.sysroot),
 			sandboxuser: opt_bytes(c.sandboxuser),
+			// the C keeps setuseragent's string in the environment
+			user_agent: Vec::new(),
 			hookdirs: list_bytes(c.hookdirs),
 			cachedirs: list_bytes(c.cachedirs),
 			architectures: list_bytes(c.architectures),

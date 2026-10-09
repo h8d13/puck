@@ -381,6 +381,7 @@ impl Request {
 		e.u64(s.parallel_downloads.into());
 		e.u64(s.disable_dl_timeout.into());
 		e.bytes(&s.dbext);
+		e.opt(&s.user_agent);
 		e.u64(self.state.is_interrupted().into());
 		e.u64(self.state.hosts().len() as u64);
 		for (host, errors) in self.state.hosts() {
@@ -423,6 +424,7 @@ impl Request {
 			parallel_downloads: u32::try_from(d.u64()?).ok()?,
 			disable_dl_timeout: d.bool()?,
 			dbext: d.bytes()?,
+			user_agent: d.opt()?,
 		};
 		let interrupted = d.bool()?;
 		let mut hosts = Vec::new();
@@ -678,6 +680,9 @@ pub struct SandboxExec {
 	// the helper and its arguments (this binary, EXEC_ARG)
 	pub program: PathBuf,
 	pub args: Vec<OsString>,
+	// environment the command inherits through the helper (the C's
+	// setenv of HTTP_USER_AGENT)
+	pub env: Vec<(OsString, OsString)>,
 	pub host: Box<dyn Host>,
 }
 
@@ -686,6 +691,7 @@ impl Default for SandboxExec {
 		SandboxExec {
 			program: PathBuf::from("/proc/self/exe"),
 			args: vec![EXEC_ARG.into()],
+			env: Vec::new(),
 			host: Box::new(System),
 		}
 	}
@@ -709,6 +715,7 @@ impl SandboxExec {
 			UnixStream::pair().map_err(ExecError::Spawn)?;
 		let mut child = Command::new(&self.program)
 			.args(&self.args)
+			.envs(self.env.iter().map(|(k, v)| (k, v)))
 			.uid(uid)
 			.gid(gid)
 			.stdin(OwnedFd::from(theirs))

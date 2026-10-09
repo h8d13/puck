@@ -95,6 +95,10 @@ pub struct Settings {
 	pub disable_dl_timeout: bool,
 	// handle->dbext, picks the url .sig files are fetched from
 	pub dbext: Vec<u8>,
+	// CURLOPT_USERAGENT: the frontend's HTTP_USER_AGENT (setuseragent
+	// puts it in the environment, curl_set_handle_opts reads it back);
+	// None reads the environment like the C
+	pub user_agent: Option<Vec<u8>>,
 }
 
 impl Default for Settings {
@@ -103,7 +107,18 @@ impl Default for Settings {
 			parallel_downloads: 1,
 			disable_dl_timeout: false,
 			dbext: b".db".to_vec(),
+			user_agent: None,
 		}
+	}
+}
+
+impl Settings {
+	// getenv("HTTP_USER_AGENT") unless the frontend handed one over
+	pub fn user_agent(&self) -> Option<Vec<u8>> {
+		self.user_agent.clone().or_else(|| {
+			std::env::var_os("HTTP_USER_AGENT")
+				.map(|v| v.as_bytes().to_vec())
+		})
 	}
 }
 
@@ -807,7 +822,6 @@ struct Job {
 	respcode: i64,
 	initial_size: i64,
 	max_size: i64,
-	user_agent: Option<Vec<u8>>,
 	file: File,
 }
 
@@ -815,6 +829,8 @@ struct Job {
 #[derive(Clone)]
 struct Worker {
 	client: Client,
+	// CURLOPT_USERAGENT
+	user_agent: Option<Vec<u8>>,
 	tx: Sender<Msg>,
 	interrupted: Arc<AtomicBool>,
 }
@@ -1091,7 +1107,7 @@ impl Worker {
 				req = req.header(header::IF_MODIFIED_SINCE, d);
 			}
 		}
-		if let Some(ua) = &job.user_agent
+		if let Some(ua) = &self.user_agent
 			&& let Ok(v) = header::HeaderValue::from_bytes(ua)
 		{
 			req = req.header(header::USER_AGENT, v);
@@ -1457,8 +1473,6 @@ impl Engine<'_> {
 			respcode: p.respcode,
 			initial_size: p.initial_size,
 			max_size: p.max_size,
-			user_agent: std::env::var_os("HTTP_USER_AGENT")
-				.map(|v| v.as_bytes().to_vec()),
 			file,
 		}
 	}
@@ -2062,6 +2076,7 @@ pub fn download_internal(
 	let interrupted = Arc::new(AtomicBool::new(state.interrupted));
 	let worker = Worker {
 		client,
+		user_agent: settings.user_agent(),
 		tx,
 		interrupted: interrupted.clone(),
 	};

@@ -423,3 +423,26 @@ fn root_operations() {
 		"error: you cannot perform this operation unless you are root.\n"
 	);
 }
+
+// setuseragent: pacman/<ver> (<sysname> <machine>) libalpm/<ver>, cut
+// at 99 bytes like snprintf into agent[100]
+#[test]
+fn user_agent() {
+	let (agent, truncated) = user_agent_string(b"Linux\0junk", b"x86_64");
+	assert_eq!(agent, b"pacman/7.1.0 (Linux x86_64) libalpm/16.0.1");
+	assert!(!truncated);
+	let long = [b'S'; 70];
+	let (agent, truncated) = user_agent_string(&long, b"m");
+	assert_eq!(agent.len(), 99);
+	assert!(agent.starts_with(b"pacman/7.1.0 (SSSS"));
+	assert!(truncated);
+	// the environment's own value stays (setenv without overwrite)
+	let config = Config::new();
+	let mut io = Io::default();
+	let got = setuseragent(&config, &mut io);
+	match std::env::var_os("HTTP_USER_AGENT") {
+		Some(env) => assert_eq!(got, env.as_encoded_bytes()),
+		None => assert!(got.starts_with(b"pacman/7.1.0 (")),
+	}
+	assert!(io.err.is_empty());
+}
