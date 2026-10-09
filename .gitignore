@@ -31,3 +31,8 @@ __pycache__/
 /src/
 /pkg/
 /puck/
+
+# alpm-capi consumer probe build artifacts (tests/consumers.sh)
+alpm-capi/tests/alpmrs/target/
+alpm-capi/tests/alpmrs/Cargo.lock
+alpm-capi/tests/goalpm/go.sum

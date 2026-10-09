@@ -1,0 +1,18 @@
+# standalone probe (own [workspace] so it is not pulled into puck's
+# workspace): the alpm.rs consumer stack (alpm-sys) linked against a
+# libalpm.so.16 chosen by PKG_CONFIG_PATH/LD_LIBRARY_PATH. built and run
+# twice (puck vs real) by tests/consumers.sh, output diffed.
+[workspace]
+
+[package]
+name = "alpmrs-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+alpm-sys = { path = "../../../consumers/alpm.rs/alpm-sys", default-features = false, features = ["pkg-config"] }
+
+[[bin]]
+name = "alpmrs-probe"
+path = "src/main.rs"
