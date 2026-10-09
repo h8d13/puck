@@ -143,9 +143,28 @@ fn outcome(
 	for s in servers {
 		s.reset();
 	}
+	// pm_errno is the last failure's: with several files failing in
+	// parallel that order is each side's own (a dead pooled connection
+	// costs curl a retry where hyper reconnects, see PORTING.md), so
+	// only that something failed is compared then
+	let mut failed: Vec<&[u8]> = logs
+		.iter()
+		.filter(|(l, m)| {
+			*l == LogLevel::Error
+				&& m.starts_with(b"failed retrieving file '")
+		})
+		.map(|(_, m)| m.split(|&c| c == b'\'').nth(1).unwrap_or(b""))
+		.collect();
+	failed.sort();
+	failed.dedup();
+	let errno = match (ret, sorted && failed.len() > 1) {
+		(-1, true) => -1,
+		(-1, false) => errno,
+		_ => 0,
+	};
 	Outcome {
 		ret,
-		errno: if ret == -1 { errno } else { 0 },
+		errno,
 		downloads,
 		logs,
 		files: snapshot(dir),
@@ -2903,7 +2922,12 @@ fn download_fuzz() {
 	for i in 0..n {
 		let scn = fuzz_scn(&mut rng);
 		let (c, r) = scn.run();
-		assert!(c == r, "case {i}\n{}", explain(&c, &r));
+		assert!(
+			c == r,
+			"case {i} parallel {}\n{}",
+			scn.parallel,
+			explain(&c, &r)
+		);
 		seen[(c.ret + 1) as usize] += 1;
 		let has = |f: &dyn Fn(&DownloadEvent) -> bool| {
 			c.downloads.iter().any(|(_, e)| f(e))
