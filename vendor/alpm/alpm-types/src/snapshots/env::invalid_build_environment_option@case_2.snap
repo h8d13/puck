@@ -1,7 +1,0 @@
----
-source: alpm-types/src/env.rs
----
-error: invalid build environment option
- | 
- | #somethingelse
- | ^ expected one of: `!`, ASCII alphanumeric character, `-`, `.`, `_`, `!`

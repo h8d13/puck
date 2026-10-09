@@ -1199,8 +1199,8 @@ translating them; practice judged by what pacman reads.
 
 # ALPM findings
 
-Nothing is applied in `vendor/patches/` today. Kept as reports in
-`vendor/upstream-reports/`, no longer applied: gzip members 0551,
+No ALPM crate is linked today (`alpm/` is the reference). Kept as
+reports in `docs/upstream-reports/`, not applied: gzip members 0551,
 content sniffing 0552, decoder over any reader 0553 (the port reads
 through libarchive's filters translated, `alpm-core::filter`), version ordering
 0101/0102, `Unknown Packager` 0105, relation backtracking 0106, empty

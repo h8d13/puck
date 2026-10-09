@@ -26,9 +26,9 @@ multiple-versions = "warn"
 wildcards = "deny"
 # workspace path deps carry no version
 allow-wildcard-paths = true
-# proc-macro only. strum_macros, enumflags2_derive (landlock) and
-# unic-langid (alpm i18n) still want syn 2, the rest is on 3
-skip = [{ crate = "syn@2", reason = "upstream derive crates" }]
+# proc-macro only: enumflags2_derive (under landlock) still wants
+# syn 2, the rest is on 3
+skip = [{ crate = "syn@2", reason = "enumflags2_derive, via landlock" }]
 
 [sources]
 unknown-registry = "deny"

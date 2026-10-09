@@ -43,8 +43,6 @@ DIFFTEST_ITERS=5000000 cargo test --release -p difftest
 scripts/check-separation.sh
 # one declaration per C symbol across difftest
 scripts/check-externs.py
-# vendor/alpm == alpm/ submodule + vendor/patches
-scripts/vendor-alpm.sh --check
 
 # upstream suites against the port
 bash pacman/test/util/vercmptest.sh target/release/vercmp
@@ -258,9 +256,9 @@ reader patches and crate dependencies go once nothing uses them.
 | `.MTREE` / local mtree | libarchive mtree reader (as pacman uses it) | `alpm-core::mtree` | 0401-0411, alpm-mtree | done |
 | tar members (packages, sync dbs, `.INSTALL`) | libarchive `archive_read_support_format_tar.c` | `alpm-core::tar` | tar crate in alpm-core | done |
 | read filters (gzip, bzip2, xz, zstd, compress, lzma, lzip, lz4, lrzip/lzop/grzip programs, stacked) | libarchive `archive_read.c` (choose_filters, read-ahead), `archive_read_support_filter_*.c` | `alpm-core::filter` | alpm-compress decoders in alpm-core, 0551-0553 | done |
-| alpm-types patches | port uses alpm-types only for `Checksum`/`digests::{Md5, Sha256}` (be_local, be_package, util); no patched type is used | - | 0101-0109 removed (0101, 0102, 0105-0107 kept as upstream reports); alpm-types itself if checksums go to md-5/sha2 directly | patches done; crate todo |
+| alpm-types patches | port uses alpm-types only for `Checksum`/`digests::{Md5, Sha256}` (be_local, be_package, util); no patched type is used | - | 0101-0109 removed (0101, 0102, 0105-0107 kept as upstream reports); alpm-types itself: `alpm-core::digest` over md-5/sha2 | done |
 
-Kept as text in `vendor/upstream-reports/`, to report upstream, real
+Kept as text in `docs/upstream-reports/`, to report upstream, real
 ALPM bugs and missing capability whose patch is no longer applied:
 alpm-compress's 0551 (gzip members), 0552 (content sniffing), 0553
 (decoder over any reader; the port reads through `filter`), 0101/0102 version ordering against
@@ -275,27 +273,26 @@ makes them; METHODOLOGY.md has the rules.
 
 | Crate | Used by | Why | Since |
 |---|---|---|---|
-| alpm-compress (vendored, no patches) | difftest and alpm-core tests | fixture encoders (gzip/bzip2/xz/zstd); its decoders are not used: libarchive's readers are translated in `filter` over the same codecs | start; decoders dropped by the filters unit |
-| flate2 1 (`zlib-rs` backend), bzip2 0.6, liblzma 0.4 (system liblzma), zstd 0.14 | `filter` | the codecs libarchive links, through the crates and versions alpm-compress uses; zlib-rs is zlib's inflate (miniz_oxide accepts corrupt deflate data zlib refuses) | filters unit |
+| flate2 1 (`zlib-rs` backend), bzip2 0.6, liblzma 0.4 (system liblzma), zstd 0.14 | `filter`; difftest and alpm-core test fixtures (encoders, driven as alpm-compress did: xz `parallel`, zstd `zstdmt` one worker) | the codecs libarchive links, through the crates and versions alpm-compress uses; zlib-rs is zlib's inflate (miniz_oxide accepts corrupt deflate data zlib refuses) | filters unit; encoders replaced alpm-compress's |
 | lz4_flex 0.14 (`safe-decode`), twox-hash 2 (`xxhash32`) | `filter::lz4` | LZ4 block decoding and xxhash32 under libarchive's own lz4 frame reader (METHODOLOGY.md) | filters unit |
-| alpm-types (vendored, no patches) | be_local, be_package, util, difftest | `Checksum` md5/sha256 only | start; 0101-0109 dropped |
-| alpm-parsers (vendored) | none directly | dependency of alpm-types | start |
-| tar 0.4 | workspace table only, for alpm-compress | alpm-core reads tar with `alpm-core::tar` (libarchive's reader) | compress unit; dropped from alpm-core by the xattr unit |
+| md-5 0.11, sha2 0.11 | `alpm-core::digest` (util's checksums, be_package, frontend check, test expectations) | ALPM's digest crates used directly; alpm-types' `Checksum` wrapped only these | replaced alpm-types |
+| tar 0.4 | alpm-core and pacman-cli tests | fixture archives; alpm-core reads tar with `alpm-core::tar` (libarchive's reader) | compress unit; dropped from alpm-core by the xattr unit |
 | reqwest 0.13 blocking, rustls | dload | HTTP downloads (ALPM dev-scripts precedent) | dload unit |
 | rustix 1.1 (`fs`, `process`, `termios`, `net`, `event`; `use-libc`) | util, diskspace, lock, sandbox, frontend util, `filter::program` | statvfs, access, umask, getuid/geteuid, fchdir, tty width, tcflush, SCM_RIGHTS to the exec helper; fsetxattr/lsetxattr, utimensat with ns (`fs`); non-blocking pipes and poll for the filter programs (`event`) | handle unit, process unit, xattr unit, filters unit |
 | landlock 0.4, libseccomp 0.4 | sandbox | `alpm_sandbox_setup_child` | sandbox unit |
 | signal-hook 0.4 (+ signal-hook-registry) | pacman-cli sighandler | SIGINT/SIGHUP soft interrupt (no safe handler API in std/rustix, none in ALPM; tokio's signals use the same registry) | signals unit |
-| memchr 2.8 | pacman-common `until_nul`/`safe_fgets_into`, util `ArchiveFgets` | the nul and '\n' scans of every reader, SIMD like glibc's memchr/strlen/fgets (core's SWAR memchr cost -Dk 9% more instructions than C pacman); already linked through alpm-types (aho-corasick, bstr) | synctime unit |
-| md-5, sha2, base64, time, unicode-width | through alpm-types / directly (time: dload, log, frontend dates, difftest) | precedent crates of ALPM | start |
+| memchr 2.8 | pacman-common `until_nul`/`safe_fgets_into`, util `ArchiveFgets` | the nul and '\n' scans of every reader, SIMD like glibc's memchr/strlen/fgets (core's SWAR memchr cost -Dk 9% more instructions than C pacman) | synctime unit |
+| base64, time, unicode-width | directly (time: dload, log, frontend dates, difftest) | precedent crates of ALPM | start |
 
 Removed, with their patches: alpm-db (0201-0207), alpm-repo-db
 (0301-0305), alpm-pkginfo (0501-0506), alpm-package, alpm-buildinfo,
 alpm-mtree (0402, 0404-0410) and alpm-common (only its dependency);
-alpm-compress's decoders (0551-0553 kept as reports), its encoders stay
-for the test fixtures.
-The vendored tree went from 10 crates / 40 patches to 3 / 0; alpm-types
-patches 0101-0109 dropped (no patched type left in use), five kept as
-upstream reports, alpm-mtree's 0401, 0403, 0411 too.
+alpm-compress's decoders (0551-0553 kept as reports), then its encoders
+(the codec crates' own, in the fixtures), alpm-types (`alpm-core::digest`)
+and alpm-parsers with it. No ALPM crate is linked: the vendored tree
+(10 crates / 40 patches at the start) is gone, `alpm/` stays as the
+reference; alpm-types patches 0101-0109 dropped, five kept as upstream
+reports, alpm-mtree's 0401, 0403, 0411 too.
 
 ## ALPM patches for parity
 

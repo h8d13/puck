@@ -39,8 +39,10 @@ whoever writes it.
   what one of them implements. Keeping a port next to a precedent needs a
   stated reason (e.g. pacman semantics the crate cannot express) in
   `PORTING.md`.
-- Use an ALPM crate where its semantics are pacman's: the alpm-compress
-  decoders, checksums. ALPM's format parsers (`alpm-db`, `alpm-repo-db`,
+- An ALPM crate is linked only where its semantics are pacman's; none
+  qualifies today, the port uses ALPM's own dependency crates directly
+  (md-5/sha2 in `alpm-core::digest`, the codecs under `filter` and the
+  test fixtures). ALPM's format parsers (`alpm-db`, `alpm-repo-db`,
   `alpm-pkginfo`, `alpm-mtree`, `alpm-package`) validate the spec
   strictly: required fields, typed values, UTF-8. pacman reads its files
   leniently and byte for byte, so pacman's readers are translated from
@@ -48,12 +50,12 @@ whoever writes it.
   be_package's parse_descfile, libarchive's mtree reader), difftested
   equal on every input the C reads. ALPM types are used only where their
   value set is the C's.
-- `vendor/patches/` (applied to the pristine `alpm/` submodule by
-  `scripts/vendor-alpm.sh` into `vendor/alpm`) holds real ALPM bugs and
-  missing capability of general use only, each written to go upstream
-  (gzip members, content sniffing). Never a patch that bends a strict
-  parser into pacman's semantics: own that reader instead. pacman bugs
-  recorded in `UPSTREAM.md` are not copied.
+- `alpm/` stays checked out as the reference. `docs/upstream-reports/`
+  holds real ALPM bugs and missing capability of general use found
+  while porting, each written as a patch to go upstream (gzip members,
+  content sniffing). Never a patch that bends a strict parser into
+  pacman's semantics: own that reader instead. pacman bugs recorded in
+  `UPSTREAM.md` are not copied.
 
 ## System-level decisions
 
@@ -179,11 +181,6 @@ No real root, and nothing outside `.tmp/` is written.
   meant to be reused are named in the report)
 - `scripts/cargo-test.sh` (cargo test --release) green for the whole
   workspace
-- vendored crates a unit patched: `cargo test` inside `vendor/alpm` with
-  the runner config (`--config "target.'cfg(all())'.runner = [...]"`,
-  `-j 2`), `-- --skip crazy_threads`: alpm-compress's zstd cases ask
-  for 99999 threads, which cannot fit under the 4 GiB cap. Remove
-  `vendor/alpm/target` and `Cargo.lock` after
 - `scripts/check-separation.sh` passes (no test modules, C access or
   difftest in port crates)
 - `scripts/check-externs.py` passes (one declaration per C symbol in

@@ -1,7 +1,0 @@
----
-source: alpm-types/src/version/pkg_full.rs
----
-error: invalid full alpm-package-version
- | 
- | 1.0.0
- | ~~~~~^ expected the '-' delimiter that divides the alpm-pkgver and alpm-pkgrel
