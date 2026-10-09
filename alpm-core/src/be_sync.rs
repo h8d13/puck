@@ -821,9 +821,10 @@ pub fn populate(
 	// _alpm_pkghash_add in archive order then alpm_list_msort by name:
 	// names are unique, so add_sorted gives the same buckets and list
 	for pkg in walk.pkgs {
-		let name = pkg.name.clone().unwrap_or_default();
-		cache.add_sorted(pkg)
-			.map_err(|_| invalid(&name, Reason::Cache))?;
+		cache.add_sorted(pkg).map_err(|p| {
+			let name = p.name.as_deref().unwrap_or_default();
+			invalid(name, Reason::Cache)
+		})?;
 	}
 	let count = cache.len().to_string();
 	let parts: [&[u8]; 5] = [

@@ -146,6 +146,11 @@ impl<P: Borrow<Package>> PkgHash<P> {
 			pkg_cmp(self.entry(i).borrow(), pkg).is_gt()
 		};
 		if self.ordered {
+			// alpm_list_add_sorted's special case: the last item
+			// first, a db read in name order appends every time
+			if self.list.last().is_none_or(|i| !after(i)) {
+				return self.list.len();
+			}
 			return self.list.partition_point(|i| !after(i));
 		}
 		self.list.iter().position(after).unwrap_or(self.list.len())
