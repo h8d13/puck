@@ -36,7 +36,6 @@ impl<T> Graph<T> {
 		}
 	}
 
-	// the child the iterator points at, advancing it
 	pub fn next_child(&mut self) -> Option<usize> {
 		let c = *self.children.get(self.iterator)?;
 		self.iterator += 1;
