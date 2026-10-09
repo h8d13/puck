@@ -461,7 +461,7 @@ impl Db {
 	}
 
 	// DB_STATUS_MISSING: a sync db whose file was absent at registration
-	pub fn is_missing(&self) -> bool {
+	pub(crate) fn is_missing(&self) -> bool {
 		self.status == Status::Missing
 	}
 
@@ -580,7 +580,7 @@ impl Db {
 	// _alpm_db_get_pkgfromcache, then the force_load of _alpm_pkg_dup:
 	// one local_db_read of INFRQ_ALL (logged each time, INFRQ_DSIZE is
 	// never set)
-	pub fn force_load_pkg(
+	pub(crate) fn force_load_pkg(
 		&mut self,
 		dbext: &[u8],
 		cb: &mut dyn Callbacks,

@@ -32,7 +32,6 @@ use alpm_core::Errno;
 use alpm_core::FileConflictType;
 use alpm_core::Handle;
 use alpm_core::add_pkg;
-use alpm_core::pkg_load_level;
 use alpm_core::vercmp;
 use alpm_core::{
 	CommitData, CommitError, PrepareData, PrepareError, TransPkg,
@@ -415,9 +414,7 @@ fn cleancache_entry<R: BufRead>(
 	}
 	ui.out.flush();
 	// alpm_pkg_load(handle, path, 0, 0): metadata only, siglevel 0
-	let loaded = h.with_callbacks(|h, cb| {
-		pkg_load_level(h.keyring_mut(), cb, &path, false, 0)
-	});
+	let loaded = h.pkg_load(&path, false, 0);
 	let Ok(pkg) = loaded else {
 		let msg = [
 			b"skipping ",

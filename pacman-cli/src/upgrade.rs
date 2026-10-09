@@ -9,7 +9,6 @@ use std::io::BufRead;
 
 use alpm_core::Handle;
 use alpm_core::add_pkg;
-use alpm_core::pkg_load_level;
 use pacman_common::util_common::until_nul;
 
 use crate::sync::{error, sync_prepare_execute};
@@ -30,15 +29,7 @@ fn load_packages<R, S: AsRef<[u8]>>(
 	let mut retval = 0;
 	for t in targets {
 		let targ = until_nul(t.as_ref());
-		let loaded = h.with_callbacks(|h, cb| {
-			pkg_load_level(
-				h.keyring_mut(),
-				cb,
-				targ,
-				true,
-				siglevel,
-			)
-		});
+		let loaded = h.pkg_load(targ, true, siglevel);
 		let pkg = match loaded {
 			Ok(pkg) => pkg,
 			Err(e) => {

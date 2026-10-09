@@ -1017,11 +1017,6 @@ impl Keyring {
 		self.gpgdir = until_nul(gpgdir).to_vec();
 	}
 
-	// keys _alpm_key_in_keychain found, in lookup order
-	pub fn known_keys(&self) -> &[Vec<u8>] {
-		&self.known_keys
-	}
-
 	// gpgme's engine file_name: the gpg Command runs, found in PATH
 	fn engine_file(&self) -> Vec<u8> {
 		let gpg = self.gpg.as_os_str();

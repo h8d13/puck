@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::be_local::INFRQ_DESC;
+use crate::be_package::{PkgLoadError, changelog, pkg_load_level};
 use crate::callbacks::{Callbacks, Fetch, LogLevel};
 use crate::db::{Db, SIG_USE_DEFAULT};
 use crate::deps::{DepMod, Depend, DepsOpts};
@@ -28,7 +29,7 @@ use crate::error::Errno;
 use crate::log::Logger;
 use crate::package::{DbCaches, Package};
 use crate::sandbox::handle_sandbox;
-use crate::signing::Keyring;
+use crate::signing::{Keyring, SigResult, pkg_check_pgp_signature};
 use crate::trans::Trans;
 use crate::util::{
 	CALLER_PREFIX, PATH_MAX, fnmatch_patterns, getuid, hash_sdbm, makepath,
@@ -335,6 +336,44 @@ impl Handle {
 		r
 	}
 
+	// alpm_pkg_load(handle, filename, full, level): the handle's keyring
+	// and callbacks
+	pub fn pkg_load(
+		&mut self,
+		filename: &[u8],
+		full: bool,
+		level: c_int,
+	) -> Result<Package, PkgLoadError> {
+		self.with_callbacks(|h, cb| {
+			pkg_load_level(
+				&mut h.keyring,
+				cb,
+				filename,
+				full,
+				level,
+			)
+		})
+	}
+
+	// alpm_pkg_check_pgp_signature(handle, pkg)
+	pub fn pkg_check_pgp_signature(
+		&mut self,
+		pkg: &Package,
+	) -> Result<Vec<SigResult>, Errno> {
+		self.with_callbacks(|h, cb| {
+			pkg_check_pgp_signature(&mut h.keyring, cb, pkg)
+		})
+	}
+
+	// alpm_pkg_changelog_open/read/close on a file package: the
+	// .CHANGELOG entry, logging through the handle
+	pub fn pkg_changelog(
+		&mut self,
+		pkg: &Package,
+	) -> Result<Vec<u8>, PkgLoadError> {
+		changelog(&mut *self.cb, pkg)
+	}
+
 	// handle->trans
 	pub fn trans(&self) -> Option<&Trans> {
 		self.trans.as_ref()
@@ -350,7 +389,10 @@ impl Handle {
 	}
 
 	// handle->trans = trans, the old one returned
-	pub fn set_trans(&mut self, trans: Option<Trans>) -> Option<Trans> {
+	pub(crate) fn set_trans(
+		&mut self,
+		trans: Option<Trans>,
+	) -> Option<Trans> {
 		std::mem::replace(&mut self.trans, trans)
 	}
 
@@ -623,7 +665,7 @@ impl Handle {
 	}
 
 	// the options dload reads, as they are now
-	pub fn dload_settings(&self) -> Settings {
+	pub(crate) fn dload_settings(&self) -> Settings {
 		Settings {
 			parallel_downloads: self.parallel_downloads,
 			disable_dl_timeout: self.disable_dl_timeout != 0,
@@ -642,7 +684,7 @@ impl Handle {
 		self.sandbox_for = f;
 	}
 
-	pub fn chroot_helper(&self) -> &Path {
+	pub(crate) fn chroot_helper(&self) -> &Path {
 		&self.chroot_helper
 	}
 

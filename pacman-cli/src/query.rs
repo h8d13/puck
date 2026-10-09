@@ -28,7 +28,6 @@ use alpm_core::Errno;
 use alpm_core::Handle;
 use alpm_core::depcmp_literal;
 use alpm_core::filelist;
-use alpm_core::pkg_check_pgp_signature;
 use alpm_core::sync_get_new_version;
 use alpm_core::{DB_USAGE_UPGRADE, Db};
 use alpm_core::{
@@ -38,7 +37,6 @@ use alpm_core::{
 use alpm_core::{
 	INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET, MtreeEntry, MtreeError,
 };
-use alpm_core::{changelog, pkg_load_level};
 use alpm_core::{compute_md5sum, fnmatch};
 use pacman_common::util_common::{PATH_MAX, mbasename, mdirname, until_nul};
 
@@ -135,9 +133,7 @@ impl PkgEnv for Env<'_> {
 		&mut self,
 		pkg: &Package,
 	) -> Result<Vec<SigResult>, Errno> {
-		let results = self.handle.with_callbacks(|h, cb| {
-			pkg_check_pgp_signature(h.keyring_mut(), cb, pkg)
-		})?;
+		let results = self.handle.pkg_check_pgp_signature(pkg)?;
 		Ok(results.iter().map(sig_result).collect())
 	}
 
@@ -162,8 +158,7 @@ impl PkgEnv for Env<'_> {
 	fn changelog(&mut self, pkg: &Package) -> Option<Vec<u8>> {
 		match pkg.origin {
 			Some(PkgFrom::File(_)) => {
-				let cb = self.handle.callbacks();
-				changelog(cb, pkg).ok()
+				self.handle.pkg_changelog(pkg).ok()
 			}
 			Some(PkgFrom::LocalDb) => {
 				let local = self.handle.localdb()?.local()?;
@@ -834,9 +829,7 @@ fn target_pkg(
 	let strname = until_nul(target);
 	if c.op_q_isfile != 0 {
 		// alpm_pkg_load(handle, strname, 1, 0): logs through the handle
-		let loaded = handle.with_callbacks(|h, cb| {
-			pkg_load_level(h.keyring_mut(), cb, strname, true, 0)
-		});
+		let loaded = handle.pkg_load(strname, true, 0);
 		return match loaded {
 			Ok(pkg) => Some(Target::File(Box::new(pkg))),
 			Err(e) => {
