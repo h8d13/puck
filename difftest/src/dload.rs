@@ -729,7 +729,8 @@ pub enum Reply {
 	Hang(Duration),
 }
 
-// one request as the server saw it
+// one request as the server saw it; via is the authority of an
+// absolute-form target (the server asked as a proxy)
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Req {
 	pub path: String,
@@ -737,6 +738,7 @@ pub struct Req {
 	pub ims: Option<String>,
 	pub agent: Option<String>,
 	pub auth: Option<String>,
+	pub via: Option<String>,
 }
 
 #[derive(Default)]
@@ -794,13 +796,24 @@ fn read_request(s: &mut TcpStream, wait: Duration) -> Option<Req> {
 	}
 	let head = String::from_utf8_lossy(&buf[..find_head_end(&buf)?]);
 	let mut lines = head.split("\r\n");
-	let path = lines.next()?.split(' ').nth(1)?.to_string();
+	let target = lines.next()?.split(' ').nth(1)?.to_string();
+	let (path, via) = match target.split_once("://") {
+		Some((_, rest)) => match rest.find('/') {
+			Some(i) => (
+				rest[i..].to_string(),
+				Some(rest[..i].to_string()),
+			),
+			None => ("/".to_string(), Some(rest.to_string())),
+		},
+		None => (target, None),
+	};
 	let mut req = Req {
 		path,
 		range: None,
 		ims: None,
 		agent: None,
 		auth: None,
+		via,
 	};
 	for l in lines {
 		let Some((k, v)) = l.split_once(':') else {

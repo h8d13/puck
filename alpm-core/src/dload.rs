@@ -22,7 +22,7 @@ use std::ffi::{OsStr, c_int};
 use std::fs::{self, File, OpenOptions};
 use std::hash::{BuildHasher, RandomState};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::fs::{PermissionsExt, chown};
@@ -35,10 +35,9 @@ use std::time::{Duration, Instant};
 
 use hyper_util::client::legacy::Error as LegacyError;
 use hyper_util::client::legacy::connect::HttpInfo;
-use reqwest::Url;
 use reqwest::blocking::{Client, RequestBuilder, Response};
-use reqwest::header;
 use reqwest::redirect::Policy;
+use reqwest::{Proxy, Url, header};
 use rustix::fs::{AtFlags, CWD, Timespec, Timestamps};
 use time::OffsetDateTime;
 
@@ -69,6 +68,8 @@ const KEEPALIVE: Duration = Duration::from_secs(60);
 const CONN_MAX_IDLE: Duration = Duration::from_secs(118);
 // Curl_retry_request's CONN_MAX_RETRIES
 const CONN_MAX_RETRIES: u32 = 5;
+// CURL_DEFAULT_PROXY_PORT
+const DEFAULT_PROXY_PORT: u16 = 1080;
 
 // the sandbox side of the handle, set when _alpm_use_sandbox holds (root,
 // a sandbox user, one of the restrictions enabled)
@@ -130,6 +131,177 @@ impl Settings {
 	}
 }
 
+// curl's proxy environment (proxy_detect_proxy, proxy_do_not_proxy):
+// the variables as a Client saw them when built; curl_getenv counts an
+// empty value as unset
+#[derive(Clone, Debug, Default)]
+pub struct ProxyEnv {
+	vars: Vec<(&'static str, String)>,
+}
+
+const PROXY_VARS: [&str; 7] = [
+	"http_proxy",
+	"https_proxy",
+	"HTTPS_PROXY",
+	"all_proxy",
+	"ALL_PROXY",
+	"no_proxy",
+	"NO_PROXY",
+];
+
+impl ProxyEnv {
+	// from a getenv
+	pub fn new(getenv: impl Fn(&str) -> Option<String>) -> Self {
+		let vars = PROXY_VARS
+			.iter()
+			.filter_map(|&n| {
+				Some((n, getenv(n).filter(|v| !v.is_empty())?))
+			})
+			.collect();
+		ProxyEnv { vars }
+	}
+
+	pub fn from_env() -> Self {
+		Self::new(|n| std::env::var(n).ok())
+	}
+
+	fn get(&self, name: &str) -> Option<&str> {
+		let v = self.vars.iter().find(|(n, _)| *n == name);
+		v.map(|(_, v)| &v[..])
+	}
+
+	// proxy_detect_proxy: the scheme's variable (lowercase first,
+	// HTTP_PROXY never: CGI can set it), then all_proxy, ALL_PROXY
+	fn detect(&self, scheme: &str) -> Option<&str> {
+		let own: &[&str] = match scheme {
+			"https" => &["https_proxy", "HTTPS_PROXY"],
+			"http" => &["http_proxy"],
+			_ => &[],
+		};
+		own.iter()
+			.chain(&["all_proxy", "ALL_PROXY"])
+			.find_map(|n| self.get(n))
+	}
+
+	// Curl_proxy_init_conn for a url: Ok(None) goes direct, Ok(Some)
+	// through that proxy (its port filled in like curl's parse_proxy),
+	// Err curl's text for a proxy setting its parse refuses or this
+	// downloader cannot use (socks: no socks support here), a
+	// CURLE_COULDNT_RESOLVE_PROXY failure
+	pub fn proxy_for(&self, url: &Url) -> Result<Option<Url>, String> {
+		let host = url.host_str().unwrap_or_default();
+		let host = host
+			.strip_prefix('[')
+			.and_then(|h| h.strip_suffix(']'))
+			.unwrap_or(host);
+		let no_proxy =
+			self.get("no_proxy").or_else(|| self.get("NO_PROXY"));
+		if check_noproxy(host, no_proxy.unwrap_or_default()) {
+			return Ok(None);
+		}
+		let Some(proxy) = self.detect(url.scheme()) else {
+			return Ok(None);
+		};
+		// CURLU_GUESS_SCHEME: no scheme means http
+		let spec = match proxy.contains("://") {
+			true => proxy.to_string(),
+			false => format!("http://{proxy}"),
+		};
+		let parsed =
+			Url::parse(&spec).ok().filter(|u| u.host().is_some());
+		let Some(mut u) = parsed else {
+			return Err(format!(
+				"Unsupported proxy syntax in '{proxy}': Bad hostname"
+			));
+		};
+		if !matches!(u.scheme(), "http" | "https") {
+			return Err(format!(
+				"Unsupported proxy scheme for '{proxy}'"
+			));
+		}
+		if u.port().is_none() {
+			let _ = u.set_port(Some(DEFAULT_PROXY_PORT));
+		}
+		Ok(Some(u))
+	}
+}
+
+// proxy_check_noproxy: comma or blank separated names, "*" for all; a
+// hostname matches a token exactly or as its tail at a dot (leading
+// and trailing dots ignored), an IP by its CIDR
+fn check_noproxy(name: &str, no_proxy: &str) -> bool {
+	if name.is_empty() || no_proxy.is_empty() {
+		return false;
+	}
+	if no_proxy == "*" {
+		return true;
+	}
+	let ip: Option<IpAddr> = name.parse().ok();
+	let name = name.strip_suffix('.').unwrap_or(name);
+	let blank = |c: char| c == ' ' || c == '\t';
+	no_proxy.split(',')
+		.map(|t| t.trim_matches(blank))
+		// a blank inside a token ends it (curl stops the loop there)
+		.map(|t| t.split(blank).next().unwrap_or_default())
+		.filter(|t| !t.is_empty())
+		.any(|t| match ip {
+			Some(ip) => match_ip(ip, t),
+			None => match_host(t, name),
+		})
+}
+
+fn match_host(token: &str, name: &str) -> bool {
+	let token = token.strip_suffix('.').unwrap_or(token);
+	let token = token.strip_prefix('.').unwrap_or(token);
+	if token.len() == name.len() {
+		return token.eq_ignore_ascii_case(name);
+	}
+	if token.len() < name.len() {
+		let at = name.len() - token.len();
+		return name.as_bytes()[at - 1] == b'.'
+			&& token.eq_ignore_ascii_case(&name[at..]);
+	}
+	false
+}
+
+// cidr4_match/cidr6_match: "network[/bits]", bits 0 is the whole address
+fn match_ip(ip: IpAddr, token: &str) -> bool {
+	let (net, bits) = match token.split_once('/') {
+		Some((n, b)) => (n, b.parse::<u32>().ok()),
+		None => (token, Some(0)),
+	};
+	let Some(bits) = bits else {
+		return false;
+	};
+	let Ok(net) = net.parse::<IpAddr>() else {
+		return false;
+	};
+	match (ip, net) {
+		(IpAddr::V4(a), IpAddr::V4(n)) => {
+			if bits > 32 {
+				return false;
+			}
+			if bits == 0 || bits == 32 {
+				return a == n;
+			}
+			let mask = u32::MAX << (32 - bits);
+			(u32::from(a) ^ u32::from(n)) & mask == 0
+		}
+		(IpAddr::V6(a), IpAddr::V6(n)) => {
+			let bits = if bits == 0 { 128 } else { bits };
+			if bits > 128 {
+				return false;
+			}
+			let mask = match bits {
+				128 => u128::MAX,
+				b => u128::MAX << (128 - b),
+			};
+			(u128::from(a) ^ u128::from(n)) & mask == 0
+		}
+		_ => false,
+	}
+}
+
 // the connection cache of handle->curlm: one reqwest Client (hyper's
 // idle pool) kept across the handle's downloads. curl's retry of a
 // request that died on a reused connection needs to tell reused from
@@ -143,6 +315,7 @@ struct Pool {
 	timeout: bool,
 	// local address -> last use; forgotten past curl's idle limit
 	seen: Arc<Mutex<HashMap<SocketAddr, Instant>>>,
+	proxies: Arc<ProxyEnv>,
 }
 
 // handle->server_errors (per host, -1 once blocked for good), the
@@ -165,10 +338,12 @@ impl DownloadState {
 		{
 			return Ok(p.clone());
 		}
+		let proxies = Arc::new(ProxyEnv::from_env());
 		let pool = Pool {
-			client: build_client(settings)?,
+			client: build_client(settings, proxies.clone())?,
 			timeout,
 			seen: Arc::default(),
+			proxies,
 		};
 		self.pool = Some(pool.clone());
 		Ok(pool)
@@ -777,6 +952,7 @@ pub fn getdate_capped(date: &[u8]) -> i64 {
 // the CURLcodes the transfers end with (curl.h)
 const CURLE_UNSUPPORTED_PROTOCOL: c_int = 1;
 const CURLE_URL_MALFORMAT: c_int = 3;
+const CURLE_COULDNT_RESOLVE_PROXY: c_int = 5;
 const CURLE_COULDNT_RESOLVE_HOST: c_int = 6;
 const CURLE_COULDNT_CONNECT: c_int = 7;
 const CURLE_PARTIAL_FILE: c_int = 18;
@@ -984,8 +1160,14 @@ fn connection_died(e: &reqwest::Error) -> bool {
 	false
 }
 
-// the curl error for a failed request (no response)
-fn send_error(e: &reqwest::Error, url: &Url, start: Instant) -> Fail {
+// the curl error for a failed request (no response); peer is what was
+// connected to, the url's host or (proxied) its proxy
+fn send_error(
+	e: &reqwest::Error,
+	peer: &Url,
+	proxied: bool,
+	start: Instant,
+) -> Fail {
 	let ms = start.elapsed().as_millis();
 	if e.is_connect() && e.is_timeout() {
 		return failed(
@@ -997,13 +1179,18 @@ fn send_error(e: &reqwest::Error, url: &Url, start: Instant) -> Fail {
 		return failed(CURLE_OPERATION_TIMEDOUT, TOO_SLOW);
 	}
 	if e.is_connect() {
-		let host = url.host_str().unwrap_or_default();
-		let port = url.port_or_known_default().unwrap_or_default();
+		let host = peer.host_str().unwrap_or_default();
+		let port = peer.port_or_known_default().unwrap_or_default();
+		// a forwarding proxy is the connection's origin to curl
+		let via = match proxied {
+			true => format!(" over proxy {host}"),
+			false => String::new(),
+		};
 		return failed(
 			CURLE_COULDNT_CONNECT,
 			format!(
-				"Failed to connect to {host}:{port} after {ms} ms: \
-			 Could not connect to server"
+				"Failed to connect to {host}:{port}{via} after {ms} \
+				 ms: Could not connect to server"
 			),
 		);
 	}
@@ -1031,20 +1218,35 @@ const CURL_SCHEMES: &[&str] = &[
 	"sftp", "smtp", "smtps", "telnet", "tftp", "ws", "wss",
 ];
 
-// a url this downloader can request: http(s) and a resolving host,
-// checked before every hop (reqwest's errors do not tell dns from connect)
-fn ensure_fetchable(url: &Url) -> Result<(), Fail> {
+// a url this downloader can request: http(s), and a resolving peer
+// (the host, or the proxy curl's environment rules pick), checked
+// before every hop (reqwest's errors do not tell dns from connect).
+// the peer is returned
+fn ensure_fetchable(url: &Url, proxies: &ProxyEnv) -> Result<Url, Fail> {
 	if !matches!(url.scheme(), "http" | "https") {
 		let m = format!("Protocol \"{}\" not supported", url.scheme());
 		return Err(failed(CURLE_UNSUPPORTED_PROTOCOL, m));
 	}
-	let host = url.host_str().unwrap_or_default();
-	let port = url.port_or_known_default().unwrap_or(80);
+	let proxy = proxies
+		.proxy_for(url)
+		.map_err(|m| failed(CURLE_COULDNT_RESOLVE_PROXY, m))?;
+	let peer = proxy.clone().unwrap_or_else(|| url.clone());
+	let host = peer.host_str().unwrap_or_default();
+	let port = peer.port_or_known_default().unwrap_or(80);
 	if (host, port).to_socket_addrs().is_err() {
-		let m = format!("Could not resolve host: {host}");
-		return Err((Code::Resolve, m.into_bytes()));
+		return Err(match proxy {
+			Some(_) => failed(
+				CURLE_COULDNT_RESOLVE_PROXY,
+				format!("Could not resolve proxy: {host}"),
+			),
+			None => (
+				Code::Resolve,
+				format!("Could not resolve host: {host}")
+					.into_bytes(),
+			),
+		});
 	}
-	Ok(())
+	Ok(peer)
 }
 
 // curl's follow: any 3xx with a non-empty Location, resolved against the
@@ -1244,7 +1446,7 @@ impl Worker {
 		// data->state.retrycount: per transfer, redirects included
 		let mut retries = 0;
 		loop {
-			ensure_fetchable(&url)?;
+			let peer = ensure_fetchable(&url, &self.pool.proxies)?;
 			let req = self.request(job, &with_auth(&first, &url));
 			let resp = match req.send() {
 				Ok(r) => r,
@@ -1267,7 +1469,10 @@ impl Worker {
 					continue;
 				}
 				Err(e) => {
-					return Err(send_error(&e, &url, start));
+					let proxied = peer != url;
+					return Err(send_error(
+						&e, &peer, proxied, start,
+					));
 				}
 			};
 			self.pool.saw(&resp);
@@ -1511,11 +1716,21 @@ impl Worker {
 // (pactest's, after any response) leaves a dead pooled connection that
 // the next request (a redirect hop, the .sig) may go out on: curl's
 // Curl_retry_request then retries on a fresh connection, see follow
-fn build_client(settings: &Settings) -> reqwest::Result<Client> {
+fn build_client(
+	settings: &Settings,
+	proxies: Arc<ProxyEnv>,
+) -> reqwest::Result<Client> {
 	let timeout = (!settings.disable_dl_timeout).then_some(LOW_SPEED_TIME);
+	// curl's environment rules in place of reqwest's (which honour
+	// HTTP_PROXY and prefer the uppercase names); a refused setting
+	// fails the hop in ensure_fetchable before any request
+	let proxy = Proxy::custom(move |url: &Url| {
+		proxies.proxy_for(url).ok().flatten().map(String::from)
+	});
 	Client::builder()
 		.timeout(timeout)
 		.connect_timeout(CONNECT_TIMEOUT)
+		.proxy(proxy)
 		.pool_idle_timeout(CONN_MAX_IDLE)
 		.redirect(Policy::none())
 		.referer(false)

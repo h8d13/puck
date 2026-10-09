@@ -17,6 +17,7 @@ use alpm_core::callbacks::{DownloadEvent, LogLevel};
 use alpm_core::dload::{
 	DownloadState, Downloader, Payload, Settings, getdate_capped,
 };
+use alpm_core::error::Errno;
 use difftest::{
 	CDload, Fetcher, Record, Recorder, Reply, Req, Rng, Server, Style,
 	TempRoot, c_getdate, closed_port, iters, payload_layout_ok,
@@ -2293,6 +2294,222 @@ fn user_agent() {
 		"user_agent_child",
 		&[("HTTP_USER_AGENT", "pacman/7.1.0 (test)")],
 	);
+}
+
+#[test]
+fn proxy_env() {
+	in_child("proxy_env_child", &[]);
+}
+
+// curl's proxy environment rules on loopback: which server gets the
+// request (the proxy sees absolute-form targets), redirects through
+// the proxy, a proxy down or unresolvable; one process per case is not
+// needed, the child is single threaded and both sides read the
+// environment per download
+#[test]
+#[ignore = "run by proxy_env in its own process"]
+fn proxy_env_child() {
+	assert!(std::env::var_os("DLOAD_CHILD").is_some());
+	let b = body(1500, 7);
+	let origin = srv(&[
+		("/core.db", vec![file(&b)]),
+		("/r", vec![redir(302, "/core.db")]),
+	]);
+	let proxy_a = srv(&[
+		("/core.db", vec![file(&b)]),
+		("/r", vec![redir(302, "/core.db")]),
+	]);
+	let proxy_b = srv(&[("/core.db", vec![file(&b)])]);
+	let (pa, pb) = (proxy_a.base(), proxy_b.base());
+	let pa_noscheme = format!("127.0.0.1:{}", proxy_a.port());
+	let down = format!("http://127.0.0.1:{}", closed_port());
+	// name, environment, path, who serves it (None: nobody could)
+	let cases: Vec<(&str, Vec<(&str, &str)>, &str, Option<usize>)> = vec![
+		("direct", vec![], "/core.db", Some(0)),
+		("http_proxy", vec![("http_proxy", &pa)], "/core.db", Some(1)),
+		(
+			"HTTP_PROXY ignored",
+			vec![("HTTP_PROXY", &pa)],
+			"/core.db",
+			Some(0),
+		),
+		("all_proxy", vec![("all_proxy", &pa)], "/core.db", Some(1)),
+		("ALL_PROXY", vec![("ALL_PROXY", &pa)], "/core.db", Some(1)),
+		(
+			"http_proxy over all_proxy",
+			vec![("http_proxy", &pa), ("all_proxy", &pb)],
+			"/core.db",
+			Some(1),
+		),
+		(
+			"all_proxy over ALL_PROXY",
+			vec![("all_proxy", &pb), ("ALL_PROXY", &pa)],
+			"/core.db",
+			Some(2),
+		),
+		(
+			"https_proxy alone",
+			vec![("https_proxy", &pa)],
+			"/core.db",
+			Some(0),
+		),
+		("empty", vec![("http_proxy", "")], "/core.db", Some(0)),
+		(
+			"no scheme",
+			vec![("http_proxy", &pa_noscheme)],
+			"/core.db",
+			Some(1),
+		),
+		(
+			"no_proxy exact",
+			vec![("http_proxy", &pa), ("no_proxy", "127.0.0.1")],
+			"/core.db",
+			Some(0),
+		),
+		(
+			"no_proxy cidr",
+			vec![
+				("http_proxy", &pa),
+				("no_proxy", "10.0.0.0/8, 127.0.0.0/8"),
+			],
+			"/core.db",
+			Some(0),
+		),
+		(
+			"no_proxy other",
+			vec![
+				("http_proxy", &pa),
+				("no_proxy", "127.0.0.2,localhost"),
+			],
+			"/core.db",
+			Some(1),
+		),
+		(
+			"no_proxy star",
+			vec![("http_proxy", &pa), ("no_proxy", "*")],
+			"/core.db",
+			Some(0),
+		),
+		(
+			"NO_PROXY",
+			vec![("http_proxy", &pa), ("NO_PROXY", "127.0.0.1")],
+			"/core.db",
+			Some(0),
+		),
+		(
+			"no_proxy over NO_PROXY",
+			vec![
+				("http_proxy", &pa),
+				("no_proxy", "127.0.0.2"),
+				("NO_PROXY", "127.0.0.1"),
+			],
+			"/core.db",
+			Some(1),
+		),
+		(
+			"redirect via proxy",
+			vec![("http_proxy", &pa)],
+			"/r",
+			Some(1),
+		),
+		("proxy down", vec![("http_proxy", &down)], "/core.db", None),
+		(
+			"proxy unresolvable",
+			vec![(
+				"http_proxy",
+				"http://no.such.host.invalid:3128",
+			)],
+			"/core.db",
+			None,
+		),
+	];
+	let all = [
+		"http_proxy",
+		"HTTP_PROXY",
+		"https_proxy",
+		"HTTPS_PROXY",
+		"all_proxy",
+		"ALL_PROXY",
+		"no_proxy",
+		"NO_PROXY",
+	];
+	let set_env = |env: &[(&str, &str)]| {
+		// SAFETY: this process runs this one test on one thread; the
+		// C reads these with getenv on the same thread
+		unsafe {
+			for v in all {
+				std::env::remove_var(v);
+			}
+			for (k, v) in env {
+				std::env::set_var(k, v);
+			}
+		}
+	};
+	for (name, env, path, who) in cases {
+		set_env(&env);
+		let mk = |d: &[u8]| {
+			vec![pkg_payload(d, "core.db", origin.url(path))]
+		};
+		let case = Case {
+			servers: vec![&origin, &proxy_a, &proxy_b],
+			payloads: &mk,
+			setup: &no_setup,
+			parallel: 1,
+			disable_timeout: false,
+			sorted: false,
+		};
+		let (c, r) = run(&case);
+		assert_eq!(c, r, "{name}: {}", explain(&c, &r));
+		let served: Vec<_> =
+			c.requests.iter().map(|q| &q.via).collect();
+		match who {
+			None => assert_eq!(
+				(c.ret, served.len()),
+				(-1, 0),
+				"{name}"
+			),
+			Some(0) => {
+				assert_eq!(c.ret, 0, "{name}");
+				assert!(
+					served.iter().all(|v| v.is_none()),
+					"{name}"
+				);
+			}
+			Some(_) => {
+				assert_eq!(c.ret, 0, "{name}");
+				let authority =
+					format!("127.0.0.1:{}", origin.port());
+				assert!(
+					served.iter().all(|v| **v == Some(
+						authority.clone()
+					)),
+					"{name}: {served:?}"
+				);
+			}
+		}
+	}
+	// Rust only: a socks proxy, which curl would use, fails the
+	// transfer with curl's text for a scheme it cannot use
+	set_env(&[("http_proxy", "socks5h://127.0.0.1:1080")]);
+	let fx = TempRoot::new("dload-socks");
+	let dir = dir_bytes(fx.dir());
+	let settings = Settings::default();
+	let mut state = DownloadState::default();
+	let mut rec = Recorder::default();
+	let mut dl = Downloader {
+		settings: &settings,
+		state: &mut state,
+		cb: &mut rec,
+		fetch: None,
+		sandbox: None,
+	};
+	let mut ps = vec![pkg_payload(&dir, "core.db", origin.url("/core.db"))];
+	assert_eq!(dl.download(&mut ps, &dir, &dir), Err(Errno::Libcurl));
+	let o = outcome(-1, 0, rec.0, fx.dir(), &[&origin], false);
+	let m = String::from_utf8_lossy(errors(&o)[0]).into_owned();
+	let want = "Unsupported proxy scheme for 'socks5h://127.0.0.1:1080'";
+	assert!(m.ends_with(&format!(" : {want}\n")), "{m}");
+	assert!(o.requests.is_empty());
 }
 
 // two _alpm_download calls on one handle: a resumed .part that goes over
