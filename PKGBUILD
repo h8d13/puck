@@ -100,18 +100,24 @@ prepare() {
 build() {
   cd "$_pkgname"
 
-  cargo build --release --frozen -p pacman-cli -p vercmp -p testpkg
-
   # upstream's scripts, man pages and configs, with the options Arch's
   # pacman package builds them with. doxygen stays off: libalpm's man3
   # pages document a library that does not ship
   meson setup --prefix=/usr --buildtype=plain -Ddoc=enabled \
+        -Dscriptlet-shell=/usr/bin/bash -Dldconfig=/usr/bin/ldconfig \
         pacman/build pacman
   meson compile -C pacman/build
+
+  # the port takes scriptlet-shell and ldconfig from this build's
+  # config.h (alpm-core/build.rs): one source for the scripts and the
+  # binaries. set again in check(), cargo rebuilds when it changes
+  export PACMAN_BUILD="$srcdir/$_pkgname/pacman/build"
+  cargo build --release --frozen -p pacman-cli -p vercmp -p testpkg
 }
 
 check() {
   cd "$_pkgname"
+  export PACMAN_BUILD="$srcdir/$_pkgname/pacman/build"
 
   # port layering, one extern declaration per C symbol
   scripts/check-separation.sh
@@ -130,7 +136,7 @@ check() {
 
   # pacman-key, pacman-db-upgrade, makepkg's lockfile line and the
   # completions' --repo-list: the C pacman-conf against the port's
-  PACMAN_BUILD=pacman/build scripts/pacman-conf-dropin.sh
+  scripts/pacman-conf-dropin.sh
 }
 
 package() {

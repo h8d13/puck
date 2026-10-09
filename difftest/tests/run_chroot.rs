@@ -3,20 +3,24 @@
 // both under fakechroot(1) as pacman's own test suite runs them
 // (pmtest.py). `under_fakechroot` re-runs this binary's fc_* tests under
 // fakechroot; outside it they return at once. the root holds a copy of
-// /bin/sh (dynamically linked, fakechroot loads the host libraries).
+// /bin/sh and of the configured SCRIPTLET_SHELL at its own path, as
+// pmtest.py places it (dynamically linked, fakechroot loads the host
+// libraries); the ldconfig stub sits at LDCONFIG.
 // compared per case: return value, log lines and events in order, the
 // logfile lines, and the root tree afterwards (paths, types, modes,
 // contents).
+use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use alpm_core::callbacks::HookWhen;
 use alpm_core::hook::{AddTarget, Targets, hook_run};
 use alpm_core::package::Package;
 use alpm_core::trans::runscriptlet;
-use alpm_core::util::{ldconfig, run_chroot};
+use alpm_core::util::{LDCONFIG, SCRIPTLET_SHELL, ldconfig, run_chroot};
 use difftest::{
 	CHookHandle, CHookResult, COMPS, Rng, RustHookHandle, TempRoot, iters,
 	tar_file, ustar, write_db,
@@ -56,6 +60,11 @@ fn pick<T: Copy>(rng: &mut Rng, items: &[T]) -> T {
 	items[rng.below(items.len())]
 }
 
+// an absolute path of config.h placed under root
+fn under_root(r: &Path, abs: &[u8]) -> PathBuf {
+	r.join(OsStr::from_bytes(&abs[1..]))
+}
+
 // a TempRoot whose root/ is rebuilt for each side of a case
 struct Fix {
 	tmp: TempRoot,
@@ -93,7 +102,7 @@ impl Fix {
 		)
 	}
 
-	// root/ with bin/sh and tmp/ only
+	// root/ with bin/sh, the scriptlet shell and tmp/ only
 	fn reset(&self) {
 		let r = self.rootdir();
 		if fs::symlink_metadata(&r).is_ok() {
@@ -103,6 +112,12 @@ impl Fix {
 		fs::create_dir_all(r.join("bin")).unwrap();
 		fs::create_dir(r.join("tmp")).unwrap();
 		fs::copy("/bin/sh", r.join("bin/sh")).unwrap();
+		let shell = under_root(&r, SCRIPTLET_SHELL);
+		if shell != r.join("bin/sh") {
+			fs::create_dir_all(shell.parent().unwrap()).unwrap();
+			fs::copy(OsStr::from_bytes(SCRIPTLET_SHELL), shell)
+				.unwrap();
+		}
 	}
 }
 
@@ -129,7 +144,8 @@ fn chmod_all(dir: &Path) {
 	}
 }
 
-// every path below dir with its type, mode and content (bin/sh skipped)
+// every path below dir with its type, mode and content (the shells
+// skipped)
 fn tree(dir: &Path) -> Vec<String> {
 	let mut out = Vec::new();
 	walk(dir, dir, &mut out);
@@ -142,7 +158,7 @@ fn walk(base: &Path, dir: &Path, out: &mut Vec<String>) {
 	for e in rd.map(Result::unwrap) {
 		let p = e.path();
 		let rel = p.strip_prefix(base).unwrap().display().to_string();
-		if rel == "bin/sh" {
+		if rel == "bin/sh" || rel.as_bytes() == &SCRIPTLET_SHELL[1..] {
 			continue;
 		}
 		let m = fs::symlink_metadata(&p).unwrap();
@@ -546,13 +562,14 @@ fn fc_ldconfig() {
 		for mode in [None, Some(0o755), Some(0o644)] {
 			let setup = |r: &Path| {
 				fs::create_dir_all(r.join("etc")).unwrap();
-				fs::create_dir_all(r.join("sbin")).unwrap();
 				if conf {
 					fs::write(r.join("etc/ld.so.conf"), "")
 						.unwrap();
 				}
 				if let Some(m) = mode {
-					let p = r.join("sbin/ldconfig");
+					let p = under_root(r, LDCONFIG);
+					fs::create_dir_all(p.parent().unwrap())
+						.unwrap();
 					fs::write(&p, stub).unwrap();
 					let perm =
 						fs::Permissions::from_mode(m);
@@ -588,7 +605,7 @@ fn install_text(rng: &mut Rng) -> String {
 	let mut s = String::new();
 	for _ in 0..rng.below(5) {
 		let f = pick(rng, &SCRIPTS);
-		match rng.below(6) {
+		match rng.below(7) {
 			0 => s += &format!("# {f}() {{ echo commented; }}\n"),
 			1 => {
 				// the name across the end of grep's first 1023
@@ -603,6 +620,9 @@ fn install_text(rng: &mut Rng) -> String {
 					"{f}() {{ echo \"$1 $2\" > /tmp/{f}; exit 4; }}\n"
 				)
 			}
+			// $0 is SCRIPTLET_SHELL (trans.c's arg0): the port's
+			// path must be the reference's
+			3 => s += &format!("{f}() {{ echo \"$0\"; }}\n"),
 			_ => {
 				s += &format!(
 					"{f}() {{\n\techo \"{f} $1 $2\"\n\
