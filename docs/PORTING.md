@@ -364,11 +364,14 @@ import success path, every `pacman.conf` directive compared at the binary
 level, and the four open follow-ups (the C double free is `UPSTREAM.md`
 "a skipped file target freed twice"). A hostile-mirror robustness harness
 was added (`difftest::IronicEvilMirrorPkger`): both binaries reject every
-malformed input safely, no divergence. A compatible `libalpm.so.16` for
-the existing C/Python/Go ecosystem (pyalpm, yay, paru) is in progress as a
-foundation. Open only if the project later chooses to replace the package
-outright rather than sit beside it: that C ABI, gettext translations,
-locale collation and other charsets, and aarch64 verification.
+malformed input safely, no divergence. The first C-ABI unit is merged
+(`alpm-capi` -> `libalpm.so.16`): the read-path subset links and runs
+byte-identical under the real pyalpm and alpm.rs consumers; the other
+~199 alpm.h symbols are stubs that abort if called, so a read-only caller
+works and transactions/callbacks/full getters are follow-up units. Open
+only if the project later chooses to replace the package outright rather
+than sit beside it: finishing that C ABI, gettext translations, locale
+collation and other charsets, and aarch64 verification.
 
 | Item | Why it blocks | Start from | State |
 |---|---|---|---|
@@ -469,6 +472,13 @@ packages, varied fields, and a sync db; `tests/mkfixture.py`):
 - go-alpm (optional external reference, `tests/goalpm/`): local pkgcache
   and vercmp identical puck vs real; its sync-pkgcache and
   `alpm_release` paths are an upstream go-alpm bug, see findings below.
+
+Stands: a real, unmodified consumer links puck's `libalpm.so.16` and the
+read path works; ELF lazy binding loads even with the rest unimplemented,
+and a call into a stubbed symbol aborts naming itself (which drives the
+next unit's subset). So read-only use (query, db/pkg fields, vercmp) is
+usable today; transactions, option/callback setters and the full getters
+are not yet.
 
 Not yet covered (follow-up units): the `va_list` log callback shim and
 the other callback setters (`alpm_option_set_logcb`/`eventcb`/… and the
