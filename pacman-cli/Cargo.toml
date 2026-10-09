@@ -9,7 +9,6 @@ alpm-core = { path = "../alpm-core" }
 pacman-common = { path = "../pacman-common" }
 rustix.workspace = true
 signal-hook.workspace = true
-time.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]

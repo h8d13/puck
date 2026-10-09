@@ -8,10 +8,11 @@
 // on the terminal (before a prompt reads, before libalpm calls back).
 // inputs are byte strings as the C would see them, cut at the first nul.
 //
-// display width follows glibc in a UTF-8 locale. pacman runs under the
-// user's locale, the port assumes UTF-8: `mbstowcs` is glibc's UTF-8
-// decoder, `wcwidth` the per character width of unicode-width with
-// glibc's -1 for non printables. messages are the untranslated msgids,
+// display width follows glibc in the process locale's charset
+// (setlocale.rs): `mbstowcs` is glibc's UTF-8 decoder, or the C locale's
+// ASCII; other charsets (ISO-8859-*, EUC, ...) need glibc's gconv
+// converters and are taken as UTF-8. `wcwidth` is the per character
+// width of unicode-width with glibc's -1 for non printables. messages are the untranslated msgids,
 // gettext is not ported. sizes are size_t in the C and wrap: a width of
 // -1 from wcwidth/wcswidth is added as usize::MAX, like the C conversion.
 
@@ -32,6 +33,7 @@ use alpm_core::log::local_offset;
 // time(NULL)
 pub use alpm_core::log::now_secs;
 use alpm_core::package::{Package, PkgFrom, pkg_cmp, pkg_find};
+use alpm_core::setlocale;
 use alpm_core::trans::{
 	InitError, trans_init as alpm_trans_init,
 	trans_release as alpm_trans_release,
@@ -279,11 +281,14 @@ struct Wc<'a> {
 const UTF8_MIN: [u32; 7] = [0, 0, 0x80, 0x800, 0x1_0000, 0x20_0000, 0x400_0000];
 
 // glibc's UTF-8 decoder: the original up to 6 byte forms (to
-// 0x7fffffff), overlong forms and surrogates rejected
+// 0x7fffffff), overlong forms and surrogates rejected; in the C locale
+// (ASCII) only bytes up to 0x7f. other charsets are taken as UTF-8
 fn decode_one(s: &[u8]) -> Option<(u32, usize)> {
 	let b = s[0];
 	let (n, lead) = match b {
 		0x00..=0x7f => return Some((u32::from(b), 1)),
+		// the C locale's ASCII: no byte past 0x7f decodes
+		_ if setlocale::current().is_ascii() => return None,
 		0xc2..=0xdf => (2, b & 0x1f),
 		0xe0..=0xef => (3, b & 0x0f),
 		0xf0..=0xf7 => (4, b & 0x07),
@@ -751,7 +756,20 @@ fn opt(s: &Option<Box<[u8]>>) -> &[u8] {
 // "%.2f %s" of humanize_size in MiB
 fn mib(size: i64) -> Vec<u8> {
 	let (v, unit) = humanize_size(size, b'M', 2);
-	format!("{v:.2} {unit}").into_bytes()
+	[&decimal(format!("{v:.2}"))[..], b" ", unit.as_bytes()].concat()
+}
+
+// a float printf formatted: LC_NUMERIC's decimal_point for Rust's '.'.
+// the field width counts it as one character, like glibc's __printf_fp
+pub fn decimal(s: String) -> Vec<u8> {
+	let point = &setlocale::current().decimal_point;
+	match s.find('.') {
+		Some(i) if point != b"." => {
+			[&s.as_bytes()[..i], point, &s.as_bytes()[i + 1..]]
+				.concat()
+		}
+		_ => s.into_bytes(),
+	}
 }
 
 // table_cell_t modes

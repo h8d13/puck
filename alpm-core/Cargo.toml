@@ -18,8 +18,7 @@ reqwest.workspace = true
 rustix.workspace = true
 # run_chroot's child: _alpm_reset_signals (METHODOLOGY.md)
 signal-hook.workspace = true
-# localtime(3) offsets for log stamps (METHODOLOGY.md)
-time = { workspace = true, features = ["local-offset"] }
+time.workspace = true
 twox-hash.workspace = true
 zstd.workspace = true
 

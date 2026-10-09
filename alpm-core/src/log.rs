@@ -1,11 +1,11 @@
 // port of lib/libalpm/log.c: alpm_logaction, the logfile and syslog
 // lines. _alpm_log is Callbacks::log with the message formatted.
 //
-// the C stamps lines with localtime(time(NULL)): the offset comes from
-// glibc's localtime_r through time's local-offset (METHODOLOGY.md), so
-// TZ, /etc/localtime and the zone's rules at that second are the C's.
-// glibc reads TZ at the first call of the process where the C's
-// localtime rereads it every time; nothing here changes the environment.
+// the C stamps lines with localtime(time(NULL)): the offset is tzfile.rs's
+// port of glibc's zone rules, so TZ, /etc/localtime and the zone's rules
+// at that second are the C's. TZ is read once per process like glibc's
+// localtime_r, where the C's localtime rereads it every time; nothing
+// here changes the environment.
 // messages come formatted (the C takes fmt + va_list). vsyslog(3) is rebuilt on std's unix socket: glibc's default
 // openlog (no ident, LOG_USER, no LOG_PID) to /dev/log, datagram first
 // then stream, a failed send drops the line (no LOG_CONS).
@@ -18,7 +18,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::net::{UnixDatagram, UnixStream};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use time::{OffsetDateTime, UtcOffset};
+use time::OffsetDateTime;
 
 use crate::dload::MONTHS;
 use crate::error::Errno;
@@ -49,12 +49,10 @@ pub fn now_secs() -> i64 {
 	}
 }
 
-// localtime(&secs)->tm_gmtoff. None outside the years time holds (-9999
-// to 9999), where glibc still answers
+// localtime(&secs)->tm_gmtoff (tzfile.rs), None where localtime fails
 pub fn local_offset(secs: i64) -> Option<i32> {
-	let t = OffsetDateTime::from_unix_timestamp(secs).ok()?;
-	let off = UtcOffset::local_offset_at(t).ok()?;
-	Some(off.whole_seconds())
+	let l = crate::tzfile::current().local(secs)?;
+	i32::try_from(l.gmtoff).ok()
 }
 
 // localtime(time(NULL)); UTC in the years local_offset cannot take

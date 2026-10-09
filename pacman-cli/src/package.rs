@@ -10,24 +10,24 @@
 // messages and titles are the untranslated msgids, gettext is not ported.
 //
 // dates: the C formats with strftime("%c") on localtime(), so the output
-// follows LC_TIME and TZ. format_date is that for LC_TIME=C.UTF-8 (and
-// C) in the local zone (alpm_core::log::local_offset); PkgEnv::format_date
-// is where a fixed zone or another locale plugs in.
+// follows LC_TIME and TZ: format_date. PkgEnv::format_date is where
+// tests plug in a fixed zone and locale (format_date_at).
 
 use alpm_core::backup::Backup;
 use alpm_core::deps::{Depend, dep_compute_string, find_satisfier};
 use alpm_core::error::Errno;
-use alpm_core::log::local_offset;
 use alpm_core::package::{
 	DbCaches, PKG_VALIDATION_NONE, PKG_VALIDATION_SHA256SUM,
 	PKG_VALIDATION_SIGNATURE, Package, PkgFrom, PkgReason,
 	compute_optionalfor, compute_requiredby,
 };
+use alpm_core::setlocale::{self, Locale};
+use alpm_core::strftime::{Tm, strftime};
+use alpm_core::tzfile;
 use alpm_core::util::until_nul;
-use time::{OffsetDateTime, UtcOffset};
 
 use crate::util::{
-	ColStr, SigResult, humanize_size, indentprint, list_display,
+	ColStr, SigResult, decimal, humanize_size, indentprint, list_display,
 	list_display_linebreak, signature_display, string_display,
 	string_length,
 };
@@ -179,31 +179,24 @@ impl Titles {
 	}
 }
 
-// strftime("%c", localtime(&t)) in the C.UTF-8 (or C) locale
+// strftime(buf, 50, "%c", localtime(&t)) in the process's locale and
+// zone (setlocale.rs, tzfile.rs). a %c longer than 49 bytes does not
+// fit: strftime returns 0 and the zeroed buffer prints as empty. None
+// where localtime fails
 pub fn format_date(t: i64) -> Option<Vec<u8>> {
-	format_date_at(t, local_offset(t)?)
+	let l = tzfile::current().local(t)?;
+	let tm = Tm::local(t, &l)?;
+	Some(
+		strftime(50, b"%c", &tm, setlocale::current())
+			.unwrap_or_default(),
+	)
 }
 
-// strftime("%c") of t in a zone utcoff seconds east of UTC, C.UTF-8 (or
-// C) locale: "%a %b %e %H:%M:%S %Y", the English names cut to 3 letters.
-// %Y is the plain year, no padding, '-' for years before 1. None outside
-// the years time covers (-9999 to 9999), where glibc localtime goes on to
-// tm_year (year - 1900) past int
+// the same in the C locale, in a zone utcoff seconds east of UTC and
+// without a zone name (the C locale's %c has no %Z)
 pub fn format_date_at(t: i64, utcoff: i32) -> Option<Vec<u8>> {
-	let off = UtcOffset::from_whole_seconds(utcoff).ok()?;
-	let d = OffsetDateTime::from_unix_timestamp(t).ok()?;
-	let d = d.checked_to_offset(off)?;
-	let s = format!(
-		"{:.3} {:.3} {:>2} {:02}:{:02}:{:02} {}",
-		d.weekday(),
-		d.month(),
-		d.day(),
-		d.hour(),
-		d.minute(),
-		d.second(),
-		d.year(),
-	);
-	Some(s.into_bytes())
+	let tm = Tm::at(t, i64::from(utcoff), false, b"")?;
+	Some(strftime(50, b"%c", &tm, &Locale::c()).unwrap_or_default())
 }
 
 // deplist_display
@@ -272,9 +265,9 @@ fn size_line(
 	out.extend_from_slice(until_nul(colstr.title));
 	out.extend_from_slice(title);
 	out.extend_from_slice(until_nul(colstr.nocolor));
-	out.extend_from_slice(
-		format!(" {:.2} {}\n", size.0, size.1).as_bytes(),
-	);
+	out.push(b' ');
+	out.extend_from_slice(&decimal(format!("{:.2}", size.0)));
+	out.extend_from_slice(format!(" {}\n", size.1).as_bytes());
 }
 
 fn opt(s: &Option<Box<[u8]>>) -> &[u8] {

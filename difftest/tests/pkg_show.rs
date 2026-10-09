@@ -219,18 +219,17 @@ fn random_cache(rng: &mut Rng) -> Vec<Package> {
 		.collect()
 }
 
-// dates both sides format (time's years -9999 to 9999, see date_range),
-// -1 for unset
+// dates both sides format (years -9999 to 9999 here, see date_range for
+// the limits), -1 for unset
 fn random_date(rng: &mut Rng) -> i64 {
+	const MIN: i64 = -377_705_116_800;
+	const MAX: i64 = 253_402_300_799;
 	match rng.below(6) {
 		0 => -1,
 		1 => 0,
 		2 => rng.below(4_000_000_000) as i64,
 		3 => -(rng.below(70_000_000_000) as i64),
-		4 => {
-			TIME_MIN + rng.below((TIME_MAX - TIME_MIN) as usize)
-				as i64
-		}
+		4 => MIN + rng.below((MAX - MIN) as usize) as i64,
 		_ => 1_700_000_000 + rng.below(100_000_000) as i64,
 	}
 }
@@ -425,88 +424,52 @@ fn same(c: &[u8], r: &[u8], what: &dyn std::fmt::Debug) {
 	assert!(c == r, "{what:?}\nC:\n{}\nrust:\n{}", lossy(c), lossy(r));
 }
 
-// first and last second of the years time covers (-9999 to 9999). the C
-// goes on to tm_year past int: there it formats and the port gives None
-const TIME_MIN: i64 = -377_705_116_800;
-const TIME_MAX: i64 = 253_402_300_799;
-
-// port and C agree inside time's range, outside it the port has None
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum DateClass {
-	Same,
-	// C formats, port None (years past 9999 or before -9999)
-	OnlyC,
-	// localtime fails, both None
-	Neither,
-}
-
+// strftime("%c") of localtime on both sides; true where it formats,
+// both None where localtime fails (tm_year past int)
 #[track_caller]
-fn date_class(t: i64) -> DateClass {
+fn date_same(t: i64) -> bool {
 	let (c, r) = (c_strftime_c(t), utc_date(t));
-	let class = match (&c, &r) {
-		(Some(_), Some(_)) => DateClass::Same,
-		(Some(_), None) => DateClass::OnlyC,
-		(None, None) => DateClass::Neither,
-		(None, Some(_)) => panic!("{t}: port formats, C cannot"),
-	};
 	let show = |s: &Option<Vec<u8>>| s.as_deref().map(lossy);
-	if class == DateClass::Same {
-		assert_eq!(show(&c), show(&r), "{t}");
-	}
-	assert_eq!(
-		class == DateClass::OnlyC,
-		!(TIME_MIN..=TIME_MAX).contains(&t) && c.is_some(),
-		"{t}"
-	);
-	class
+	assert_eq!(show(&c), show(&r), "{t}");
+	c.is_some()
 }
 
 #[test]
 fn date_fixed() {
-	use DateClass::*;
 	let cases = [
-		(0, Same),
-		(-1, Same),
-		(1, Same),
-		(86_399, Same),
-		(86_400, Same),
-		(951_782_400, Same),
-		(1_700_000_000, Same),
-		(-62_135_596_800, Same),
-		(-62_135_596_801, Same),
-		(-62_167_219_200, Same),
-		(-62_198_755_200, Same),
-		(-30_000_000_000, Same),
-		(-80_000_000_000, Same),
-		(253_402_300_799, Same),
-		(253_402_300_800, OnlyC),
-		(i64::from(i32::MAX), Same),
-		(i64::from(i32::MIN), Same),
-		(i64::MAX, Neither),
-		(i64::MIN, Neither),
+		(0, true),
+		(-1, true),
+		(1, true),
+		(86_399, true),
+		(86_400, true),
+		(951_782_400, true),
+		(1_700_000_000, true),
+		(-62_135_596_800, true),
+		(-62_135_596_801, true),
+		(-62_167_219_200, true),
+		(-62_198_755_200, true),
+		(-30_000_000_000, true),
+		(-80_000_000_000, true),
+		(253_402_300_799, true),
+		(253_402_300_800, true),
+		(i64::from(i32::MAX), true),
+		(i64::from(i32::MIN), true),
+		(i64::MAX, false),
+		(i64::MIN, false),
 	];
 	for (t, want) in cases {
-		assert_eq!(date_class(t), want, "{t}");
+		assert_eq!(date_same(t), want, "{t}");
 	}
 	assert_eq!(utc_date(0).unwrap(), b"Thu Jan  1 00:00:00 1970".to_vec());
-}
-
-// time's range and the localtime limits, found on the C, plus one past
-#[test]
-fn date_range() {
-	use DateClass::*;
-	for (t, want) in [
-		(TIME_MIN, Same),
-		(TIME_MAX, Same),
-		(TIME_MIN - 1, OnlyC),
-		(TIME_MAX + 1, OnlyC),
-	] {
-		assert_eq!(date_class(t), want, "{t}");
-	}
 	assert_eq!(
-		c_strftime_c(TIME_MAX + 1).unwrap(),
+		utc_date(253_402_300_800).unwrap(),
 		b"Sat Jan  1 00:00:00 10000".to_vec()
 	);
+}
+
+// the localtime limits, found on the C, and past them
+#[test]
+fn date_range() {
 	let edge = |mut ok: i64, mut bad: i64| {
 		while ok.abs_diff(bad) > 1 {
 			let mid = ok + (bad - ok) / 2;
@@ -519,16 +482,16 @@ fn date_range() {
 		(ok, bad)
 	};
 	for (ok, bad) in [edge(0, i64::MAX), edge(0, i64::MIN)] {
-		assert_eq!(date_class(ok), OnlyC, "{ok}");
-		assert_eq!(date_class(bad), Neither, "{bad}");
-		assert_eq!(date_class(bad + (bad - ok)), Neither, "{bad}");
+		assert!(date_same(ok), "{ok}");
+		assert!(!date_same(bad), "{bad}");
+		assert!(!date_same(bad + (bad - ok)), "{bad}");
 	}
 }
 
 #[test]
 fn date_fuzz() {
 	let mut rng = Rng::new(0xda7e);
-	let mut seen = std::collections::BTreeMap::new();
+	let (mut formatted, mut failed) = (0usize, 0usize);
 	let n = iters();
 	for _ in 0..n {
 		let t = match rng.below(4) {
@@ -537,17 +500,17 @@ fn date_fuzz() {
 			2 => (rng.next_u64() >> 28) as i64 - (1 << 35),
 			_ => (rng.next_u64() >> 31) as i64 - (1 << 32),
 		};
-		*seen.entry(date_class(t)).or_insert(0usize) += 1;
+		match date_same(t) {
+			true => formatted += 1,
+			false => failed += 1,
+		}
 	}
-	println!("{seen:?}");
+	println!("formatted {formatted} failed {failed}");
 	// per 1000 inputs, about 3/4 of the rates measured with 200000
-	for (k, per_1000) in [
-		(DateClass::Same, 370),
-		(DateClass::OnlyC, 180),
-		(DateClass::Neither, 180),
-	] {
-		let got = seen.get(&k).copied().unwrap_or(0);
-		assert!(got * 1000 >= n * per_1000, "{k:?}: {got} of {n}");
+	for (what, got, per_1000) in
+		[("formatted", formatted, 550), ("failed", failed, 180)]
+	{
+		assert!(got * 1000 >= n * per_1000, "{what}: {got} of {n}");
 	}
 }
 

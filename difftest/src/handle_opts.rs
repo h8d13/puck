@@ -25,7 +25,7 @@ const EVENT_DATABASE_MISSING: c_int = 27;
 unsafe extern "C" {
 	fn gmtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
 	// what log.c, util.c and package.c call: rereads TZ every time
-	fn localtime(t: *const i64) -> *mut Tm;
+	pub(crate) fn localtime(t: *const i64) -> *mut Tm;
 }
 
 // what logcb and eventcb were given, in order

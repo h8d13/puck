@@ -47,6 +47,8 @@ Every finding states who controls the input that triggers it:
 | stale `.sig` kept after a sync | real (rare) |
 | a pax header warning ends the extraction quietly | packager |
 | default-only ACL installs a directory with mode 0 (libarchive) | real (rare) |
+| dates past 49 bytes of `%c` print empty | real |
+| glibc posixrules default: swapped correction, footer names | env |
 | minor sections | per bullet |
 
 ## `_alpm_filelist_pathcmp` compares signed `char`
@@ -341,7 +343,11 @@ declarations. No existing MR found for it.
   (322, 487/495), e.g. a Latin-1 description under a UTF-8 locale is cut
   off; `wcwidth` -1 added to `size_t` (340, 353, 488), e.g. a tab in a
   description, breaks wrapping / makes widths SIZE_MAX. Display only.
-  **packager** (plausible in old or third-party packages)
+  **packager** (plausible in old or third-party packages). in the C
+  locale (`LC_ALL=C pacman -Qi` on a terminal, often used for stable
+  output) every UTF-8 description, packager or optdepend is cut at its
+  first non-ASCII byte: "Balló György" prints "Ball" on this host.
+  **real**
 - strtol into int (parseindex 1447, getcols 239, plus unsigned short
   return): user typed selection numbers, `COLUMNS`. **local**, harmless
 - table_calc_widths assumes rows no wider than the header (650); callers
@@ -581,6 +587,37 @@ declarations. No existing MR found for it.
   **none**
 - with POSIXLY_CORRECT set getopt stops at the first non-option, `pacman
   pkg -S` fails. **env**
+
+## dates and the locale (package.c, util.c, glibc)
+
+- `strftime(bdatestr, 50, "%c", ...)` (package.c:212/216, util.c:1226): a
+  locale whose `%c` needs 50 bytes or more gets 0 and the zeroed buffer,
+  so Build and Install Date print empty (ta_IN: "திங்கள் 10 ஆகஸ்ட் 2026
+  மாலை 05:17:10" is 70 bytes). **real** (users of such locales)
+- glibc `__tzfile_default` (time/tzfile.c:496-570), for a TZ with a DST
+  name and no rules (`CET-1CEST`, `AAA3BBB`): the transitions of
+  posixrules are moved with the signs of tzcode's west-positive offsets on
+  glibc's east-positive ones, and `rule_dstoff` is never set by
+  `__tzfile_read` when the file has transitions: 0 at the process's first
+  run, the previous run's dstoff after. `localtime` (pacman's) reruns it
+  on every call, so the first date of a process can differ from the same
+  date later, `localtime_r` keeps the first. `TZ=AAA3BBB` starts DST at
+  06:00 local instead of 02:00 (09:00 UTC, glibc 2.44). **env**
+- glibc `__tzfile_compute` (time/tzfile.c:648): the test meant to keep the
+  user's names after posixrules' last transition compares `zone_names`
+  with `&leaps[num_leaps]`, which `__tzfile_default` never sets: from then
+  on posixrules' own footer applies, EST/EDT at -5/-4 for `TZ=AAA3BBB`.
+  **env**
+- glibc `compute_change` (time/tzset.c:430-449): years before 1971 start
+  from 1970-01-01, so POSIX rule zones (`TZ=EST5EDT,M3.2.0,M11.1.0`) never
+  show DST before 1970 (1960-06-29 prints EST). **env**
+- glibc `parse_rule` (time/tzset.c:229): `Mm.n.d` fields are stored before
+  the range check, a failed `M0`/`M13` rule is still computed and
+  `compute_change` indexes `__mon_yday` out of bounds (from the source,
+  not run). **env**
+- glibc `mktime(localtime(t))` is not t for some historic transitions
+  (Europe/Paris 1944, `%s` one hour off); pacman never formats `%s`.
+  **none**
 
 ## regex (glibc, as pacman uses it)
 

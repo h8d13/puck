@@ -210,7 +210,7 @@ Not needed for an English-locale replacement; noted so it is not lost.
 |---|---|
 | translations: pacman and libalpm messages through gettext (49 `po` languages); the port prints the English msgids | later |
 | libalpm C ABI (`alpm.h`, `libalpm.so.16` via a `cdylib`) for C/Go/Python/Vala front ends (pamac, pyalpm, yay; paru through alpm.rs): a distro-level choice, would sit as a thin unsafe crate on the public Rust API; needs stable package/db addresses, `#[repr(C)]` public structs, `alpm_list_t` ownership per function, a C shim for `va_list` log callbacks | later |
-| locale-dependent behaviour beyond C.UTF-8: `-Qi`/`-Si` dates are strftime `%c` in the user's LC_TIME (en_US: `Mon 10 Aug 2026 03:17:10 PM CEST`, the port prints the C locale's `Mon Aug 10 15:17:10 2026`), regex collation ranges and `[=e=]`, `strcoll` sort of glob results, non-UTF-8 locales for display (`mbstowcs`/`wcwidth`), pax NFC composition | later |
+| locale-dependent behaviour (pacman calls `setlocale(LC_ALL, "")`) | done: `alpm-core::setlocale` resolves the locale like glibc 2.44 (LC_ALL/LC_x/LANG, locale-archive, LOCPATH, locale.alias, codeset fallbacks and gconv aliases, C/POSIX, all twelve categories or "C"); `-Qi`/`-Si` dates and `%b` are `strftime::strftime(50, "%c")` with every conversion, eras and alternative digits, `%Z` from `tzfile` (TZ, TZif, POSIX rules, posixrules, leap seconds); sizes take LC_NUMERIC's decimal point; the C locale's ASCII cuts display text like glibc's mbstowcs. difftest: every SUPPORTED UTF-8 locale (`DIFFTEST_LOCALES=all`), cli_binary `locales`. left: `strcoll` order of Include globs and regex collation ranges/`[=e=]`/`[.x.]` need a port of glibc's LC_COLLATE weight tables (strcoll_l.c, weight.h, regcomp's collseq), and glob's fnmatch in multibyte locales; other charsets than UTF-8 and ASCII (ISO-8859-*, EUC, GB18030) need glibc's gconv converters, and wcwidth stays unicode-width (glibc reads LC_CTYPE's width table); the C locale's single-byte regex and libarchive's C-locale pax conversion are not modelled; pax NFC composition (libarchive's Unicode 6.0 tables) stays pinned, packager practice; translations (gettext) out of scope | partly done |
 
 ### 4. Public Rust API
 
@@ -448,9 +448,11 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   `is_ascii_whitespace` leaves out '\v'.
 - `wordsplit`: `None` for the C EINVAL (unbalanced quote). `parse_ini`
   takes a closure, the line number counts `safe_fgets` chunks like the C.
-- frontend display runs in C.UTF-8 on both sides; the port assumes a UTF-8
-  locale where pacman follows the user's. `mbstowcs` is glibc's UTF-8
-  decoder (1-6 byte forms, no overlongs/surrogates); invalid input keeps
+- frontend display runs in C.UTF-8 on both sides in-process (the port's
+  default before `localize`); the binary follows the user's locale for
+  ASCII (C/POSIX) and UTF-8, other charsets are taken as UTF-8.
+  `mbstowcs` is glibc's UTF-8 decoder (1-6 byte forms, no
+  overlongs/surrogates; bytes past 0x7f invalid in ASCII); invalid input keeps
   the valid prefix like the C. `wcwidth` is unicode-width per character
   (None/non-char = -1, L'\0' = 0, no string ligatures like wcswidth);
   differences to glibc counted in `cli_util::wcwidth_divergence`. Printing functions
@@ -550,10 +552,11 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   the group cache.
 - `package.c` display: libalpm and system calls go through a `PkgEnv`
   trait (requiredby, satisfiers, db name, signatures, file probes, dates).
-  Dates: the C uses `strftime("%c", localtime())` (LC_TIME, TZ); the port
-  ships `format_date` (C.UTF-8 `%c` in the local zone, `format_date_at`
-  for a fixed offset; None outside years -9999..9999 where the C still
-  formats); in-process tests pin UTC through `PkgEnv::format_date`. Titles are untranslated msgids. Where the
+  Dates: the C uses `strftime(buf, 50, "%c", localtime())` (LC_TIME,
+  TZ); `format_date` is that on `alpm-core::strftime`, `setlocale` and
+  `tzfile` (every year localtime takes, a `%c` past 49 bytes empty like
+  the C's zeroed buffer), `format_date_at` the C locale at a fixed
+  offset; in-process tests pin UTC through `PkgEnv::format_date`. Titles are untranslated msgids. Where the
   C crashes (md5 failure on a backup file, out-of-range dates) the port
   logs/prints "None" instead.
 - `compute_requiredby`/`optionalfor` take a `DbCaches` trait (lazy, one
@@ -831,7 +834,7 @@ Follow-ups raised by port units:
 | wire `HelperSandbox::for_handle` into `Handle::fetch_pkgurl` once `handle->user` (getuid) is ported | integrate | done: `Handle::user`, `SandboxFor` in `with_downloader` (fetch_pkgurl, sync commit downloads) |
 | dload difftest umask race (C umask(0) process-wide vs parallel tests) | integrate | done: `difftest::umask_lock()` |
 | rustix `process`/`termios` features: handle->user, getcols tty width, flush_term_input | handle, cliutil2 | done (`use-libc` backend for fakeroot, METHODOLOGY.md); pty difftest |
-| local time offset for log stamps (UTC today) | handle | done: `log::local_offset` (time `local-offset`, METHODOLOGY.md) for pacman.log, syslog, PACMAN_DEBUG and `-Qi`/`-Si`/`%b` dates; %F's year unpadded like glibc; parse-time errors get their PACMAN_DEBUG stamp; difftests compare stamps (`stamped`) instead of stripping them, commits keep the zone (`strip_stamps`) |
+| local time offset for log stamps (UTC today) | handle | done: `log::local_offset` (`tzfile`, METHODOLOGY.md) for pacman.log, syslog, PACMAN_DEBUG and `-Qi`/`-Si`/`%b` dates; %F's year unpadded like glibc; parse-time errors get their PACMAN_DEBUG stamp; difftests compare stamps (`stamped`) instead of stripping them, commits keep the zone (`strip_stamps`) |
 | shared helpers into util: `llstat`, `strerror`, `PATH_MAX` once; frontend `pm_printf`/`Output`/`check_syncdbs`/`getcols` | conflict, diskspace, query, sync | done |
 | `Handle` split borrow of local + sync caches (resolver and displays clone caches today) | deps, sync | done: -Si/-Sii and -Dk/-Dkk borrow in place (peak RSS on the real local + core/extra/vrch dbs: -Si 133 -> 88 MiB, -Sii 137 -> 89, -Dk 57 -> 36, -Dkk 124 -> 76; wall equal within noise); the resolver's `TransPkg`s stay owned copies by design (Notes) |
 | XferCommand via a sandbox helper exec mode (`alpm_sandbox_setup_child` from conf.c) | sandbox | done: `conf::XferCommand`, `sandbox::SandboxExec` |
@@ -886,7 +889,7 @@ divergences left with the owned readers.
 
 | Divergence | Effect |
 |---|---|
-| dates before -9999 or after 9999: C formats, port prints "None" | `-Qi`/`-Si` display only |
+| log stamps in `right/` (leap second) zones: the C takes the leap correction off the time of day, log.rs adds tm_gmtoff only (dates do both) | pacman.log, syslog, PACMAN_DEBUG stamps under such a TZ |
 | pax strings in a UTF-8 locale: libarchive composes decomposed sequences (NFC), the port keeps them; other locales are not modelled (the C locale fails non-ASCII UTF-8 names with ARCHIVE_WARN) | names with hdrcharset UTF-8 only; makepkg marks them BINARY |
 | a pax record name past its 512-byte window: the port sees up to the block end, libarchive's copy buffer may hold less or more | "overlarge attribute name" on names past 512 bytes only |
 | fifos made with mknodat, libarchive's mkfifo (glibc's internal mknodat) | none on a system; under fakeroot only the port's is faked |
