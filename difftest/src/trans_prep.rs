@@ -78,7 +78,23 @@ pub fn tp_any_name(rng: &mut Rng) -> &'static str {
 	}
 }
 
+// now and then one dep_from_string takes apart oddly (empty name or
+// version, a description, "<=>", a pkgrel against a version)
+const ODD: [&str; 8] = [
+	"a>=",
+	"<1",
+	"b=1:2-3",
+	"c<=>1",
+	"d: for d",
+	"e>=1-01",
+	"v1=",
+	"libx>1.0-1",
+];
+
 pub fn tp_relation(rng: &mut Rng) -> String {
+	if rng.below(10) == 0 {
+		return pick(rng, &ODD).to_string();
+	}
 	let name = tp_any_name(rng);
 	match rng.below(3) {
 		0 => format!(
@@ -154,7 +170,7 @@ fn gen_pkg(rng: &mut Rng, name: &'static str, sync: bool) -> TpPkg {
 		groups: subset(rng, &TP_GROUPS, 3),
 		asdep: rng.below(2) == 0,
 		arch,
-		filename: match rng.below(10) {
+		filename: match rng.below(6) {
 			0 => "shared-1-1-any.pkg.tar.zst".to_string(),
 			_ => format!("{name}-{version}-{arch}.pkg.tar.zst"),
 		},
@@ -860,10 +876,44 @@ impl CTx {
 	}
 
 	pub fn release(&self) -> (TpRet, TpCalls) {
+		self.disarm_double_free();
 		// SAFETY: h is live
 		let (r, c) =
 			self.run(&[], || unsafe { alpm_trans_release(self.h) });
 		(self.ret(r), c)
+	}
+
+	// a file target that failed to resolve on its own turn and was
+	// pulled by a later target sits on trans->add and
+	// trans->unresolvable both, and _alpm_trans_free frees it twice
+	// (UPSTREAM.md "a skipped file target freed twice"): its
+	// unresolvable node loses its data, _alpm_pkg_free_trans(NULL)
+	// returns. after the test read its view, before any release
+	fn disarm_double_free(&self) {
+		// SAFETY: h is live, its leading fields mirrored
+		let t = unsafe { (*self.h.cast::<CHandleHead>()).trans };
+		if t.is_null() {
+			return;
+		}
+		// SAFETY: a live alpm_trans_t
+		let (add, mut node) = unsafe { ((*t).add, (*t).unresolvable) };
+		let files: Vec<*mut c_void> = list_data(add)
+			.into_iter()
+			.filter(|&p| {
+				let o = crate::package::read_pkg(p.cast())
+					.origin;
+				matches!(o, Some(alpm_core::package::PkgFrom::File(_)))
+			})
+			.collect();
+		while !node.is_null() {
+			// SAFETY: a node of the C's list
+			unsafe {
+				if files.contains(&(*node).data) {
+					(*node).data = ptr::null_mut();
+				}
+				node = (*node).next;
+			}
+		}
 	}
 
 	pub fn interrupt(&self) -> TpRet {
@@ -1156,6 +1206,7 @@ const ERR_CONFLICTING_DEPS: c_int =
 impl Drop for CTx {
 	fn drop(&mut self) {
 		let _guard = ALPM.lock().unwrap_or_else(|e| e.into_inner());
+		self.disarm_double_free();
 		// SAFETY: h came from alpm_initialize, a transaction left over
 		// goes with it; rec from Box::into_raw, unused once h is gone
 		unsafe {

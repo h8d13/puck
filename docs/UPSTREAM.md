@@ -35,6 +35,7 @@ Every finding states who controls the input that triggers it:
 | backup entry without a hash crashes the remove | local |
 | unremovable package forgotten with its files left | env |
 | `-Fx -l` conflict check is dead | real |
+| a skipped file target freed twice | real (rare) |
 | `_alpm_pkg_check_meta` name check swapped | packager |
 | `string_length` buffer one byte short | packager |
 | `_alpm_splitname` precondition | packager / local |
@@ -212,6 +213,38 @@ validation only.
 
 pacman.c:878 `checkargs_files` tests `op_q_search`, which -F never sets
 (should be `op_f_regex`), so `--regex --list` is never rejected.
+
+## a skipped file target freed twice
+
+Practice: **real (rare)**. `pacman -U h.pkg a.pkg` where `h` cannot be
+resolved on its own turn but a later target pulls it, then "y" to "Do you
+want to skip the above package(s) for this upgrade?": pacman aborts in
+`alpm_trans_release` (`free(): invalid pointer`), after the install when
+the transaction otherwise goes through.
+
+`_alpm_sync_prepare` resolves the targets one by one (sync.c:420-427):
+a target whose `_alpm_resolvedeps` fails goes to `unresolvable`. A later
+target's chain may still pull that same package through the `preferred`
+list (deps.c:826-834: `find_dep_satisfier(preferred, missdep)`, then
+`_alpm_resolvedeps` on it), and this time it resolves, because
+`*packages` now holds other packages: in the fuzz case `h` needs `d`,
+`d-1.5-2` (core) is pulled first and its `g` needs `libx`, whose only
+provider left after an ignored package is `d-2.0-1` (multi), excluded by
+name; on `a`'s turn `libx` pulls `d-2.0-1` first and `h` resolves. With
+the skip answer sync.c:500-503 sets `trans->unresolvable = unresolvable`
+and `trans->add = resolved`, both holding `h`. `_alpm_trans_free`
+(trans.c:294-298) runs `_alpm_pkg_free_trans` on both lists, which frees
+a `ALPM_PKG_FROM_FILE` package itself (package.c:738): double free. A sync
+package on both lists only loses its `removes` list twice. Fix idea: drop
+from `unresolvable` what `resolved` holds before storing it, or do not
+record a target as unresolvable until the whole loop is done.
+
+- port: the lists mirror the C's (the package on both), nothing is freed
+  twice
+- difftest: `trans_prep`'s `CTx` nulls the data of such an
+  `unresolvable` node before any `alpm_trans_release` (`_alpm_pkg_free_trans`
+  of NULL returns); the frontend fuzz has not reached the case (its
+  resolvable worlds, no IgnorePkg)
 
 ## `_alpm_pkg_check_meta` name check swapped
 

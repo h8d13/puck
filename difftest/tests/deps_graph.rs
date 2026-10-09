@@ -59,39 +59,12 @@ fn some<T>(rng: &mut Rng, n: usize, f: impl Fn(&mut Rng) -> T) -> Vec<T> {
 	(0..rng.below(n)).map(|_| f(rng)).collect()
 }
 
-// mostly unversioned, so satisfiers and cycles are frequent; now and
-// then one dep_from_string takes apart oddly (empty name or version,
-// a description, "<=>", a pkgrel against a version)
-const ODD: [&str; 8] = [
-	"a>=",
-	"<1",
-	"b=1:2-3",
-	"c<=>1",
-	"d: for d",
-	"e>=1-01",
-	"v1=",
-	"libx>1.0-1",
-];
-
-fn relation(rng: &mut Rng) -> String {
-	match rng.below(10) {
-		0 => pick(rng, &ODD).to_string(),
-		_ => tp_relation(rng),
-	}
-}
-
-// a trans_prep world with odd depends and some ">=ver" provisions
-// (those match no versioned dep). the trans_prep tests keep plain
-// relations: odd ones abort the C there (PORTING.md follow-ups)
+// a trans_prep world (odd relations included) with some ">=ver"
+// provisions (those match no versioned dep)
 fn gen_deps_world(rng: &mut Rng) -> TpWorld {
 	let mut w = gen_world(rng, false);
 	let all = w.local.iter_mut().chain(w.sync.iter_mut().flatten());
 	for p in all.chain(w.files.iter_mut()) {
-		for d in p.depends.iter_mut() {
-			if rng.below(10) == 0 {
-				*d = pick(rng, &ODD).to_string();
-			}
-		}
 		if rng.below(5) == 0 {
 			let ver = pick(rng, &TP_DEP_VERSIONS);
 			let name = tp_any_name(rng);
@@ -423,7 +396,7 @@ impl Case<'_> {
 		// virtual names reach the provider question
 		let dep = match rng.below(2) {
 			0 => pick(rng, &TP_VIRTUAL).to_string(),
-			_ => relation(rng),
+			_ => tp_relation(rng),
 		};
 		let ans = answers(rng);
 		let (cr, cc) =
