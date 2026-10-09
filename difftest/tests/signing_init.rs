@@ -1,7 +1,7 @@
 // init_gpgme's lines (signing.c) against the C: the C runs it once per
 // process (static init), so this binary holds a single test, on a
 // gpgdir without a keyring. gpgme's library version has no port
-// counterpart (PORTING.md): the value after "GPGME version: " is masked
+// counterpart: the value after "GPGME version: " is masked
 use std::fs;
 
 use alpm_core::internals::signing::{Keyring, key_in_keychain};

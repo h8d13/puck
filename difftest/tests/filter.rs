@@ -57,7 +57,7 @@ fn streams(data: &[u8]) -> Vec<(String, Vec<u8>)> {
 }
 
 // libarchive's write filter; an empty lz4 stream from lz4_flex: the lz4
-// writer crashes closing a stream with no data (UPSTREAM.md)
+// writer crashes closing a stream with no data
 fn write(name: &str, opts: &str, data: &[u8]) -> Vec<u8> {
 	if name != "lz4" || !data.is_empty() {
 		return c_filter_write(name, opts, data);
@@ -125,7 +125,7 @@ fn cut_streams() {
 
 // bytes changed after the magic: the decoders' corrupt-data paths. lz4
 // blocks without a checksum are left alone (liblz4 and lz4_flex differ on
-// invalid blocks, UPSTREAM.md)
+// invalid blocks)
 #[test]
 fn corrupt_streams() {
 	let mut rng = Rng::new(0x0bad_da7a);

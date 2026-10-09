@@ -812,7 +812,7 @@ fn link_cases() {
 
 // libarchive reads a directory entry (type '5', or a regular one named
 // like a directory) as one without data, so its data is read as the next
-// header and the loop ends there (UPSTREAM.md)
+// header and the loop ends there
 #[test]
 fn dir_with_data() {
 	for kind in *b"50" {

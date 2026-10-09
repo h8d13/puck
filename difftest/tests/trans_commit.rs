@@ -380,7 +380,7 @@ fn signed_keyring() {
 	let w = sig_world(&fx, &gpg, Some(TcSigKind::Key("full")), true);
 	compare(&fx, &signed_case(&gpg, w, sync(&["c"]), SIG_PACKAGE));
 	// a bad signature before a good one: pm_errno is the last
-	// validation's (UPSTREAM.md), both reported, both questions asked
+	// validation's, both reported, both questions asked
 	let mut w = sig_world(&fx, &gpg, Some(TcSigKind::Other), false);
 	tc_sign(&fx, &gpg, &mut w.sync[0], TcSigKind::Key("full"));
 	w.sync[0].sig_on_mirror = true;

@@ -6,7 +6,7 @@
 // return value, stdout, stderr, input consumed and the whole fixture tree
 // afterwards. both outputs are normalized: the fixture dir to "@", the
 // PACMAN_DEBUG stamps cut, lines carrying libarchive's texts dropped
-// (be_package does not log those, PORTING.md), debug lines not from
+// (be_package does not log those), debug lines not from
 // sync.c dropped (libalpm's own are compared in their units)
 use std::cell::RefCell;
 use std::fs;

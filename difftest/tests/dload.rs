@@ -145,7 +145,7 @@ fn outcome(
 	}
 	// pm_errno is the last failure's: with several files failing in
 	// parallel that order is each side's own (a dead pooled connection
-	// costs curl a retry where hyper reconnects, see PORTING.md), so
+	// costs curl a retry where hyper reconnects), so
 	// only that something failed is compared then
 	let mut failed: Vec<&[u8]> = logs
 		.iter()

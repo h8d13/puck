@@ -47,7 +47,7 @@ pub fn c_tolower(c: u8) -> u8 {
 
 // localtime(&t) as the port's Tm, None where it fails. localtime, not
 // localtime_r, like pacman: it rereads TZ, which matters for a DST name
-// without rules (UPSTREAM.md). its static buffer: callers keep to one
+// without rules. its static buffer: callers keep to one
 // thread (the probe binaries)
 pub fn c_localtime_tm(t: i64) -> Option<PortTm> {
 	// SAFETY: localtime's result is copied before the next call, its

@@ -311,7 +311,7 @@ fn entry_diff(c: &CMtreeEntry, r: &MtreeEntry) -> Vec<&'static str> {
 }
 
 // the C's entries against the port's up to the one the C stops at (the
-// first libarchive warns about, pacman's -Qkk ends there: UPSTREAM.md)
+// first libarchive warns about, pacman's -Qkk ends there)
 fn entries_diff(c: &[CMtreeEntry], r: &[MtreeEntry]) -> Option<String> {
 	let warned = r.iter().position(|e| e.warning.is_some());
 	let r = &r[..warned.unwrap_or(r.len())];
@@ -2009,7 +2009,7 @@ fn check_divergences() {
 	assert_eq!(c, r);
 
 	// a file entry without sha256: libarchive leaves a zero digest, the
-	// C reports a mismatch, never "information not available" (UPSTREAM.md)
+	// C reports a mismatch, never "information not available"
 	let mtree =
 		format!("#mtree\n/set type=file uid={u} gid={g} mode=644\n\
 		./a time={BASE_TIME}.0 size=6\n");
@@ -2021,7 +2021,7 @@ fn check_divergences() {
 	);
 
 	// an entry libarchive warns about (uppercase digest): the C stops
-	// there and prints totals as if done (UPSTREAM.md), the port checks
+	// there and prints totals as if done, the port checks
 	// it and goes on
 	let mtree = format!(
 		"#mtree\n/set type=file uid={u} gid={g} mode=644\n\

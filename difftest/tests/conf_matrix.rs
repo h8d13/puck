@@ -6,8 +6,7 @@
 // for HTTP mirrors, the requests the scripted server saw and how many
 // ran at once. each case also proves itself: the C is run once more
 // with the directive taken out (Case::without) and that outcome must
-// differ, else the case would show nothing. PORTING.md "Configuration
-// matrix" lists which difftest covers which directive.
+// differ, else the case would show nothing.
 //
 // root-only operations run under fakeroot, transactions that extract
 // files under fakechroot fakeroot like pactest (hooks and scriptlets
@@ -460,7 +459,7 @@ struct How {
 	pty: bool,
 	// compare the requests' User-Agent (curl's through XferCommand; the
 	// built-in downloader's is the frontend's HTTP_USER_AGENT, which
-	// the port does not set yet: PORTING.md handover row)
+	// the port does not set yet)
 	agent: bool,
 }
 
@@ -488,7 +487,7 @@ const XFER_ROOT: How = How {
 };
 
 // GOTO_ERR's "got error <n> at <func> (<file>: <line>)" debug lines
-// carry the C's source position, never logged by the port (PORTING.md)
+// carry the C's source position, never logged by the port
 fn is_goto_err(line: &[u8]) -> bool {
 	let key = b"got error ";
 	let Some(i) = line.windows(key.len()).position(|w| w == key) else {
@@ -1678,7 +1677,7 @@ fn downloads() {
 	// DownloadUser with the sandbox off (seccomp and landlock), or with
 	// the syscall filter alone. landlock alone is not comparable here:
 	// the C applies it before no_new_privs, which only real root may,
-	// the port after (UPSTREAM.md)
+	// the port after
 	cases.push(Case::new(
 		"DisableSandbox: DownloadUser -Sy --debug",
 		conf("DownloadUser = nobody\nDisableSandbox\n", &core),
@@ -2381,7 +2380,7 @@ fn xfercommand() {
 	.how(XFER_ROOT)
 	.route("/m/core/core.db", vec![stall_db(&w, 1500)]));
 	// the environment the command sees (HTTP_USER_AGENT apart: the C
-	// sets it, the port not yet, PORTING.md handover row)
+	// sets it, the port not yet)
 	let env = env_script(&w);
 	cases.push(Case::new(
 		"environment of the command",
@@ -2416,7 +2415,7 @@ fn stall_db(w: &World, ms: u64) -> Reply {
 
 // what the C's HTTP_USER_AGENT is and whether the port sets one: read
 // from the environment dump of the xfercommand cases, reported, not
-// compared (PORTING.md handover row)
+// compared
 #[test]
 fn user_agent_note() {
 	let w = World::new("cm-agent");
