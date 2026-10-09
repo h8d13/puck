@@ -2,7 +2,7 @@
 // and SIGHUP, installed by main and removed by cleanup.
 //
 // a handler in safe Rust can only set a flag or write to a pipe
-// (signal-hook, METHODOLOGY.md), which is all the C's handler may do
+// (signal-hook), which is all the C's handler may do
 // async-signal-safely besides write(2) and _exit. signal-hook's handler
 // writes the signal number to its self-pipe; a thread reads it and does
 // what the C's handler does, in its order: the cursor to the line after

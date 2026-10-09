@@ -305,7 +305,7 @@ pub fn user_agent_string(sysname: &[u8], machine: &[u8]) -> (Vec<u8>, bool) {
 // setuseragent: HTTP_USER_AGENT for the downloader and XferCommand,
 // the environment's own when set (setenv without overwrite). the C
 // warns through pm_printf before config_new made config, which would
-// dereference NULL (UPSTREAM.md); here the fresh config's logmask
+// dereference NULL; here the fresh config's logmask
 // decides
 pub fn setuseragent(config: &Config, io: &mut Io) -> Vec<u8> {
 	if let Some(env) = std::env::var_os("HTTP_USER_AGENT") {
@@ -832,7 +832,6 @@ fn debug_level(config: &mut Config, io: &mut Io, arg: Option<&[u8]>) -> Arg {
 	Arg::Done
 }
 
-// parsearg_global
 fn parsearg_global(
 	config: &mut Config,
 	io: &mut Io,
