@@ -1497,6 +1497,59 @@ fn errors(o: &Outcome) -> Vec<&[u8]> {
 	e.map(|l| &l.1[..]).collect()
 }
 
+fn loop_tail(o: &Outcome) -> (usize, Option<String>) {
+	let m = String::from_utf8_lossy(errors(o)[0]).into_owned();
+	(o.requests.len(), m.split(" : ").nth(1).map(str::to_string))
+}
+
+const DIED: &str = "Connection died, tried 5 times before giving up\n";
+
+// a kept connection that dies under the next request: both sides reuse
+// it (curl skips its liveness check for a second after the last), get
+// nothing back and retry on a fresh one, up to curl's 5 per transfer,
+// redirect hops included: 6 requests served, then "Connection died"
+#[test]
+fn stale_loop_retries() {
+	let s = styled(
+		Style::Stale,
+		&[
+			("/a", vec![redir(302, "/b")]),
+			("/b", vec![redir(301, "/a")]),
+		],
+	);
+	let scn = Scn::new("stale loop", vec![s], |d, _| {
+		vec![pkg_payload(d, "x", v("@0/a"))]
+	});
+	let (c, r) = scn.run();
+	assert_eq!(c, r, "{}", explain(&c, &r));
+	assert_eq!(loop_tail(&c), (6, Some(DIED.to_string())));
+	// the retries start over with the next transfer on the handle
+	let sig = body(64, 5);
+	let s = styled(
+		Style::Stale,
+		&[
+			("/p", vec![file(&body(100, 3))]),
+			("/p.sig", vec![file(&sig)]),
+			("/q", vec![file(&body(100, 4))]),
+			("/q.sig", vec![file(&sig)]),
+		],
+	);
+	let scn = Scn::new("stale sigs", vec![s], |d, _| {
+		let mut ps = with_sig(pkg_payload(d, "p", v("@0/p")));
+		ps.extend(with_sig(pkg_payload(d, "q", v("@0/q"))));
+		ps
+	});
+	let (c, r) = scn.run();
+	assert_eq!(c, r, "{}", explain(&c, &r));
+	assert_eq!((c.ret, c.files.len(), c.requests.len()), (0, 4, 4));
+}
+
+// pinned divergence: pactest's server promises keep-alive and closes
+// after every response. curl reuses the dead connection every hop (no
+// liveness check within a second of the last) and gives up after 5
+// retries; hyper notices the close while the connection sits idle, so
+// a hop may get a fresh connection instead, and the loop ends at either
+// limit depending on that race
 #[test]
 fn drop_loop_divergence() {
 	let s = styled(
@@ -1510,14 +1563,12 @@ fn drop_loop_divergence() {
 		vec![pkg_payload(d, "x", v("@0/a"))]
 	});
 	let (c, r) = scn.run();
-	let tail = |o: &Outcome| {
-		let m = String::from_utf8_lossy(errors(o)[0]).into_owned();
-		(o.requests.len(), m.split(" : ").nth(1).map(str::to_string))
-	};
-	let died = "Connection died, tried 5 times before giving up\n";
 	let max = "Maximum (10) redirects followed\n";
-	assert_eq!(tail(&c), (6, Some(died.to_string())));
-	assert_eq!(tail(&r), (11, Some(max.to_string())));
+	assert_eq!(loop_tail(&c), (6, Some(DIED.to_string())));
+	let (n, m) = loop_tail(&r);
+	assert!((6..=11).contains(&n), "{n} requests");
+	let m = m.unwrap_or_default();
+	assert!(m == DIED || m == max, "{m}");
 	assert_eq!((c.ret, c.files.len()), (r.ret, r.files.len()));
 }
 

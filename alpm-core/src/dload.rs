@@ -17,21 +17,24 @@
 // back in Err, as the C leaves it: it can be Errno::Ok where the C fails
 // without setting it.
 
+use std::collections::HashMap;
 use std::ffi::{OsStr, c_int};
 use std::fs::{self, File, OpenOptions};
 use std::hash::{BuildHasher, RandomState};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::net::ToSocketAddrs;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::fs::{PermissionsExt, chown};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use hyper_util::client::legacy::Error as LegacyError;
+use hyper_util::client::legacy::connect::HttpInfo;
 use reqwest::Url;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::header;
@@ -61,6 +64,11 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LOW_SPEED_TIME: Duration = Duration::from_secs(10);
 const MAX_REDIRS: usize = 10;
 const KEEPALIVE: Duration = Duration::from_secs(60);
+// curl's conn_max_idle_ms: an idle connection older than this is not
+// reused (CURLOPT_MAXAGE_CONN default)
+const CONN_MAX_IDLE: Duration = Duration::from_secs(118);
+// Curl_retry_request's CONN_MAX_RETRIES
+const CONN_MAX_RETRIES: u32 = 5;
 
 // the sandbox side of the handle, set when _alpm_use_sandbox holds (root,
 // a sandbox user, one of the restrictions enabled)
@@ -122,16 +130,50 @@ impl Settings {
 	}
 }
 
-// handle->server_errors (per host, -1 once blocked for good) and the
+// the connection cache of handle->curlm: one reqwest Client (hyper's
+// idle pool) kept across the handle's downloads. curl's retry of a
+// request that died on a reused connection needs to tell reused from
+// fresh: every connection a request went out on is remembered by its
+// local address (hyper-util's HttpInfo, on the response or carried by
+// the error), a known one is a reuse
+#[derive(Clone, Debug)]
+struct Pool {
+	client: Client,
+	// the Client's low-speed timeout, rebuilt when the option changes
+	timeout: bool,
+	// local address -> last use; forgotten past curl's idle limit
+	seen: Arc<Mutex<HashMap<SocketAddr, Instant>>>,
+}
+
+// handle->server_errors (per host, -1 once blocked for good), the
 // dload_interrupted static: once a download went over its max size,
-// every later transfer aborts
+// every later transfer aborts, and the connection cache
 #[derive(Clone, Debug, Default)]
 pub struct DownloadState {
 	server_errors: Vec<(Vec<u8>, i32)>,
 	interrupted: bool,
+	pool: Option<Pool>,
 }
 
 impl DownloadState {
+	// the handle's Client for these settings, built on first use or
+	// when the timeout option changed (connections are lost then)
+	fn pool(&mut self, settings: &Settings) -> reqwest::Result<Pool> {
+		let timeout = !settings.disable_dl_timeout;
+		if let Some(p) = &self.pool
+			&& p.timeout == timeout
+		{
+			return Ok(p.clone());
+		}
+		let pool = Pool {
+			client: build_client(settings)?,
+			timeout,
+			seen: Arc::default(),
+		};
+		self.pool = Some(pool.clone());
+		Ok(pool)
+	}
+
 	// whether a download went over its max size
 	pub fn is_interrupted(&self) -> bool {
 		self.interrupted
@@ -156,6 +198,7 @@ impl DownloadState {
 		DownloadState {
 			server_errors: hosts,
 			interrupted,
+			pool: None,
 		}
 	}
 
@@ -746,6 +789,7 @@ const CURLE_FILE_COULDNT_READ_FILE: c_int = 37;
 const CURLE_ABORTED_BY_CALLBACK: c_int = 42;
 const CURLE_TOO_MANY_REDIRECTS: c_int = 47;
 const CURLE_GOT_NOTHING: c_int = 52;
+const CURLE_SEND_ERROR: c_int = 55;
 const CURLE_RECV_ERROR: c_int = 56;
 const CURLE_FILESIZE_EXCEEDED: c_int = 63;
 
@@ -828,7 +872,7 @@ struct Job {
 // shared by the transfer threads of one download
 #[derive(Clone)]
 struct Worker {
-	client: Client,
+	pool: Pool,
 	// CURLOPT_USERAGENT
 	user_agent: Option<Vec<u8>>,
 	tx: Sender<Msg>,
@@ -843,6 +887,46 @@ fn meets_timecondition(timeofdoc: i64, timevalue: i64) -> bool {
 
 fn header_bytes(r: &Response, name: header::HeaderName) -> Option<&[u8]> {
 	r.headers().get(name).map(|v| v.as_bytes())
+}
+
+fn content_length(r: &Response) -> Option<i64> {
+	let v = header_bytes(r, header::CONTENT_LENGTH)?;
+	std::str::from_utf8(v).ok()?.trim().parse().ok()
+}
+
+// the local address of the connection a failed request went out on:
+// hyper-util attaches the connection's info to its errors
+fn error_local_addr(e: &reqwest::Error) -> Option<SocketAddr> {
+	let mut src: Option<&dyn std::error::Error> = Some(e);
+	while let Some(s) = src {
+		if let Some(h) = s.downcast_ref::<LegacyError>() {
+			let mut ext = http::Extensions::new();
+			h.connect_info()?.get_extras(&mut ext);
+			return ext.get::<HttpInfo>().map(HttpInfo::local_addr);
+		}
+		src = s.source();
+	}
+	None
+}
+
+impl Pool {
+	// conn->bits.reuse of the connection at addr: used before, and
+	// marked used now
+	fn reuse(&self, addr: Option<SocketAddr>) -> bool {
+		let Some(addr) = addr else {
+			return false;
+		};
+		let mut seen = self.seen.lock().unwrap();
+		let now = Instant::now();
+		seen.retain(|_, t| now.duration_since(*t) < CONN_MAX_IDLE);
+		seen.insert(addr, now).is_some()
+	}
+
+	// a response: its connection is known from here on
+	fn saw(&self, resp: &Response) {
+		let info = resp.extensions().get::<HttpInfo>();
+		self.reuse(info.map(HttpInfo::local_addr));
+	}
 }
 
 // curl's Content-Range read: the first number (after any "bytes" or
@@ -868,6 +952,37 @@ fn is_timeout(e: &io::Error) -> bool {
 
 const TOO_SLOW: &str = "Operation too slow. \
 	Less than 1 bytes/sec transferred the last 10 seconds";
+
+// a request that got no byte of a response because the connection went
+// away: hyper's IncompleteMessage (closed before the status line), or
+// the socket reset or broken under the request. on a reused connection
+// curl retries these (Curl_retry_request: nothing received, CURLE_OK,
+// CURLE_RECV_ERROR or CURLE_SEND_ERROR with bits.reuse)
+fn connection_died(e: &reqwest::Error) -> bool {
+	if e.is_timeout() || e.is_connect() || e.is_redirect() {
+		return false;
+	}
+	let mut src: Option<&dyn std::error::Error> = Some(e);
+	while let Some(s) = src {
+		// hyper's IncompleteMessage, not re-exported by reqwest
+		if s.to_string()
+			.contains("connection closed before message completed")
+		{
+			return true;
+		}
+		if let Some(io) = s.downcast_ref::<io::Error>() {
+			use io::ErrorKind::*;
+			return matches!(
+				io.kind(),
+				ConnectionReset
+					| ConnectionAborted | BrokenPipe
+					| UnexpectedEof
+			);
+		}
+		src = s.source();
+	}
+	false
+}
 
 // the curl error for a failed request (no response)
 fn send_error(e: &reqwest::Error, url: &Url, start: Instant) -> Fail {
@@ -1096,7 +1211,7 @@ impl Worker {
 
 	// the request curl_set_handle_opts describes
 	fn request(&self, job: &Job, url: &Url) -> RequestBuilder {
-		let mut req = self.client.get(url.clone());
+		let mut req = self.pool.client.get(url.clone());
 		if job.resume_from > 0 {
 			let range = format!("bytes={}-", job.resume_from);
 			req = req.header(header::RANGE, range);
@@ -1126,12 +1241,36 @@ impl Worker {
 		let start = Instant::now();
 		let mut url = first.clone();
 		let mut follows = 0;
+		// data->state.retrycount: per transfer, redirects included
+		let mut retries = 0;
 		loop {
 			ensure_fetchable(&url)?;
 			let req = self.request(job, &with_auth(&first, &url));
-			let resp = req.send();
-			let resp =
-				resp.map_err(|e| send_error(&e, &url, start))?;
+			let resp = match req.send() {
+				Ok(r) => r,
+				Err(e) if connection_died(&e)
+					&& self.pool.reuse(
+						error_local_addr(&e),
+					) =>
+				{
+					if retries == CONN_MAX_RETRIES {
+						return Err(failed(
+							CURLE_SEND_ERROR,
+							format!(
+								"Connection died, tried \
+								 {CONN_MAX_RETRIES} times \
+								 before giving up"
+							),
+						));
+					}
+					retries += 1;
+					continue;
+				}
+				Err(e) => {
+					return Err(send_error(&e, &url, start));
+				}
+			};
+			self.pool.saw(&resp);
 			xfer.respcode = i64::from(resp.status().as_u16());
 			let Some(next) = location(&resp, &url) else {
 				if url != first {
@@ -1177,10 +1316,7 @@ impl Worker {
 		}
 		let chunked = header_bytes(&resp, header::TRANSFER_ENCODING)
 			.is_some_and(|v| find_sub(v, b"chunked").is_some());
-		let length = header_bytes(&resp, header::CONTENT_LENGTH)
-			.and_then(|v| {
-				std::str::from_utf8(v).ok()?.trim().parse().ok()
-			});
+		let length = content_length(&resp);
 		let size: i64 = if chunked { -1 } else { length.unwrap_or(-1) };
 		if job.max_size > 0 && size > job.max_size {
 			return Err(failed(
@@ -1368,19 +1504,19 @@ impl Worker {
 	}
 }
 
-// no idle pool: a server that answers HTTP/1.1 without "Connection: close"
-// and then closes (pactest's server, after any response) leaves a dead
-// pooled connection, which hyper writes the next request (a redirect hop
-// or the .sig) to and fails with an empty reply. curl retries such a
-// reused connection on a fresh one when it died before any byte
-// (Curl_retry_request); reqwest cannot tell a reused connection from a
-// fresh one, so every request gets its own and no retry is ever needed
+// the easy handle options curl_set_handle_opts sets once per handle,
+// and the multi's connection cache: idle connections kept for curl's
+// 118 s, reused by the next request to the host (HTTP/1.1 only, see
+// PORTING.md on HTTP/2). a server that promised keep-alive and closed
+// (pactest's, after any response) leaves a dead pooled connection that
+// the next request (a redirect hop, the .sig) may go out on: curl's
+// Curl_retry_request then retries on a fresh connection, see follow
 fn build_client(settings: &Settings) -> reqwest::Result<Client> {
 	let timeout = (!settings.disable_dl_timeout).then_some(LOW_SPEED_TIME);
 	Client::builder()
 		.timeout(timeout)
 		.connect_timeout(CONNECT_TIMEOUT)
-		.pool_max_idle_per_host(0)
+		.pool_idle_timeout(CONN_MAX_IDLE)
 		.redirect(Policy::none())
 		.referer(false)
 		.tcp_keepalive(KEEPALIVE)
@@ -2069,13 +2205,13 @@ pub fn download_internal(
 	cb: &mut dyn Callbacks,
 	payloads: &mut [Payload],
 ) -> Result<bool, Errno> {
-	let Ok(client) = build_client(settings) else {
+	let Ok(pool) = state.pool(settings) else {
 		return Err(Errno::Libcurl);
 	};
 	let (tx, rx) = mpsc::channel();
 	let interrupted = Arc::new(AtomicBool::new(state.interrupted));
 	let worker = Worker {
-		client,
+		pool,
 		user_agent: settings.user_agent(),
 		tx,
 		interrupted: interrupted.clone(),
