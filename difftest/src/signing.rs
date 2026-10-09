@@ -1,6 +1,7 @@
 // C side of lib/libalpm/signing.c and base64.c, and the gpg fixtures the
 // signature tests share: throwaway keyrings and signed files built with
-// gpg(1) under /tmp, a C handle whose gpgdir points at them.
+// gpg(1) under /tmp, a C handle whose gpgdir points at them, a loopback
+// HKP server the net keyrings' dirmngr uses as its keyserver.
 //
 // init_gpgme sets gpgme's engine info once per process, from the first
 // handle's gpgdir. CSigHandle sets it again before every call (same
@@ -15,11 +16,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::ptr;
 use std::sync::MutexGuard;
+use std::time::Duration;
 
 use alpm_core::callbacks::{Callbacks, LogLevel, Question};
 use alpm_core::package::Package;
 use alpm_core::signing::{PgpKey, SigResult, SigStatus, SigValidity};
 
+use crate::dload::{Reply, Server};
 use crate::fixtures::{TempRoot, tar_file, ustar};
 use crate::handle::log_message;
 use crate::handle::{
@@ -835,9 +838,38 @@ pub enum Home {
 	Direct,
 	// copy with a read-only pubring.gpg
 	ReadOnly,
+	// copies with dirmngr enabled, the fixture's HKP server as their
+	// keyserver: one per side, imports change them
+	Net(Side),
 }
 
+// whose keyring: the C handle's or the port's
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+	C,
+	Rust,
+}
+
+// the keyrings both sides share: nothing a test does changes them
 pub const HOMES: [Home; 3] = [Home::Pgp, Home::Direct, Home::ReadOnly];
+
+// what the HKP server answers for a key: the index of a search and the
+// key a receive gets
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Served {
+	// the index names the fingerprint, the key follows
+	Key,
+	// the index names the long key id only: no fingerprint to receive
+	// by
+	ShortId,
+	// another key: gpg's import screener rejects it
+	Wrong,
+	// an html page
+	Garbage,
+	NotFound,
+	// no response for 2 s, then closed: dirmngr has no read timeout
+	Hang,
+}
 
 // signer keys: name, uid, faked creation time, expiry
 const SIGNERS: &[(&str, &str, Option<&str>, &str)] = &[
@@ -849,6 +881,12 @@ const SIGNERS: &[(&str, &str, Option<&str>, &str)] = &[
 	("dis", "Disabled Key <dis@x.test>", None, "never"),
 	("rev", "Revoked Key <rev@x.test>", None, "never"),
 	("stranger", "Stranger <stranger@x.test>", None, "never"),
+	(
+		"stranger2",
+		"Stranger Two <stranger2@x.test>",
+		None,
+		"never",
+	),
 	("mbox", "mbox@x.test", None, "never"),
 	("odd", "Odd: Name (c) <odd@x.test>", None, "never"),
 	("exp", "Expired Key <exp@x.test>", Some(OLD_KEY), "1y"),
@@ -874,7 +912,9 @@ pub const FILES: &[&str] = &[
 	"never",
 	"dis",
 	"rev",
+	// keys the keyrings lack: imported by the keyserver tests
 	"stranger",
+	"stranger2",
 	"mbox",
 	"odd",
 	"exp",
@@ -944,6 +984,35 @@ fn first_fpr(colons: &[u8]) -> String {
 	line.split(':').nth(9).unwrap().to_string()
 }
 
+fn home_name(home: Home) -> &'static str {
+	match home {
+		Home::Pgp => "pgp",
+		Home::Direct => "direct",
+		Home::ReadOnly => "ro",
+		Home::Net(Side::C) => "net-c",
+		Home::Net(Side::Rust) => "net-r",
+	}
+}
+
+fn signer_uid(name: &str) -> &'static str {
+	let s = SIGNERS.iter().find(|s| s.0 == name);
+	s.unwrap_or_else(|| panic!("no signer {name}")).1
+}
+
+// an HKP index escapes everything but letters and digits
+fn percent(s: &[u8]) -> String {
+	let mut out = String::new();
+	for &c in s {
+		match c {
+			b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => {
+				out.push(c as char)
+			}
+			_ => out.push_str(&format!("%{c:02X}")),
+		}
+	}
+	out
+}
+
 fn mkdir_private(p: &Path) {
 	fs::create_dir_all(p).unwrap();
 	fs::set_permissions(p, fs::Permissions::from_mode(0o700)).unwrap();
@@ -953,11 +1022,14 @@ fn set_mode(p: &Path, mode: u32) {
 	fs::set_permissions(p, fs::Permissions::from_mode(mode)).unwrap();
 }
 
-// the keyrings and signed files, removed with their gpg-agents on drop
+// the keyrings and signed files, removed with their gpg-agents and
+// dirmngrs on drop
 pub struct GpgFixture {
 	root: TempRoot,
 	// signer name -> primary fingerprint, "master" for the pacman key
 	fprs: Vec<(String, String)>,
+	// the net homes' keyserver, 404 until serve() routes a key
+	hkp: Server,
 }
 
 impl GpgFixture {
@@ -965,6 +1037,7 @@ impl GpgFixture {
 		let mut fx = GpgFixture {
 			root: TempRoot::new(tag),
 			fprs: Vec::new(),
+			hkp: Server::start(),
 		};
 		fx.build_signers();
 		fx.build_pgp();
@@ -992,12 +1065,7 @@ impl GpgFixture {
 
 	// handle->gpgdir of a home, with the '/' set_gpgdir appends
 	pub fn home(&self, home: Home) -> Vec<u8> {
-		let name = match home {
-			Home::Pgp => "pgp",
-			Home::Direct => "direct",
-			Home::ReadOnly => "ro",
-		};
-		[&self.root.path(name)[..], b"/"].concat()
+		[&self.root.path(home_name(home))[..], b"/"].concat()
 	}
 
 	pub fn fpr(&self, name: &str) -> &str {
@@ -1077,7 +1145,7 @@ impl GpgFixture {
 		let pm = first_fpr(&gpg(&v, &list, None));
 		self.fprs.push(("master".to_string(), pm.clone()));
 		for &(name, ..) in SIGNERS {
-			if name == "stranger" {
+			if name.starts_with("stranger") {
 				continue;
 			}
 			let key = gpg(&s, &["--export", self.fpr(name)], None);
@@ -1104,22 +1172,139 @@ impl GpgFixture {
 		gpg(&v, &["--check-trustdb"], None);
 	}
 
-	// the direct-trust and read-only keyrings: copies of pgp's files
+	// the direct-trust, read-only and net keyrings: copies of pgp's
+	// files. the net ones keep dirmngr, pointed at the HKP server on
+	// loopback only (no tor probe, no ipv6, a connect timeout): WKD
+	// stays off them, dirmngr would resolve the uid's domain through
+	// the system resolver
 	fn build_copies(&self) {
 		let v = self.pgp_home();
-		let copies = [("direct", "trust-model direct\n"), ("ro", "")];
+		let copies = [
+			("direct", "trust-model direct\n"),
+			("ro", ""),
+			(home_name(Home::Net(Side::C)), ""),
+			(home_name(Home::Net(Side::Rust)), ""),
+		];
+		let dirmngr = format!(
+			"keyserver hkp://127.0.0.1:{}\ndisable-ipv6\n\
+			no-use-tor\nstandard-resolver\nconnect-timeout 3\n",
+			self.hkp.port()
+		);
 		for (name, extra) in copies {
 			let d = self.dir().join(name);
 			mkdir_private(&d);
 			for f in ["pubring.gpg", "trustdb.gpg"] {
 				fs::copy(v.join(f), d.join(f)).unwrap();
 			}
-			let conf =
+			let mut conf =
 				fs::read_to_string(v.join("gpg.conf")).unwrap();
+			if name.starts_with("net") {
+				conf = conf.replace("disable-dirmngr\n", "");
+				fs::write(d.join("dirmngr.conf"), &dirmngr)
+					.unwrap();
+			}
 			fs::write(d.join("gpg.conf"), conf + extra).unwrap();
 			gpg(&d, &["--check-trustdb"], None);
 		}
 		set_mode(&self.dir().join("ro/pubring.gpg"), 0o444);
+	}
+
+	// what the HKP server answers about a signer key from now on: the
+	// paths dirmngr asks for a search by fingerprint or long key id
+	// (alpm_pkg_load searches what extract_keyid found), by the last 8
+	// characters (pacman's retry), and the receive by what the index
+	// named. the wrong key is the other stranger's
+	pub fn serve(&self, name: &str, what: Served) {
+		let fpr = self.fpr(name).to_string();
+		let id = match what {
+			Served::ShortId => &fpr[24..],
+			_ => &fpr[..],
+		};
+		let created = self.created(name);
+		let index = format!(
+			"info:1:1\npub:{id}:22:256:{created}::\n\
+			uid:{}:{created}::\n",
+			percent(signer_uid(name).as_bytes())
+		);
+		let both = |r: Reply| (r.clone(), r);
+		let (index, key) = match what {
+			Served::Garbage => {
+				let page = b"<html>this is not a key</html>\n";
+				both(Reply::Status(200, page.to_vec()))
+			}
+			Served::NotFound => {
+				let page = b"No results found\n";
+				both(Reply::Status(404, page.to_vec()))
+			}
+			Served::Hang => {
+				both(Reply::Hang(Duration::from_secs(2)))
+			}
+			_ => {
+				let mut sent = name;
+				if what == Served::Wrong {
+					sent = if name == "stranger" {
+						"stranger2"
+					} else {
+						"stranger"
+					};
+				}
+				(
+					Reply::Status(200, index.into_bytes()),
+					Reply::Status(200, self.armored(sent)),
+				)
+			}
+		};
+		let lookup = "/pks/lookup?op=";
+		for pattern in [&fpr[..], &fpr[24..], &fpr[32..]] {
+			let p = format!(
+				"{lookup}index&options=mr&fingerprint=on\
+				&search=0x{pattern}"
+			);
+			self.hkp.route(&p, vec![index.clone()]);
+		}
+		let p = format!("{lookup}get&options=mr&search=0x{id}");
+		self.hkp.route(&p, vec![key]);
+	}
+
+	// the paths asked of the HKP server since the last call
+	pub fn requests(&self) -> Vec<String> {
+		let reqs = self.hkp.requests();
+		self.hkp.reset();
+		reqs.into_iter().map(|r| r.path).collect()
+	}
+
+	// a signer's key creation time, from its listing
+	fn created(&self, name: &str) -> String {
+		let exact = format!("={}", signer_uid(name));
+		let list = ["--with-colons", "--list-keys", "--", &exact];
+		let out = gpg(&self.signer_home(), &list, None);
+		let text = String::from_utf8_lossy(&out);
+		let pub_line = text.lines().find(|l| l.starts_with("pub:"));
+		pub_line.unwrap().split(':').nth(5).unwrap().to_string()
+	}
+
+	// a signer's public key as a keyserver serves it
+	fn armored(&self, name: &str) -> Vec<u8> {
+		let args = ["--armor", "--export", "--", self.fpr(name)];
+		gpg(&self.signer_home(), &args, None)
+	}
+
+	// a home's public keys as gpg lists them, without what differs
+	// between two imports of the same key: the trustdb stamp line and
+	// each record's last-update time
+	pub fn listing(&self, home: Home) -> Vec<String> {
+		let d = self.dir().join(home_name(home));
+		let out = gpg(&d, &["--with-colons", "--list-keys"], None);
+		let text = String::from_utf8_lossy(&out);
+		let records = text.lines().filter(|l| !l.starts_with("tru:"));
+		records.map(|l| {
+			let mut f: Vec<&str> = l.split(':').collect();
+			if f.len() > 18 {
+				f[18] = "";
+			}
+			f.join(":")
+		})
+		.collect()
 	}
 
 	// detached signature of data by the signer keys named, for files
@@ -1251,9 +1436,11 @@ impl GpgFixture {
 
 impl Drop for GpgFixture {
 	fn drop(&mut self) {
-		// the agents key generation and signing started; TempRoot
-		// removes the tree after this
-		for home in ["s", "pgp", "direct", "ro"] {
+		// the agents key generation and signing started, the net
+		// homes' dirmngrs; TempRoot removes the tree after this
+		let net = [Home::Net(Side::C), Home::Net(Side::Rust)];
+		let homes = ["s", "pgp", "direct", "ro"].into_iter();
+		for home in homes.chain(net.map(home_name)) {
 			let dir = self.dir().join(home);
 			let st = Command::new("gpgconf")
 				.arg("--homedir")

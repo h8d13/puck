@@ -274,7 +274,7 @@ come along.
 | curl features `dload` lacks | `ftp://` servers, `.netrc`, HTTP/2, curl's proxy env rules, curl's low-speed abort | `dload` note | todo: decide which matter for real mirrorlists |
 | User-Agent (`setuseragent`, pacman.c) | the C sets `HTTP_USER_AGENT=pacman/<ver> (<sysname> <machine>) libalpm/<ver>` unless already set; the port never does, so its requests carry no User-Agent and XferCommand children get no `HTTP_USER_AGENT`. twin-root does not compare request headers. std's `set_var` is unsafe (edition 2024): hand the string to the dload settings and to the XferCommand/helper `Command::env` instead | `dload` `user_agent`, pacman.c `setuseragent` | todo |
 | twin-root steps for risky real cases | gate covers ~20 steps on a fresh root; missing: a `-Syu` across months of updates (old snapshot via the Arch Linux Archive), `replaces`, archlinux-keyring upgraded in the same transaction, mkinitcpio/kernel/dkms hooks, interactive conflict prompts, an interrupted commit (SIGINT mid-extract) and the run after it | `scripts/twin-root.sh` | todo |
-| WKD/keyserver import success path | implemented, only the failure path is compared (difftest keyrings disable dirmngr) | `signing` row; `difftest/tests/signing_gpg.rs` | todo: a local keyserver or WKD fixture |
+| WKD/keyserver import success path | keyserver done: `GpgFixture`'s HKP server on loopback, dirmngr enabled on the net keyrings (one per side); `keyserver_against_c` compares the 404, html, hang, wrong-key, declined and imported paths, the key id-only index, validation after the import, dirmngr's requests and the keyrings afterwards; no port divergence. WKD success untested: dirmngr resolves `openpgpkey.<domain>` and the SRV record through the system resolver (network) and builds the WKD TLS session from the system CAs only (`hkp-cacert` is for hkps, p11-kit's user config is not merged here), so a loopback HTTPS fixture needs root; `http-proxy` would route the fetch (no target DNS) once trust exists | `signing` note; `difftest/tests/signing_gpg.rs` | keyserver done, WKD failure path only |
 | signal edges | the handler thread decides after delivery, so a signal at a state edge can land on the other side; no segv/winch handler | `sighandler` note | accepted for now; revisit with the interrupted-commit twin step |
 | helper re-exec through `/proc/self/exe` | chroot exec and the sandbox helper failed without a mounted `/proc` where the C forks (minimal chroots, some containers) | `hook`/`run_chroot` and `sandbox` notes | done: `sandbox::helper_program`, decided at startup (`helper_entry`): `/proc/self/exe` while `/proc` is mounted, else argv[0] resolved like execvp (`exe_path`); difftests `run_chroot`/`hook`/`sandbox` `without_proc` reruns and `cli_binary without_proc` (both binaries in a mount namespace without `/proc`); what stays apart is a divergences row |
 | aarch64 and other arches | `hash_sdbm`/`pathcmp` follow the platform's `char`, never run there; sandbox syscall list per arch | Notes on `c_char` | todo: run the suites on aarch64 |
@@ -421,7 +421,7 @@ vtables (`get_file_pkg_ops`, `get_sync_pkg_ops`, be_local's
 | `lib/libalpm/log.c` | 112 | `alpm-core::log` | logaction (logfile, errno), leader format, syslog packet, local time (`local_offset`): difftest, stamps compared within `CLOCK_SLACK`, tz-probe against localtime(3) in 16 zones (DST edges by bisection), the binaries in 6 zones (`cli_binary` local_time) |
 | `lib/libalpm/handle.c` | 1017 | `alpm-core::handle` (trans in `trans`) | options, lock, logfile, callbacks, keyring, cachedirs, hookdirs, gpgdir, sandbox, dload state: difftest option fuzz, lock, logaction; alpm_initialize path checks/normalisation, dbext, architectures, siglevels, ignore/noupgrade/noextract lists + match: difftest |
 | `lib/libalpm/alpm.c` | 132 | `alpm-core::handle` | alpm_initialize is `Handle::initialize` (handle.c row), alpm_release its `Drop`; version/capabilities only exist for a C ABI (Later) |
-| `lib/libalpm/signing.c` | 1201 | `alpm-core::signing` | decode_signature, checksig (.sig and base64), check_pgp_helper, process_siglist, key_in_keychain, key_import (keyring and question part; WKD and keyserver lookups are implemented, but the difftest keyrings disable dirmngr, so only their failure path is compared), pkg/db_check_pgp_signature, extract_keyid, every `_alpm_log` line (debug included, `_alpm_access`'s via `util::alpm_access`): difftest vs gpgme-backed C on throwaway keyrings (all status/validity pairs, bad/garbage/truncated/armored sigs), results, rc, pm_errno, questions, logs at every level; init_gpgme's lines (`signing_init`); gpg_strerror's table vs gpgme_strerror for every code; gpg argv vs gpgme's; extract_keyid fuzz |
+| `lib/libalpm/signing.c` | 1201 | `alpm-core::signing` | decode_signature, checksig (.sig and base64), check_pgp_helper, process_siglist, key_in_keychain, key_import (keyring, question, keyserver search and receive through dirmngr against a loopback HKP server: 404, html, hang, wrong key, key id-only index, success and validation after it; WKD compared on its failure path only, see the Handover row), pkg/db_check_pgp_signature, extract_keyid, every `_alpm_log` line (debug included, `_alpm_access`'s via `util::alpm_access`): difftest vs gpgme-backed C on throwaway keyrings (all status/validity pairs, bad/garbage/truncated/armored sigs), results, rc, pm_errno, questions, logs at every level; init_gpgme's lines (`signing_init`); gpg_strerror's table vs gpgme_strerror for every code; gpg argv vs gpgme's; extract_keyid fuzz |
 | `lib/libalpm/dload.c` | 1474 | `alpm-core::dload` | _alpm_download (reqwest, fetchcb path), resume/mirrors/cache servers/server error counting/.sig/max size/time condition, alpm_fetch_pkgurl, download dir + filecache helpers: difftest vs C on scripted 127.0.0.1 HTTP servers and file://; sandbox child behind `Sandbox`: fetch_pkgurl cases and db_update sequences sandboxed vs the C, the binaries under fakeroot with DownloadUser (`cli_binary` xfercommand). Left: the User-Agent is `HTTP_USER_AGENT` from the environment only, the frontend never sets it (pacman.c row) |
 | `lib/libalpm/deps.c` | 926 | `alpm-core::deps` | dep_from_string, dep_compute_string, depcmp_provides (+ static dep_vercmp through it), depcmp_literal, depcmp, find_satisfier, checkdeps, sortbydeps, resolvedep/resolvedeps, find_dbs_satisfier, recursedeps: difftest on fixture handles (local + 3 sync dbs, ignore, assumeinstalled, NODEPVERSION, usage), questions/logs compared |
 | `lib/libalpm/graph.c` | 38 | `alpm-core::graph` | via sortbydeps |
@@ -699,7 +699,21 @@ installed as `pacman`/`pacman-conf` (handover row "install names").
   (warning once per process, NOT_A_FILE leaking into later pm_errno) is
   per `Keyring`; a read error mid-file shows gpg's status, not gpgme's
   errno text; a key lookup failing partway returns Err instead of zeroed
-  entries; FAILURE status lines ignored.
+  entries; FAILURE status lines ignored (gpgme's keylist handler
+  does the same: a keyserver search that fails with "Not found",
+  "Unsupported encoding" or "End of file" is GPG_ERR_EOF to pacman).
+  Keyserver traffic, gpg's argv against gpgme's on the same fixture:
+  `--with-colons --search-keys -- 0x<id>` then `--recv-keys -- <fpr>`
+  (the key id when the index named no fingerprint), identical; dirmngr
+  asks `/pks/lookup?op=index&options=mr&fingerprint=on&search=0x<id>`
+  and `op=get&options=mr&search=0x<fpr>` with HTTP/1.0. gpg's import
+  screener rejects a key other than the one received (`IMPORT_RES 1`
+  without `IMPORT_OK`: "could not import key, 0 results" on both
+  sides). dirmngr has no read timeout (gpg's `keyserver-options
+  timeout` is a no-op with it): a hanging keyserver holds both pacman
+  and the port until it closes; a refused connection marks the host
+  dead for the daemon's life, later retries fail at once with "No
+  keyserver available" (dirmngr's host table, not the port's doing).
 - `dload`: `Result<bool, Errno>` (Ok(true) = 0, Ok(false) = 1, Err = -1,
   Err(Errno::Ok) where the C fails without pm_errno). `DownloadState`
   (server error counts, the sticky interrupt) per handle. Divergences

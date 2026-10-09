@@ -5,9 +5,12 @@
 // disabled, revoked, expired and unknown keys, expired, bad, garbage,
 // truncated, armored, missing and unreadable signatures. both sides run
 // the same gpg on the same keyring; results, return codes, pm_errno,
-// questions and logs are compared. no network: the
-// keyrings set disable-dirmngr, so WKD and keyserver lookups fail and
-// only that failure is compared.
+// questions and logs are compared. no network: the shared keyrings
+// set disable-dirmngr, so WKD and keyserver lookups fail there; the
+// net keyrings (one per side) get their keys from the fixture's HKP
+// server on loopback, WKD is never tried on them (the uid's domain
+// would go to the system resolver). WKD success is untested: dirmngr
+// trusts only the system CAs for it (PORTING.md).
 //
 // gpg runs a few times per call: the fuzz does DIFFTEST_ITERS / 1000
 // calls (200 at 200000).
@@ -23,8 +26,8 @@ use alpm_core::package::Package;
 use alpm_core::signing::*;
 use difftest::{
 	CSigHandle, FILES, GpgFixture, HOMES, Home, RecordingCallbacks, Rng,
-	SigCall, c_gpgme_strerror, encode_base64, iters, keyid_input_defined,
-	write_gpg_logger,
+	Served, Side, SigCall, c_gpgme_strerror, encode_base64, iters,
+	keyid_input_defined, write_gpg_logger,
 };
 
 // gpg calls are slow: one fuzz call per 1000 iterations
@@ -98,6 +101,21 @@ impl Bench {
 		let dir = self.fx.home(h);
 		self.c.set_gpgdir(&dir);
 		self.kr.set_gpgdir(&dir);
+	}
+
+	// each side on its own net keyring: imports change them
+	fn net(&mut self) {
+		self.c.set_gpgdir(&self.fx.home(Home::Net(Side::C)));
+		self.kr.set_gpgdir(&self.fx.home(Home::Net(Side::Rust)));
+	}
+
+	// what both sides asked the HKP server since the last call: the C
+	// ran first, so the port's requests must repeat the C's
+	fn traffic(&self, what: &str) -> Vec<String> {
+		let reqs = self.fx.requests();
+		let (c, r) = reqs.split_at(reqs.len() / 2);
+		assert_eq!(c, r, "{what}: keyserver requests");
+		c.to_vec()
 	}
 
 	fn answer(&mut self, yes: bool) {
@@ -357,6 +375,7 @@ fn home_files(home: Home) -> &'static [&'static str] {
 		Home::Pgp => FILES,
 		Home::Direct => &["never", "intro", "marg", "unk", "master"],
 		Home::ReadOnly => &["stranger", "exp", "mixed"],
+		Home::Net(_) => &[],
 	}
 }
 
@@ -531,6 +550,80 @@ fn keys_against_c() {
 	assert!(seen.contains_key("in stranger 0"));
 }
 
+// the keyserver paths, each side importing into its own net keyring:
+// a package signed by a key the keyring lacks, the server answering
+// 404, an html page, a hang, the wrong key, then the key with the
+// question answered no and yes, validation with the key present; a db
+// signature whose key the index names by key id only. the requests
+// dirmngr makes and the keyrings afterwards must match too
+#[test]
+fn keyserver_against_c() {
+	use SigStatus::Valid;
+	use SigValidity::Unknown;
+	let mut b = Bench::new("signing-hkp");
+	b.net();
+	let stranger = b.fx.fpr("stranger").to_string();
+	let s2 = b.fx.fpr("stranger2").to_string();
+	let unknown_ok = SIG_PACKAGE | SIG_PACKAGE_UNKNOWN_OK;
+	let lookup = "/pks/lookup?op=";
+	let index = |fpr: &str| {
+		format!(
+			"{lookup}index&options=mr&fingerprint=on&search=0x{fpr}"
+		)
+	};
+	let get = |id: &str| format!("{lookup}get&options=mr&search=0x{id}");
+	// alpm_pkg_load searches the key id extract_keyid found, the
+	// siglist and key_import paths the fingerprint; the retry is by
+	// the last 8 characters either way
+	let (keyid, short) = (&stranger[24..], &stranger[32..]);
+	b.answer(true);
+	b.fx.serve("stranger", Served::NotFound);
+	assert_eq!(b.load("stranger", false, unknown_ok), -1);
+	assert_eq!(b.traffic("404"), [index(keyid), index(short)]);
+	b.fx.serve("stranger", Served::Garbage);
+	assert_eq!(b.key_import(None, stranger.as_bytes()), -1);
+	assert_eq!(b.traffic("garbage"), [index(&stranger), index(short)]);
+	b.fx.serve("stranger", Served::Hang);
+	let uid = Some(&b"no email"[..]);
+	assert_eq!(b.key_import(uid, stranger.as_bytes()), -1);
+	assert_eq!(b.traffic("hang"), [index(&stranger), index(short)]);
+	// found, the key received is another's: the import screener
+	// rejects it, nothing lands in the keyring
+	b.fx.serve("stranger", Served::Wrong);
+	b.helper("stranger", None, [false, false, true], true, "wrong");
+	assert_eq!(b.traffic("wrong"), [index(&stranger), get(&stranger)]);
+	assert_eq!(b.in_keychain(stranger.as_bytes()), 0);
+	// declined: asked, nothing looked up
+	b.fx.serve("stranger", Served::Key);
+	b.answer(false);
+	assert_eq!(b.load("stranger", false, unknown_ok), -1);
+	assert!(b.traffic("declined").is_empty());
+	// imported, validated at once: unknown trust, not accepted at that
+	// level, known from then on
+	b.answer(true);
+	assert_eq!(b.load("stranger", false, SIG_PACKAGE), -1);
+	assert_eq!(b.traffic("imported"), [index(keyid), get(&stranger)]);
+	assert_eq!(b.in_keychain(stranger.as_bytes()), 1);
+	assert_eq!(b.load("stranger", false, unknown_ok), 0);
+	assert!(b.traffic("present").is_empty());
+	let sigs = b.pkg_check(&b.pkg("stranger", None), "present");
+	assert_eq!(shape(&sigs), [(Valid, Unknown)]);
+	// a db signature, the index naming the key id only
+	b.fx.serve("stranger2", Served::ShortId);
+	let level = SIG_DATABASE | SIG_DATABASE_UNKNOWN_OK;
+	assert_eq!(b.register("stranger2", level), 0);
+	assert_eq!(b.traffic("db"), [index(&s2), get(&s2[24..])]);
+	assert_eq!(shape(&b.db_check("stranger2")), [(Valid, Unknown)]);
+	// both keyrings hold the same keys in the same state
+	let c = b.fx.listing(Home::Net(Side::C));
+	assert_eq!(c, b.fx.listing(Home::Net(Side::Rust)));
+	for fpr in [&stranger, &s2] {
+		let held =
+			c.iter().any(|l| l == &format!("fpr:::::::::{fpr}:"));
+		assert!(held, "{fpr} not in the keyring: {c:?}");
+	}
+}
+
 // a random file, keyring, level, answer and call, many times
 #[test]
 fn fuzz_against_c() {
@@ -623,6 +716,10 @@ fn normalize(run: &[String]) -> Vec<String> {
 				it.next();
 			}
 			"--enable-special-filenames" => {}
+			// one keyring per side on the net homes
+			_ if a.starts_with("--homedir=") => {
+				out.push("--homedir=<home>".to_string());
+			}
 			_ if a.starts_with("--lc-")
 				|| a.starts_with("--display")
 				|| a.starts_with("--tty") => {}
@@ -722,6 +819,15 @@ fn invocations_match_gpgme() {
 				);
 			}),
 		),
+		(
+			"import",
+			Box::new(|b| {
+				b.net();
+				b.fx.serve("stranger", Served::Key);
+				let fpr = b.fx.fpr("stranger").to_string();
+				b.key_import(None, fpr.as_bytes());
+			}),
+		),
 	];
 	for (what, step) in &steps {
 		step(&mut b);
@@ -730,7 +836,8 @@ fn invocations_match_gpgme() {
 		assert_eq!(c, r, "{what}");
 		for run in &c {
 			let op = run.iter().skip_while(|a| {
-				!a.starts_with("--with") && *a != "--verify"
+				!a.starts_with("--with")
+					&& *a != "--verify" && *a != "--recv-keys"
 			});
 			println!(
 				"{what}: {}",
