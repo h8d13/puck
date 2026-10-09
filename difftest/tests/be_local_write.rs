@@ -12,7 +12,7 @@ use alpm_core::filelist::{File, FileList};
 use alpm_core::internals::backup::Backup;
 use alpm_core::internals::be_local::{
 	INFRQ_ALL, INFRQ_BASE, INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET,
-	LocalDb, WriteError,
+	LocalDb, LocalDbWriteError,
 };
 use alpm_core::internals::deps::{DepMod, Depend};
 use alpm_core::internals::error::Errno;
@@ -56,7 +56,7 @@ fn rust_ops(dbpath: &[u8], ops: &[WriteOp]) -> Result<Vec<OpResult>, c_int> {
 			}
 			WriteOp::Write(p, inforeq) => {
 				match db.write(p, *inforeq) {
-					Err(WriteError::Write(e)) => {
+					Err(LocalDbWriteError::Write(e)) => {
 						panic!("write failed: {e}")
 					}
 					r => res(r.map_err(|_| None)),
@@ -594,5 +594,5 @@ fn write_error_divergence() {
 	assert_eq!(cres[0].rc, 0, "C reports success");
 	let db = LocalDb::register(&r.dbpath()).unwrap();
 	let err = db.write(&foo, INFRQ_DESC).unwrap_err();
-	assert!(matches!(err, WriteError::Write(_)), "{err:?}");
+	assert!(matches!(err, LocalDbWriteError::Write(_)), "{err:?}");
 }

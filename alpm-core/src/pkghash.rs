@@ -32,19 +32,19 @@ const PRIME_LIST: [u32; 145] = [
 const MAX_HASH_LOAD: f64 = 0.68;
 const INITIAL_HASH_LOAD: f64 = 0.58;
 
-// alpm_pkghash_t. P is the stored handle: an owned Package for a db cache,
-// or a reference / Rc where the packages live elsewhere
+/// alpm_pkghash_t. P is the stored handle: an owned Package for a db cache,
+/// or a reference / Rc where the packages live elsewhere
 #[derive(Clone, Debug)]
 pub struct PkgHash<P = Package> {
-	// slab index per bucket, None is an empty bucket
+	/// slab index per bucket, None is an empty bucket
 	table: Vec<Option<usize>>,
 	slab: Vec<Option<P>>,
-	// slab holes left by remove, reused by add
+	/// slab holes left by remove, reused by add
 	holes: Vec<usize>,
-	// slab indices in pkghash->list order
+	/// slab indices in pkghash->list order
 	list: Vec<usize>,
-	// list in pkg_cmp order (no add broke it): merge_pos bisects, so a
-	// db load's add_sorted calls do not each scan the list
+	/// list in pkg_cmp order (no add broke it): merge_pos bisects, so a
+	/// db load's add_sorted calls do not each scan the list
 	ordered: bool,
 	limit: usize,
 }
@@ -80,8 +80,8 @@ fn free_bucket(table: &[Option<usize>], name_hash: c_ulong) -> usize {
 }
 
 impl<P: Borrow<Package>> PkgHash<P> {
-	// _alpm_pkghash_create: room for at least size entries before a
-	// rehash. None past the largest table (ERANGE in the C)
+	/// _alpm_pkghash_create: room for at least size entries before a
+	/// rehash. None past the largest table (ERANGE in the C)
 	pub fn new(size: u32) -> Option<Self> {
 		let (buckets, limit) = table_size(size)?;
 		Some(PkgHash {
@@ -94,31 +94,33 @@ impl<P: Borrow<Package>> PkgHash<P> {
 		})
 	}
 
-	// entries
+	/// entries
 	pub fn len(&self) -> usize {
 		self.list.len()
 	}
 
+	/// no entries
 	pub fn is_empty(&self) -> bool {
 		self.list.is_empty()
 	}
 
+	/// the table size
 	pub fn buckets(&self) -> usize {
 		self.table.len()
 	}
 
-	// entries allowed before the next add rehashes
+	/// entries allowed before the next add rehashes
 	pub fn limit(&self) -> usize {
 		self.limit
 	}
 
-	// pkghash->list order
+	/// pkghash->list order
 	pub fn iter(&self) -> impl Iterator<Item = &P> {
 		self.list.iter().map(|&i| self.entry(i))
 	}
 
-	// pkghash->list order, for loading cached packages in place. name
-	// and name_hash must not change, the buckets are not rehashed
+	/// pkghash->list order, for loading cached packages in place. name
+	/// and name_hash must not change, the buckets are not rehashed
 	pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut P> {
 		let mut slots: Vec<Option<&mut P>> =
 			self.slab.iter_mut().map(Option::as_mut).collect();
@@ -127,12 +129,12 @@ impl<P: Borrow<Package>> PkgHash<P> {
 		})
 	}
 
-	// the entry at list position i, without walking the list
+	/// the entry at list position i, without walking the list
 	pub fn at(&self, i: usize) -> Option<&P> {
 		Some(self.entry(*self.list.get(i)?))
 	}
 
-	// at for loading in place, same rules as iter_mut
+	/// at for loading in place, same rules as iter_mut
 	pub fn at_mut(&mut self, i: usize) -> Option<&mut P> {
 		let slot = &mut self.slab[*self.list.get(i)?];
 		Some(slot.as_mut().expect("slab index points at a hole"))
@@ -213,13 +215,13 @@ impl<P: Borrow<Package>> PkgHash<P> {
 		Ok(())
 	}
 
-	// _alpm_pkghash_add: appended to the list. Err hands pkg back when
-	// the table cannot grow
+	/// _alpm_pkghash_add: appended to the list. Err hands pkg back when
+	/// the table cannot grow
 	pub fn add(&mut self, pkg: P) -> Result<(), P> {
 		self.add_pkg(pkg, false)
 	}
 
-	// _alpm_pkghash_add_sorted: merged into the list by name
+	/// _alpm_pkghash_add_sorted: merged into the list by name
 	pub fn add_sorted(&mut self, pkg: P) -> Result<(), P> {
 		self.add_pkg(pkg, true)
 	}
@@ -238,20 +240,20 @@ impl<P: Borrow<Package>> PkgHash<P> {
 		None
 	}
 
-	// _alpm_pkghash_find
+	/// _alpm_pkghash_find
 	pub fn find(&self, name: &[u8]) -> Option<&P> {
 		self.find_index(name).map(|i| self.entry(i))
 	}
 
-	// the entry find returns, for loading it in place. name and
-	// name_hash must not change
+	/// the entry find returns, for loading it in place. name and
+	/// name_hash must not change
 	pub fn find_mut(&mut self, name: &[u8]) -> Option<&mut P> {
 		let i = self.find_index(name)?;
 		self.slab[i].as_mut()
 	}
 
-	// _alpm_pkghash_remove: drops the first entry in probe order with
-	// pkg's name and stored name_hash, returns it
+	/// _alpm_pkghash_remove: drops the first entry in probe order with
+	/// pkg's name and stored name_hash, returns it
 	pub fn remove(&mut self, pkg: &Package) -> Option<P> {
 		let n = self.buckets();
 		let mut pos = (pkg.name_hash % n as c_ulong) as usize;

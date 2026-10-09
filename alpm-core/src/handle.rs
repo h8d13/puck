@@ -42,17 +42,17 @@ const SYSHOOKDIR: &[u8] = b"/usr/share/libalpm/hooks/";
 const PASSWD: &str = "/etc/passwd";
 const ENOENT: i32 = 2;
 
-// what runs a download sandboxed: None where _alpm_use_sandbox fails
+/// what runs a download sandboxed: None where _alpm_use_sandbox fails
 pub type SandboxFor = fn(&Handle) -> Option<Box<dyn Sandbox>>;
 
-// alpm_handle_t
+/// alpm_handle_t
 pub struct Handle {
-	// getuid() at alpm_initialize
+	/// getuid() at alpm_initialize
 	user: u32,
-	// sandbox::handle_sandbox, swapped by tests that cannot be root
+	/// sandbox::handle_sandbox, swapped by tests that cannot be root
 	sandbox_for: SandboxFor,
-	// the binary run_chroot's child re-executes (sandbox::CHROOT_ARG),
-	// this one by default; test binaries are not the pacman binary
+	/// the binary run_chroot's child re-executes (sandbox::CHROOT_ARG),
+	/// this one by default; test binaries are not the pacman binary
 	chroot_helper: PathBuf,
 	root: Vec<u8>,
 	dbpath: Vec<u8>,
@@ -70,11 +70,11 @@ pub struct Handle {
 	cachedirs: Vec<Vec<u8>>,
 	hookdirs: Vec<Vec<u8>>,
 	lockfile: Vec<u8>,
-	// Some is lockfd >= 0
+	/// Some is lockfd >= 0
 	lock: Option<File>,
-	// logfile, logstream, usesyslog
+	/// logfile, logstream, usesyslog
 	logger: Logger,
-	// gpgdir (empty is NULL), known_keys
+	/// gpgdir (empty is NULL), known_keys
 	keyring: Keyring,
 	sandboxuser: Option<Vec<u8>>,
 	disable_sandbox_filesystem: u16,
@@ -82,40 +82,40 @@ pub struct Handle {
 	checkspace: c_int,
 	parallel_downloads: c_uint,
 	disable_dl_timeout: u16,
-	// server_errors and the dload_interrupted static
+	/// server_errors and the dload_interrupted static
 	download: DownloadState,
-	// logcb, eventcb, questioncb, progresscb, dlcb
+	/// logcb, eventcb, questioncb, progresscb, dlcb
 	cb: Box<dyn Callbacks>,
 	fetch: Option<Box<dyn Fetch>>,
 	db_local: Option<Db>,
-	// registration order
+	/// registration order
 	dbs_sync: Vec<Db>,
-	// handle->trans, None is NULL
+	/// handle->trans, None is NULL
 	trans: Option<Trans>,
-	// what a signal thread may touch of trans and lock
+	/// what a signal thread may touch of trans and lock
 	interrupt: Arc<Interrupt>,
 }
 
-// the part of a handle another thread may touch while the handle runs.
-// the frontend's soft interrupt handler calls alpm_trans_interrupt and
-// alpm_unlock on config->handle from signal context; safe Rust cannot
-// share the handle, so trans.rs publishes whether the transaction is
-// interruptible (trans->state COMMITTING or INTERRUPTED) and lock/unlock
-// whether the lock is held. an interrupt asked here is set into
-// trans->state where the commit reads it (trans::interrupted)
+/// the part of a handle another thread may touch while the handle runs.
+/// the frontend's soft interrupt handler calls alpm_trans_interrupt and
+/// alpm_unlock on config->handle from signal context; safe Rust cannot
+/// share the handle, so trans.rs publishes whether the transaction is
+/// interruptible (trans->state COMMITTING or INTERRUPTED) and lock/unlock
+/// whether the lock is held. an interrupt asked here is set into
+/// trans->state where the commit reads it (trans::interrupted)
 #[derive(Debug)]
 pub struct Interrupt {
 	lockfile: Vec<u8>,
-	// handle->lockfd >= 0
+	/// handle->lockfd >= 0
 	locked: AtomicBool,
 	committing: AtomicBool,
-	// asked by trans_interrupt, not yet in trans->state
+	/// asked by trans_interrupt, not yet in trans->state
 	requested: AtomicBool,
 }
 
 impl Interrupt {
-	// alpm_trans_interrupt: Ok while the transaction commits. Err is
-	// TRANS_TYPE, also without a transaction (C: TRANS_NULL)
+	/// alpm_trans_interrupt: Ok while the transaction commits. Err is
+	/// TRANS_TYPE, also without a transaction (C: TRANS_NULL)
 	pub fn trans_interrupt(&self) -> Result<(), Errno> {
 		if !self.committing.load(Ordering::SeqCst) {
 			return Err(Errno::TransType);
@@ -124,9 +124,9 @@ impl Interrupt {
 		Ok(())
 	}
 
-	// alpm_unlock: the lockfile unlinked if the handle holds it. the C
-	// closes lockfd first, here it closes with the process (the caller
-	// exits) or with the handle
+	/// alpm_unlock: the lockfile unlinked if the handle holds it. the C
+	/// closes lockfd first, here it closes with the process (the caller
+	/// exits) or with the handle
 	pub fn unlock(&self) -> io::Result<()> {
 		if !self.locked.swap(false, Ordering::SeqCst) {
 			return Ok(());
@@ -157,15 +157,15 @@ pub(crate) struct SyncParts<'h> {
 	pub(crate) dbs: &'h mut [Db],
 }
 
-// the dbs borrowed with what their calls take from the handle: dbext
-// (read by cache loads), the callbacks db.c logs through and the
-// options deps.c reads next to the caches
+/// the dbs borrowed with what their calls take from the handle: dbext
+/// (read by cache loads), the callbacks db.c logs through and the
+/// options deps.c reads next to the caches
 pub struct DbsMut<'h> {
 	pub dbext: &'h [u8],
 	pub cb: &'h mut dyn Callbacks,
 	pub opts: DepsOpts<'h>,
 	pub local: Option<&'h mut Db>,
-	// registration order
+	/// registration order
 	pub sync: &'h mut [Db],
 }
 
@@ -190,9 +190,9 @@ fn canonicalize_path(path: &[u8]) -> Vec<u8> {
 	p
 }
 
-// _alpm_set_directory_option: with must_exist, stat(2) must see a
-// directory (symlinks followed) and realpath(3) resolves it; both fail
-// as NotADir. the result ends in '/'
+/// _alpm_set_directory_option: with must_exist, stat(2) must see a
+/// directory (symlinks followed) and realpath(3) resolves it; both fail
+/// as NotADir. the result ends in '/'
 pub fn set_directory_option(
 	value: &[u8],
 	must_exist: bool,
@@ -253,11 +253,11 @@ fn strdup_all<S: AsRef<[u8]>>(list: &[S]) -> Vec<Vec<u8>> {
 }
 
 impl Handle {
-	// alpm_initialize: root then dbpath must be existing directories,
-	// stored resolved with a trailing '/'. dbext starts as ".db", the
-	// hookdir is root's SYSHOOKDIR, the lockfile "<dbpath>db.lck". the
-	// local db is registered (and created when missing); its failure is
-	// the errno be_local reports
+	/// alpm_initialize: root then dbpath must be existing directories,
+	/// stored resolved with a trailing '/'. dbext starts as ".db", the
+	/// hookdir is root's SYSHOOKDIR, the lockfile `<dbpath>db.lck`. the
+	/// local db is registered (and created when missing); its failure is
+	/// the errno be_local reports
 	pub fn initialize(root: &[u8], dbpath: &[u8]) -> Result<Handle, Errno> {
 		let root = set_directory_option(root, true)?;
 		let dbpath = set_directory_option(dbpath, true)?;
@@ -314,18 +314,20 @@ impl Handle {
 		self.cb.log(LogLevel::Debug, &parts.concat());
 	}
 
-	// alpm_option_set_logcb/eventcb/questioncb/progresscb/dlcb at once
+	/// alpm_option_set_logcb/eventcb/questioncb/progresscb/dlcb at once
 	pub fn set_callbacks(&mut self, cb: Box<dyn Callbacks>) {
 		self.cb = cb;
 	}
 
+	/// the handle's Callbacks (logcb, eventcb, questioncb, progresscb,
+	/// dlcb)
 	pub fn callbacks(&mut self) -> &mut dyn Callbacks {
 		&mut *self.cb
 	}
 
-	// f with the callbacks lent out next to the handle, for calls that
-	// read the handle while they log, ask or send events. the handle's
-	// own logging inside f goes nowhere
+	/// f with the callbacks lent out next to the handle, for calls that
+	/// read the handle while they log, ask or send events. the handle's
+	/// own logging inside f goes nowhere
 	pub fn with_callbacks<R>(
 		&mut self,
 		f: impl FnOnce(&mut Handle, &mut dyn Callbacks) -> R,
@@ -336,8 +338,8 @@ impl Handle {
 		r
 	}
 
-	// alpm_pkg_load(handle, filename, full, level): the handle's keyring
-	// and callbacks
+	/// alpm_pkg_load(handle, filename, full, level): the handle's keyring
+	/// and callbacks
 	pub fn pkg_load(
 		&mut self,
 		filename: &[u8],
@@ -355,7 +357,7 @@ impl Handle {
 		})
 	}
 
-	// alpm_pkg_check_pgp_signature(handle, pkg)
+	/// alpm_pkg_check_pgp_signature(handle, pkg)
 	pub fn pkg_check_pgp_signature(
 		&mut self,
 		pkg: &Package,
@@ -365,8 +367,8 @@ impl Handle {
 		})
 	}
 
-	// alpm_pkg_changelog_open/read/close on a file package: the
-	// .CHANGELOG entry, logging through the handle
+	/// alpm_pkg_changelog_open/read/close on a file package: the
+	/// .CHANGELOG entry, logging through the handle
 	pub fn pkg_changelog(
 		&mut self,
 		pkg: &Package,
@@ -374,16 +376,17 @@ impl Handle {
 		changelog(&mut *self.cb, pkg)
 	}
 
-	// handle->trans
+	/// handle->trans
 	pub fn trans(&self) -> Option<&Trans> {
 		self.trans.as_ref()
 	}
 
+	/// handle->trans, mutable
 	pub fn trans_mut(&mut self) -> Option<&mut Trans> {
 		self.trans.as_mut()
 	}
 
-	// the handle's Interrupt, for a signal thread
+	/// the handle's Interrupt, for a signal thread
 	pub fn interrupt(&self) -> Arc<Interrupt> {
 		Arc::clone(&self.interrupt)
 	}
@@ -409,12 +412,12 @@ impl Handle {
 		}
 	}
 
-	// alpm_option_set_fetchcb, None is the built-in downloader
+	/// alpm_option_set_fetchcb, None is the built-in downloader
 	pub fn set_fetchcb(&mut self, fetch: Option<Box<dyn Fetch>>) {
 		self.fetch = fetch;
 	}
 
-	// alpm_logaction
+	/// alpm_logaction
 	pub fn logaction(
 		&mut self,
 		prefix: &[u8],
@@ -423,35 +426,36 @@ impl Handle {
 		self.logger.logaction(prefix, msg)
 	}
 
-	// alpm_option_get_logfile
+	/// alpm_option_get_logfile
 	pub fn logfile(&self) -> Option<&[u8]> {
 		self.logger.logfile()
 	}
 
-	// alpm_option_set_logfile: the open stream closes
+	/// alpm_option_set_logfile: the open stream closes
 	pub fn set_logfile(&mut self, logfile: &[u8]) {
 		self.logger.set_logfile(logfile);
 		let f = self.logger.logfile().unwrap_or_default().to_vec();
 		self.debug(&[b"option 'logfile' = ", &f, b"\n"]);
 	}
 
-	// alpm_option_get_usesyslog
+	/// alpm_option_get_usesyslog
 	pub fn usesyslog(&self) -> c_int {
 		self.logger.usesyslog()
 	}
 
+	/// alpm_option_set_usesyslog
 	pub fn set_usesyslog(&mut self, usesyslog: c_int) {
 		self.logger.set_usesyslog(usesyslog);
 	}
 
-	// alpm_option_get_lockfile
+	/// alpm_option_get_lockfile
 	pub fn lockfile(&self) -> &[u8] {
 		&self.lockfile
 	}
 
-	// _alpm_handle_lock: the lockfile's directory made first, then
-	// created exclusively (mode 0000). Ok when this handle holds it
-	// already; Err keeps errno for the caller's HANDLE_LOCK message
+	/// _alpm_handle_lock: the lockfile's directory made first, then
+	/// created exclusively (mode 0000). Ok when this handle holds it
+	/// already; Err keeps errno for the caller's HANDLE_LOCK message
 	pub fn lock(&mut self) -> io::Result<()> {
 		if self.lock.is_some() {
 			return Ok(());
@@ -472,13 +476,13 @@ impl Handle {
 		Ok(())
 	}
 
-	// whether this handle holds the lock
+	/// whether this handle holds the lock
 	pub fn is_locked(&self) -> bool {
 		self.lock.is_some()
 	}
 
-	// alpm_unlock: closes and unlinks the lockfile, Ok without the lock.
-	// Err is ALPM_ERR_SYSTEM with unlink's errno
+	/// alpm_unlock: closes and unlinks the lockfile, Ok without the lock.
+	/// Err is ALPM_ERR_SYSTEM with unlink's errno
 	pub fn unlock(&mut self) -> io::Result<()> {
 		if self.lock.take().is_none() {
 			return Ok(());
@@ -487,8 +491,8 @@ impl Handle {
 		fs::remove_file(OsStr::from_bytes(&self.lockfile))
 	}
 
-	// _alpm_handle_unlock: a lockfile gone already is a warning only,
-	// false (C -1) when it could not be removed
+	/// _alpm_handle_unlock: a lockfile gone already is a warning only,
+	/// false (C -1) when it could not be removed
 	pub fn handle_unlock(&mut self) -> bool {
 		let Err(e) = self.unlock() else {
 			return true;
@@ -508,18 +512,19 @@ impl Handle {
 		missing
 	}
 
-	// alpm_option_get_cachedirs
+	/// alpm_option_get_cachedirs
 	pub fn cachedirs(&self) -> &[Vec<u8>] {
 		&self.cachedirs
 	}
 
-	// alpm_option_add_cachedir: canonicalized, not stat'ed until used
+	/// alpm_option_add_cachedir: canonicalized, not stat'ed until used
 	pub fn add_cachedir(&mut self, cachedir: &[u8]) {
 		let dir = canonicalize_path(until_nul(cachedir));
 		self.debug(&[b"option 'cachedir' = ", &dir, b"\n"]);
 		self.cachedirs.push(dir);
 	}
 
+	/// alpm_option_set_cachedirs
 	pub fn set_cachedirs<S: AsRef<[u8]>>(&mut self, dirs: &[S]) {
 		self.cachedirs.clear();
 		for d in dirs {
@@ -527,23 +532,25 @@ impl Handle {
 		}
 	}
 
-	// alpm_option_remove_cachedir: canonicalized first, true when removed
+	/// alpm_option_remove_cachedir: canonicalized first, true when removed
 	pub fn remove_cachedir(&mut self, cachedir: &[u8]) -> bool {
 		let dir = canonicalize_path(until_nul(cachedir));
 		remove_str(&mut self.cachedirs, &dir)
 	}
 
-	// alpm_option_get_hookdirs
+	/// alpm_option_get_hookdirs
 	pub fn hookdirs(&self) -> &[Vec<u8>] {
 		&self.hookdirs
 	}
 
+	/// alpm_option_add_hookdir
 	pub fn add_hookdir(&mut self, hookdir: &[u8]) {
 		let dir = canonicalize_path(until_nul(hookdir));
 		self.debug(&[b"option 'hookdir' = ", &dir, b"\n"]);
 		self.hookdirs.push(dir);
 	}
 
+	/// alpm_option_set_hookdirs
 	pub fn set_hookdirs<S: AsRef<[u8]>>(&mut self, dirs: &[S]) {
 		self.hookdirs.clear();
 		for d in dirs {
@@ -551,39 +558,42 @@ impl Handle {
 		}
 	}
 
+	/// alpm_option_remove_hookdir
 	pub fn remove_hookdir(&mut self, hookdir: &[u8]) -> bool {
 		let dir = canonicalize_path(until_nul(hookdir));
 		remove_str(&mut self.hookdirs, &dir)
 	}
 
-	// alpm_option_get_gpgdir, None until set
+	/// alpm_option_get_gpgdir, None until set
 	pub fn gpgdir(&self) -> Option<&[u8]> {
 		Some(self.keyring.gpgdir()).filter(|g| !g.is_empty())
 	}
 
-	// alpm_option_set_gpgdir: _alpm_set_directory_option without the
-	// existence check, the keyring keeps its known keys
+	/// alpm_option_set_gpgdir: _alpm_set_directory_option without the
+	/// existence check, the keyring keeps its known keys
 	pub fn set_gpgdir(&mut self, gpgdir: &[u8]) {
 		let dir = canonicalize_path(until_nul(gpgdir));
 		self.keyring.set_gpgdir(&dir);
 		self.debug(&[b"option 'gpgdir' = ", &dir, b"\n"]);
 	}
 
+	/// the keyring: gpgdir and the keys found so far
 	pub fn keyring(&self) -> &Keyring {
 		&self.keyring
 	}
 
+	/// the keyring, for the keyring-level calls (pkg_load_level, ...)
 	pub fn keyring_mut(&mut self) -> &mut Keyring {
 		&mut self.keyring
 	}
 
-	// alpm_option_get_sandboxuser
+	/// alpm_option_get_sandboxuser
 	pub fn sandboxuser(&self) -> Option<&[u8]> {
 		self.sandboxuser.as_deref()
 	}
 
-	// alpm_option_set_sandboxuser: the old user goes first, a name
-	// getpwnam does not know leaves none and gives false (C 1)
+	/// alpm_option_set_sandboxuser: the old user goes first, a name
+	/// getpwnam does not know leaves none and gives false (C 1)
 	pub fn set_sandboxuser(&mut self, user: Option<&[u8]>) -> bool {
 		self.sandboxuser = None;
 		let user = user.map(until_nul);
@@ -601,49 +611,55 @@ impl Handle {
 		true
 	}
 
-	// alpm_option_get_disable_sandbox: 2 both restrictions off, 1 one
+	/// alpm_option_get_disable_sandbox: 2 both restrictions off, 1 one
 	pub fn disable_sandbox(&self) -> c_int {
 		let fs = self.disable_sandbox_filesystem != 0;
 		let sc = self.disable_sandbox_syscalls != 0;
 		c_int::from(fs) + c_int::from(sc)
 	}
 
+	/// alpm_option_set_disable_sandbox: both parts
 	pub fn set_disable_sandbox(&mut self, disable: u16) {
 		self.disable_sandbox_filesystem = disable;
 		self.disable_sandbox_syscalls = disable;
 	}
 
+	/// alpm_option_get_disable_sandbox_filesystem (landlock)
 	pub fn disable_sandbox_filesystem(&self) -> u16 {
 		self.disable_sandbox_filesystem
 	}
 
+	/// alpm_option_set_disable_sandbox_filesystem
 	pub fn set_disable_sandbox_filesystem(&mut self, disable: u16) {
 		self.disable_sandbox_filesystem = disable;
 	}
 
+	/// alpm_option_get_disable_sandbox_syscalls (seccomp)
 	pub fn disable_sandbox_syscalls(&self) -> u16 {
 		self.disable_sandbox_syscalls
 	}
 
+	/// alpm_option_set_disable_sandbox_syscalls
 	pub fn set_disable_sandbox_syscalls(&mut self, disable: u16) {
 		self.disable_sandbox_syscalls = disable;
 	}
 
-	// alpm_option_get_checkspace
+	/// alpm_option_get_checkspace
 	pub fn checkspace(&self) -> c_int {
 		self.checkspace
 	}
 
+	/// alpm_option_set_checkspace
 	pub fn set_checkspace(&mut self, checkspace: c_int) {
 		self.checkspace = checkspace;
 	}
 
-	// alpm_option_get_parallel_downloads
+	/// alpm_option_get_parallel_downloads
 	pub fn parallel_downloads(&self) -> c_uint {
 		self.parallel_downloads
 	}
 
-	// alpm_option_set_parallel_downloads: 0 is WrongArgs
+	/// alpm_option_set_parallel_downloads: 0 is WrongArgs
 	pub fn set_parallel_downloads(
 		&mut self,
 		n: c_uint,
@@ -655,11 +671,12 @@ impl Handle {
 		Ok(())
 	}
 
-	// alpm_option_get_disable_dl_timeout
+	/// alpm_option_get_disable_dl_timeout
 	pub fn disable_dl_timeout(&self) -> u16 {
 		self.disable_dl_timeout
 	}
 
+	/// alpm_option_set_disable_dl_timeout
 	pub fn set_disable_dl_timeout(&mut self, disable: u16) {
 		self.disable_dl_timeout = disable;
 	}
@@ -673,23 +690,13 @@ impl Handle {
 		}
 	}
 
-	// handle->user
+	/// handle->user
 	pub fn user(&self) -> u32 {
 		self.user
 	}
 
-	// how downloads get their sandbox (sandbox::handle_sandbox), for
-	// tests standing in for root
-	pub fn set_sandbox_for(&mut self, f: SandboxFor) {
-		self.sandbox_for = f;
-	}
-
 	pub(crate) fn chroot_helper(&self) -> &Path {
 		&self.chroot_helper
-	}
-
-	pub fn set_chroot_helper(&mut self, program: PathBuf) {
-		self.chroot_helper = program;
 	}
 
 	// f with a Downloader on the handle's download settings, state,
@@ -710,7 +717,7 @@ impl Handle {
 		f(&mut dl, &mut self.cachedirs)
 	}
 
-	// alpm_fetch_pkgurl with the remote file siglevel
+	/// alpm_fetch_pkgurl with the remote file siglevel
 	pub fn fetch_pkgurl<U: AsRef<[u8]>>(
 		&mut self,
 		urls: &[U],
@@ -721,29 +728,32 @@ impl Handle {
 		})
 	}
 
-	// alpm_option_get_overwrite_files and friends, like noupgrade
+	/// alpm_option_get_overwrite_files and friends, like noupgrade
 	pub fn overwrite_files(&self) -> &[Vec<u8>] {
 		&self.overwrite_files
 	}
 
+	/// alpm_option_add_overwrite_file
 	pub fn add_overwrite_file(&mut self, glob: &[u8]) {
 		self.overwrite_files.push(until_nul(glob).to_vec());
 	}
 
+	/// alpm_option_set_overwrite_files
 	pub fn set_overwrite_files<S: AsRef<[u8]>>(&mut self, globs: &[S]) {
 		self.overwrite_files = strdup_all(globs);
 	}
 
+	/// alpm_option_remove_overwrite_file
 	pub fn remove_overwrite_file(&mut self, glob: &[u8]) -> bool {
 		remove_str(&mut self.overwrite_files, glob)
 	}
 
-	// alpm_option_get_assumeinstalled
+	/// alpm_option_get_assumeinstalled
 	pub fn assumeinstalled(&self) -> &[Depend] {
 		&self.assumeinstalled
 	}
 
-	// ignorepkg, ignoregroup and assumeinstalled, as deps.c reads them
+	/// ignorepkg, ignoregroup and assumeinstalled, as deps.c reads them
 	pub fn deps_opts(&self) -> DepsOpts<'_> {
 		DepsOpts {
 			ignorepkg: &self.ignorepkg,
@@ -752,8 +762,8 @@ impl Handle {
 		}
 	}
 
-	// alpm_option_add_assumeinstalled: only "name" and "name=version",
-	// name_hash recomputed for hand-built deps
+	/// alpm_option_add_assumeinstalled: only "name" and "name=version",
+	/// name_hash recomputed for hand-built deps
 	pub fn add_assumeinstalled(
 		&mut self,
 		dep: &Depend,
@@ -767,8 +777,8 @@ impl Handle {
 		Ok(())
 	}
 
-	// alpm_option_set_assumeinstalled: a refused dep stops the copy,
-	// the ones before it stay
+	/// alpm_option_set_assumeinstalled: a refused dep stops the copy,
+	/// the ones before it stay
 	pub fn set_assumeinstalled(
 		&mut self,
 		deps: &[Depend],
@@ -777,9 +787,9 @@ impl Handle {
 		deps.iter().try_for_each(|d| self.add_assumeinstalled(d))
 	}
 
-	// alpm_option_remove_assumeinstalled: first entry with dep's
-	// name_hash (as given) and name, and the same version or none on
-	// both. true when removed
+	/// alpm_option_remove_assumeinstalled: first entry with dep's
+	/// name_hash (as given) and name, and the same version or none on
+	/// both. true when removed
 	pub fn remove_assumeinstalled(&mut self, dep: &Depend) -> bool {
 		let same = |d: &Depend| {
 			d.name_hash == dep.name_hash
@@ -793,49 +803,51 @@ impl Handle {
 		true
 	}
 
-	// alpm_option_get_root
+	/// alpm_option_get_root
 	pub fn root(&self) -> &[u8] {
 		&self.root
 	}
 
-	// alpm_option_get_dbpath
+	/// alpm_option_get_dbpath
 	pub fn dbpath(&self) -> &[u8] {
 		&self.dbpath
 	}
 
-	// alpm_option_get_dbext
+	/// alpm_option_get_dbext
 	pub fn dbext(&self) -> &[u8] {
 		&self.dbext
 	}
 
-	// alpm_option_set_dbext: dbs registered later use it, registered
-	// ones keep their path
+	/// alpm_option_set_dbext: dbs registered later use it, registered
+	/// ones keep their path
 	pub fn set_dbext(&mut self, dbext: &[u8]) {
 		self.dbext = until_nul(dbext).to_vec();
 		let dbext = self.dbext.clone();
 		self.debug(&[b"option 'dbext' = ", &dbext, b"\n"]);
 	}
 
-	// alpm_get_localdb: None after unregister_localdb
+	/// alpm_get_localdb: None after unregister_localdb
 	pub fn localdb(&self) -> Option<&Db> {
 		self.db_local.as_ref()
 	}
 
+	/// alpm_get_localdb, mutable
 	pub fn localdb_mut(&mut self) -> Option<&mut Db> {
 		self.db_local.as_mut()
 	}
 
-	// alpm_get_syncdbs
+	/// alpm_get_syncdbs
 	pub fn syncdbs(&self) -> &[Db] {
 		&self.dbs_sync
 	}
 
+	/// alpm_get_syncdbs, mutable
 	pub fn syncdbs_mut(&mut self) -> &mut [Db] {
 		&mut self.dbs_sync
 	}
 
-	// the local db and the sync dbs borrowed together, with dbext and
-	// the callbacks
+	/// the local db and the sync dbs borrowed together, with dbext and
+	/// the callbacks
 	pub fn dbs_mut(&mut self) -> DbsMut<'_> {
 		DbsMut {
 			dbext: &self.dbext,
@@ -850,9 +862,9 @@ impl Handle {
 		}
 	}
 
-	// alpm_register_syncdb: an empty name or one with '/' is WrongArgs,
-	// "local" and registered names DbNotNull. validated, then appended
-	// to the sync dbs
+	/// alpm_register_syncdb: an empty name or one with '/' is WrongArgs,
+	/// "local" and registered names DbNotNull. validated, then appended
+	/// to the sync dbs
 	pub fn register_syncdb(
 		&mut self,
 		treename: &[u8],
@@ -880,22 +892,22 @@ impl Handle {
 		Ok(self.dbs_sync.last_mut().expect("just pushed"))
 	}
 
-	// alpm_unregister_all_syncdbs
+	/// alpm_unregister_all_syncdbs
 	pub fn unregister_all_syncdbs(&mut self) {
 		for db in std::mem::take(&mut self.dbs_sync) {
 			db.unregister(&mut *self.cb);
 		}
 	}
 
-	// alpm_db_unregister on the local db. DbNotFound once gone (the C
-	// would need a freed pointer)
+	/// alpm_db_unregister on the local db. DbNotFound once gone (the C
+	/// would need a freed pointer)
 	pub fn unregister_localdb(&mut self) -> Result<(), Errno> {
 		let db = self.db_local.take().ok_or(Errno::DbNotFound)?;
 		db.unregister(&mut *self.cb);
 		Ok(())
 	}
 
-	// alpm_db_unregister on a sync db, found by name like _alpm_db_cmp
+	/// alpm_db_unregister on a sync db, found by name like _alpm_db_cmp
 	pub fn unregister_syncdb(
 		&mut self,
 		treename: &[u8],
@@ -907,33 +919,33 @@ impl Handle {
 		Ok(())
 	}
 
-	// alpm_option_get_architectures
+	/// alpm_option_get_architectures
 	pub fn architectures(&self) -> &[Vec<u8>] {
 		&self.architectures
 	}
 
-	// alpm_option_add_architecture
+	/// alpm_option_add_architecture
 	pub fn add_architecture(&mut self, arch: &[u8]) {
 		self.architectures.push(until_nul(arch).to_vec());
 	}
 
-	// alpm_option_set_architectures
+	/// alpm_option_set_architectures
 	pub fn set_architectures<S: AsRef<[u8]>>(&mut self, arches: &[S]) {
 		self.architectures = strdup_all(arches);
 	}
 
-	// alpm_option_remove_architecture: true when removed
+	/// alpm_option_remove_architecture: true when removed
 	pub fn remove_architecture(&mut self, arch: &[u8]) -> bool {
 		remove_str(&mut self.architectures, arch)
 	}
 
-	// alpm_option_get_default_siglevel
+	/// alpm_option_get_default_siglevel
 	pub fn default_siglevel(&self) -> c_int {
 		self.siglevel
 	}
 
-	// alpm_option_set_default_siglevel: exactly ALPM_SIG_USE_DEFAULT is
-	// WrongArgs. gpgme builds store any other level
+	/// alpm_option_set_default_siglevel: exactly ALPM_SIG_USE_DEFAULT is
+	/// WrongArgs. gpgme builds store any other level
 	pub fn set_default_siglevel(
 		&mut self,
 		level: c_int,
@@ -945,8 +957,8 @@ impl Handle {
 		Ok(())
 	}
 
-	// alpm_option_get_local_file_siglevel: ALPM_SIG_USE_DEFAULT anywhere
-	// in the level gives the default
+	/// alpm_option_get_local_file_siglevel: ALPM_SIG_USE_DEFAULT anywhere
+	/// in the level gives the default
 	pub fn local_file_siglevel(&self) -> c_int {
 		match self.localfilesiglevel & SIG_USE_DEFAULT {
 			0 => self.localfilesiglevel,
@@ -954,11 +966,12 @@ impl Handle {
 		}
 	}
 
+	/// alpm_option_set_local_file_siglevel
 	pub fn set_local_file_siglevel(&mut self, level: c_int) {
 		self.localfilesiglevel = level;
 	}
 
-	// alpm_option_get_remote_file_siglevel
+	/// alpm_option_get_remote_file_siglevel
 	pub fn remote_file_siglevel(&self) -> c_int {
 		match self.remotefilesiglevel & SIG_USE_DEFAULT {
 			0 => self.remotefilesiglevel,
@@ -966,84 +979,118 @@ impl Handle {
 		}
 	}
 
+	/// alpm_option_set_remote_file_siglevel
 	pub fn set_remote_file_siglevel(&mut self, level: c_int) {
 		self.remotefilesiglevel = level;
 	}
 
-	// alpm_option_get_noupgrades and friends: add appends a copy, set
-	// replaces with copies, remove drops the first equal entry (true
-	// when removed, C 1)
+	/// alpm_option_get_noupgrades and friends: add appends a copy, set
+	/// replaces with copies, remove drops the first equal entry (true
+	/// when removed, C 1)
 	pub fn noupgrades(&self) -> &[Vec<u8>] {
 		&self.noupgrade
 	}
 
+	/// alpm_option_add_noupgrade
 	pub fn add_noupgrade(&mut self, pkg: &[u8]) {
 		self.noupgrade.push(until_nul(pkg).to_vec());
 	}
 
+	/// alpm_option_set_noupgrades
 	pub fn set_noupgrades<S: AsRef<[u8]>>(&mut self, list: &[S]) {
 		self.noupgrade = strdup_all(list);
 	}
 
+	/// alpm_option_remove_noupgrade
 	pub fn remove_noupgrade(&mut self, pkg: &[u8]) -> bool {
 		remove_str(&mut self.noupgrade, pkg)
 	}
 
-	// alpm_option_match_noupgrade: _alpm_fnmatch_patterns, None is -1
+	/// alpm_option_match_noupgrade: _alpm_fnmatch_patterns, None is -1
 	pub fn match_noupgrade(&self, path: &[u8]) -> Option<bool> {
 		fnmatch_patterns(&self.noupgrade, path)
 	}
 
+	/// alpm_option_get_noextracts
 	pub fn noextracts(&self) -> &[Vec<u8>] {
 		&self.noextract
 	}
 
+	/// alpm_option_add_noextract
 	pub fn add_noextract(&mut self, path: &[u8]) {
 		self.noextract.push(until_nul(path).to_vec());
 	}
 
+	/// alpm_option_set_noextracts
 	pub fn set_noextracts<S: AsRef<[u8]>>(&mut self, list: &[S]) {
 		self.noextract = strdup_all(list);
 	}
 
+	/// alpm_option_remove_noextract
 	pub fn remove_noextract(&mut self, path: &[u8]) -> bool {
 		remove_str(&mut self.noextract, path)
 	}
 
+	/// alpm_option_match_noextract: Some(true) matched, Some(false)
+	/// inverted match (`!` pattern), None no match
 	pub fn match_noextract(&self, path: &[u8]) -> Option<bool> {
 		fnmatch_patterns(&self.noextract, path)
 	}
 
+	/// alpm_option_get_ignorepkgs
 	pub fn ignorepkgs(&self) -> &[Vec<u8>] {
 		&self.ignorepkg
 	}
 
+	/// alpm_option_add_ignorepkg
 	pub fn add_ignorepkg(&mut self, pkg: &[u8]) {
 		self.ignorepkg.push(until_nul(pkg).to_vec());
 	}
 
+	/// alpm_option_set_ignorepkgs
 	pub fn set_ignorepkgs<S: AsRef<[u8]>>(&mut self, list: &[S]) {
 		self.ignorepkg = strdup_all(list);
 	}
 
+	/// alpm_option_remove_ignorepkg
 	pub fn remove_ignorepkg(&mut self, pkg: &[u8]) -> bool {
 		remove_str(&mut self.ignorepkg, pkg)
 	}
 
+	/// alpm_option_get_ignoregroups
 	pub fn ignoregroups(&self) -> &[Vec<u8>] {
 		&self.ignoregroup
 	}
 
+	/// alpm_option_add_ignoregroup
 	pub fn add_ignoregroup(&mut self, grp: &[u8]) {
 		self.ignoregroup.push(until_nul(grp).to_vec());
 	}
 
+	/// alpm_option_set_ignoregroups
 	pub fn set_ignoregroups<S: AsRef<[u8]>>(&mut self, list: &[S]) {
 		self.ignoregroup = strdup_all(list);
 	}
 
+	/// alpm_option_remove_ignoregroup
 	pub fn remove_ignoregroup(&mut self, grp: &[u8]) -> bool {
 		remove_str(&mut self.ignoregroup, grp)
+	}
+}
+
+// hooks of the tests, not part of the public surface
+#[cfg(feature = "internals")]
+impl Handle {
+	// how downloads get their sandbox (sandbox::handle_sandbox), for
+	// tests standing in for root
+	pub fn set_sandbox_for(&mut self, f: SandboxFor) {
+		self.sandbox_for = f;
+	}
+
+	// the binary the chroot helper re-executes, this one by default; test
+	// binaries point it at the pacman binary
+	pub fn set_chroot_helper(&mut self, program: PathBuf) {
+		self.chroot_helper = program;
 	}
 }
 

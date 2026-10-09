@@ -41,60 +41,66 @@ use crate::util::{
 	strtoofft, until_nul, with_vec,
 };
 
-// ALPM_LOCAL_DB_VERSION
+/// ALPM_LOCAL_DB_VERSION
 pub const LOCAL_DB_VERSION: u64 = 9;
 
-// alpm_dbinfrq_t
+/// alpm_dbinfrq_t INFRQ_BASE: name and version, what the cache holds
 pub const INFRQ_BASE: c_int = 1 << 0;
+/// INFRQ_DESC: the desc file (depends, provides, sizes, dates, ...)
 pub const INFRQ_DESC: c_int = 1 << 1;
+/// INFRQ_FILES: the files file (file list and backup entries)
 pub const INFRQ_FILES: c_int = 1 << 2;
+/// INFRQ_SCRIPTLET: whether an install scriptlet exists
 pub const INFRQ_SCRIPTLET: c_int = 1 << 3;
+/// INFRQ_DSIZE: the download size, computed by a sync transaction
 pub const INFRQ_DSIZE: c_int = 1 << 4;
+/// INFRQ_ALL: every section
 pub const INFRQ_ALL: c_int =
 	INFRQ_BASE | INFRQ_DESC | INFRQ_FILES | INFRQ_SCRIPTLET | INFRQ_DSIZE;
+/// INFRQ_ERROR: a section failed to load, set in `Package::infolevel`
 pub const INFRQ_ERROR: c_int = 1 << 30;
 
-// failures of validate/populate, named after the pm_errno the C sets
+/// failures of validate/populate, named after the pm_errno the C sets
 #[derive(Debug)]
-pub enum DbError {
-	// ALPM_ERR_DB_OPEN: the directory cannot be listed
+pub enum LocalDbError {
+	/// ALPM_ERR_DB_OPEN: the directory cannot be listed
 	Open(io::Error),
-	// ALPM_ERR_DB_CREATE: missing directory could not be created, or
-	// its version file not written
+	/// ALPM_ERR_DB_CREATE: missing directory could not be created, or
+	/// its version file not written
 	Create(io::Error),
-	// ALPM_ERR_DB_VERSION
+	/// ALPM_ERR_DB_VERSION
 	Version,
-	// ALPM_ERR_MEMORY: the package cache cannot grow
+	/// ALPM_ERR_MEMORY: the package cache cannot grow
 	Memory,
 }
 
-impl DbError {
-	// the pm_errno the C leaves on the handle
+impl LocalDbError {
+	/// the pm_errno the C leaves on the handle
 	pub fn errno(&self) -> Errno {
 		match self {
-			DbError::Open(_) => Errno::DbOpen,
-			DbError::Create(_) => Errno::DbCreate,
-			DbError::Version => Errno::DbVersion,
-			DbError::Memory => Errno::Memory,
+			LocalDbError::Open(_) => Errno::DbOpen,
+			LocalDbError::Create(_) => Errno::DbCreate,
+			LocalDbError::Version => Errno::DbVersion,
+			LocalDbError::Memory => Errno::Memory,
 		}
 	}
 }
 
-// failures of read(), the C only logs them and sets INFRQ_ERROR
+/// failures of read(), the C only logs them and sets INFRQ_ERROR
 #[derive(Debug)]
-pub enum ReadError {
-	// INFRQ_ERROR from an earlier read, no retry
+pub enum LocalDbReadError {
+	/// INFRQ_ERROR from an earlier read, no retry
 	Earlier,
-	// desc/files could not be opened, or a desc read failed (ferror)
+	/// desc/files could not be opened, or a desc read failed (ferror)
 	Io(io::Error),
-	// a %XDATA% line without '=' (_alpm_pkg_parse_xdata NULL)
+	/// a %XDATA% line without '=' (_alpm_pkg_parse_xdata NULL)
 	XData(Vec<u8>),
 }
 
-// the local alpm_db_t once registered: its validated directory
+/// the local alpm_db_t once registered: its validated directory
 #[derive(Clone, Debug)]
 pub struct LocalDb {
-	// _alpm_db_path: "<dbpath>local/"
+	/// _alpm_db_path: `<dbpath>local/`
 	path: Vec<u8>,
 }
 
@@ -140,11 +146,11 @@ fn entries(dir: fs::ReadDir) -> impl Iterator<Item = fs::DirEntry> {
 }
 
 impl LocalDb {
-	// _alpm_db_register_local + local_db_validate. dbpath is
-	// handle->dbpath: absolute and ending in '/'. a missing local/ is
-	// created (mode 0755, one level) with a version file, so is the
-	// version file of an empty one
-	pub fn register(dbpath: &[u8]) -> Result<LocalDb, DbError> {
+	/// _alpm_db_register_local + local_db_validate. dbpath is
+	/// handle->dbpath: absolute and ending in '/'. a missing local/ is
+	/// created (mode 0755, one level) with a version file, so is the
+	/// version file of an empty one
+	pub fn register(dbpath: &[u8]) -> Result<LocalDb, LocalDbError> {
 		let path = [dbpath, b"local/"].concat();
 		let dir = match fs::read_dir(os(&path)) {
 			Ok(dir) => dir,
@@ -152,36 +158,38 @@ impl LocalDb {
 				DirBuilder::new()
 					.mode(0o755)
 					.create(os(&path))
-					.map_err(DbError::Create)?;
-				add_version(&path).map_err(DbError::Create)?;
+					.map_err(LocalDbError::Create)?;
+				add_version(&path)
+					.map_err(LocalDbError::Create)?;
 				return Ok(LocalDb { path });
 			}
-			Err(e) => return Err(DbError::Open(e)),
+			Err(e) => return Err(LocalDbError::Open(e)),
 		};
 		let verfile = [&path[..], b"ALPM_DB_VERSION"].concat();
 		let Ok(mut f) = File::open(os(&verfile)) else {
 			// only an empty db gets a fresh version file
 			if entries(dir).next().is_some() {
-				return Err(DbError::Version);
+				return Err(LocalDbError::Version);
 			}
-			add_version(&path).map_err(|_| DbError::Version)?;
+			add_version(&path)
+				.map_err(|_| LocalDbError::Version)?;
 			return Ok(LocalDb { path });
 		};
 		// fopen succeeds on a directory, the read then fails
 		let mut buf = Vec::new();
-		f.read_to_end(&mut buf).map_err(|_| DbError::Version)?;
+		f.read_to_end(&mut buf).map_err(|_| LocalDbError::Version)?;
 		match scan_zu(&buf) {
 			Some(LOCAL_DB_VERSION) => Ok(LocalDb { path }),
-			_ => Err(DbError::Version),
+			_ => Err(LocalDbError::Version),
 		}
 	}
 
-	// _alpm_db_path
+	/// _alpm_db_path
 	pub fn path(&self) -> &[u8] {
 		&self.path
 	}
 
-	// _alpm_local_db_pkgpath: "<path><name>-<version>/<filename>"
+	/// _alpm_local_db_pkgpath: `<path><name>-<version>/<filename>`
 	pub fn pkgpath(&self, pkg: &Package, filename: &[u8]) -> Vec<u8> {
 		let name = pkg.name.as_deref().unwrap_or_default();
 		let version = pkg.version.as_deref().unwrap_or_default();
@@ -190,13 +198,13 @@ impl LocalDb {
 
 	// the C sizes the cache from the directory link count (subdirs + 2),
 	// counting entries where the filesystem reports fewer than 2 links
-	fn est_count(&self) -> Result<u32, DbError> {
-		let meta =
-			fs::metadata(os(&self.path)).map_err(DbError::Open)?;
+	fn est_count(&self) -> Result<u32, LocalDbError> {
+		let meta = fs::metadata(os(&self.path))
+			.map_err(LocalDbError::Open)?;
 		let mut est = meta.nlink();
 		if est < 2 {
 			let dir = fs::read_dir(os(&self.path))
-				.map_err(DbError::Open)?;
+				.map_err(LocalDbError::Open)?;
 			// plus the "." and ".." readdir gives the C
 			est = entries(dir).count() as u64 + 2;
 		}
@@ -204,21 +212,22 @@ impl LocalDb {
 		Ok(est.saturating_sub(2) as u32)
 	}
 
-	// local_db_populate: one package per "name-ver-rel" directory, in
-	// readdir order. entries splitname rejects and later duplicates of a
-	// name are skipped (logged). the C appends then msorts the list by
-	// name; names are unique, so add_sorted gives the same list and
-	// bucket layout. only name, version, name_hash and origin are set,
-	// read() does the rest (the C's INFRQ_BASE read loads nothing but
-	// its log line)
+	/// local_db_populate: one package per "name-ver-rel" directory, in
+	/// readdir order. entries splitname rejects and later duplicates of a
+	/// name are skipped (logged). the C appends then msorts the list by
+	/// name; names are unique, so add_sorted gives the same list and
+	/// bucket layout. only name, version, name_hash and origin are set,
+	/// read() does the rest (the C's INFRQ_BASE read loads nothing but
+	/// its log line)
 	pub fn populate(
 		&self,
 		cb: &mut dyn Callbacks,
-	) -> Result<PkgHash<Package>, DbError> {
-		let dir =
-			fs::read_dir(os(&self.path)).map_err(DbError::Open)?;
+	) -> Result<PkgHash<Package>, LocalDbError> {
+		let dir = fs::read_dir(os(&self.path))
+			.map_err(LocalDbError::Open)?;
 		let est = self.est_count()?;
-		let mut cache = PkgHash::new(est).ok_or(DbError::Memory)?;
+		let mut cache =
+			PkgHash::new(est).ok_or(LocalDbError::Memory)?;
 		for ent in entries(dir) {
 			// is_dir: stat, so a symlink to a directory counts. the
 			// d_type shortcut is compiled out of the meson build
@@ -262,7 +271,8 @@ impl LocalDb {
 				b"' to package cache for db 'local'\n",
 			];
 			logv(cb, LogLevel::Function, &parts);
-			cache.add_sorted(pkg).map_err(|_| DbError::Memory)?;
+			cache.add_sorted(pkg)
+				.map_err(|_| LocalDbError::Memory)?;
 		}
 		let count = cache.len().to_string();
 		let parts: [&[u8]; 3] = [
@@ -274,19 +284,19 @@ impl LocalDb {
 		Ok(cache)
 	}
 
-	// local_db_read: loads the sections of inforeq not loaded yet. on
-	// error what was read stays, INFRQ_ERROR is set
+	/// local_db_read: loads the sections of inforeq not loaded yet. on
+	/// error what was read stays, INFRQ_ERROR is set
 	pub fn read(
 		&self,
 		pkg: &mut Package,
 		inforeq: c_int,
 		cb: &mut dyn Callbacks,
-	) -> Result<(), ReadError> {
+	) -> Result<(), LocalDbReadError> {
 		if pkg.infolevel & inforeq == inforeq {
 			return Ok(());
 		}
 		if pkg.infolevel & INFRQ_ERROR != 0 {
-			return Err(ReadError::Earlier);
+			return Err(LocalDbReadError::Earlier);
 		}
 		let level = format!("{inforeq:x}");
 		let parts: [&[u8]; 5] = [
@@ -310,7 +320,7 @@ impl LocalDb {
 		pkg: &Package,
 		file: &[u8],
 		cb: &mut dyn Callbacks,
-	) -> Result<File, ReadError> {
+	) -> Result<File, LocalDbReadError> {
 		let path = self.pkgpath(pkg, file);
 		File::open(os(&path)).map_err(|e| {
 			let err = strerror(&e);
@@ -322,7 +332,7 @@ impl LocalDb {
 				b"\n",
 			];
 			logv(cb, LogLevel::Error, &parts);
-			ReadError::Io(e)
+			LocalDbReadError::Io(e)
 		})
 	}
 
@@ -335,7 +345,7 @@ impl LocalDb {
 		pkg: &mut Package,
 		inforeq: c_int,
 		cb: &mut dyn Callbacks,
-	) -> Result<(), ReadError> {
+	) -> Result<(), LocalDbReadError> {
 		if Self::wants(pkg, inforeq, INFRQ_DESC) {
 			let f = self.open_section(pkg, b"desc", cb)?;
 			read_desc(pkg, &mut Lines::new(f), cb)?;
@@ -520,16 +530,16 @@ fn read_desc(
 	pkg: &mut Package,
 	f: &mut Lines,
 	cb: &mut dyn Callbacks,
-) -> Result<(), ReadError> {
+) -> Result<(), LocalDbReadError> {
 	let deps = dep_from_string;
 	while !f.eof {
-		f.fgets().map_err(ReadError::Io)?;
+		f.fgets().map_err(LocalDbReadError::Io)?;
 		if f.strip() == 0 {
 			continue;
 		}
 		let key = f.line.clone();
 		let name = pkg.name_bytes().to_vec();
-		let io = ReadError::Io;
+		let io = LocalDbReadError::Io;
 		match &key[..] {
 			b"%NAME%" => {
 				if f.next().map_err(io)? != &name[..] {
@@ -609,7 +619,7 @@ fn read_desc(
 				with_vec(&mut pkg.xdata, |x| {
 					extend_xdata(x, lines)
 				})
-				.map_err(ReadError::XData)?;
+				.map_err(LocalDbReadError::XData)?;
 			}
 			_ => {
 				let parts: [&[u8]; 4] = [
@@ -665,14 +675,15 @@ fn read_files(pkg: &mut Package, f: &mut Lines) {
 
 pub use crate::mtree::{Entry as MtreeEntry, EntryType as MtreeType};
 
+/// why alpm_pkg_mtree_open failed
 #[derive(Debug)]
 pub enum MtreeError {
-	// access(F_OK) fails: "there is no mtree file for this package"
+	/// access(F_OK) fails: "there is no mtree file for this package"
 	Missing,
-	// archive_read_open fails
+	/// archive_read_open fails
 	Read(mtree::Error),
-	// the first archive_read_next_header fails: no entries, libarchive's
-	// text
+	/// the first archive_read_next_header fails: no entries, libarchive's
+	/// text
 	Parse(Vec<u8>),
 }
 
@@ -688,9 +699,9 @@ pub fn read_mtree(path: &[u8]) -> Result<Vec<MtreeEntry>, MtreeError> {
 }
 
 impl LocalDb {
-	// alpm_pkg_mtree_open + alpm_pkg_mtree_next to the end, on
-	// _alpm_local_db_pkgpath(db, pkg, "mtree"). an open failure is
-	// logged like _cache_mtree_open
+	/// alpm_pkg_mtree_open + alpm_pkg_mtree_next to the end, on
+	/// _alpm_local_db_pkgpath(db, pkg, "mtree"). an open failure is
+	/// logged like _cache_mtree_open
 	pub fn mtree(
 		&self,
 		pkg: &Package,
@@ -721,35 +732,35 @@ impl LocalDb {
 // C sets the umask (0000 for prepare, 0022 for write) around its mkdir and
 // fopen; the port gives the same modes by chmod. logging is not modelled
 
-// why _alpm_local_db_prepare returned -1
+/// why _alpm_local_db_prepare returned -1
 #[derive(Debug)]
-pub enum PrepareError {
-	// checkdbdir could not create the db dir or replace a non-directory
-	// with one: ALPM_ERR_SYSTEM
+pub enum LocalDbPrepareError {
+	/// checkdbdir could not create the db dir or replace a non-directory
+	/// with one: ALPM_ERR_SYSTEM
 	DbDir(io::Error),
-	// mkdir of the package dir failed (also when it exists), logged,
-	// pm_errno untouched
+	/// mkdir of the package dir failed (also when it exists), logged,
+	/// pm_errno untouched
 	Mkdir(io::Error),
 }
 
-impl PrepareError {
-	// the pm_errno the C sets, None where it leaves it alone
+impl LocalDbPrepareError {
+	/// the pm_errno the C sets, None where it leaves it alone
 	pub fn errno(&self) -> Option<Errno> {
 		match self {
-			PrepareError::DbDir(_) => Some(Errno::System),
-			PrepareError::Mkdir(_) => None,
+			LocalDbPrepareError::DbDir(_) => Some(Errno::System),
+			LocalDbPrepareError::Mkdir(_) => None,
 		}
 	}
 }
 
-// why _alpm_local_db_write failed
+/// why _alpm_local_db_write failed
 #[derive(Debug)]
-pub enum WriteError {
-	// desc or files could not be opened: -1, pm_errno untouched. a desc
-	// failure skips the files
+pub enum LocalDbWriteError {
+	/// desc or files could not be opened: -1, pm_errno untouched. a desc
+	/// failure skips the files
 	Open(io::Error),
-	// writing failed (disk full). the C ignores fprintf/fclose results
-	// and returns 0 here
+	/// writing failed (disk full). the C ignores fprintf/fclose results
+	/// and returns 0 here
 	Write(io::Error),
 }
 
@@ -890,9 +901,9 @@ fn files_text(pkg: &Package) -> Vec<u8> {
 	out
 }
 
-fn write_file(path: &[u8], text: &[u8]) -> Result<(), WriteError> {
-	let mut f = create_0644(path).map_err(WriteError::Open)?;
-	f.write_all(text).map_err(WriteError::Write)
+fn write_file(path: &[u8], text: &[u8]) -> Result<(), LocalDbWriteError> {
+	let mut f = create_0644(path).map_err(LocalDbWriteError::Open)?;
+	f.write_all(text).map_err(LocalDbWriteError::Write)
 }
 
 impl LocalDb {
@@ -907,21 +918,24 @@ impl LocalDb {
 		makepath(&self.path)
 	}
 
-	// _alpm_local_db_prepare: the package directory, mode 0755 (umask
-	// 0000)
-	pub fn prepare(&self, pkg: &Package) -> Result<(), PrepareError> {
-		self.checkdbdir().map_err(PrepareError::DbDir)?;
+	/// _alpm_local_db_prepare: the package directory, mode 0755 (umask
+	/// 0000)
+	pub fn prepare(
+		&self,
+		pkg: &Package,
+	) -> Result<(), LocalDbPrepareError> {
+		self.checkdbdir().map_err(LocalDbPrepareError::DbDir)?;
 		let path = self.pkgpath(pkg, b"");
-		mkdir_mode(os(&path), 0o755).map_err(PrepareError::Mkdir)
+		mkdir_mode(os(&path), 0o755).map_err(LocalDbPrepareError::Mkdir)
 	}
 
-	// _alpm_local_db_write: desc for INFRQ_DESC, files for INFRQ_FILES.
-	// install and mtree are extracted by add.c, nothing to write
+	/// _alpm_local_db_write: desc for INFRQ_DESC, files for INFRQ_FILES.
+	/// install and mtree are extracted by add.c, nothing to write
 	pub fn write(
 		&self,
 		pkg: &Package,
 		inforeq: c_int,
-	) -> Result<(), WriteError> {
+	) -> Result<(), LocalDbWriteError> {
 		if inforeq & INFRQ_DESC != 0 {
 			write_file(
 				&self.pkgpath(pkg, b"desc"),
@@ -937,10 +951,10 @@ impl LocalDb {
 		Ok(())
 	}
 
-	// _alpm_local_db_remove: unlink every entry of the package dir (they
-	// are files), then rmdir it. failures do not stop the others; the
-	// first is returned. the C's PATH_MAX check is the kernel's
-	// ENAMETOOLONG on the joined name
+	/// _alpm_local_db_remove: unlink every entry of the package dir (they
+	/// are files), then rmdir it. failures do not stop the others; the
+	/// first is returned. the C's PATH_MAX check is the kernel's
+	/// ENAMETOOLONG on the joined name
 	pub fn remove(&self, pkg: &Package) -> io::Result<()> {
 		let path = self.pkgpath(pkg, b"");
 		let dir = fs::read_dir(os(&path))?;
@@ -959,10 +973,10 @@ impl LocalDb {
 		first.map_or(Ok(()), Err)
 	}
 
-	// alpm_pkg_set_reason on a package of this db (the C checks
-	// origin_data.db against handle->db_local, the caller does here).
-	// alpm_pkg_get_reason loads the desc first, a failed load compares
-	// what the package holds. the desc is rewritten only on a change
+	/// alpm_pkg_set_reason on a package of this db (the C checks
+	/// origin_data.db against handle->db_local, the caller does here).
+	/// alpm_pkg_get_reason loads the desc first, a failed load compares
+	/// what the package holds. the desc is rewritten only on a change
 	pub fn set_reason(
 		&self,
 		pkg: &mut Package,

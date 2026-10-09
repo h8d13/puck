@@ -1,18 +1,18 @@
-// port of lib/libalpm/filelist.c
-//
-// a name never holds a nul: File::new cuts it at the first one, as the
-// C's strdup'd names end there. sort, contains and difference order like
-// strcmp (unsigned bytes), intersection goes through
-// _alpm_filelist_pathcmp, which orders differently, see pathcmp.
+//! port of lib/libalpm/filelist.c
+//!
+//! a name never holds a nul: File::new cuts it at the first one, as the
+//! C's strdup'd names end there. sort, contains and difference order like
+//! strcmp (unsigned bytes), intersection goes through
+//! _alpm_filelist_pathcmp, which orders differently, see pathcmp.
 
 use std::cmp::Ordering;
 use std::ffi::c_char;
 
 use crate::util::until_nul;
 
-// alpm_file_t. size is off_t, 64 bit as meson sets _FILE_OFFSET_BITS=64,
-// mode is mode_t, u32 on linux. name is private so every File goes
-// through new: readers of a name never scan it for a nul again
+/// alpm_file_t. size is off_t, 64 bit as meson sets _FILE_OFFSET_BITS=64,
+/// mode is mode_t, u32 on linux. name is private so every File goes
+/// through new: readers of a name never scan it for a nul again
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct File {
 	name: Vec<u8>,
@@ -21,18 +21,19 @@ pub struct File {
 }
 
 impl File {
-	// the name as the C string it is in the C, up to its first nul
+	/// the name as the C string it is in the C, up to its first nul
 	pub fn new(mut name: Vec<u8>, size: i64, mode: u32) -> Self {
 		name.truncate(until_nul(&name).len());
 		File { name, size, mode }
 	}
 
+	/// the path, without the nul
 	pub fn name(&self) -> &[u8] {
 		&self.name
 	}
 }
 
-// alpm_filelist_t, count is files.len()
+/// alpm_filelist_t, count is files.len()
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileList {
 	pub files: Vec<File>,
@@ -61,9 +62,9 @@ fn is_dir(s: &[u8]) -> bool {
 }
 
 impl FileList {
-	// _alpm_filelist_sort: C qsorts by strcmp unless already sorted.
-	// a stable sort keeps sorted input as is too, and fixes the order of
-	// equal names that qsort leaves unspecified
+	/// _alpm_filelist_sort: C qsorts by strcmp unless already sorted.
+	/// a stable sort keeps sorted input as is too, and fixes the order of
+	/// equal names that qsort leaves unspecified
 	pub fn sort(&mut self) {
 		// the C's pre-sorted check: written lists are sorted, one pass
 		// and no scratch allocation
@@ -73,8 +74,8 @@ impl FileList {
 		self.files.sort_by(|a, b| a.name().cmp(b.name()));
 	}
 
-	// alpm_filelist_contains: binary search, files must be sorted.
-	// with duplicate names any one of them may come back, like bsearch
+	/// alpm_filelist_contains: binary search, files must be sorted.
+	/// with duplicate names any one of them may come back, like bsearch
 	pub fn contains(&self, path: &[u8]) -> Option<&File> {
 		let path = until_nul(path);
 		let i = self
@@ -84,9 +85,9 @@ impl FileList {
 		Some(&self.files[i])
 	}
 
-	// _alpm_filelist_difference: names of self missing from other, a
-	// merge walk that assumes both sorted. names borrow from self, the C
-	// list does not own its strings either
+	/// _alpm_filelist_difference: names of self missing from other, a
+	/// merge walk that assumes both sorted. names borrow from self, the C
+	/// list does not own its strings either
 	pub fn difference(&self, other: &FileList) -> Vec<&[u8]> {
 		let (a, b) = (&self.files, &other.files);
 		let (mut i, mut j) = (0, 0);
@@ -108,9 +109,9 @@ impl FileList {
 		out
 	}
 
-	// _alpm_filelist_intersection: names of self also in other, compared
-	// with pathcmp, shared directories left out. same merge walk and
-	// borrowing as difference
+	/// _alpm_filelist_intersection: names of self also in other, compared
+	/// with pathcmp, shared directories left out. same merge walk and
+	/// borrowing as difference
 	pub fn intersection(&self, other: &FileList) -> Vec<&[u8]> {
 		let (a, b) = (&self.files, &other.files);
 		let (mut i, mut j) = (0, 0);

@@ -51,44 +51,45 @@ use crate::util::{
 // hard upper limit of a db download
 const DB_MAX_SIZE: i64 = 128 * 1024 * 1024;
 
-// why an entry made the db invalid
+/// why an entry made the db invalid
 #[derive(Debug)]
 pub enum SyncDbInvalidReason {
-	// _alpm_splitname refused the entry name
+	/// _alpm_splitname refused the entry name
 	Name,
-	// _alpm_pkg_check_meta refused name or version
+	/// _alpm_pkg_check_meta refused name or version
 	Meta,
-	// _alpm_validate_filename refused %FILENAME%
+	/// _alpm_validate_filename refused %FILENAME%
 	Filename,
-	// a data block could not be read, or a line is over 512 KiB
+	/// a data block could not be read, or a line is over 512 KiB
 	Read(io::Error),
-	// the data ended where a value or a list's blank line was due
+	/// the data ended where a value or a list's blank line was due
 	Truncated,
-	// a %DATA% line without '=' (_alpm_pkg_parse_xdata NULL)
+	/// a %DATA% line without '=' (_alpm_pkg_parse_xdata NULL)
 	XData(Vec<u8>),
-	// the cache cannot grow, ALPM_ERR_MEMORY turned into DB_INVALID
+	/// the cache cannot grow, ALPM_ERR_MEMORY turned into DB_INVALID
 	Cache,
 }
 
+/// why a sync db failed to load, with the pm_errno it sets (`errno`)
 #[derive(Debug)]
 pub enum SyncDbError {
-	// missing db file: sync_db_validate marks it DB_STATUS_MISSING
+	/// missing db file: sync_db_validate marks it DB_STATUS_MISSING
 	NotFound,
-	// _alpm_open_archive failed
+	/// _alpm_open_archive failed
 	Open(io::Error),
-	// _alpm_pkghash_create refused the estimate
+	/// _alpm_pkghash_create refused the estimate
 	Memory,
-	// an entry failed to load, the whole db is dropped
+	/// an entry failed to load, the whole db is dropped
 	Invalid {
 		entry: Vec<u8>,
 		reason: SyncDbInvalidReason,
 	},
-	// archive_read_next_header failed
+	/// archive_read_next_header failed
 	Archive(io::Error),
 }
 
 impl SyncDbError {
-	// pm_errno the C leaves after alpm_db_get_pkgcache
+	/// pm_errno the C leaves after alpm_db_get_pkgcache
 	pub fn errno(&self) -> Errno {
 		match self {
 			SyncDbError::NotFound => Errno::DbNotFound,
@@ -100,8 +101,8 @@ impl SyncDbError {
 	}
 }
 
-// _alpm_db_path for a sync db: dbpath ends with '/' after
-// alpm_initialize, nothing is added between dbpath and "sync/"
+/// _alpm_db_path for a sync db: dbpath ends with '/' after
+/// alpm_initialize, nothing is added between dbpath and "sync/"
 pub fn db_path(dbpath: &[u8], treename: &[u8], dbext: &[u8]) -> Vec<u8> {
 	[
 		until_nul(dbpath),
@@ -112,12 +113,12 @@ pub fn db_path(dbpath: &[u8], treename: &[u8], dbext: &[u8]) -> Vec<u8> {
 	.concat()
 }
 
-// sync_db_validate on a db neither valid nor invalid yet: Ok(false) when
-// the file at path (its _alpm_db_path) is missing (DB_STATUS_MISSING,
-// the C sends ALPM_EVENT_DATABASE_MISSING), Ok(true) when it exists and
-// passed. siglevel is alpm_db_get_siglevel; with SIG_DATABASE the
-// "<path>.sig" check runs, and again while an offered key import works.
-// Err(DbInvalidSig) marks the db invalid
+/// sync_db_validate on a db neither valid nor invalid yet: Ok(false) when
+/// the file at path (its _alpm_db_path) is missing (DB_STATUS_MISSING,
+/// the C sends ALPM_EVENT_DATABASE_MISSING), Ok(true) when it exists and
+/// passed. siglevel is alpm_db_get_siglevel; with SIG_DATABASE the
+/// "<path>.sig" check runs, and again while an offered key import works.
+/// Err(DbInvalidSig) marks the db invalid
 pub fn sync_db_validate(
 	kr: &mut Keyring,
 	cb: &mut dyn Callbacks,
@@ -289,13 +290,13 @@ fn update_locked(
 	failed.map_or(ret, Err)
 }
 
-// alpm_db_update: the sync dbs at positions dbs of handle.syncdbs() (used
-// for syncing) downloaded into "<dbpath>sync/", with If-Modified-Since
-// unless force or the db is invalid. Ok(true) something was downloaded
-// (C 0), Ok(false) every db was up to date (C 1), Err the pm_errno of
-// the failure (C -1). an empty dbs is the C's NULL list: Err(Errno::Ok),
-// the C leaves pm_errno as it was. umask(0022) from the download dir
-// setup on, like the C: the dbs get 0644 whatever the process umask
+/// alpm_db_update: the sync dbs at positions dbs of handle.syncdbs() (used
+/// for syncing) downloaded into `<dbpath>sync/`, with If-Modified-Since
+/// unless force or the db is invalid. Ok(true) something was downloaded
+/// (C 0), Ok(false) every db was up to date (C 1), Err the pm_errno of
+/// the failure (C -1). an empty dbs is the C's NULL list: Err(Errno::Ok),
+/// the C leaves pm_errno as it was. umask(0022) from the download dir
+/// setup on, like the C: the dbs get 0644 whatever the process umask
 pub fn db_update(
 	handle: &mut Handle,
 	dbs: &[usize],
@@ -334,8 +335,8 @@ pub fn db_update(
 	ret
 }
 
-// _sync_get_validation, what alpm_pkg_get_validation computes on first
-// use. Package::validation stays 0 in the cache like the C field
+/// _sync_get_validation, what alpm_pkg_get_validation computes on first
+/// use. Package::validation stays 0 in the cache like the C field
 pub fn get_validation(pkg: &Package) -> c_int {
 	if pkg.validation != 0 {
 		return pkg.validation;
@@ -781,18 +782,18 @@ impl Walk<'_> {
 	}
 }
 
-// sync_db_populate: the package cache of the db file at path (its
-// _alpm_db_path), list sorted by name, buckets filled in archive order.
-// dbext is handle->dbext at load time: ".files" divides the size
-// estimate, whatever the path's own extension.
-//
-// errors rank like the C: the walk goes on past an entry that fails, and
-// any such entry makes the db invalid (the first one is returned), even
-// when the archive breaks later; a broken archive with good entries so
-// far is an archive error.
-//
-// logs through cb the C's lines of the walk; the open failures of
-// _alpm_open_archive are not logged
+/// sync_db_populate: the package cache of the db file at path (its
+/// _alpm_db_path), list sorted by name, buckets filled in archive order.
+/// dbext is handle->dbext at load time: ".files" divides the size
+/// estimate, whatever the path's own extension.
+///
+/// errors rank like the C: the walk goes on past an entry that fails, and
+/// any such entry makes the db invalid (the first one is returned), even
+/// when the archive breaks later; a broken archive with good entries so
+/// far is an archive error.
+///
+/// logs through cb the C's lines of the walk; the open failures of
+/// _alpm_open_archive are not logged
 pub fn populate(
 	path: &[u8],
 	dbext: &[u8],

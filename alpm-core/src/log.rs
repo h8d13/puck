@@ -33,15 +33,15 @@ const ENOENT: i32 = 2;
 const EACCES: i32 = 13;
 const EPROTOTYPE: i32 = 91;
 
-// a point in time as localtime(3) sees it: seconds since the epoch and
-// the zone's offset east of UTC (tm_gmtoff)
+/// a point in time as localtime(3) sees it: seconds since the epoch and
+/// the zone's offset east of UTC (tm_gmtoff)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LogTime {
 	pub secs: i64,
 	pub utcoff: i32,
 }
 
-// time(NULL)
+/// time(NULL)
 pub fn now_secs() -> i64 {
 	match SystemTime::now().duration_since(UNIX_EPOCH) {
 		Ok(d) => d.as_secs() as i64,
@@ -49,13 +49,13 @@ pub fn now_secs() -> i64 {
 	}
 }
 
-// localtime(&secs)->tm_gmtoff (tzfile.rs), None where localtime fails
+/// localtime(&secs)->tm_gmtoff (tzfile.rs), None where localtime fails
 pub fn local_offset(secs: i64) -> Option<i32> {
 	let l = crate::tzfile::current().local(secs)?;
 	i32::try_from(l.gmtoff).ok()
 }
 
-// localtime(time(NULL)); UTC in the years local_offset cannot take
+/// localtime(time(NULL)); UTC in the years local_offset cannot take
 pub fn local_now() -> LogTime {
 	let secs = now_secs();
 	let utcoff = local_offset(secs).unwrap_or(0);
@@ -78,8 +78,8 @@ fn local(t: LogTime) -> (i32, u8, u8, u8, u8, u8) {
 	)
 }
 
-// _alpm_log_leader: "[%FT%T%z] [prefix] ". glibc's %F is "%Y-%m-%d",
-// the year unpadded
+/// _alpm_log_leader: "[%FT%T%z] [prefix] ". glibc's %F is "%Y-%m-%d",
+/// the year unpadded
 pub fn leader(t: LogTime, prefix: &[u8]) -> Vec<u8> {
 	let (y, mo, d, h, mi, s) = local(t);
 	let sign = if t.utcoff < 0 { '-' } else { '+' };
@@ -92,7 +92,7 @@ pub fn leader(t: LogTime, prefix: &[u8]) -> Vec<u8> {
 	[stamp.as_bytes(), prefix, b"] "].concat()
 }
 
-// the packet vsyslog sends: "<pri>%h %e %T tag: msg", C locale
+/// the packet vsyslog sends: "<pri>%h %e %T tag: msg", C locale
 pub fn syslog_message(t: LogTime, tag: &[u8], msg: &[u8]) -> Vec<u8> {
 	let (_, mo, d, h, mi, s) = local(t);
 	let month = String::from_utf8_lossy(MONTHS[(mo - 1) as usize]);
@@ -141,7 +141,7 @@ impl Syslog {
 	}
 }
 
-// handle->logfile, logstream and usesyslog
+/// handle->logfile, logstream and usesyslog
 #[derive(Debug, Default)]
 pub struct Logger {
 	logfile: Option<Vec<u8>>,
@@ -151,13 +151,13 @@ pub struct Logger {
 }
 
 impl Logger {
-	// alpm_option_get_logfile
+	/// alpm_option_get_logfile
 	pub fn logfile(&self) -> Option<&[u8]> {
 		self.logfile.as_deref()
 	}
 
-	// alpm_option_set_logfile: the stream closes, the next logaction
-	// opens the new file
+	/// alpm_option_set_logfile: the stream closes, the next logaction
+	/// opens the new file
 	pub fn set_logfile(&mut self, logfile: &[u8]) {
 		self.logfile = Some(until_nul(logfile).to_vec());
 		self.stream = None;
@@ -167,8 +167,8 @@ impl Logger {
 		self.usesyslog
 	}
 
-	// alpm_option_set_usesyslog. turning it off keeps the connection,
-	// the C's closelog runs at handle release only
+	/// alpm_option_set_usesyslog. turning it off keeps the connection,
+	/// the C's closelog runs at handle release only
 	pub fn set_usesyslog(&mut self, usesyslog: c_int) {
 		self.usesyslog = usesyslog;
 	}
@@ -213,10 +213,10 @@ impl Logger {
 		}
 	}
 
-	// alpm_logaction: an empty prefix is "UNKNOWN". a logfile that does
-	// not open sets the errno, syslog still gets the line. the C's stdio
-	// buffer (st_blksize) hides a failed write unless the line overflows
-	// it, fflush's error is not checked
+	/// alpm_logaction: an empty prefix is "UNKNOWN". a logfile that does
+	/// not open sets the errno, syslog still gets the line. the C's stdio
+	/// buffer (st_blksize) hides a failed write unless the line overflows
+	/// it, fflush's error is not checked
 	pub fn logaction(
 		&mut self,
 		prefix: &[u8],

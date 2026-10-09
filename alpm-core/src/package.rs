@@ -18,7 +18,7 @@ use crate::handle::Handle;
 use crate::util::{fnmatch, hash_sdbm, until_nul};
 use crate::version::vercmp;
 
-// alpm_pkg_xdata_t
+/// alpm_pkg_xdata_t
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PkgXData {
 	pub name: Box<[u8]>,
@@ -28,8 +28,8 @@ pub struct PkgXData {
 // limits.h on linux
 pub(crate) const NAME_MAX: usize = 255;
 
-// _alpm_pkg_parse_xdata: "name=value" split at the first '=', None
-// without one
+/// _alpm_pkg_parse_xdata: "name=value" split at the first '=', None
+/// without one
 pub fn parse_xdata(s: &[u8]) -> Option<PkgXData> {
 	let s = until_nul(s);
 	let sep = s.iter().position(|&c| c == b'=')?;
@@ -51,7 +51,7 @@ pub(crate) fn extend_xdata(
 	Ok(())
 }
 
-// alpm_pkgreason_t, discriminants as in alpm.h
+/// alpm_pkgreason_t, discriminants as in alpm.h
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PkgReason {
 	#[default]
@@ -60,29 +60,34 @@ pub enum PkgReason {
 	Unknown = 2,
 }
 
-// alpm_pkgfrom_t with origin_data folded in. the db pointer of the two db
-// origins waits for the db backends
+/// alpm_pkgfrom_t with origin_data folded in. the db pointer of the two db
+/// origins waits for the db backends
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PkgFrom {
-	// path the package was loaded from, origin_data.file
+	/// path the package was loaded from, origin_data.file
 	File(Box<[u8]>),
 	LocalDb,
 	SyncDb,
 }
 
-// alpm_pkgvalidation_t bits for Package::validation
+/// alpm_pkgvalidation_t ALPM_PKG_VALIDATION_UNKNOWN, for
+/// `Package::validation`
 pub const PKG_VALIDATION_UNKNOWN: c_int = 0;
+/// ALPM_PKG_VALIDATION_NONE
 pub const PKG_VALIDATION_NONE: c_int = 1 << 0;
+/// ALPM_PKG_VALIDATION_MD5SUM
 pub const PKG_VALIDATION_MD5SUM: c_int = 1 << 1;
+/// ALPM_PKG_VALIDATION_SHA256SUM
 pub const PKG_VALIDATION_SHA256SUM: c_int = 1 << 2;
+/// ALPM_PKG_VALIDATION_SIGNATURE
 pub const PKG_VALIDATION_SIGNATURE: c_int = 1 << 3;
 
-// alpm_pkg_t, Default is _alpm_pkg_new (calloc). NULL strings are None.
-// alpm_time_t and off_t are 64 bit in the meson build
+/// alpm_pkg_t, Default is _alpm_pkg_new (calloc). NULL strings are None.
+/// alpm_time_t and off_t are 64 bit in the meson build
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Package {
-	// _alpm_hash_sdbm of name, set by hand like the C: a stale hash
-	// changes lookups the same way
+	/// _alpm_hash_sdbm of name, set by hand like the C: a stale hash
+	/// changes lookups the same way
 	pub name_hash: c_ulong,
 	pub filename: Option<Box<[u8]>>,
 	pub base: Option<Box<[u8]>>,
@@ -110,15 +115,15 @@ pub struct Package {
 	pub conflicts: Box<[Depend]>,
 	pub provides: Box<[Depend]>,
 	pub files: FileList,
-	// None while unset, calloc leaves the C enum at 0
+	/// None while unset, calloc leaves the C enum at 0
 	pub origin: Option<PkgFrom>,
 	pub reason: PkgReason,
-	// C int, nonzero when the package has an install scriptlet
+	/// C int, nonzero when the package has an install scriptlet
 	pub scriptlet: c_int,
 	pub xdata: Box<[PkgXData]>,
-	// alpm_dbinfrq_t bits
+	/// alpm_dbinfrq_t bits
 	pub infolevel: c_int,
-	// PKG_VALIDATION_* bits
+	/// PKG_VALIDATION_* bits
 	pub validation: c_int,
 }
 
@@ -134,15 +139,15 @@ impl Package {
 		}
 	}
 
-	// name as strcmp sees it. the C dereferences NULL names, None reads
-	// as empty here
+	/// name as strcmp sees it. the C dereferences NULL names, None reads
+	/// as empty here
 	pub fn name_bytes(&self) -> &[u8] {
 		until_nul(self.name.as_deref().unwrap_or_default())
 	}
 
-	// _alpm_pkg_dup without the handle/ops/db pointers. the C copies a
-	// subset: base64_sig, download_size, checkdepends, makedepends and
-	// xdata come back empty, Clone copies everything
+	/// _alpm_pkg_dup without the handle/ops/db pointers. the C copies a
+	/// subset: base64_sig, download_size, checkdepends, makedepends and
+	/// xdata come back empty, Clone copies everything
 	pub fn dup(&self) -> Package {
 		Package {
 			base64_sig: None,
@@ -155,13 +160,13 @@ impl Package {
 	}
 }
 
-// _alpm_pkg_cmp: strcmp on the names
+/// _alpm_pkg_cmp: strcmp on the names
 pub fn pkg_cmp(a: &Package, b: &Package) -> Ordering {
 	a.name_bytes().cmp(b.name_bytes())
 }
 
-// _alpm_pkg_compare_versions: alpm_pkg_vercmp, a NULL version sorts
-// before any other, two NULLs are equal
+/// _alpm_pkg_compare_versions: alpm_pkg_vercmp, a NULL version sorts
+/// before any other, two NULLs are equal
 pub fn pkg_compare_versions(spkg: &Package, localpkg: &Package) -> Ordering {
 	match (&spkg.version, &localpkg.version) {
 		(Some(a), Some(b)) => vercmp(a, b),
@@ -176,7 +181,7 @@ pub(crate) fn has_name(pkg: &Package, name: &[u8], hash: c_ulong) -> bool {
 		&& pkg.name.as_deref().map(until_nul) == Some(name)
 }
 
-// alpm_pkg_find: first package named needle
+/// alpm_pkg_find: first package named needle
 pub fn pkg_find<'a, I>(haystack: I, needle: &[u8]) -> Option<&'a Package>
 where
 	I: IntoIterator<Item = &'a Package>,
@@ -185,14 +190,14 @@ where
 	haystack.into_iter().find(|p| has_name(p, needle, hash))
 }
 
-// the db caches compute_requiredby walks, each in its pkgcache list
-// order. packages must have their depends/optdepends loaded (the C getters
-// lazy-load local entries). a cache that does not load is a NULL list in
-// the C, an empty one here
+/// the db caches compute_requiredby walks, each in its pkgcache list
+/// order. packages must have their depends/optdepends loaded (the C getters
+/// lazy-load local entries). a cache that does not load is a NULL list in
+/// the C, an empty one here
 pub trait DbCaches {
-	// handle->db_local
+	/// handle->db_local
 	fn local_cache(&mut self) -> Vec<&Package>;
-	// handle->dbs_sync, registration order
+	/// handle->dbs_sync, registration order
 	fn sync_caches(&mut self) -> Vec<Vec<&Package>>;
 }
 
@@ -248,7 +253,7 @@ fn compute(
 	reqs
 }
 
-// alpm_pkg_compute_requiredby
+/// alpm_pkg_compute_requiredby
 pub fn compute_requiredby(
 	pkg: &Package,
 	caches: &mut impl DbCaches,
@@ -256,7 +261,7 @@ pub fn compute_requiredby(
 	compute(pkg, caches, false)
 }
 
-// alpm_pkg_compute_optionalfor
+/// alpm_pkg_compute_optionalfor
 pub fn compute_optionalfor(
 	pkg: &Package,
 	caches: &mut impl DbCaches,
@@ -264,14 +269,14 @@ pub fn compute_optionalfor(
 	compute(pkg, caches, true)
 }
 
-// alpm_pkg_should_ignore (DepsOpts::should_ignore)
+/// alpm_pkg_should_ignore (DepsOpts::should_ignore)
 pub fn pkg_should_ignore(handle: &Handle, pkg: &Package) -> bool {
 	handle.deps_opts().should_ignore(pkg)
 }
 
-// _alpm_pkg_check_meta on a package with this name and version, every
-// failed check logged. true is the C's 0. the name is the fnmatch
-// pattern, the character class the string, as in the C
+/// _alpm_pkg_check_meta on a package with this name and version, every
+/// failed check logged. true is the C's 0. the name is the fnmatch
+/// pattern, the character class the string, as in the C
 pub fn check_meta(name: &[u8], version: &[u8], cb: &mut dyn Callbacks) -> bool {
 	let (name, version) = (until_nul(name), until_nul(version));
 	if name.is_empty() || version.is_empty() {

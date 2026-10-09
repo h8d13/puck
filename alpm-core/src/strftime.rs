@@ -1,21 +1,21 @@
-// glibc 2.44's strftime (time/strftime_l.c, its era and alternative
-// digit lookups time/era.c, time/alt_digit.c) on a locale read by
-// setlocale.rs. pacman formats dates with strftime(buf, 50, "%c",
-// localtime(&t)): %c is the locale's d_t_fmt, which can hold any
-// conversion, so all of them are here with glibc's flags (_ - 0 ^ #),
-// field widths and E/O modifiers.
-//
-// translation:
-// - the C writes into the buffer as it goes and returns 0 when a piece
-//   does not fit (what fit stays, without its nul); None here, the
-//   caller knows what its buffer held
-// - a subformat (%c, %x, %EY, ...) is measured first like the C's, so it
-//   goes in whole or not at all
-// - %s is mktime(tm), here the second tm was made from: glibc's mktime
-//   gives another second for some historic transitions (Europe/Paris in
-//   1944); pacman never formats %s
-// - %Z with an empty tm_zone takes tzname after tzset() in the C; the
-//   names a zone gives come from the same data, the port keeps it empty
+//! glibc 2.44's strftime (time/strftime_l.c, its era and alternative
+//! digit lookups time/era.c, time/alt_digit.c) on a locale read by
+//! setlocale.rs. pacman formats dates with strftime(buf, 50, "%c",
+//! localtime(&t)): %c is the locale's d_t_fmt, which can hold any
+//! conversion, so all of them are here with glibc's flags (_ - 0 ^ #),
+//! field widths and E/O modifiers.
+//!
+//! translation:
+//! - the C writes into the buffer as it goes and returns 0 when a piece
+//!   does not fit (what fit stays, without its nul); None here, the
+//!   caller knows what its buffer held
+//! - a subformat (%c, %x, %EY, ...) is measured first like the C's, so it
+//!   goes in whole or not at all
+//! - %s is mktime(tm), here the second tm was made from: glibc's mktime
+//!   gives another second for some historic transitions (Europe/Paris in
+//!   1944); pacman never formats %s
+//! - %Z with an empty tm_zone takes tzname after tzset() in the C; the
+//!   names a zone gives come from the same data, the port keeps it empty
 
 use crate::setlocale::{
 	ABALTMON_1, ABDAY_1, ABMON_1, ALTMON_1, AM_STR, D_FMT, D_T_FMT, DAY_1,
@@ -25,18 +25,18 @@ use crate::setlocale::{
 use crate::tzfile::Local;
 use crate::util::until_nul;
 
-// struct tm as localtime fills it, and the second it came from (%s)
+/// struct tm as localtime fills it, and the second it came from (%s)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tm {
 	pub sec: i32,
 	pub min: i32,
 	pub hour: i32,
 	pub mday: i32,
-	// 0..11
+	/// 0..11
 	pub mon: i32,
-	// years since 1900
+	/// years since 1900
 	pub year: i32,
-	// 0 is Sunday
+	/// 0 is Sunday
 	pub wday: i32,
 	pub yday: i32,
 	pub isdst: i32,
@@ -46,8 +46,8 @@ pub struct Tm {
 }
 
 impl Tm {
-	// the broken-down time of t at gmtoff seconds east of UTC (__offtime),
-	// None where tm_year leaves int
+	/// the broken-down time of t at gmtoff seconds east of UTC (__offtime),
+	/// None where tm_year leaves int
 	pub fn at(t: i64, gmtoff: i64, isdst: bool, zone: &[u8]) -> Option<Tm> {
 		let local = t.checked_add(gmtoff)?;
 		let days = local.div_euclid(86_400);
@@ -87,8 +87,8 @@ impl Tm {
 }
 
 impl Tm {
-	// localtime's tm: the zone's offset less the leap second correction,
-	// tm_sec past 59 on a leap second
+	/// localtime's tm: the zone's offset less the leap second correction,
+	/// tm_sec past 59 on a leap second
 	pub fn local(t: i64, l: &Local) -> Option<Tm> {
 		let off = l.gmtoff.checked_sub(l.leap_correct)?;
 		let mut tm = Tm::at(t, off, l.isdst, &l.zone)?;
@@ -192,7 +192,7 @@ fn alt_digit(loc: &Locale, n: i32) -> Option<&[u8]> {
 	digits.get(i).map(Vec::as_slice)
 }
 
-// strftime(s, max, fmt, tm): None where the C returns 0
+/// strftime(s, max, fmt, tm): None where the C returns 0
 pub fn strftime(
 	max: usize,
 	fmt: &[u8],

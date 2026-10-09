@@ -72,7 +72,8 @@ pub use add::add_pkg;
 pub use backup::Backup;
 pub use be_local::{
 	INFRQ_ALL, INFRQ_BASE, INFRQ_DESC, INFRQ_DSIZE, INFRQ_FILES,
-	INFRQ_SCRIPTLET, LocalDb, MtreeEntry, MtreeError, MtreeType,
+	INFRQ_SCRIPTLET, LocalDb, LocalDbError, LocalDbPrepareError,
+	LocalDbReadError, LocalDbWriteError, MtreeEntry, MtreeError, MtreeType,
 };
 pub use be_package::{
 	PkgInvalidReason, PkgLoadError, changelog, pkg_load, pkg_load_level,

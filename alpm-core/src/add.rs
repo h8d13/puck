@@ -20,7 +20,9 @@ use rustix::fs::{
 };
 
 use crate::backup;
-use crate::be_local::{INFRQ_DESC, INFRQ_FILES, PrepareError, WriteError};
+use crate::be_local::{
+	INFRQ_DESC, INFRQ_FILES, LocalDbPrepareError, LocalDbWriteError,
+};
 use crate::callbacks::{
 	Event, LogLevel, PackageOp, PackageOperation, Progress, logv,
 };
@@ -46,12 +48,12 @@ use crate::util::{
 
 use LogLevel::{Debug, Error, Warning};
 
-// alpm_add_pkg: a sync (db is its position in Handle::syncdbs()) or
-// file package becomes an explicit target. the same sync package again
-// is skipped, another of that name is TransDupTarget (a file package is
-// never the same: the C compares addresses, pacman loads each file
-// once). an installed package of that name only brings warnings, or
-// with NEEDED skips an up to date one
+/// alpm_add_pkg: a sync (db is its position in Handle::syncdbs()) or
+/// file package becomes an explicit target. the same sync package again
+/// is skipped, another of that name is TransDupTarget (a file package is
+/// never the same: the C compares addresses, pacman loads each file
+/// once). an installed package of that name only brings warnings, or
+/// with NEEDED skips an up to date one
 pub fn add_pkg(
 	h: &mut Handle,
 	pkg: Package,
@@ -1350,9 +1352,9 @@ fn extract_single_file(
 	errors
 }
 
-// get_install_time: SOURCE_DATE_EPOCH when strtoull(.., 10) reads all of
-// it without overflow (leading blanks and a sign taken, a negative value
-// wraps like the C's unsigned long long into time_t), else now
+/// get_install_time: SOURCE_DATE_EPOCH when strtoull(.., 10) reads all of
+/// it without overflow (leading blanks and a sign taken, a negative value
+/// wraps like the C's unsigned long long into time_t), else now
 pub fn install_time(source_date_epoch: Option<&[u8]>, now: i64) -> i64 {
 	let Some(s) = source_date_epoch.map(until_nul) else {
 		return now;
@@ -1426,7 +1428,7 @@ fn db_prepare(h: &mut Handle, pkg: &Package) -> bool {
 	};
 	match local.prepare(pkg) {
 		Ok(()) => true,
-		Err(PrepareError::Mkdir(e)) => {
+		Err(LocalDbPrepareError::Mkdir(e)) => {
 			let path = local.pkgpath(pkg, b"");
 			let msg = [
 				b"could not create directory ",
@@ -1438,7 +1440,7 @@ fn db_prepare(h: &mut Handle, pkg: &Package) -> bool {
 			logv(h.callbacks(), Error, &msg);
 			false
 		}
-		Err(PrepareError::DbDir(_)) => false,
+		Err(LocalDbPrepareError::DbDir(_)) => false,
 	}
 }
 
@@ -1464,8 +1466,8 @@ fn db_write(h: &mut Handle, pkg: &Package) -> bool {
 		};
 		let path = local.pkgpath(pkg, file);
 		match local.write(pkg, inforeq) {
-			Ok(()) | Err(WriteError::Write(_)) => {}
-			Err(WriteError::Open(e)) => {
+			Ok(()) | Err(LocalDbWriteError::Write(_)) => {}
+			Err(LocalDbWriteError::Open(e)) => {
 				let msg = [
 					b"could not open file ",
 					&path[..],
@@ -1510,14 +1512,14 @@ fn position(entry: &Entry, consumed: &Cell<u64>, plain: bool) -> i64 {
 	}
 }
 
-// commit_single_pkg: t.pkg, a file package (origin File), installed or
-// upgraded over t.oldpkg (an upgrade when the local cache still holds a
-// package of that name). t is a target of the handle's transaction,
-// taken out of trans.add by the driver (the C mutates it in place);
-// flags and skip_remove are read from the transaction. pkg_current and
-// pkg_count are the progress counters. reason, install date and backup
-// hashes are updated in t.pkg. Err is the pm_errno the C leaves (Ok
-// where it sets none, also without a transaction)
+/// commit_single_pkg: t.pkg, a file package (origin File), installed or
+/// upgraded over t.oldpkg (an upgrade when the local cache still holds a
+/// package of that name). t is a target of the handle's transaction,
+/// taken out of trans.add by the driver (the C mutates it in place);
+/// flags and skip_remove are read from the transaction. pkg_current and
+/// pkg_count are the progress counters. reason, install date and backup
+/// hashes are updated in t.pkg. Err is the pm_errno the C leaves (Ok
+/// where it sets none, also without a transaction)
 pub fn commit_single_pkg(
 	h: &mut Handle,
 	t: &mut TransPkg,
@@ -1826,9 +1828,9 @@ fn add_in_local_cache(h: &mut Handle, pkg: &Package) -> bool {
 		.is_some_and(|db| db.add_pkg_in_cache(dbs.cb, pkg).is_ok())
 }
 
-// the per-package step of _alpm_upgrade_packages: any failure of
-// commit_single_pkg is ALPM_ERR_TRANS_ABORT. the driver then marks the
-// transaction interrupted and skips ldconfig
+/// the per-package step of _alpm_upgrade_packages: any failure of
+/// commit_single_pkg is ALPM_ERR_TRANS_ABORT. the driver then marks the
+/// transaction interrupted and skips ldconfig
 pub fn upgrade_package(
 	h: &mut Handle,
 	t: &mut TransPkg,

@@ -6,7 +6,7 @@
 use std::ffi::c_int;
 use std::fmt;
 
-// alpm_errno_t from alpm.h, same order so the discriminants match
+/// alpm_errno_t from alpm.h, same order so the discriminants match
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum Errno {
@@ -69,7 +69,7 @@ pub enum Errno {
 }
 
 impl Errno {
-	// every variant in discriminant order, ALL[i] as c_int == i
+	/// every variant in discriminant order, `ALL[i] as c_int == i`
 	pub const ALL: [Errno; 56] = {
 		use Errno::*;
 		[
@@ -132,13 +132,14 @@ impl Errno {
 		]
 	};
 
+	/// the variant of an alpm_errno_t value, None out of range
 	pub fn from_raw(err: c_int) -> Option<Errno> {
 		usize::try_from(err)
 			.ok()
 			.and_then(|i| Self::ALL.get(i).copied())
 	}
 
-	// alpm_strerror. Ok has no case in the C switch, falls to default
+	/// alpm_strerror. Ok has no case in the C switch, falls to default
 	pub fn strerror(self) -> &'static str {
 		use Errno::*;
 		match self {
@@ -219,8 +220,8 @@ impl Errno {
 
 const UNEXPECTED: &str = "unexpected error";
 
-// alpm_strerror on a raw value: out of range values hit the C default.
-// only the tests call it, the port's own paths do not
+/// alpm_strerror on a raw value: out of range values hit the C default.
+/// only the tests call it, the port's own paths do not
 #[cfg_attr(not(feature = "internals"), allow(dead_code))]
 pub fn strerror(err: c_int) -> &'static str {
 	Errno::from_raw(err).map_or(UNEXPECTED, Errno::strerror)

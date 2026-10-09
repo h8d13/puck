@@ -6,7 +6,7 @@
 use crate::package::Package;
 use crate::util::until_nul;
 
-// alpm_group_t
+/// alpm_group_t
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Group<P = Package> {
 	pub name: Vec<u8>,
@@ -14,7 +14,7 @@ pub struct Group<P = Package> {
 }
 
 impl<P> Group<P> {
-	// _alpm_group_new: copy of name, no members yet
+	/// _alpm_group_new: copy of name, no members yet
 	pub fn new(name: &[u8]) -> Self {
 		Group {
 			name: until_nul(name).to_vec(),

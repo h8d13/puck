@@ -76,8 +76,8 @@ fn position(list: &[TransPkg], name: &[u8]) -> Option<usize> {
 	list.iter().position(|t| ptr::eq(&t.pkg, found))
 }
 
-// alpm_sync_get_new_version over the handle's sync dbs: the package of
-// pkg's name in the first db holding one, with its db, when newer
+/// alpm_sync_get_new_version over the handle's sync dbs: the package of
+/// pkg's name in the first db holding one, with its db, when newer
 pub fn sync_get_new_version(
 	h: &mut Handle,
 	pkg: &Package,
@@ -302,10 +302,10 @@ fn check_replacers(
 	replacers
 }
 
-// alpm_sync_sysupgrade: every local package not already a target is
-// checked against the sync dbs used for upgrades in order: the first db
-// with replacers for it adds them, else the first db holding its name
-// decides through check_literal
+/// alpm_sync_sysupgrade: every local package not already a target is
+/// checked against the sync dbs used for upgrades in order: the first db
+/// with replacers for it adds them, else the first db holding its name
+/// decides through check_literal
 pub fn sync_sysupgrade(
 	h: &mut Handle,
 	enable_downgrade: bool,
@@ -377,11 +377,11 @@ fn sysupgrade(
 	}
 }
 
-// alpm_find_group_pkgs over the sync dbs at positions dbs: the members
-// of group name in db order, each name once. with NEEDED (and a
-// transaction) members as new as the installed package are skipped;
-// ignored ones only with a yes to INSTALL_IGNOREPKG. a name skipped or
-// asked about is not looked at again in later dbs
+/// alpm_find_group_pkgs over the sync dbs at positions dbs: the members
+/// of group name in db order, each name once. with NEEDED (and a
+/// transaction) members as new as the installed package are skipped;
+/// ignored ones only with a yes to INSTALL_IGNOREPKG. a name skipped or
+/// asked about is not looked at again in later dbs
 pub fn find_group_pkgs(
 	h: &mut Handle,
 	dbs: &[usize],
@@ -448,10 +448,10 @@ pub fn find_group_pkgs(
 	})
 }
 
-// compute_download_size (static in C): what is left to download of a
-// sync package (0 when cached, size minus a cached .part), stored with
-// INFRQ_DSIZE. other origins download nothing. Ok(true) is a partial
-// (C 1); a sync package without filename is PkgInvalidName
+/// compute_download_size (static in C): what is left to download of a
+/// sync package (0 when cached, size minus a cached .part), stored with
+/// INFRQ_DSIZE. other origins download nothing. Ok(true) is a partial
+/// (C 1); a sync package without filename is PkgInvalidName
 pub fn compute_download_size(
 	h: &Handle,
 	cb: &mut dyn Callbacks,
@@ -496,8 +496,8 @@ pub fn compute_download_size(
 	Ok(partial)
 }
 
-// alpm_pkg_download_size: computed once (INFRQ_DSIZE), then the stored
-// value
+/// alpm_pkg_download_size: computed once (INFRQ_DSIZE), then the stored
+/// value
 pub fn pkg_download_size(h: &mut Handle, newpkg: &mut Package) -> i64 {
 	if newpkg.infolevel & INFRQ_DSIZE == 0 {
 		h.with_callbacks(|h, cb| {
@@ -507,8 +507,8 @@ pub fn pkg_download_size(h: &mut Handle, newpkg: &mut Package) -> i64 {
 	newpkg.download_size
 }
 
-// alpm_find_dbs_satisfier on the sync dbs at positions dbs, caches
-// loaded first: the satisfier and its db. an empty dbs is WrongArgs
+/// alpm_find_dbs_satisfier on the sync dbs at positions dbs, caches
+/// loaded first: the satisfier and its db. an empty dbs is WrongArgs
 pub fn dbs_satisfier(
 	h: &mut Handle,
 	dbs: &[usize],

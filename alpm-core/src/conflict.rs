@@ -27,8 +27,8 @@ use crate::util::{PATH_MAX, fnmatch_patterns, llstat, until_nul};
 
 use LogLevel::Debug;
 
-// alpm_conflict_t. the C dups both packages and points reason into the
-// conflicts list of the package that declares it, cloned here
+/// alpm_conflict_t. the C dups both packages and points reason into the
+/// conflicts list of the package that declares it, cloned here
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Conflict {
 	pub package1: Package,
@@ -36,23 +36,23 @@ pub struct Conflict {
 	pub reason: Depend,
 }
 
-// alpm_fileconflicttype_t, discriminants as in alpm.h
+/// alpm_fileconflicttype_t, discriminants as in alpm.h
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileConflictType {
 	Target = 1,
 	Filesystem,
 }
 
-// alpm_fileconflict_t
+/// alpm_fileconflict_t
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileConflict {
-	// name of the package installing file
+	/// name of the package installing file
 	pub target: Vec<u8>,
 	pub conflict_type: FileConflictType,
-	// root + path, the trailing '/' of a directory dropped when the
-	// filesystem has something else there
+	/// root + path, the trailing '/' of a directory dropped when the
+	/// filesystem has something else there
 	pub file: Vec<u8>,
-	// owner of file, empty when unowned
+	/// owner of file, empty when unowned
 	pub ctarget: Vec<u8>,
 }
 
@@ -131,7 +131,7 @@ fn check_conflict(
 	}
 }
 
-// _alpm_innerconflicts: targets against targets
+/// _alpm_innerconflicts: targets against targets
 pub fn innerconflicts(
 	packages: &[&Package],
 	log: &mut dyn Callbacks,
@@ -142,7 +142,7 @@ pub fn innerconflicts(
 	baddeps
 }
 
-// alpm_checkconflicts: the handle is only checked for NULL
+/// alpm_checkconflicts: the handle is only checked for NULL
 pub fn checkconflicts(
 	packages: &[&Package],
 	log: &mut dyn Callbacks,
@@ -150,9 +150,9 @@ pub fn checkconflicts(
 	innerconflicts(packages, log)
 }
 
-// _alpm_outerconflicts: targets against the local packages of other
-// names (sorted by name), then those against the targets with the local
-// package first
+/// _alpm_outerconflicts: targets against the local packages of other
+/// names (sorted by name), then those against the targets with the local
+/// package first
 pub fn outerconflicts<P: Borrow<Package>>(
 	local: &PkgHash<P>,
 	packages: &[&Package],
@@ -168,22 +168,22 @@ pub fn outerconflicts<P: Borrow<Package>>(
 	baddeps
 }
 
-// result of _alpm_db_find_fileconflicts
+/// result of _alpm_db_find_fileconflicts
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FileConflicts {
 	pub conflicts: Vec<FileConflict>,
-	// paths appended to handle->trans->skip_remove, files changing
-	// hands between two targets
+	/// paths appended to handle->trans->skip_remove, files changing
+	/// hands between two targets
 	pub skip_remove: Vec<Vec<u8>>,
 }
 
-// the handle state _alpm_db_find_fileconflicts reads
+/// the handle state _alpm_db_find_fileconflicts reads
 pub struct FileCheck<'a, P> {
-	// handle->root, ends in '/'
+	/// handle->root, ends in '/'
 	pub root: &'a [u8],
-	// handle->db_local's cache, files loaded
+	/// handle->db_local's cache, files loaded
 	pub local: &'a PkgHash<P>,
-	// handle->overwrite_files
+	/// handle->overwrite_files
 	pub overwrite: &'a [Vec<u8>],
 }
 
@@ -532,9 +532,9 @@ impl<P: Borrow<Package>> FileCheck<'_, P> {
 		}
 	}
 
-	// _alpm_db_find_fileconflicts: every target against the targets
-	// after it, then against the filesystem. progress before each target
-	// and once at 100 after the last, nothing for no targets
+	/// _alpm_db_find_fileconflicts: every target against the targets
+	/// after it, then against the filesystem. progress before each target
+	/// and once at 100 after the last, nothing for no targets
 	pub fn find_fileconflicts(
 		&self,
 		upgrade: &[&Package],

@@ -42,8 +42,8 @@ use crate::util::{
 
 use LogLevel::{Debug, Error, Warning};
 
-// alpm_remove_pkg: a local package joins the removals once, as a dup of
-// its fully loaded cache entry. other origins are WrongArgs
+/// alpm_remove_pkg: a local package joins the removals once, as a dup of
+/// its fully loaded cache entry. other origins are WrongArgs
 pub fn remove_pkg(h: &mut Handle, pkg: &Package) -> Result<(), Errno> {
 	if pkg.origin != Some(PkgFrom::LocalDb) {
 		return Err(Errno::WrongArgs);
@@ -675,13 +675,13 @@ fn remove_package_files(
 	Ok(err)
 }
 
-// _alpm_remove_single_package: a removal (no newpkg: events, scriptlets,
-// progress and the "removed" log line) or the old half of an upgrade.
-// files are removed unless DBONLY, then the local db entry and the cache
-// entry go. the C returns 0 and drops the files' result, which is the
-// Ok/Err here: Err(PkgCantRemove) is the pm_errno the C leaves on the
-// upgrade path (the removal path's alpm_pkg_has_scriptlet resets it).
-// no transaction is TransNull (the C dereferences NULL)
+/// _alpm_remove_single_package: a removal (no newpkg: events, scriptlets,
+/// progress and the "removed" log line) or the old half of an upgrade.
+/// files are removed unless DBONLY, then the local db entry and the cache
+/// entry go. the C returns 0 and drops the files' result, which is the
+/// Ok/Err here: Err(PkgCantRemove) is the pm_errno the C leaves on the
+/// upgrade path (the removal path's alpm_pkg_has_scriptlet resets it).
+/// no transaction is TransNull (the C dereferences NULL)
 pub fn remove_single_package(
 	h: &mut Handle,
 	oldpkg: &Package,

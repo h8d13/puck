@@ -1,53 +1,53 @@
-// glibc regcomp(3)/regexec(3) as pacman calls them: REG_EXTENDED and
-// REG_NOSUB, with REG_ICASE and REG_NEWLINE as flags; only match or
-// no-match is ever used (lib/libalpm/db.c, remove.c, src/pacman/files.c).
-// remove.c leaves REG_NOSUB out, which only matters for anchors inside
-// {m,n} copies right before a group (see Compiler)
-//
-// semantics are glibc's in the C.UTF-8 locale. pacman calls
-// setlocale(LC_ALL, ""), other locales differ (collation rules, single
-// byte charsets) and are not modelled. character classes and towupper
-// take std's Unicode properties instead of glibc's tables (Class::has).
-//
-// translation:
-// - parsing follows posix/regcomp.c token by token so every pattern gets
-//   the same error; regcomp folds REG_ERPAREN into Paren
-// - C.UTF-8 has no collation rules (nrules 0): ranges take single-byte
-//   end points and compare code points, [. .] and [= =] take one byte
-// - like glibc the matcher works on bytes: literals are byte sequences,
-//   '.' and bracket expressions take whole characters. invalid UTF-8
-//   bytes are characters of their own that only literals match
-// - REG_ICASE upper-cases pattern and text (towupper), so escaped
-//   letters keep their case and match nothing, [:lower:]/[:upper:] in a
-//   bracket become [:alpha:]
-// - without REG_ICASE, bracket expressions, \w \s and word anchors, glibc
-//   matches in single-byte mode (optimize_utf8): matches may start inside
-//   a character and '.' only checks UTF-8 structure
-// - anchors are epsilon moves gated by context, like glibc's node
-//   constraints: the "next" half is checked against what the following
-//   step consumes, a single byte for literals and ASCII sets; a step over
-//   '\n' gives the newline context even without REG_NEWLINE
-// - matching: Pike VM over byte positions, O(len * insts). patterns with
-//   back-references use a depth-first search over (pc, position,
-//   captures), memoized so it stays polynomial, capped at MAX_STATES
-//   after which is_match gives up with false. the search takes any
-//   capture assignment that works, glibc misses some when the referenced
-//   group is repeated
-// - instruction count is capped at MAX_INSTS (glibc goes on until malloc
-//   fails), larger {m,n} expansions give Space
+//! glibc regcomp(3)/regexec(3) as pacman calls them: REG_EXTENDED and
+//! REG_NOSUB, with REG_ICASE and REG_NEWLINE as flags; only match or
+//! no-match is ever used (lib/libalpm/db.c, remove.c, src/pacman/files.c).
+//! remove.c leaves REG_NOSUB out, which only matters for anchors inside
+//! {m,n} copies right before a group (see Compiler)
+//!
+//! semantics are glibc's in the C.UTF-8 locale. pacman calls
+//! setlocale(LC_ALL, ""), other locales differ (collation rules, single
+//! byte charsets) and are not modelled. character classes and towupper
+//! take std's Unicode properties instead of glibc's tables (Class::has).
+//!
+//! translation:
+//! - parsing follows posix/regcomp.c token by token so every pattern gets
+//!   the same error; regcomp folds REG_ERPAREN into Paren
+//! - C.UTF-8 has no collation rules (nrules 0): ranges take single-byte
+//!   end points and compare code points, [. .] and [= =] take one byte
+//! - like glibc the matcher works on bytes: literals are byte sequences,
+//!   '.' and bracket expressions take whole characters. invalid UTF-8
+//!   bytes are characters of their own that only literals match
+//! - REG_ICASE upper-cases pattern and text (towupper), so escaped
+//!   letters keep their case and match nothing, `[:lower:]`/`[:upper:]` in a
+//!   bracket become `[:alpha:]`
+//! - without REG_ICASE, bracket expressions, \w \s and word anchors, glibc
+//!   matches in single-byte mode (optimize_utf8): matches may start inside
+//!   a character and '.' only checks UTF-8 structure
+//! - anchors are epsilon moves gated by context, like glibc's node
+//!   constraints: the "next" half is checked against what the following
+//!   step consumes, a single byte for literals and ASCII sets; a step over
+//!   '\n' gives the newline context even without REG_NEWLINE
+//! - matching: Pike VM over byte positions, O(len * insts). patterns with
+//!   back-references use a depth-first search over (pc, position,
+//!   captures), memoized so it stays polynomial, capped at MAX_STATES
+//!   after which is_match gives up with false. the search takes any
+//!   capture assignment that works, glibc misses some when the referenced
+//!   group is repeated
+//! - instruction count is capped at MAX_INSTS (glibc goes on until malloc
+//!   fails), larger {m,n} expansions give Space
 use std::collections::HashSet;
 use std::ffi::c_int;
 
 use crate::util::until_nul;
 
-// regcomp cflags besides REG_EXTENDED, which is implied
+/// regcomp cflags besides REG_EXTENDED, which is implied
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Flags {
 	pub icase: bool,
 	pub newline: bool,
 }
 
-// regcomp errors glibc returns for REG_EXTENDED patterns
+/// regcomp errors glibc returns for REG_EXTENDED patterns
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
 	BadPattern,
@@ -66,7 +66,7 @@ pub enum Error {
 }
 
 impl Error {
-	// reg_errcode_t value in regex.h
+	/// reg_errcode_t value in regex.h
 	pub fn code(self) -> c_int {
 		match self {
 			Error::BadPattern => 2,
@@ -86,17 +86,18 @@ impl Error {
 	}
 }
 
+/// a compiled pattern, regex_t
 #[derive(Debug, Clone)]
 pub struct Regex {
 	insts: Vec<Inst>,
 	charsets: Vec<Charset>,
 	icase: bool,
 	newline: bool,
-	// glibc optimize_utf8 applied: matched as single bytes
+	/// glibc optimize_utf8 applied: matched as single bytes
 	sb: bool,
-	// groups used by back-references, bit k for \k+1
+	/// groups used by back-references, bit k for \k+1
 	refs: u16,
-	// bytes a match can start with, None when it may start anywhere
+	/// bytes a match can start with, None when it may start anywhere
 	fastmap: Option<Box<[bool; 256]>>,
 }
 
@@ -1394,7 +1395,7 @@ impl Compiler {
 }
 
 impl Regex {
-	// regcomp(&reg, pattern, REG_EXTENDED | flags), pattern as a C string
+	/// regcomp(&reg, pattern, REG_EXTENDED | flags), pattern as a C string
 	pub fn new(pattern: &[u8], flags: Flags) -> Result<Regex, Error> {
 		let s = Str::new(until_nul(pattern), flags.icase, true);
 		let mut p = Parser {
@@ -1436,7 +1437,7 @@ impl Regex {
 		Ok(re)
 	}
 
-	// regexec(&reg, text, 0, NULL, 0) == 0, text as a C string
+	/// regexec(&reg, text, 0, NULL, 0) == 0, text as a C string
 	pub fn is_match(&self, text: &[u8]) -> bool {
 		let s = Str::new(until_nul(text), self.icase, false);
 		let m = Matcher { re: self, s: &s };
