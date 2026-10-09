@@ -1,40 +1,17 @@
-## Harness
-
-`t/bNNNN-*.sh` are git `t/`-style scripts: each sources `bench-lib.sh`,
-declares ops and prints TAP. Ops run as argv[0] `pacman` from a trash dir.
-Pure bash; needs GNU `time`, plus `valgrind`, `perf` or `strace` for the
-modes that use them.
-
-- time mode (the default) compares C pacman and puck: median wall time,
-  peak RSS, and whether rc, stdout and stderr match
-- profiling modes look at puck alone (`--side=c` profiles the C reference
-  instead): one headline number per op and its top functions or syscalls
-  (`--top=N`)
+## Usage
 
 ```
-bench/run.sh                          # every script, time mode
-bench/t/b1000-query.sh -n 15          # one script, 15 runs per side
-bench/t/b1000-query.sh --run=2,5-6 -v # some ops, show commands and runs
-bench/t/b2000-sync.sh --valgrind      # memcheck: errors or definite leaks fail
-bench/run.sh --valgrind=callgrind     # Ir counts (deterministic), top functions
-bench/run.sh --valgrind=massif        # also dhat, cachegrind
-bench/run.sh --perf -n 10             # perf stat, user-space counters
-bench/run.sh --perf=record --top=10
+bench/run.sh                          # C vs puck: time, RSS, same output
+bench/t/b1000-query.sh -n 15 --run=2  # one script, one op, 15 runs
+bench/run.sh --valgrind               # memcheck (puck)
+bench/run.sh --valgrind=callgrind     # also massif, dhat, cachegrind
+bench/run.sh --perf                   # perf stat; --perf=record for hotspots
 bench/run.sh --strace
-prove bench/t/b*.sh :: --perf         # same, through prove
 ```
 
-`--help` on any script lists every option. Each tool's files stay in
-`results/<script>/<op>/<side>.*`, for example `callgrind_annotate
-results/b1000-query/2/puck.callgrind` or `perf report -i
-results/b1000-query/2/puck.perf.data`. `results/<script>.tsv` has one
-line per op and side. For symbols with source lines in perf and callgrind,
-build with `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`.
-
-Numbering: `b1xxx` local db reads, `b2xxx` sync db reads, `b3xxx` for
-root-changing ops (a script redefines `bench_reset SIDE` to restore its
-root before every run, untimed). `bench_expect_diff` marks an op whose
-output is known to differ (`not ok ... # TODO`), like `test_expect_failure`.
+Profiling modes run puck only (`--side=c` for C) and list the top 5
+functions or syscalls (`--top=N`). Raw files land in `results/`, `--help`
+lists the rest. Ops live in `t/`.
 
 ## Read-only ops
 
