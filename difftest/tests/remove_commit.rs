@@ -9,8 +9,10 @@
 // db trees. scriptlets run in the fc_ tests, re-run under fakechroot(1)
 // like run_chroot.rs.
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::Command;
@@ -21,7 +23,7 @@ use alpm_core::package::{Package, PkgFrom};
 use alpm_core::trans::{
 	TRANS_FLAG_DBONLY, TRANS_FLAG_NOSAVE, TRANS_FLAG_NOSCRIPTLET,
 };
-use alpm_core::util::{compute_md5sum, hash_sdbm};
+use alpm_core::util::{SCRIPTLET_SHELL, compute_md5sum, hash_sdbm};
 use difftest::{
 	LocalEntry, RmCase, RmOutcome, RmRec, Rng, TempRoot, c_remove_single,
 	force_remove, iters, rust_remove_single, snapshot, umask_lock,
@@ -275,11 +277,6 @@ fn gen_world(rng: &mut Rng, install: bool) -> World {
 fn write_root(root: &Path, w: &World) {
 	force_remove(root);
 	fs::create_dir(root).unwrap();
-	if w.install.is_some() {
-		fs::create_dir_all(root.join("bin")).unwrap();
-		fs::create_dir(root.join("tmp")).unwrap();
-		fs::copy("/bin/sh", root.join("bin/sh")).unwrap();
-	}
 	for (node, kind) in TREE.iter().zip(&w.nodes) {
 		let p = root.join(node);
 		match kind {
@@ -305,6 +302,18 @@ fn write_root(root: &Path, w: &World) {
 			}
 			Node::Proc => symlink("/proc", &p).unwrap(),
 			_ => {}
+		}
+	}
+	// the host's shell at the reference's SCRIPTLET_SHELL for the
+	// install scriptlet. a world whose tree holds a file or a dangling
+	// link where the shell's directory goes keeps it: both sides then
+	// fail to exec the same way
+	if w.install.is_some() {
+		fs::create_dir(root.join("tmp")).unwrap();
+		let sh = root.join(OsStr::from_bytes(&SCRIPTLET_SHELL[1..]));
+		if fs::create_dir_all(sh.parent().unwrap()).is_ok() {
+			fs::copy(OsStr::from_bytes(SCRIPTLET_SHELL), sh)
+				.unwrap();
 		}
 	}
 	for &d in &w.stray {

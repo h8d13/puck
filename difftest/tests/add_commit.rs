@@ -5,7 +5,10 @@
 // counts, contents, link targets, archive mtimes) and the local db
 // written (%INSTALLDATE% masked). run as the invoking user: entries owned
 // by that user chown as a no-op on both sides, others fail the same way.
-use alpm_core::util::compute_md5sum;
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+
+use alpm_core::util::{SCRIPTLET_SHELL, compute_md5sum};
 use difftest::{
 	AC_C_LOCALE, AC_SDE_EXACT, AcCase, AcFs, AcMeta, AcNode, AcOld, AcRec,
 	AcResult, Comp, Rng, TarNode, TempRoot, ac_owner, c_upgrade,
@@ -1809,14 +1812,15 @@ fn fc_scriptlets() {
 	if !in_fakechroot() {
 		return;
 	}
-	let sh = std::fs::read("/bin/sh").unwrap();
+	// the host's shell at the reference's SCRIPTLET_SHELL
+	let sh = std::fs::read(OsStr::from_bytes(SCRIPTLET_SHELL)).unwrap();
 	let mut c = case(vec![
 		file(".INSTALL", 0o644, INSTALL),
 		dir("usr/", 0o755),
 		file("usr/a", 0o644, b"a"),
 	]);
 	c.root = vec![
-		AcFs::File(b"bin/sh".to_vec(), 0o755, sh),
+		AcFs::File(SCRIPTLET_SHELL[1..].to_vec(), 0o755, sh),
 		AcFs::Dir(b"tmp".to_vec(), 0o1777),
 	];
 	let r = compare("ac-fc-install", &c);
