@@ -1,0 +1,14 @@
+default_stages: ['pre-commit']
+
+repos:
+  - repo: local
+    hooks:
+      - id: fmt
+        name: format
+        # no --all: it also formats path deps (vendor/alpm)
+        entry: cargo fmt
+        language: system
+        types: [rust]
+        pass_filenames: false
+        fail_fast: true
+        require_serial: true
