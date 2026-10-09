@@ -22,8 +22,8 @@ license = "GPL-2.0-or-later"
 # what they already implement
 [workspace.dependencies]
 alpm-compress = { path = "vendor/alpm/alpm-compress" }
-alpm-parsers = { path = "vendor/alpm/alpm-parsers" }
-alpm-types = { path = "vendor/alpm/alpm-types" }
+# serde off: the port only uses its digests
+alpm-types = { path = "vendor/alpm/alpm-types", default-features = false }
 # crates ALPM itself depends on, same versions
 base64 = "0.23.0"
 bzip2 = "0.6.0"
@@ -51,3 +51,11 @@ twox-hash = { version = "2", default-features = false, features = ["xxhash32"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# the C returns error codes, so does the port: no aborts, no stubs
+[workspace.lints.clippy]
+dbg_macro = "deny"
+enum_variant_names = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
