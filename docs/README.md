@@ -11,10 +11,12 @@ contributors directly benefits this project.
 - Speed, memory usage, syscall counts and overall correctness are attractive factors
 when it comes to the very tool that orchestrates your operating system and maintains it.
 
-- This project builds upon [ALPM](https://alpm.archlinux.page/), whose development was
+- This project references [ALPM](https://alpm.archlinux.page/) as a spec reference and
+reuses the same dependency crates ALPM does (digests, codecs); it owns its readers rather
+than linking the ALPM crates. ALPM's development was
 [officially announced](https://lists.archlinux.org/archives/list/arch-dev-public@lists.archlinux.org/thread/MZLH43574GGP7QQ7RKAAIRFT5LJPCEB4/)
 as funded by [the Sovereign Tech Agency](https://www.sovereign.tech/)'s Sovereign Tech Fund:
-financing for four developers to work on the ALPM project part-time over the course of 15 months.
+four developers on the ALPM project part-time over 15 months.
 
 - ALPM is explicitly [not a package manager](https://alpm.archlinux.page/faq.html). It provides
 spec-backed parsers and writers for the file formats, but not the transaction engine on top:
@@ -39,15 +41,12 @@ everything built in, `puck` keeps working when the libraries around it don't.
 - Memory safety where it matters most: a root-privileged process that downloads, decompresses
 and parses archives and metadata from the network.
 
-- Strict typing at the boundary. Malformed `desc`, `.PKGINFO`, `.MTREE` or version strings are
-rejected at parse time by `alpm-types`, instead of being carried as loose `char *` through
-the transaction.
+- Correctness is measured, not asserted. Every ported function is differential-tested against
+`pacman` on the same root, database and packages, and the benches compare time, memory and
+syscall counts on real operations.
 
 - `libseccomp` sandboxing of the riskier stages (download, decompression, parsing) shrinks
 what a malicious or malformed package can reach.
-
-- License-compatible stack: the ALPM and VOA crates are `MIT OR Apache-2.0`, so they can be
-used by GPL-licensed `puck`, which follows `pacman`'s license as a port.
 
 ---
 
