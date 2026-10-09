@@ -11,6 +11,7 @@ bzip2.workspace = true
 flate2.workspace = true
 landlock.workspace = true
 liblzma.workspace = true
+memchr.workspace = true
 libseccomp.workspace = true
 lz4_flex.workspace = true
 pacman-common = { path = "../pacman-common" }

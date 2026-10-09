@@ -1398,10 +1398,8 @@ impl<'e, 'a> ArchiveFgets<'e, 'a> {
 				self.off = 0;
 			}
 			let rest = &self.block[self.off..];
-			let eol = rest
-				.iter()
-				.position(|&c| c == b'\n')
-				.or_else(|| rest.iter().position(|&c| c == 0));
+			let eol = memchr::memchr(b'\n', rest)
+				.or_else(|| memchr::memchr(0, rest));
 			let new = eol.unwrap_or(rest.len());
 			let needed = self.line.len() + new + 1;
 			if self.started && needed > MAX_LINE_SIZE {

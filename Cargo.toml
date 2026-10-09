@@ -30,6 +30,9 @@ bzip2 = "0.6.0"
 # zlib-rs: zlib's inflate (libarchive links zlib), not miniz_oxide
 flate2 = { version = "1", features = ["zlib-rs"] }
 liblzma = "0.4.1"
+# through alpm-types (aho-corasick, bstr): glibc's SIMD memchr for the
+# readers' line and nul scans
+memchr = "2.8"
 tar = "0.4.44"
 time = "0.3.47"
 unicode-width = "0.2"

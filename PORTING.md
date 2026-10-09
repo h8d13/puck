@@ -271,6 +271,7 @@ makes them; METHODOLOGY.md has the rules.
 | rustix 1.1 (`fs`, `process`, `termios`, `net`, `event`; `use-libc`) | util, diskspace, lock, sandbox, frontend util, `filter::program` | statvfs, access, umask, getuid/geteuid, fchdir, tty width, tcflush, SCM_RIGHTS to the exec helper; fsetxattr/lsetxattr, utimensat with ns (`fs`); non-blocking pipes and poll for the filter programs (`event`) | handle unit, process unit, xattr unit, filters unit |
 | landlock 0.4, libseccomp 0.4 | sandbox | `alpm_sandbox_setup_child` | sandbox unit |
 | signal-hook 0.4 (+ signal-hook-registry) | pacman-cli sighandler | SIGINT/SIGHUP soft interrupt (no safe handler API in std/rustix, none in ALPM; tokio's signals use the same registry) | signals unit |
+| memchr 2.8 | pacman-common `until_nul`/`safe_fgets_into`, util `ArchiveFgets` | the nul and '\n' scans of every reader, SIMD like glibc's memchr/strlen/fgets (core's SWAR memchr cost -Dk 9% more instructions than C pacman); already linked through alpm-types (aho-corasick, bstr) | synctime unit |
 | md-5, sha2, base64, time, unicode-width | through alpm-types / directly (time: dload, log, frontend dates, difftest) | precedent crates of ALPM | start |
 
 Removed, with their patches: alpm-db (0201-0207), alpm-repo-db
