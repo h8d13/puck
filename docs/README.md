@@ -34,7 +34,7 @@ hooks and cache layout. Nothing to migrate, and can switch back to `pacman` at a
 replaces `gpgme` and the `pacman-key` init/populate dance, which is a long-standing source of
 "invalid or corrupted package (PGP signature)" breakage.
 
-- An ideal `puck` could, over-time link more internally and become ideally, fully static.
+- Over time `puck` could link more internally and approach a fully static build.
 
 - Memory safety where it matters most: a root-privileged process that downloads, decompresses
 and parses archives and metadata from the network.
