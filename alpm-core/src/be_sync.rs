@@ -432,7 +432,9 @@ impl<'e, 'a> Lines<'e, 'a> {
 		let Some(l) = self.f.next()? else {
 			return Ok(false);
 		};
-		self.line = until_nul(l).to_vec();
+		// one buffer for every line, like the C's b->line
+		self.line.clear();
+		self.line.extend_from_slice(until_nul(l));
 		Ok(true)
 	}
 
