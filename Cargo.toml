@@ -8,6 +8,7 @@ members = [
 	"vercmp",
 	"difftest",
 	"examples/puck-mini",
+	"alpm-capi",
 ]
 # submodules: C reference and ALPM (its own workspace)
 exclude = ["pacman", "alpm"]
