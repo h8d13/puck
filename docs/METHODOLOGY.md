@@ -69,6 +69,7 @@ follows the wider ALPM workspace, then parity:
 | `statvfs` (`diskspace.c`), `umask` | `rustix` safe API | in ALPM's lockfile |
 | getuid/geteuid, fchdir, tty width and tcflush, fd passing (`SCM_RIGHTS`) | `rustix` `process`, `termios`, `net` | same crate; `use-libc` backend so ids go through libc like the C's (fakeroot's LD_PRELOAD fakes libc, not raw syscalls) |
 | chroot exec (scriptlets, hooks, ldconfig) | helper process (the binary re-executed, `--alpm-chroot-exec`): `std::os::unix::fs::chroot`, `set_current_dir`, rustix `umask`, signal-hook handlers for `_alpm_reset_signals`, `CommandExt::arg0` + `exec` | no `pre_exec` (unsafe); the C child's steps and texts in its order, argv[0] the caller's; std's chroot is libc's, so fakechroot wraps it like the C's |
+| the helper's program (`sandbox::helper_program`) | `/proc/self/exe` while `/proc` is mounted, else argv[0] resolved like execvp, decided at startup | the link is the running image like a fork's child; without `/proc` (a chroot entered by hand) the file's path is the safe way left: fexecve/`execveat` on an O_PATH fd has no safe std or rustix API (rustix's is `unsafe`, in `runtime`) |
 | run downloads and XferCommand as DownloadUser | spawned helper process (the binary re-executed), `CommandExt::uid`/`gid` | safe std, instead of the C's fork + setuid |
 | landlock (`sandbox_fs.c`) | `landlock` crate | the Landlock maintainers' binding |
 | seccomp (`sandbox_syscalls.c`) | `libseccomp` crate | binding to the same C library pacman links |
