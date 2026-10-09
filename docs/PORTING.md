@@ -333,26 +333,15 @@ A change to a public name is a `ref` commit naming the unit that made it.
 
 Gate: the pacman binary built only on the public API (done: pacman-cli,
 testpkg, vercmp build with alpm-core's default features, difftest with
-`internals`); `cargo doc` without private items (done); a small example
-front end (query, search, sync transaction) on the public API (done:
-`examples/puck-mini`). State: done.
+`internals`); `cargo doc` without private items (done). State: done.
 
-`examples/puck-mini` is a workspace member depending on `alpm-core` with
-default features only (never `internals`, `cargo tree -p puck-mini -e
-features -i alpm-core` shows the `default` feature alone). Three
-subcommands drive the public surface: `query` lists installed packages
-through `Handle::dbs_mut` + `Db::pkgcache` (`-Q`), `search` runs
-`Db::search` over the sync dbs (`-Ss`), and `install` runs a one-package
-sync transaction (`register_syncdb`/`add_server`, `trans_init`,
-`Db::dup_pkg`, `add_pkg`, `trans_prepare`, `trans_commit`,
-`trans_release`, `-S`), with a stderr `Callbacks` impl that leaves
-questions at their default answer. `tests/frontend.rs` builds a fixture
-root in `std::env::temp_dir` (empty local db, a sync `.db`, a cached
-`.pkg.tar.gz`) and runs all three; the install actually extracts and
-registers the package. No public-surface addition was needed: the
-api-surface unit's root re-exports (the pub `Package`/`Trans` fields,
-`DbsMut`, the `INFRQ_*`/flag constants) already cover a real front end,
-which is the M4 finding.
+pacman-cli is itself the example front end: the whole puck binary drives
+the public surface (`Handle`, `Db`, `Package`, the `trans_*` calls, the
+`Callbacks` trait) on default features, never `internals`, exercised by
+every difftest. No public-surface addition was needed — the api-surface
+unit's root re-exports (the pub `Package`/`Trans` fields, `DbsMut`, the
+`INFRQ_*`/flag constants) already cover a real front end, which is the M4
+finding.
 
 ### Handover: remaining for a pacman replacement
 
@@ -364,26 +353,27 @@ come along.
 
 As of 2026-10-09: milestones 1-3b are met and milestone 4 (the public
 Rust API) is met, with the pacman binary, testpkg and vercmp built only
-on alpm-core's public surface and `examples/puck-mini` proving that
-surface is enough for an independent Rust front end (query, search, sync
-install) without reaching into `internals`. Closed since: install names
-and the PKGBUILD (ships upstream's
-scripts, provides/conflicts pacman), `dload` User-Agent, connection reuse,
-curl's retry/proxy/low-speed and `-U <url>` at binary level, the helper
-re-exec without `/proc`, scriptlet-shell and ldconfig from config.h, the
-keyserver import success path, every `pacman.conf` directive compared at
-the binary level, and the four open follow-ups (the C double free is
-`UPSTREAM.md` "a skipped file target freed twice"). A hostile-mirror
-robustness harness was added (`difftest::IronicEvilMirrorPkger`): both
-binaries reject every malformed input safely, no divergence. Still
-blocking a full replacement: the libalpm C ABI, gettext translations,
-locale collation and other charsets, the risky twin-root steps, WKD
-import success, and aarch64.
+on alpm-core's public surface, pacman-cli itself the real front end on
+that surface (default features, never `internals`). puck installs as `puck`/
+`puck-conf` alongside pacman (`depends=('pacman')`), reusing pacman's
+config, dbs, keyring and hooks; it does not claim to replace the package.
+Closed since: `dload` User-Agent, connection reuse, curl's
+retry/proxy/low-speed and `-U <url>` at binary level, the helper re-exec
+without `/proc`, scriptlet-shell and ldconfig from config.h, the keyserver
+import success path, every `pacman.conf` directive compared at the binary
+level, and the four open follow-ups (the C double free is `UPSTREAM.md`
+"a skipped file target freed twice"). A hostile-mirror robustness harness
+was added (`difftest::IronicEvilMirrorPkger`): both binaries reject every
+malformed input safely, no divergence. A compatible `libalpm.so.16` for
+the existing C/Python/Go ecosystem (pyalpm, yay, paru) is in progress as a
+foundation. Open only if the project later chooses to replace the package
+outright rather than sit beside it: that C ABI, gettext translations,
+locale collation and other charsets, and aarch64 verification.
 
 | Item | Why it blocks | Start from | State |
 |---|---|---|---|
-| libalpm C ABI (`libalpm.so.16`) | pamac, pyalpm, yay, paru (alpm.rs) and pacman-contrib link libalpm; without it pacman stays installed beside puck. Builds on this milestone's public API | "Later" row; `c_null_contract`, `_alpm_strtoofft` notes | todo |
-| install names `pacman`, `pacman-conf` | makepkg, pacman-key, pacman-db-upgrade, completions and paccache call them by name | PKGBUILD `package()`; `scripts/pacman-conf-dropin.sh` | done: the crate keeps `puck`/`puck-conf` (difftests, scripts), the package installs them as `pacman`/`pacman-conf` with `vercmp`/`testpkg`, `provides=('pacman=7.1.0')`, `conflicts=('pacman')`. The bash tools (makepkg, libmakepkg, pacman-key, repo-add, pacman-db-upgrade, makepkg-template), completions, man pages, `/etc` configs and `pacman-scripts.mo` ship built from `pacman/` by meson (Arch's options, doxygen off); the C binaries, libalpm and its catalogs are dropped from the install. `SCRIPTLET_SHELL` and `LDCONFIG` (`alpm-core::util`) come from the config.h of the C build `PACMAN_BUILD` names (`alpm-core/build.rs`; meson's `/bin/sh`, `/sbin/ldconfig` without one): the PKGBUILD passes Arch's `/usr/bin/bash`, `/usr/bin/ldconfig` to meson and builds the port against that build, difftest compares the port with the reference it was configured next to (run_chroot's fixture copies the configured shell to its path in the root, as pmtest.py does). Open: Arch's own `pacman.conf`/`makepkg.conf`, `alpm.sysusers` (DownloadUser) and the gnupg socket units are packaging, not upstream, and are not shipped |
+| libalpm C ABI (`libalpm.so.16`) | pamac, pyalpm, yay, paru (alpm.rs) and pacman-contrib link libalpm's C ABI; a compatible `libalpm.so.16` lets them run on puck's engine. Not about removing pacman (puck installs beside it); a capability for the ecosystem and a prerequisite only if the package is ever replaced outright. Thin unsafe shim on the public Rust API | "Later" row; `c_null_contract`, `_alpm_strtoofft` notes; `consumers/` submodules | in progress (foundation + read-path subset, validated by pyalpm/alpm.rs/go-alpm) |
+| install names `pacman`, `pacman-conf` | makepkg, pacman-key, pacman-db-upgrade, completions and paccache call them by name | PKGBUILD `package()` | not pursued: puck installs as `puck`/`puck-conf` alongside pacman (`depends=('pacman')`), reusing pacman's config, dbs, keyring and hooks; no `provides`/`conflicts`, the binaries keep their own names, so nothing is stripped or renamed. Installing as `pacman`/`pacman-conf` with `provides`/`conflicts` and shipping upstream's scripts would be the shape of a full package replacement, which puck does not claim; the scriptlet-shell/ldconfig config.h mechanism (`alpm-core/build.rs`) stays for that eventual build |
 | PKGBUILD | `check()`, source, deps | PKGBUILD | done: `check()` runs `check-separation.sh`, `check-externs.py`, the port crates' unit tests, upstream's vercmptest and script tests and the pacman-conf drop-in comparison (difftest, pactest and twin-root need the C objects or a chroot: left to the gates); `gnupg` a hard dependency (SigLevel defaults to Required); the pacman/ submodule is a second git source checked out in `prepare()`. Open: source is private ssh until the repo opens (the https line is next to it); x86_64 only (aarch64 row) |
 | gettext translations | non-English users get the English msgids | "Later" row | todo |
 | locale collation and charsets | `strcoll` for Include glob order and regex ranges/`[=e=]`/`[.x.]`; charsets other than UTF-8/ASCII; glibc wcwidth table | "Later" row, `regex` note, divergences table | todo |
@@ -642,8 +632,7 @@ repo-add/repo-remove, pacman-key, pacman-db-upgrade, the wrapper (bash)
 and makepkg-template (Perl). They call `pacman` and `pacman-conf` as
 binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
 `pacman-key --init`/`--populate` and `repo-add` against the Rust binaries.
-The PKGBUILD ships them built by meson from `pacman/`, next to the port
-installed as `pacman`/`pacman-conf` (handover row "install names").
+puck installs beside pacman and uses these upstream tools as they are (they call `pacman`/`pacman-conf`, which on an alongside install are pacman's own).
 
 ## Configuration matrix
 
