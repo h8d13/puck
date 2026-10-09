@@ -15,8 +15,8 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustix::fs::{
-	AtFlags, CWD, Mode, OFlags, Timespec, Timestamps, XattrFlags, chmodat,
-	fchmod, fsetxattr, futimens, lsetxattr, mknodat, openat, utimensat,
+	AtFlags, CWD, Mode, OFlags, Timespec, Timestamps, XattrFlags,
+	fsetxattr, futimens, lsetxattr, mknodat, openat, utimensat,
 };
 
 use crate::backup;
@@ -927,15 +927,17 @@ impl Writer<'_> {
 				),
 			};
 		}
+		// fchmod/chmod through std, so glibc's: rustix makes these raw
+		// syscalls, which LD_PRELOAD fakeroot (pactest, rootless image
+		// builds) never sees, and the faked modes of every directory
+		// would stay at mkdir's. libarchive calls glibc's too
 		if self.deferred & TODO_MODE != 0 {
-			let _ = match &fd {
-				Some(fd) => fchmod(fd, mode),
-				None => chmodat(
-					CWD,
-					os(&path),
-					mode,
-					AtFlags::empty(),
-				),
+			let perm = fs::Permissions::from_mode(mode.bits());
+			let _ = match fd {
+				Some(fd) => {
+					fs::File::from(fd).set_permissions(perm)
+				}
+				None => fs::set_permissions(os(&path), perm),
 			};
 		}
 	}
