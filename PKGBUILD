@@ -148,6 +148,8 @@ package() {
   rm "$pkgdir"/usr/include/{alpm,alpm_list}.h
   rmdir "$pkgdir"/usr/include
   rm "$pkgdir"/usr/share/locale/*/LC_MESSAGES/{pacman,libalpm}.mo
+  # languages with no pacman-scripts.mo leave empty directories behind
+  find "$pkgdir/usr/share/locale" -depth -type d -empty -delete
 
   # the port under pacman's names: makepkg, pacman-key, pacman-db-upgrade
   # and the completions call pacman and pacman-conf by name
