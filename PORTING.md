@@ -140,8 +140,8 @@ Twin roots, C vs Rust, real packages and mirrors in a user namespace
 do not: real package sets with hooks, scriptlets, capabilities and backup
 files, real HTTPS mirrors, a real keyring, landlock and DownloadUser.
 
-Gate: every step equal on `scripts/twin-root.sh`. State: harness done,
-gate not met (diffs below, all owned or reported).
+Gate: every step equal on `scripts/twin-root.sh`. State: met (master
+8c8d768, every step equal).
 
 ```
 cargo build --release -p pacman-cli
@@ -157,7 +157,7 @@ only CacheDir). Steps, the same argv and env on both sides
 (`LC_ALL=C`, `TZ=Europe/Berlin`); a diff carried from the step before
 is counted, not repeated:
 
-| Step | argv | Result (master 8ce1038) |
+| Step | argv | First run (master 8ce1038) |
 |---|---|---|
 | sy | `-Sy` | log offset |
 | download | `-Sw -dd which less iana-etc`, empty cache only | no new diff |
@@ -177,23 +177,10 @@ is counted, not repeated:
 | sc | `-Sc`, answers y y n n y | error text for download dirs |
 | fy / f / fl | `-Fy`, `-F ping`, `-Fl iputils` | no new diff |
 
-Diffs, latest run:
-- pacman.log stamps: Rust UTC (+0000), C local (+0200); output unit.
-  Normalised, the logs are equal.
-- `security.capability` missing on usr/bin/newuidmap, newgidmap (shadow):
-  fixed by the xattr unit (pax records and xattrs on extraction).
-- optdepends after install/upgrade lack ` [installed]`/` [pending]`:
-  `pacman-cli/src/callback.rs` runs with `Lookup for ()`, whose
-  `installed()` (and `db_name()`, the provider list's repository
-  headers) is still the pre-trans.c stub. Repro: `-S gzip` on a root
-  with grep, C prints `grep: zegrep/... [installed]`. Needs the local
-  db and the transaction's add list reachable from the callbacks
-  (emitted in add.rs/remove.rs); open.
-- `-Qi`/`-Qii` Build Date in UTC, C in local time (`package.rs`
-  `format_date`): the log stamps' cause, no local zone; output unit.
-- `-Sc` on a leftover `download-XXXXXX` dir: C logs libarchive's
-  "Error reading fd 8", the port "Is a directory" (libarchive error
-  texts are the port's, `be_package.rs` `open_archive`).
+The first run's diffs, all fixed since: log stamps and Build Date in
+UTC (tzfile, setlocale/strftime), newuidmap/newgidmap capabilities (pax
+xattrs), optdepend markers (`PackageOp::local`/`pending`), the `-Sc`
+download-dir error text.
 
 Harness choices: every pacman-visible path is under a tmpfs on /mnt
 private to the session (DownloadUser alpm cannot traverse the 0700
@@ -201,6 +188,33 @@ home); a fixed etc/machine-id (systemd's scriptlet keeps it); content of
 the java keystore and ldconfig's aux-cache not compared (dates, inode
 numbers); `download-XXXXXX` names canonicalised. Runtime ~2-3 min warm
 (network bound), ~620 MiB per root.
+
+### Performance
+
+Not a gate: puck should not be slower or bigger than the C on common
+ops. `bench.py` compares read-only ops on the host's dbs, `bench_trans.py`
+root-changing ops under fakechroot + fakeroot (time, CPU, peak RSS,
+strace call counts, output and the resulting tree under faked ids):
+
+```
+./bench.py [-n RUNS] [-- OP ...]           # C /usr/bin/pacman vs puck
+./bench_trans.py [-n RUNS] [-l] [OP ...]   # -l lists the ops, -k keeps
+```
+
+Master 8c8d768, puck/C, every output and tree equal:
+
+| ops | time | peak RSS |
+|---|---|---|
+| `-Q`, `-Qi`, `-Qs`, `-Qo`, `-T` | 0.46-0.75x | 0.39-0.41x |
+| `-Qk`, `-Qkk`, `-Dk`, `-Qu` | 0.81-0.99x | 0.37-0.90x |
+| `-Ss`, `-Si`, `-Sl` | 0.80-0.93x | 0.89-0.90x |
+| `-S` install (1, 54 pkgs), `-U`, reinstall | 0.77-0.85x | 0.77-0.90x |
+| `--dbonly`, `-R`, `-Rns`, `-D`, `-Sy`, `-Sw`, `-Sc` | 0.92-1.11x | 0.31-0.90x |
+
+`-Si` shows DIFF against the host's pacman 7.1.0, which still prints
+"MD5 Sum" in Validated By; the reference build does not. Under fakeroot
+each std `metadata()` is two syscalls (fakeroot's statx wrapper), so
+`-Rns` counts more stat calls than the C; natively one statx.
 
 ### Later (low priority)
 
