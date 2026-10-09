@@ -143,6 +143,7 @@ impl RustHookHandle {
 	// root and dbpath must exist, logfile is created on first use
 	pub fn new(root: &[u8], dbpath: &[u8], logfile: PathBuf) -> Self {
 		let mut h = Handle::initialize(root, dbpath).unwrap();
+		h.set_chroot_helper(crate::test_chroot_helper());
 		let recs = Rc::new(RefCell::new(Vec::new()));
 		h.set_callbacks(Box::new(HookRecorder(recs.clone())));
 		h.set_logfile(logfile.as_os_str().as_encoded_bytes());

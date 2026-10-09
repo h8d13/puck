@@ -51,9 +51,12 @@ use crate::sandbox_fs::restrict_writes_to;
 use crate::sandbox_syscalls::syscalls_filter;
 use crate::util::{PATH_MAX, getuid, until_nul};
 
-// argv[1] of the helper: a download, or a command to exec (EXEC_ARG)
+// argv[1] of the helper: a download, a command to exec as the sandbox
+// user (EXEC_ARG), or the child of util::run_chroot (CHROOT_ARG ROOT CMD
+// ARGV...)
 pub const HELPER_ARG: &str = "--alpm-sandbox-helper";
 pub const EXEC_ARG: &str = "--alpm-sandbox-exec";
+pub const CHROOT_ARG: &str = "--alpm-chroot-exec";
 
 // _alpm_sandbox_callback_t
 pub const CB_LOG: u32 = 0;
@@ -605,6 +608,7 @@ pub fn helper_entry() -> Option<i32> {
 	match arg.to_str()? {
 		HELPER_ARG => Some(helper_main()),
 		EXEC_ARG => Some(exec_main()),
+		CHROOT_ARG => Some(crate::util::chroot_main()),
 		_ => None,
 	}
 }

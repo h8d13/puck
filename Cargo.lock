@@ -50,6 +50,7 @@ dependencies = [
  "pacman-common",
  "reqwest",
  "rustix",
+ "signal-hook",
  "tar",
  "time",
  "twox-hash",

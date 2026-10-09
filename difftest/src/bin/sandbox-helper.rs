@@ -1,5 +1,6 @@
-// the sandbox download helper, entered the way pacman's main will: the
-// tests point HelperSandbox::program here instead of /proc/self/exe.
+// the sandbox download helper and run_chroot's child, entered the way
+// pacman's main does: the tests point HelperSandbox::program and
+// Handle::set_chroot_helper here instead of /proc/self/exe.
 // a watchdog ends a helper still running after 60 s (exit 124, like
 // timeout(1)); an exec'd command replaces it and brings its own
 fn main() {

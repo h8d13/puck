@@ -38,6 +38,11 @@ fn under_fakechroot() {
 		.arg(exe)
 		.args(["fc_", "--nocapture", "--test-threads=1"])
 		.env(CHILD, "1")
+		// chroot_denied's C chdir(root) moves this process's cwd for
+		// a moment, into a root removed after
+		.current_dir(env!("CARGO_MANIFEST_DIR"))
+		// the host's /proc inside the chroot (fc_fixed's signals)
+		.env("FAKECHROOT_EXCLUDE_PATH", "/proc")
 		.output()
 		.expect("fakechroot not found");
 	print!("{}", String::from_utf8_lossy(&out.stdout));
@@ -245,7 +250,7 @@ fn fc_fixed() {
 			"printf '%02047d\\n' 0",
 			vec![line(&format!("{long}\n")), line("0\n")],
 		),
-		// the child's execv failure, from chroot(8) on the Rust side
+		// the child's execv failure
 		(
 			"/nonexistent",
 			"",
@@ -293,6 +298,60 @@ fn fc_fixed() {
 	rustix::process::umask(old);
 	assert!(cr.1.contains(&line("0022\n")), "{}", show(&cr));
 	assert_eq!(cr, r.take(ok, 1), "umask");
+	// argv[0] is the caller's, not cmd (ldconfig prefixes its messages
+	// with it): sh reading its script from stdin shows it as $0. "sh"
+	// is relative to the chroot's "/"
+	let echo0 = Some(&b"echo \"$0\"\n"[..]);
+	for (cmd, arg0) in
+		[("/bin/sh", "x"), ("bin/sh", "ldconfig"), ("sh", "sh")]
+	{
+		fix.reset();
+		fs::copy("/bin/sh", fix.rootdir().join("sh")).unwrap();
+		let argv = vec![arg0.as_bytes().to_vec()];
+		let cr = c.run_chroot(Some(cmd.as_bytes()), &argv, echo0);
+		let ok = run_chroot(
+			&mut r.h,
+			Some(cmd.as_bytes()),
+			&[arg0.as_bytes()],
+			echo0,
+		);
+		let want = line(&format!("{arg0}\n"));
+		assert!(cr.1.contains(&want), "{cmd} {arg0}\n{}", show(&cr));
+		assert_eq!(cr, r.take(ok, 1), "{cmd} argv[0] {arg0}");
+	}
+	// _alpm_reset_signals: dispositions the process ignores are back
+	// to default in the child (SIGHUP 1, SIGUSR1 10; not SIGCHLD, the
+	// C's waitpid would find no child). the shell's own SigIgn (bash
+	// ignores SIGQUIT) is the run without them
+	let status = "while read -r k v; do \
+		[ \"$k\" = SigIgn: ] && echo \"$v\"; done < /proc/self/status";
+	let argv = vec![b"/bin/sh".to_vec(), b"-c".to_vec(), status.into()];
+	let args: Vec<&[u8]> = argv.iter().map(|a| &a[..]).collect();
+	fix.reset();
+	let plain = c.run_chroot(Some(b"/bin/sh"), &argv, None);
+	let sigs = [1, 10];
+	for sig in sigs {
+		difftest::c_ignore_signal(sig, true);
+	}
+	let cr = c.run_chroot(Some(b"/bin/sh"), &argv, None);
+	let ok = run_chroot(&mut r.h, Some(b"/bin/sh"), &args, None);
+	for sig in sigs {
+		difftest::c_ignore_signal(sig, false);
+	}
+	assert_eq!(cr, plain, "C signals\n{}", show(&cr));
+	assert_eq!(cr, r.take(ok, 1), "signals");
+	// a file of no known format: execv fails, no /bin/sh fallback
+	// (execvp's)
+	fix.reset();
+	let f = fix.rootdir().join("noformat");
+	fs::write(&f, "echo ran\n").unwrap();
+	fs::set_permissions(&f, fs::Permissions::from_mode(0o755)).unwrap();
+	let cr = c.run_chroot(Some(b"/noformat"), &[b"/noformat".into()], None);
+	let ok =
+		run_chroot(&mut r.h, Some(b"/noformat"), &[b"/noformat"], None);
+	let enoexec = line("call to execv failed (Exec format error)\n");
+	assert!(cr.1.contains(&enoexec), "{}", show(&cr));
+	assert_eq!(cr, r.take(ok, 1), "ENOEXEC");
 	let term = Log(
 		1,
 		b"command terminated by signal 15: Terminated\n".to_vec(),
@@ -307,6 +366,57 @@ fn fc_fixed() {
 		.run_chroot(Some(b"/bin/sh"), &argv, None)
 		.1
 		.contains(&term));
+}
+
+// outside fakechroot the C child's chroot() fails for a user without
+// CAP_SYS_CHROOT (as root it runs): its text, from the helper here
+#[test]
+fn chroot_denied() {
+	if in_child() {
+		return;
+	}
+	let fix = Fix::new("chroot-denied");
+	let (mut c, mut r) = (fix.c(), fix.r());
+	let argv =
+		vec![b"/bin/sh".to_vec(), b"-c".to_vec(), b"echo in".to_vec()];
+	let args: Vec<&[u8]> = argv.iter().map(|a| &a[..]).collect();
+	let cr = c.run_chroot(Some(b"/bin/sh"), &argv, None);
+	let ok = run_chroot(&mut r.h, Some(b"/bin/sh"), &args, None);
+	if rustix::process::geteuid().as_raw() != 0 {
+		let denied = difftest::HookRec::Scriptlet(
+			b"could not change the root directory \
+			(Operation not permitted)\n"
+				.to_vec(),
+		);
+		assert!(cr.1.contains(&denied), "{}", show(&cr));
+	}
+	assert_eq!(cr, r.take(ok, 1));
+}
+
+// the helper on a root run_chroot's own chdir would have refused: the
+// C child's chroot() failure text, exit 1 (sandbox-helper's watchdog
+// bounds it)
+#[test]
+fn chroot_helper_no_root() {
+	if in_child() {
+		return;
+	}
+	let out = Command::new(difftest::test_chroot_helper())
+		.args([
+			alpm_core::sandbox::CHROOT_ARG,
+			"/nonexistent-root/",
+			"/bin/sh",
+			"sh",
+		])
+		.output()
+		.unwrap();
+	assert_eq!(out.status.code(), Some(1));
+	assert_eq!(out.stdout, b"");
+	assert_eq!(
+		String::from_utf8_lossy(&out.stderr),
+		"could not change the root directory \
+		(No such file or directory)\n"
+	);
 }
 
 const SNIPPETS: [&str; 18] = [

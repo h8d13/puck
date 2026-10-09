@@ -66,7 +66,7 @@ follows the wider ALPM workspace, then parity:
 | OpenPGP verification and keys (`signing.c`) | drive `gpg` over `--status-fd` like gpgme does | same engine, keyring (`/etc/pacman.d/gnupg`) and trust model as pacman; ALPM's VOA/rpgp stack cannot read gnupg keyboxes or trustdb |
 | `statvfs` (`diskspace.c`), `umask` | `rustix` safe API | in ALPM's lockfile |
 | getuid/geteuid, fchdir, tty width and tcflush, fd passing (`SCM_RIGHTS`) | `rustix` `process`, `termios`, `net` | same crate; `use-libc` backend so ids go through libc like the C's (fakeroot's LD_PRELOAD fakes libc, not raw syscalls) |
-| chroot exec (scriptlets, hooks, ldconfig) | spawn `chroot(8)` via `std::process::Command` | no `pre_exec` (unsafe); works under fakechroot like the C's `chroot()` |
+| chroot exec (scriptlets, hooks, ldconfig) | helper process (the binary re-executed, `--alpm-chroot-exec`): `std::os::unix::fs::chroot`, `set_current_dir`, rustix `umask`, signal-hook handlers for `_alpm_reset_signals`, `CommandExt::arg0` + `exec` | no `pre_exec` (unsafe); the C child's steps and texts in its order, argv[0] the caller's; std's chroot is libc's, so fakechroot wraps it like the C's |
 | run downloads and XferCommand as DownloadUser | spawned helper process (the binary re-executed), `CommandExt::uid`/`gid` | safe std, instead of the C's fork + setuid |
 | landlock (`sandbox_fs.c`) | `landlock` crate | the Landlock maintainers' binding |
 | seccomp (`sandbox_syscalls.c`) | `libseccomp` crate | binding to the same C library pacman links |

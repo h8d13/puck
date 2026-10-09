@@ -367,6 +367,7 @@ pub fn rust_remove_single(
 	case: &RmCase,
 ) -> RmOutcome {
 	let mut h = Handle::initialize(root, dbpath).unwrap();
+	h.set_chroot_helper(crate::test_chroot_helper());
 	let recs = Rc::new(RefCell::new(Vec::new()));
 	h.set_callbacks(Box::new(RustRec(recs.clone())));
 	h.set_logfile(logfile.as_os_str().as_encoded_bytes());

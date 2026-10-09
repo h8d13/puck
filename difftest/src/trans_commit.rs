@@ -1053,6 +1053,7 @@ pub fn rust_commit(fx: &TempRoot, c: &TcCase) -> TcResult {
 	let logfile = fx.dir().join("log");
 	let _ = fs::remove_file(&logfile);
 	let mut h = Handle::initialize(&fx.root(), &fx.dbpath()).unwrap();
+	h.set_chroot_helper(crate::test_chroot_helper());
 	h.set_logfile(logfile.as_os_str().as_bytes());
 	h.add_cachedir(&tc_dir(fx, "cache"));
 	h.set_checkspace(c_int::from(c.checkspace));

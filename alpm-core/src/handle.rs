@@ -15,6 +15,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -49,6 +50,9 @@ pub struct Handle {
 	user: u32,
 	// sandbox::handle_sandbox, swapped by tests that cannot be root
 	sandbox_for: SandboxFor,
+	// the binary run_chroot's child re-executes (sandbox::CHROOT_ARG),
+	// this one by default; test binaries are not the pacman binary
+	chroot_helper: PathBuf,
 	root: Vec<u8>,
 	dbpath: Vec<u8>,
 	dbext: Vec<u8>,
@@ -269,6 +273,7 @@ impl Handle {
 		Ok(Handle {
 			user: getuid(),
 			sandbox_for: handle_sandbox,
+			chroot_helper: PathBuf::from("/proc/self/exe"),
 			root,
 			dbpath,
 			dbext: b".db".to_vec(),
@@ -635,6 +640,14 @@ impl Handle {
 	// tests standing in for root
 	pub fn set_sandbox_for(&mut self, f: SandboxFor) {
 		self.sandbox_for = f;
+	}
+
+	pub fn chroot_helper(&self) -> &Path {
+		&self.chroot_helper
+	}
+
+	pub fn set_chroot_helper(&mut self, program: PathBuf) {
+		self.chroot_helper = program;
 	}
 
 	// f with a Downloader on the handle's download settings, state,
