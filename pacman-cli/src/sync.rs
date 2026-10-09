@@ -279,7 +279,7 @@ fn cleandb_entry(
 	}
 	match fs::metadata(os(&path)) {
 		// the C then reads the uninitialised st_mode: taken as no
-		// directory here (UPSTREAM.md)
+		// directory here
 		Err(e) => {
 			let msg = [b"could not remove ", &path[..], b": "];
 			error(
@@ -944,7 +944,6 @@ fn process_pkg<R>(ui: &mut Ui<R>, h: &mut Handle, t: TransPkg) -> i32 {
 	0
 }
 
-// group_exists
 fn group_exists(h: &mut Handle, dbs: &[usize], name: &[u8]) -> bool {
 	dbs.iter().any(|&i| {
 		let d = h.dbs_mut();
