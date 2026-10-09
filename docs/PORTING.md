@@ -144,7 +144,9 @@ do not: real package sets with hooks, scriptlets, capabilities and backup
 files, real HTTPS mirrors, a real keyring, landlock and DownloadUser.
 
 Gate: every step equal on `scripts/twin-root.sh`. State: met (master
-8c8d768, every step equal).
+8c8d768, every step equal); the risky real cases (hooks, keyring txn,
+replaces, interactive conflicts, across-months `-Syu`, interrupt and
+recovery) are now part of the gate, all 32 steps equal.
 
 ```
 cargo build --release -p pacman-cli
@@ -179,11 +181,34 @@ is counted, not repeated:
 | qkk / dk | `-Qkk`, `-Dk` | no new diff |
 | sc | `-Sc`, answers y y n n y | error text for download dirs |
 | fy / f / fl | `-Fy`, `-F ping`, `-Fl iputils` | no new diff |
+| hook-install | `-U twin-hook` (shipped PostTransaction hook, mkinitcpio/dkms-style) | no new diff |
+| keyring-txn | `-U twin-keyring twin-extra` (pacman-key-style populate hook in a multi-package txn) | no new diff |
+| replaces-install | `-U twin-old` | no new diff |
+| replaces | `-Syu` from the local repo, twin-new replaces twin-old | no new diff (see below) |
+| conflict-a / conflict-no / conflict-yes | `-U twin-ca`, then `-U twin-cb` (conflicts twin-ca) declining, then accepting; piped `y`/`y y` | no new diff (see below) |
+| syu-old / syu-new | `-Sy tree` from a 2024/03 archive snapshot, then `-Syu` from 2024/12 | no new diff (see below) |
+| interrupt / interrupt-recover | `-U twin-sig` SIGINT mid pre-transaction hook, then the recovery run | no new diff (see below) |
 
 The first run's diffs, all fixed since: log stamps and Build Date in
 UTC (tzfile, setlocale/strftime), newuidmap/newgidmap capabilities (pax
 xattrs), optdepend markers (`PackageOp::local`/`pending`), the `-Sc`
 download-dir error text.
+
+Two port divergences the risky steps surfaced, both fixed here:
+
+- conflict-yes: the conflict question (callbacks) and "Proceed with
+  installation?" (operation) read stdin through separate `BufReader`s.
+  The first gulped the whole piped stdin, so the second saw EOF and the
+  install aborted. `std_stdin` now builds each reader with capacity 1:
+  neither reads past the `\n` it stops on, the leftover stays in the one
+  fd, matching the C reading both prompts from a single stdio FILE*
+  (pacman.rs). Fixed in the port, not upstream.
+- replaces / syu-new stdout: ":: Starting full system upgrade..."
+  printed after prepare's events instead of before. The C `colon_printf`
+  fflushes stdout; the port's operation and callbacks use separate
+  Output buffers, so the line had to be flushed before `sync_sysupgrade`
+  fires the replace question and prepare events (sync.rs, same pattern
+  as `commit`).
 
 Harness choices: every pacman-visible path is under a tmpfs on /mnt
 private to the session (DownloadUser alpm cannot traverse the 0700
@@ -191,6 +216,20 @@ home); a fixed etc/machine-id (systemd's scriptlet keeps it); content of
 the java keystore and ldconfig's aux-cache not compared (dates, inode
 numbers); `download-XXXXXX` names canonicalised. Runtime ~2-3 min warm
 (network bound), ~620 MiB per root.
+
+Risky-case choices: the replaces step serves twin-new from a local
+`file://` repo (`repo-add`, unsigned), no keyring; the across-months
+`-Syu` pins both sides to Arch Linux Archive snapshots (2024/03,
+2024/12, `SigLevel Never`), so network to archive.archlinux.org is the
+only extra dependency; the keyring and hook fixtures are stand-ins
+(`twin-keyring`, `twin-hook`) so a real archlinux-keyring/gpg run does
+not add non-determinism. The interrupt step SIGINTs the group during an
+AbortOnFail PreTransaction hook (a deterministic edge before any
+extraction; a true mid-extract SIGINT lands on a different file each
+run, left to the signal-edges note). `place_both` pins the mtimes of
+the dirs it stamps (the pre-placed hook lives outside any run window),
+and the per-side cache dirs are pinned at setup, so the steps that do
+not re-stamp them still compare equal.
 
 ### Performance
 
@@ -351,7 +390,7 @@ import success, and aarch64.
 | connection reuse in `dload` | every package and `.sig` opened a new connection; `-Sw` of 200 small packages from one https mirror (`bench/dload-remote.sh`): 200 TLS handshakes and 4.6 s against the C's 5 connections and 1.8 s | `dload` note | done: one Client per handle (curl's 118 s idle limit), curl's retry of a request that died on a reused connection; after: 5 connections, 2.0 s |
 | curl features `dload` lacks | `ftp://` servers, `.netrc`, HTTP/2, curl's proxy env rules, curl's low-speed abort | `dload` note | done: proxy environment rules and the low-speed check implemented and difftested; `ftp://`, `.netrc`, HTTP/2 and socks proxies stay divergences (reasons in the `dload` note) |
 | User-Agent (`setuseragent`, pacman.c) | the C sets `HTTP_USER_AGENT=pacman/<ver> (<sysname> <machine>) libalpm/<ver>` unless already set; the port sent none | `dload` `Settings::user_agent`, pacman.c `setuseragent` | done: `Config::user_agent` to the handle, the XferCommand's and the exec helper's environment; difftest dload `user_agent`, cli_binary `xfercommand` (request headers and the command's environment compared) |
-| twin-root steps for risky real cases | gate covers ~20 steps on a fresh root; missing: a `-Syu` across months of updates (old snapshot via the Arch Linux Archive), `replaces`, archlinux-keyring upgraded in the same transaction, mkinitcpio/kernel/dkms hooks, interactive conflict prompts, an interrupted commit (SIGINT mid-extract) and the run after it | `scripts/twin-root.sh` | todo |
+| twin-root steps for risky real cases | gate now 32 steps: added mkinitcpio/dkms-style hooks, a pacman-key-style keyring txn, `replaces` from a local repo, interactive conflict prompts (declined and accepted), a `-Syu` across months (Arch Linux Archive 2024/03 then 2024/12) and an interrupted commit + recovery; two port divergences found and fixed (the two-reader stdin EOF on the second prompt, and the "Starting full system upgrade" flush order), see 3b | `scripts/twin-root.sh` | done |
 | WKD/keyserver import success path | keyserver done: `GpgFixture`'s HKP server on loopback, dirmngr enabled on the net keyrings (one per side); `keyserver_against_c` compares the 404, html, hang, wrong-key, declined and imported paths, the key id-only index, validation after the import, dirmngr's requests and the keyrings afterwards; no port divergence. WKD success untested: dirmngr resolves `openpgpkey.<domain>` and the SRV record through the system resolver (network) and builds the WKD TLS session from the system CAs only (`hkp-cacert` is for hkps, p11-kit's user config is not merged here), so a loopback HTTPS fixture needs root; `http-proxy` would route the fetch (no target DNS) once trust exists. Not a parity blocker: the failure path matches current pacman and a successful WKD import is rare; and the VOA direction (README) obviates runtime key discovery entirely (certs are provisioned on disk, no fetch at verify time), so WKD success is a dead-end under that goal, not unfinished parity work | `signing` note; `difftest/tests/signing_gpg.rs` | keyserver done; WKD failure path matched, success untestable here and obviated by VOA |
 | signal edges | the handler thread decides after delivery, so a signal at a state edge can land on the other side; no segv/winch handler | `sighandler` note | accepted for now; revisit with the interrupted-commit twin step |
 | helper re-exec through `/proc/self/exe` | chroot exec and the sandbox helper failed without a mounted `/proc` where the C forks (minimal chroots, some containers) | `hook`/`run_chroot` and `sandbox` notes | done: `sandbox::helper_program`, decided at startup (`helper_entry`): `/proc/self/exe` while `/proc` is mounted, else argv[0] resolved like execvp (`exe_path`); difftests `run_chroot`/`hook`/`sandbox` `without_proc` reruns and `cli_binary without_proc` (both binaries in a mount namespace without `/proc`); what stays apart is a divergences row |

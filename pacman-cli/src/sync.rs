@@ -1123,6 +1123,10 @@ pub fn sync_trans<R: BufRead, S: AsRef<[u8]>>(
 			let msg = b"starting full system upgrade\n";
 			let _ = h.logaction(PACMAN_CALLER_PREFIX, msg);
 		}
+		// C colon_printf fflushes stdout: this line must reach the
+		// sink before sysupgrade's replace question and prepare's
+		// events, which flush the callbacks' separate Output
+		ui.out.flush();
 		if let Err(e) = sync_sysupgrade(h, config.op_s_upgrade >= 2) {
 			let msg = [e.strerror().as_bytes(), b"\n"];
 			error(ui.out, config, &msg);

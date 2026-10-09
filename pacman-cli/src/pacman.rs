@@ -13,7 +13,9 @@
 //
 // operations and the callbacks write into Outputs flushed to one sink
 // (the binary's std streams) where the C flushes. the prompts of the
-// operations and of the callbacks read stdin through separate buffers.
+// operations and of the callbacks read stdin through separate readers
+// over the one fd, each unbuffered past its line (std_stdin) so neither
+// over-reads the other's input.
 // signals: the binary installs sighandler's soft interrupt handler, run
 // gives it the handle after setup_libalpm and removes it in cleanup,
 // before the handle is released like the C.
@@ -1495,9 +1497,18 @@ pub fn main_args<F: FnOnce() -> Result<(), i32>>(
 	Ok((config, targets))
 }
 
-// the binary's stdin, buffered here: a held lock would block the next
-// Term (callbacks are re-installed after setup)
+// the binary's stdin. the callbacks' Term and the operation's Term are
+// separate readers over the one stdin fd (a held StdinLock would block
+// the other); capacity 1 keeps each from reading past the '\n' it stops
+// on, so a first prompt (an alpm conflict/replace question from the
+// callbacks) does not swallow the input a second prompt ("Proceed with
+// installation?") then reads. the leftover stays in the shared fd, like
+// the C reading both prompts line by line from one stdio FILE*
 pub type StdIn = io::BufReader<io::Stdin>;
+
+fn std_stdin() -> StdIn {
+	io::BufReader::with_capacity(1, io::stdin())
+}
 
 // CLOCK_MONOTONIC_COARSE counts from boot, so a fresh bar's zero sync
 // time is long past: the offset keeps that
@@ -1513,7 +1524,7 @@ fn monotonic_ms() -> i64 {
 // the clocks
 pub fn std_term() -> Term<StdIn> {
 	Term {
-		stdin: io::BufReader::new(io::stdin()),
+		stdin: std_stdin(),
 		stdin_tty: io::stdin().is_terminal(),
 		stdout_tty: io::stdout().is_terminal(),
 		cols: getcols,
