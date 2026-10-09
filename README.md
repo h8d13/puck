@@ -2,7 +2,7 @@
 
 > https://en.wikipedia.org/wiki/Pac-Man
 
-Rust port of `pacman`, file by file, checked against the upstream C with
+[Rust](https://rust-lang.org/) port of [`pacman`](https://gitlab.archlinux.org/pacman/pacman), file by file, checked against the upstream C with
 differential tests.
 
 ## Setup
@@ -31,5 +31,5 @@ Building the C reference follows upstream: `pacman/doc/index.asciidoc`
 - `pacman/`, `alpm/`: submodules, upstreams
 - `alpm-core/`, `pacman-common/`, `pacman-cli/`, `vercmp/`: the port
 - `difftest/`: equivalence tests against the C, the only crate calling `unsafe`
-
+- `bench/` `docs/`: profiling (exec time, memRSS and syscalls), and clanker documentation
 ---
