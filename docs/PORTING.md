@@ -295,8 +295,25 @@ A change to a public name is a `ref` commit naming the unit that made it.
 Gate: the pacman binary built only on the public API (done: pacman-cli,
 testpkg, vercmp build with alpm-core's default features, difftest with
 `internals`); `cargo doc` without private items (done); a small example
-front end (query, search, sync transaction) on the public API: a
-separate follow-up unit, not started. State: partly done.
+front end (query, search, sync transaction) on the public API (done:
+`examples/puck-mini`). State: done.
+
+`examples/puck-mini` is a workspace member depending on `alpm-core` with
+default features only (never `internals`, `cargo tree -p puck-mini -e
+features -i alpm-core` shows the `default` feature alone). Three
+subcommands drive the public surface: `query` lists installed packages
+through `Handle::dbs_mut` + `Db::pkgcache` (`-Q`), `search` runs
+`Db::search` over the sync dbs (`-Ss`), and `install` runs a one-package
+sync transaction (`register_syncdb`/`add_server`, `trans_init`,
+`Db::dup_pkg`, `add_pkg`, `trans_prepare`, `trans_commit`,
+`trans_release`, `-S`), with a stderr `Callbacks` impl that leaves
+questions at their default answer. `tests/frontend.rs` builds a fixture
+root in `std::env::temp_dir` (empty local db, a sync `.db`, a cached
+`.pkg.tar.gz`) and runs all three; the install actually extracts and
+registers the package. No public-surface addition was needed: the
+api-surface unit's root re-exports (the pub `Package`/`Trans` fields,
+`DbsMut`, the `INFRQ_*`/flag constants) already cover a real front end,
+which is the M4 finding.
 
 ### Handover: remaining for a pacman replacement
 
@@ -307,9 +324,11 @@ package, roughly in order of what blocks most. Each row is a unit
 come along.
 
 As of 2026-10-09: milestones 1-3b are met and milestone 4 (the public
-Rust API) is shaped, with the pacman binary, testpkg and vercmp built
-only on alpm-core's public surface; the one M4 piece left is an example
-front end. Closed since: install names and the PKGBUILD (ships upstream's
+Rust API) is met, with the pacman binary, testpkg and vercmp built only
+on alpm-core's public surface and `examples/puck-mini` proving that
+surface is enough for an independent Rust front end (query, search, sync
+install) without reaching into `internals`. Closed since: install names
+and the PKGBUILD (ships upstream's
 scripts, provides/conflicts pacman), `dload` User-Agent, connection reuse,
 curl's retry/proxy/low-speed and `-U <url>` at binary level, the helper
 re-exec without `/proc`, scriptlet-shell and ldconfig from config.h, the
