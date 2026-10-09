@@ -702,6 +702,24 @@ fn proxy_env_rules() {
 		pick(&[("http_proxy", "https://u:p@a")], http),
 		Ok(Some("https://u:p@a:1080/".to_string()))
 	);
+	// a scheme's default port given explicitly stays (the url crate
+	// hides it)
+	assert_eq!(
+		pick(&[("http_proxy", "http://a:80")], http),
+		Ok(Some("http://a/".to_string()))
+	);
+	assert_eq!(
+		pick(&[("http_proxy", "https://u@a:443/x")], http),
+		Ok(Some("https://u@a/x".to_string()))
+	);
+	assert_eq!(
+		pick(&[("http_proxy", "http://[::1]:80")], http),
+		Ok(Some("http://[::1]/".to_string()))
+	);
+	assert_eq!(
+		pick(&[("http_proxy", "http://[::1]")], http),
+		Ok(Some("http://[::1]:1080/".to_string()))
+	);
 	assert_eq!(
 		pick(&[("http_proxy", "socks5h://a:1080")], http),
 		Err("Unsupported proxy scheme for 'socks5h://a:1080'"

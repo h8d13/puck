@@ -220,11 +220,27 @@ impl ProxyEnv {
 				"Unsupported proxy scheme for '{proxy}'"
 			));
 		}
-		if u.port().is_none() {
+		// the url crate drops a scheme's default port: the text says
+		// whether one was given
+		if !has_explicit_port(&spec) {
 			let _ = u.set_port(Some(DEFAULT_PROXY_PORT));
 		}
 		Ok(Some(u))
 	}
+}
+
+// whether "scheme://[user@]host[:port]/..." names a port
+fn has_explicit_port(spec: &str) -> bool {
+	let rest = spec.split_once("://").map_or(spec, |(_, r)| r);
+	let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+	let hostport = authority.rsplit('@').next().unwrap_or_default();
+	let after_host = match hostport.rsplit_once(']') {
+		Some((_, tail)) => tail,
+		None => hostport,
+	};
+	after_host.rsplit_once(':').is_some_and(|(_, p)| {
+		!p.is_empty() && p.bytes().all(|c| c.is_ascii_digit())
+	})
 }
 
 // proxy_check_noproxy: comma or blank separated names, "*" for all; a
