@@ -146,6 +146,35 @@ or masked, never tolerated broadly (fixed machine-id; the java keystore
 and ldconfig's aux-cache, dates and inode numbers inside, skip content).
 No real root, and nothing outside `.tmp/` is written.
 
+## Benchmarks
+
+`bench/` compares C pacman and puck on the same op, time and peak RSS
+first, equal output always: not a gate (PORTING.md "Performance"), a
+difference is a finding. `bench-lib.sh` is sourced by one script per
+op group under `bench/t/`, TAP out, `prove bench/t/b*.sh` or
+`bench/run.sh`.
+
+- Adding an op: a `bench_op ARG...` line in the script of its group
+  (read-only: `b1000-query`, `b2000-sync`). An op that changes a root
+  goes through `root_op STATE CONF ARG...` of `t/lib-root.sh`
+  (`b3000-install`, `b3100-remove`, `b3200-db`): a fresh copy of STATE
+  per run under fakechroot + fakeroot, `bench_label` when the arguments
+  are long. A new state is made in `root_setup`, with C pacman. A new
+  group is a new `bNNNN-name.sh` next to them.
+- Modes, one per invocation: time (default; both sides, `-n` runs,
+  median), `--strace` (both sides, call counts), `--valgrind[=TOOL]`,
+  `--perf[=record]` (one side, puck unless `--side=c`). Profiling runs
+  inside the op's wrapper (fakeroot), around pacman.
+- An op is "not ok" when the sides' rc, stdout, stderr or state
+  (`bench_state`: tree under faked ids, local db, log, masked where the
+  C stamps at run time) differ in any run. `bench_expect_diff` marks a
+  difference explained in a comment next to it (git's
+  test_expect_failure); it turns "ok # TODO vanished" when fixed, then
+  the mark goes. Timing never fails an op.
+- Nothing outside `bench/trash.<script>` (`-d` keeps it) and
+  `bench/results/` is written; no real root, no network: packages come
+  from the host's cache, sync dbs from the host.
+
 ## Unit workflow
 
 - `scripts/unit-worktree.sh <name>` (clean tree, so commit first) makes

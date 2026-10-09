@@ -192,29 +192,44 @@ numbers); `download-XXXXXX` names canonicalised. Runtime ~2-3 min warm
 ### Performance
 
 Not a gate: puck should not be slower or bigger than the C on common
-ops. `bench.py` compares read-only ops on the host's dbs, `bench_trans.py`
-root-changing ops under fakechroot + fakeroot (time, CPU, peak RSS,
-strace call counts, output and the resulting tree under faked ids):
+ops. `bench/` is the harness, git's t/ shape: one script per group of
+ops under `bench/t/` (`b1000-query`, `b2000-sync` on the host's dbs;
+`b3000-install`, `b3100-remove`, `b3200-db` under fakechroot + fakeroot
+on a fresh root per run), `bench-lib.sh` sourced like test-lib.sh, TAP
+out:
 
 ```
-bench/bench.py [-n RUNS] [-- OP ...]           # C /usr/bin/pacman vs puck
-bench/bench_trans.py [-n RUNS] [-l] [OP ...]   # -l lists the ops, -k keeps
+bench/run.sh [-n RUNS]            # C /usr/bin/pacman vs puck, every script
+prove bench/t/b*.sh :: -n 3       # same, prove's tally
+bench/t/b3000-install.sh --run=2 -d   # one op, trash dir kept
+bench/run.sh --strace             # --perf, --valgrind: one side profiled
 ```
 
-Master 8c8d768, puck/C, every output and tree equal:
+Time mode alternates the sides, median wall and peak RSS (`launch.c`,
+wait4's rusage). After every run the sides' rc, stdout, stderr and the
+op's state (tree under faked ids, local db with install dates masked,
+log with stamps cut) are compared, each side's root spelled ROOT: an op
+is "not ok" when any differs, `bench_expect_diff` marks a known one.
+Numbers and the usage in `bench/README.md`, adding an op in
+`METHODOLOGY.md` "Benchmarks".
+
+puck from 7b42a16 against pacman 7.1.0, 7 runs, host shared with other
+units' builds (load 6-8, so absolute times are high and noisier than
+the ratios); every output and tree equal except `-Si`:
 
 | ops | time | peak RSS |
 |---|---|---|
-| `-Q`, `-Qi`, `-Qs`, `-Qo`, `-T` | 0.46-0.75x | 0.39-0.41x |
-| `-Qk`, `-Qkk`, `-Dk`, `-Qu` | 0.81-0.99x | 0.37-0.90x |
-| `-Ss`, `-Si`, `-Sl` | 0.80-0.93x | 0.89-0.90x |
-| `-S` install (1, 54 pkgs), `-U`, reinstall | 0.77-0.85x | 0.77-0.90x |
-| `--dbonly`, `-R`, `-Rns`, `-D`, `-Sy`, `-Sw`, `-Sc` | 0.92-1.11x | 0.31-0.90x |
+| `-Q`, `-Qi`, `-Qs`, `-Qo`, `-T` | 0.47-0.87x | 0.37-0.40x |
+| `-Qk`, `-Qkk`, `-Dk`, `-Qu` | 0.75-0.92x | 0.37-0.90x |
+| `-Ss`, `-Si`, `-Sl` | 0.68-1.04x | 0.89x |
+| `-S` install (14, 54 pkgs), `-U`, reinstall | 0.77-0.97x | 0.77-0.90x |
+| `--dbonly`, `-R`, `-Rns`, `-D`, `-Sy`, `-Sw`, `-Sc` | 0.93-1.05x | 0.30-0.89x |
 
-`-Si` shows DIFF against the host's pacman 7.1.0, which still prints
-"MD5 Sum" in Validated By; the reference build does not. Under fakeroot
-each std `metadata()` is two syscalls (fakeroot's statx wrapper), so
-`-Rns` counts more stat calls than the C; natively one statx.
+`-Si` is the known diff against the host's pacman 7.1.0, which still
+prints "MD5 Sum" in Validated By; the reference build does not.
+`--strace` on `-Rns`: puck 54.2k calls to the C's 50.6k (newfstatat
+9652 against the C's lstat 6573 + newfstatat 5846, and 3823 getpid
+the C's top list lacks), under fakeroot on both sides.
 
 ### Later (low priority)
 
