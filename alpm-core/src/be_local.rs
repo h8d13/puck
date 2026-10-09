@@ -698,7 +698,7 @@ fn read_files(pkg: &mut Package, f: &mut Lines) {
 //
 // the C opens "<pkgpath>mtree" with libarchive's mtree reader
 // (crate::mtree) and yields its entries one by one. an entry libarchive
-// warns about ends the C's walk (UPSTREAM.md), here it is kept with its
+// warns about ends the C's walk, here it is kept with its
 // warning
 
 pub use crate::mtree::{Entry as MtreeEntry, EntryType as MtreeType};

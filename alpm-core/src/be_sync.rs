@@ -465,8 +465,8 @@ impl<'e, 'a> Lines<'e, 'a> {
 
 	// READ_AND_STORE_ALL, READ_AND_SPLITDEP, the %FILES% loop: lines up
 	// to a blank one. READ_AND_SPLITDEP parses the line pointer of the
-	// section header, freed once a longer line grows the buffer
-	// (UPSTREAM.md): the current line here
+	// section header, freed once a longer line grows the buffer:
+	// the current line here
 	fn list<T>(
 		&mut self,
 		out: &mut Vec<T>,

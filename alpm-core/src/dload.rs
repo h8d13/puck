@@ -1870,8 +1870,8 @@ impl Worker {
 
 // the easy handle options curl_set_handle_opts sets once per handle,
 // and the multi's connection cache: idle connections kept for curl's
-// 118 s, reused by the next request to the host (HTTP/1.1 only, see
-// PORTING.md on HTTP/2). a server that promised keep-alive and closed
+// 118 s, reused by the next request to the host (HTTP/1.1 only).
+// a server that promised keep-alive and closed
 // (pactest's, after any response) leaves a dead pooled connection that
 // the next request (a redirect hop, the .sig) may go out on: curl's
 // Curl_retry_request then retries on a fresh connection, see follow
@@ -2920,7 +2920,7 @@ impl Downloader<'_> {
 	// are (with their .sig when siglevel wants package signatures), the
 	// rest downloaded into the first usable cachedir. siglevel is the
 	// remote file siglevel. a sandbox download dir nothing was downloaded
-	// through is removed (the C keeps it, UPSTREAM.md)
+	// through is removed (the C keeps it)
 	pub fn fetch_pkgurl<U: AsRef<[u8]>>(
 		&mut self,
 		cachedirs: &mut Vec<Vec<u8>>,
