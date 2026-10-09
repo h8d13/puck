@@ -616,7 +616,10 @@ fn prepare(h: &mut Handle, trans: &mut Trans) -> Result<(), PrepareError> {
 		with_view(h, |v, cb| remove::remove_prepare(v, cb, trans))?;
 	} else {
 		sync::check_dbs(h, &trans.add)?;
-		load_caches(h, true);
+		load_caches(h, false);
+		if with_view(h, |v, _| sync::resolve_needs_sync(v, trans)) {
+			load_caches(h, true);
+		}
 		with_view(h, |v, cb| sync::sync_prepare(v, cb, trans))?;
 	}
 	load_full(h, trans);

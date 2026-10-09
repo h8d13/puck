@@ -24,10 +24,10 @@ use crate::callbacks::{Callbacks, Event, LogLevel, Progress, Question, logv};
 use crate::conflict::{
 	Conflict, FileCheck, FileConflict, innerconflicts, outerconflicts,
 };
-use crate::db::{DB_USAGE_UPGRADE, Db};
+use crate::db::{DB_USAGE_INSTALL, DB_USAGE_UPGRADE, Db};
 use crate::deps::{
 	DepMissing, Depend, checkdeps, dep_from_string, depcmp, depcmp_literal,
-	find_dbs_satisfier, list_diff, resolvedeps,
+	find_dbs_satisfier, find_dep_satisfier, list_diff, resolvedeps,
 };
 use crate::diskspace::{System, check_diskspace, check_downloadspace};
 use crate::dload::Payload;
@@ -518,12 +518,7 @@ pub fn dbs_satisfier(
 		.trans()
 		.is_some_and(|t| t.flags & TRANS_FLAG_NODEPVERSION != 0);
 	load_caches(h, false);
-	for &i in dbs {
-		let d = h.dbs_mut();
-		if let Some(db) = d.sync.get_mut(i) {
-			let _ = db.pkgcache(d.dbext, d.cb);
-		}
-	}
+	load_until_literal(h, dbs, &dep_from_string(depstring));
 	with_view(h, |view, cb| {
 		let env = view.env(nodepversion);
 		let list: Vec<_> = dbs
@@ -534,6 +529,30 @@ pub fn dbs_satisfier(
 		let db = db_of(view, pkg);
 		Ok(TransPkg::new(pkg.clone(), db))
 	})
+}
+
+// the caches resolvedep reads, in its order: each usable db loads
+// until one holds a literal it returns at once. an ignored literal
+// keeps loading, an answer the C asks about later may skip it
+fn load_until_literal(h: &mut Handle, dbs: &[usize], dep: &Depend) {
+	let d = h.dbs_mut();
+	for &i in dbs {
+		let Some(db) = d.sync.get_mut(i) else {
+			continue;
+		};
+		if db.usage() & (DB_USAGE_INSTALL | DB_USAGE_UPGRADE) == 0 {
+			continue;
+		}
+		let Ok(cache) = db.pkgcache(d.dbext, d.cb) else {
+			continue;
+		};
+		let found = cache.find(&dep.name).filter(|&p| {
+			depcmp_literal(p, dep) && !d.opts.should_ignore(p)
+		});
+		if found.is_some() {
+			return;
+		}
+	}
 }
 
 // the sync db whose cache holds pkg (by address)
@@ -628,6 +647,36 @@ pub(crate) fn sync_prepare(
 		}
 	}
 	Ok(())
+}
+
+// whether resolve will look in the sync dbs: the C loads their caches
+// lazily, in resolvedep, reached only for a target dependency neither
+// the local db (without the targets) nor another target satisfies
+pub(crate) fn resolve_needs_sync(view: &View, trans: &Trans) -> bool {
+	if trans.flags & TRANS_FLAG_NODEPS != 0 {
+		return false;
+	}
+	let nodepversion = trans.flags & TRANS_FLAG_NODEPVERSION != 0;
+	let env = view.env(nodepversion);
+	let targets: Vec<&Package> = trans.add.iter().map(|t| &t.pkg).collect();
+	let mut remove: Vec<&Package> = trans.remove.iter().collect();
+	remove.extend(trans.add.iter().flat_map(|t| &t.removes));
+	let localpkgs = list_diff(&view.local_list(), &targets);
+	targets.iter().any(|&pkg| {
+		let deps = checkdeps(
+			&env,
+			&localpkgs,
+			&remove,
+			&[pkg],
+			false,
+			&mut (),
+		);
+		deps.iter().any(|miss| {
+			let dep = &miss.depend;
+			find_dep_satisfier(targets.iter().copied(), dep)
+				.is_none()
+		})
+	})
 }
 
 // the resolver step of _alpm_sync_prepare: each target resolved against
