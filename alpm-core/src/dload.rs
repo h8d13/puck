@@ -1625,12 +1625,6 @@ impl Worker {
 			.is_some_and(|v| find_sub(v, b"chunked").is_some());
 		let length = content_length(&resp);
 		let size: i64 = if chunked { -1 } else { length.unwrap_or(-1) };
-		if job.max_size > 0 && size > job.max_size {
-			return Err(failed(
-				CURLE_FILESIZE_EXCEEDED,
-				"Maximum file size exceeded",
-			));
-		}
 		xfer.remote_size = size;
 		// a resumed GET needs its offset back in Content-Range; "*/size"
 		// (or no number) on a 2xx gets everything instead
@@ -1649,30 +1643,42 @@ impl Worker {
 		if status == 416 && resume_from > 0 {
 			return Ok(());
 		}
-		// curl_http_firstwrite
+		// http_firstwrite, then http_size: a transfer done early here
+		// (nothing left to download, the time condition answered) still
+		// fails on the size, and the response code the header callback
+		// recorded is 304 then
+		let mut done = None;
 		if resume_from > 0 && !range_ok {
-			if size == resume_from {
-				// already downloaded, curl's final progress update
-				return self.progress(job, status, 0, size);
+			if size != resume_from {
+				return Err(failed(
+					CURLE_RANGE_ERROR,
+					"HTTP server does not seem to support byte \
+					 ranges. Cannot resume.",
+				));
 			}
-			return Err(failed(
-				CURLE_RANGE_ERROR,
-				"HTTP server does not seem to support byte ranges. \
-				 Cannot resume.",
-			));
-		}
-		if let Some(t) = job.time_cond
-			&& resume_from == 0 && !meets_timecondition(timeofdoc, t)
-		{
+			// already downloaded, curl's final progress update
+			done = Some(self.progress(job, status, 0, size));
+		} else if let Some(t) = job.time_cond
+			&& resume_from == 0 && !meets_timecondition(
+			timeofdoc, t,
+		) {
 			// curl answers for the server: httpcode becomes 304
 			xfer.timecond = true;
 			xfer.respcode = 304;
-			return Ok(());
+			done = Some(Ok(()));
+		}
+		if job.max_size > 0 && size > job.max_size {
+			return Err(failed(
+				CURLE_FILESIZE_EXCEEDED,
+				"Maximum file size exceeded",
+			));
+		}
+		if let Some(r) = done {
+			return r;
 		}
 		self.http_body(job, xfer, resp, size)
 	}
 
-	// the body, size -1 when unknown
 	// the body, size -1 when unknown. a reader thread blocks on the
 	// response (reqwest's read cannot be interrupted) and hands chunks
 	// over; curl's low-speed check runs here every second and on each

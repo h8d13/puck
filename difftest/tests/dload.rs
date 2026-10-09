@@ -3086,3 +3086,29 @@ fn http_dates() {
 	// out-of-range fields and free piece sequences leave a third parsed
 	assert!(parsed >= n / 4, "{parsed} of {n} parsed");
 }
+
+// curl answers a time condition (304) before its size check fails the
+// transfer: the response code the header callback kept is 304, which
+// the next attempt on another server reports when it has none of its
+// own (file://)
+#[test]
+fn size_exceeded_after_time_condition() {
+	let b = body(3000, 4);
+	let s = srv(&[("/p.pkg", vec![file(&b)])]);
+	let scn = Scn::new("size after 304", vec![s], |d, _| {
+		let mut p = db_payload(d, "p.pkg", &[v("@0"), furl(d, "repo")]);
+		p.max_size = 100;
+		p.download_signature = true;
+		vec![p]
+	})
+	.setup(move |d| {
+		fs::create_dir(d.join("repo")).unwrap();
+		fs::write(d.join("repo/p.pkg"), &b).unwrap();
+		set_mtime(&d.join("repo/p.pkg"), T0);
+		fs::write(d.join("p.pkg"), b"old").unwrap();
+	});
+	let (c, r) = scn.run();
+	assert_eq!(c, r, "{}", explain(&c, &r));
+	let line = b"p.pkg: response code 304\n";
+	assert!(c.logs.iter().any(|l| l.1 == line), "{:?}", c.logs);
+}
