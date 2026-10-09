@@ -1,6 +1,6 @@
-// alpm_core::group against the C in group.c
-use alpm_core::group::Group;
-use alpm_core::package::Package;
+// alpm_core::internals::group against the C in group.c
+use alpm_core::internals::group::Group;
+use alpm_core::internals::package::Package;
 use difftest::{Rng, c_group_new, iters};
 
 fn assert_same(name: &[u8]) {

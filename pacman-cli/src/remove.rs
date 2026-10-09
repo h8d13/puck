@@ -5,14 +5,13 @@
 
 use std::io::BufRead;
 
-use alpm_core::deps::dep_compute_string;
-use alpm_core::handle::Handle;
-use alpm_core::package::Package;
-use alpm_core::remove::remove_pkg;
-use alpm_core::trans::{
-	PrepareData, trans_commit, trans_get_remove, trans_prepare,
-};
-use alpm_core::util::{fnmatch, until_nul};
+use alpm_core::Handle;
+use alpm_core::Package;
+use alpm_core::dep_compute_string;
+use alpm_core::fnmatch;
+use alpm_core::remove_pkg;
+use alpm_core::{PrepareData, trans_commit, trans_get_remove, trans_prepare};
+use pacman_common::util_common::until_nul;
 
 use crate::conf::cat;
 use crate::sync::{error, local_list, warning};

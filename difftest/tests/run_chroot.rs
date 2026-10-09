@@ -1,4 +1,4 @@
-// alpm_core::util::{run_chroot, ldconfig}, trans::runscriptlet and
+// alpm_core::internals::util::{run_chroot, ldconfig}, trans::runscriptlet and
 // hook::hook_run against the C, for real in a chroot of a fixture root,
 // both under fakechroot(1) as pacman's own test suite runs them
 // (pmtest.py). `under_fakechroot` re-runs this binary's fc_* tests under
@@ -12,11 +12,11 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::Command;
 
-use alpm_core::callbacks::HookWhen;
-use alpm_core::hook::{AddTarget, Targets, hook_run};
-use alpm_core::package::Package;
-use alpm_core::trans::runscriptlet;
-use alpm_core::util::{ldconfig, run_chroot};
+use alpm_core::internals::callbacks::HookWhen;
+use alpm_core::internals::hook::{AddTarget, Targets, hook_run};
+use alpm_core::internals::package::Package;
+use alpm_core::internals::trans::runscriptlet;
+use alpm_core::internals::util::{ldconfig, run_chroot};
 use difftest::{
 	CHookHandle, CHookResult, COMPS, Rng, RustHookHandle, TempRoot, iters,
 	tar_file, ustar, write_db,
@@ -403,7 +403,7 @@ fn chroot_helper_no_root() {
 	}
 	let out = Command::new(difftest::test_chroot_helper())
 		.args([
-			alpm_core::sandbox::CHROOT_ARG,
+			alpm_core::internals::sandbox::CHROOT_ARG,
 			"/nonexistent-root/",
 			"/bin/sh",
 			"sh",

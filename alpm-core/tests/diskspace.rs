@@ -4,18 +4,18 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use alpm_core::callbacks::{Callbacks, LogLevel, Progress};
-use alpm_core::diskspace::{
+use alpm_core::filelist::{File, FileList};
+use alpm_core::internals::callbacks::{Callbacks, LogLevel, Progress};
+use alpm_core::internals::diskspace::{
 	FsInfo, FsInfoState, MountEntry, MountPoint, Mounts, SpaceError,
 	System, USED_INSTALL, USED_REMOVE, calculate_installed_size,
 	calculate_removed_size, check_diskspace, check_downloadspace,
 	check_mountpoint, load_fsinfo, match_mount_point, mount_point_list,
 	parse_mntent,
 };
-use alpm_core::error::Errno;
-use alpm_core::filelist::{File, FileList};
-use alpm_core::handle::Handle;
-use alpm_core::package::Package;
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::package::Package;
 
 #[derive(Debug, PartialEq, Eq)]
 enum Ev {

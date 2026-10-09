@@ -2,13 +2,13 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use alpm_core::be_local::{
+use alpm_core::internals::be_local::{
 	DbError, INFRQ_DESC, INFRQ_ERROR, INFRQ_FILES, INFRQ_SCRIPTLET,
 	LocalDb, ReadError,
 };
-use alpm_core::deps::DepMod;
-use alpm_core::error::Errno;
-use alpm_core::package::{
+use alpm_core::internals::deps::DepMod;
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::package::{
 	PKG_VALIDATION_SHA256SUM, PKG_VALIDATION_SIGNATURE, PkgFrom, PkgReason,
 };
 

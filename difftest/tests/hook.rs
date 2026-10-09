@@ -1,4 +1,4 @@
-// alpm_core::hook against the C _alpm_hook_run on root "/" (hooks run on
+// alpm_core::internals::hook against the C _alpm_hook_run on root "/" (hooks run on
 // the host, as the C does without a chroot). random hook files in three
 // hook directories (masking, symlinks to /dev/null, dangling links,
 // directories, unreadable files, missing or non-directory hookdirs) are
@@ -10,11 +10,11 @@ use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
-use alpm_core::callbacks::HookWhen;
 use alpm_core::filelist::{File, FileList};
-use alpm_core::hook::{AddTarget, Targets, hook_run};
-use alpm_core::package::Package;
-use alpm_core::util::hash_sdbm;
+use alpm_core::internals::callbacks::HookWhen;
+use alpm_core::internals::hook::{AddTarget, Targets, hook_run};
+use alpm_core::internals::package::Package;
+use alpm_core::internals::util::hash_sdbm;
 use difftest::{
 	CHookHandle, CHookResult, LocalEntry, Rng, RustHookHandle, TempRoot,
 	iters,

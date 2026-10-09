@@ -23,24 +23,24 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use alpm_core::backup::Backup;
-use alpm_core::be_local::{
-	INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET, MtreeEntry, MtreeError,
-};
-use alpm_core::be_package::{self, pkg_load_level};
-use alpm_core::db::{DB_USAGE_UPGRADE, Db};
-use alpm_core::deps::depcmp_literal;
-use alpm_core::error::Errno;
+use alpm_core::Backup;
+use alpm_core::Errno;
+use alpm_core::Handle;
+use alpm_core::depcmp_literal;
 use alpm_core::filelist;
-use alpm_core::handle::Handle;
-use alpm_core::package::{
+use alpm_core::pkg_check_pgp_signature;
+use alpm_core::sync_get_new_version;
+use alpm_core::{DB_USAGE_UPGRADE, Db};
+use alpm_core::{
 	DbCaches, Package, PkgFrom, PkgReason, compute_optionalfor,
 	compute_requiredby, pkg_should_ignore,
 };
-use alpm_core::signing::{self, pkg_check_pgp_signature};
-use alpm_core::sync::sync_get_new_version;
-use alpm_core::util::{compute_md5sum, fnmatch, until_nul};
-use pacman_common::util_common::{PATH_MAX, mbasename, mdirname};
+use alpm_core::{
+	INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET, MtreeEntry, MtreeError,
+};
+use alpm_core::{changelog, pkg_load_level};
+use alpm_core::{compute_md5sum, fnmatch};
+use pacman_common::util_common::{PATH_MAX, mbasename, mdirname, until_nul};
 
 use crate::check::{CheckEnv, check_pkg_fast, check_pkg_full, is_backup};
 use crate::conf::{Config, LOG_ERROR, LOG_WARNING, cat};
@@ -163,7 +163,7 @@ impl PkgEnv for Env<'_> {
 		match pkg.origin {
 			Some(PkgFrom::File(_)) => {
 				let cb = self.handle.callbacks();
-				be_package::changelog(cb, pkg).ok()
+				changelog(cb, pkg).ok()
 			}
 			Some(PkgFrom::LocalDb) => {
 				let local = self.handle.localdb()?.local()?;
@@ -193,8 +193,8 @@ impl PkgEnv for Env<'_> {
 }
 
 // the part of an alpm_sigresult_t signature_display reads
-fn sig_result(r: &signing::SigResult) -> SigResult {
-	use signing::{SigStatus as S, SigValidity as V};
+fn sig_result(r: &alpm_core::SigResult) -> SigResult {
+	use alpm_core::{SigStatus as S, SigValidity as V};
 	let status = match r.status {
 		S::Valid => SigStatus::Valid,
 		S::KeyExpired => SigStatus::KeyExpired,
@@ -738,7 +738,7 @@ fn groups(
 			_ => Vec::new(),
 		},
 	};
-	let copy = |g: alpm_core::group::Group<&Package>| {
+	let copy = |g: alpm_core::Group<&Package>| {
 		(g.name, g.packages.into_iter().cloned().collect())
 	};
 	groups.into_iter().map(copy).collect()

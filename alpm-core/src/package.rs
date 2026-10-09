@@ -123,6 +123,17 @@ pub struct Package {
 }
 
 impl Package {
+	/// a package with its name (hash set) and version, the rest as
+	/// `_alpm_pkg_new` leaves it
+	pub fn new(name: &[u8], version: &[u8]) -> Package {
+		Package {
+			name_hash: hash_sdbm(name),
+			name: Some(name.into()),
+			version: Some(version.into()),
+			..Package::default()
+		}
+	}
+
 	// name as strcmp sees it. the C dereferences NULL names, None reads
 	// as empty here
 	pub fn name_bytes(&self) -> &[u8] {

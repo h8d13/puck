@@ -8,8 +8,8 @@
 use std::fmt::Write as _;
 use std::fs;
 
-use alpm_core::handle::Handle;
-use alpm_core::trans::{TRANS_FLAG_ALLDEPS, TRANS_FLAG_ALLEXPLICIT};
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::trans::{TRANS_FLAG_ALLDEPS, TRANS_FLAG_ALLEXPLICIT};
 use difftest::{
 	CRun, FrontHandle, LocalEntry, Node, Rng, SyncWorld, TempRoot,
 	c_pacman_database, iters, section, snapshot, umask_lock,

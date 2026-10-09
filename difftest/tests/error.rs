@@ -1,5 +1,5 @@
-// alpm_core::error::strerror against C alpm_strerror
-use alpm_core::error::{Errno, strerror};
+// alpm_core::internals::error::strerror against C alpm_strerror
+use alpm_core::internals::error::{Errno, strerror};
 use difftest::{Rng, c_strerror};
 
 fn check(err: i32) {

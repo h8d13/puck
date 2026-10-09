@@ -7,12 +7,12 @@
 // messages are the untranslated msgids.
 use std::ffi::c_int;
 
+use alpm_core::Errno;
+use alpm_core::Handle;
 use alpm_core::PACKAGE_VERSION;
-use alpm_core::be_package::pkg_load_level;
-use alpm_core::callbacks::{Callbacks, LogLevel};
-use alpm_core::error::Errno;
-use alpm_core::handle::Handle;
-use alpm_core::signing::{SIG_PACKAGE, SIG_PACKAGE_OPTIONAL};
+use alpm_core::pkg_load_level;
+use alpm_core::{Callbacks, LogLevel};
+use alpm_core::{SIG_PACKAGE, SIG_PACKAGE_OPTIONAL};
 
 // ROOTDIR, DBPATH, GPGDIR of the reference build's config.h, the siglevel
 // main() loads with

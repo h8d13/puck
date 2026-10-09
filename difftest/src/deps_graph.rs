@@ -12,8 +12,8 @@ use std::collections::VecDeque;
 use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
 
-use alpm_core::deps::{DepMissing, Depend};
-use alpm_core::trans::{TRANS_FLAG_NODEPVERSION, TRANS_FLAG_NOLOCK};
+use alpm_core::internals::deps::{DepMissing, Depend};
+use alpm_core::internals::trans::{TRANS_FLAG_NODEPVERSION, TRANS_FLAG_NOLOCK};
 
 use crate::handle::log_message;
 use crate::handle::{

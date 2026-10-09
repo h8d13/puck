@@ -15,9 +15,11 @@ use std::ffi::{CString, c_char, c_int, c_void};
 use std::ptr;
 use std::sync::MutexGuard;
 
-use alpm_core::be_local::{INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET};
-use alpm_core::group::Group;
-use alpm_core::package::Package;
+use alpm_core::internals::be_local::{
+	INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET,
+};
+use alpm_core::internals::group::Group;
+use alpm_core::internals::package::Package;
 
 use crate::group::CGroup;
 use crate::handle::*;

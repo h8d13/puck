@@ -1,5 +1,5 @@
-// unit tests for alpm_core::backup
-use alpm_core::backup::*;
+// unit tests for alpm_core::internals::backup
+use alpm_core::internals::backup::*;
 
 fn backup(name: &[u8], hash: Option<&[u8]>) -> Backup {
 	Backup {
@@ -10,7 +10,7 @@ fn backup(name: &[u8], hash: Option<&[u8]>) -> Backup {
 
 #[test]
 fn needbackup_cases() {
-	let pkg = alpm_core::package::Package {
+	let pkg = alpm_core::internals::package::Package {
 		backup: vec![
 			backup(b"etc/a", Some(b"1")),
 			backup(b"etc/b", None),

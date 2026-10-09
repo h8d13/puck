@@ -1,6 +1,6 @@
 // get_install_time's SOURCE_DATE_EPOCH parse: strtoull base 10 over the
 // whole string, no ERANGE
-use alpm_core::add::install_time;
+use alpm_core::internals::add::install_time;
 
 #[test]
 fn install_time_source_date_epoch() {

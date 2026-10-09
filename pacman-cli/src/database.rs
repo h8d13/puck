@@ -13,19 +13,18 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use alpm_core::be_local::{INFRQ_DESC, INFRQ_FILES};
-use alpm_core::callbacks::Callbacks;
-use alpm_core::conflict::checkconflicts;
-use alpm_core::db::Db;
-use alpm_core::deps::{
-	DbPkgs, DepsEnv, DepsOpts, checkdeps, dep_compute_string,
-};
-use alpm_core::error::Errno;
-use alpm_core::handle::Handle;
-use alpm_core::package::{Package, PkgReason};
-use alpm_core::pkghash::PkgHash;
-use alpm_core::trans::{TRANS_FLAG_ALLDEPS, TRANS_FLAG_ALLEXPLICIT};
-use alpm_core::util::{strerror, until_nul};
+use alpm_core::Callbacks;
+use alpm_core::Db;
+use alpm_core::Errno;
+use alpm_core::Handle;
+use alpm_core::PkgHash;
+use alpm_core::checkconflicts;
+use alpm_core::strerror;
+use alpm_core::{DbPkgs, DepsEnv, DepsOpts, checkdeps, dep_compute_string};
+use alpm_core::{INFRQ_DESC, INFRQ_FILES};
+use alpm_core::{Package, PkgReason};
+use alpm_core::{TRANS_FLAG_ALLDEPS, TRANS_FLAG_ALLEXPLICIT};
+use pacman_common::util_common::until_nul;
 
 use crate::conf::{Config, LOG_ERROR};
 use crate::util::{Output, pm_printf, trans_init, trans_release};

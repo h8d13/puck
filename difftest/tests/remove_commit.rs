@@ -1,4 +1,4 @@
-// alpm_core::remove::remove_single_package against the C's
+// alpm_core::internals::remove::remove_single_package against the C's
 // _alpm_remove_single_package on fixture roots and local dbs: files,
 // directories, symlinks (to dirs, files, nowhere, /proc as a
 // mountpoint), read-only directories, backup files modified or not with
@@ -15,13 +15,13 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::Command;
 
-use alpm_core::backup::Backup;
 use alpm_core::filelist::{File, FileList};
-use alpm_core::package::{Package, PkgFrom};
-use alpm_core::trans::{
+use alpm_core::internals::backup::Backup;
+use alpm_core::internals::package::{Package, PkgFrom};
+use alpm_core::internals::trans::{
 	TRANS_FLAG_DBONLY, TRANS_FLAG_NOSAVE, TRANS_FLAG_NOSCRIPTLET,
 };
-use alpm_core::util::{compute_md5sum, hash_sdbm};
+use alpm_core::internals::util::{compute_md5sum, hash_sdbm};
 use difftest::{
 	LocalEntry, RmCase, RmOutcome, RmRec, Rng, TempRoot, c_remove_single,
 	force_remove, iters, rust_remove_single, snapshot, umask_lock,

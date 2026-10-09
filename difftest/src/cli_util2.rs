@@ -21,9 +21,9 @@ use std::os::unix::fs::{OpenOptionsExt, symlink};
 use std::path::Path;
 use std::ptr;
 
-use alpm_core::be_local::INFRQ_DSIZE;
-use alpm_core::handle::Handle;
-use alpm_core::package::{Package, PkgFrom};
+use alpm_core::internals::be_local::INFRQ_DSIZE;
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::package::{Package, PkgFrom};
 use pacman_cli::conf::Config;
 use pacman_cli::util::Output;
 

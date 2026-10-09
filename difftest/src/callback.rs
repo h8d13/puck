@@ -17,12 +17,12 @@ use std::ptr;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, AtomicU16, Ordering};
 
-use alpm_core::callbacks::{
+use alpm_core::internals::callbacks::{
 	DownloadEvent, Event, LogLevel, Progress, Question,
 };
-use alpm_core::conflict::Conflict;
-use alpm_core::deps::Depend;
-use alpm_core::package::{Package, PkgFrom};
+use alpm_core::internals::conflict::Conflict;
+use alpm_core::internals::deps::Depend;
+use alpm_core::internals::package::{Package, PkgFrom};
 use pacman_cli::callback::Frontend;
 use pacman_cli::conf::Config;
 use pacman_cli::util::{Output, Term};
@@ -591,7 +591,7 @@ unsafe fn call_c(call: &Call<'_>, k: &mut Keep) -> c_int {
 }
 
 fn call_rust(w: &mut World, call: &mut Call<'_>) -> c_int {
-	use alpm_core::callbacks::Callbacks;
+	use alpm_core::internals::callbacks::Callbacks;
 	match call {
 		Call::Event(e) => w.event(e),
 		Call::Question(q) => {

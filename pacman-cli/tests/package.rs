@@ -1,10 +1,9 @@
 // unit tests for pacman_cli::package, the parts the C comparison cannot
 // reach (gpgme results, checksum failures, changelogs)
-use alpm_core::backup::Backup;
-use alpm_core::deps::dep_from_string;
-use alpm_core::error::Errno;
-use alpm_core::package::{DbCaches, Package, PkgFrom};
-use alpm_core::util::hash_sdbm;
+use alpm_core::Backup;
+use alpm_core::Errno;
+use alpm_core::dep_from_string;
+use alpm_core::{DbCaches, Package, PkgFrom};
 use pacman_cli::package::*;
 use pacman_cli::util::{ColStr, SigResult, SigStatus, SigValidity};
 
@@ -83,13 +82,10 @@ impl PkgEnv for Env {
 
 fn pkg(origin: Option<PkgFrom>) -> Package {
 	Package {
-		name_hash: hash_sdbm(b"foo"),
-		name: Some(b"foo"[..].into()),
-		version: Some(b"1-1"[..].into()),
 		builddate: -1,
 		installdate: -1,
 		origin,
-		..Package::default()
+		..Package::new(b"foo", b"1-1")
 	}
 }
 

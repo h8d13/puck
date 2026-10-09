@@ -53,7 +53,7 @@ const DB_MAX_SIZE: i64 = 128 * 1024 * 1024;
 
 // why an entry made the db invalid
 #[derive(Debug)]
-pub enum Reason {
+pub enum SyncDbInvalidReason {
 	// _alpm_splitname refused the entry name
 	Name,
 	// _alpm_pkg_check_meta refused name or version
@@ -71,7 +71,7 @@ pub enum Reason {
 }
 
 #[derive(Debug)]
-pub enum Error {
+pub enum SyncDbError {
 	// missing db file: sync_db_validate marks it DB_STATUS_MISSING
 	NotFound,
 	// _alpm_open_archive failed
@@ -79,20 +79,23 @@ pub enum Error {
 	// _alpm_pkghash_create refused the estimate
 	Memory,
 	// an entry failed to load, the whole db is dropped
-	Invalid { entry: Vec<u8>, reason: Reason },
+	Invalid {
+		entry: Vec<u8>,
+		reason: SyncDbInvalidReason,
+	},
 	// archive_read_next_header failed
 	Archive(io::Error),
 }
 
-impl Error {
+impl SyncDbError {
 	// pm_errno the C leaves after alpm_db_get_pkgcache
 	pub fn errno(&self) -> Errno {
 		match self {
-			Error::NotFound => Errno::DbNotFound,
-			Error::Open(_) => Errno::DbOpen,
-			Error::Memory => Errno::Memory,
-			Error::Invalid { .. } => Errno::DbInvalid,
-			Error::Archive(_) => Errno::Libarchive,
+			SyncDbError::NotFound => Errno::DbNotFound,
+			SyncDbError::Open(_) => Errno::DbOpen,
+			SyncDbError::Memory => Errno::Memory,
+			SyncDbError::Invalid { .. } => Errno::DbInvalid,
+			SyncDbError::Archive(_) => Errno::Libarchive,
 		}
 	}
 }
@@ -364,14 +367,14 @@ fn bytes_per_package(code: Code) -> u64 {
 fn open_archive(
 	path: &[u8],
 	dbext: &[u8],
-) -> Result<(tar::Reader, u64), Error> {
+) -> Result<(tar::Reader, u64), SyncDbError> {
 	// open(2)'s ENOENT only: a filter's program that cannot run fails
 	// with that kind too (filter/program.rs), the C's db open fails then
 	let enoent = Some(rustix::io::Errno::NOENT.raw_os_error());
 	let archive = util::open_archive(path).map_err(|e| {
 		match e.raw_os_error() == enoent {
-			true => Error::NotFound,
-			false => Error::Open(e),
+			true => SyncDbError::NotFound,
+			false => SyncDbError::Open(e),
 		}
 	})?;
 	let size = archive.meta.len();
@@ -447,15 +450,15 @@ impl<'e, 'a> Lines<'e, 'a> {
 	}
 
 	// READ_NEXT, READ_AND_STORE: the end of the data fails too
-	fn next(&mut self) -> Result<&[u8], Reason> {
+	fn next(&mut self) -> Result<&[u8], SyncDbInvalidReason> {
 		match self.fgets() {
 			Ok(true) => Ok(&self.line),
-			Ok(false) => Err(Reason::Truncated),
-			Err(e) => Err(Reason::Read(e)),
+			Ok(false) => Err(SyncDbInvalidReason::Truncated),
+			Err(e) => Err(SyncDbInvalidReason::Read(e)),
 		}
 	}
 
-	fn store(&mut self) -> Result<Option<Box<[u8]>>, Reason> {
+	fn store(&mut self) -> Result<Option<Box<[u8]>>, SyncDbInvalidReason> {
 		Ok(Some(self.next()?.into()))
 	}
 
@@ -467,7 +470,7 @@ impl<'e, 'a> Lines<'e, 'a> {
 		&mut self,
 		out: &mut Vec<T>,
 		f: impl Fn(&[u8]) -> T,
-	) -> Result<(), Reason> {
+	) -> Result<(), SyncDbInvalidReason> {
 		loop {
 			let line = self.next()?;
 			if line.is_empty() {
@@ -483,7 +486,7 @@ impl<'e, 'a> Lines<'e, 'a> {
 		&mut self,
 		out: &mut Box<[T]>,
 		f: impl Fn(&[u8]) -> T,
-	) -> Result<(), Reason> {
+	) -> Result<(), SyncDbInvalidReason> {
 		with_vec(out, |v| self.list(v, f))
 	}
 }
@@ -516,8 +519,8 @@ struct Walk<'a> {
 	cb: &'a mut dyn Callbacks,
 }
 
-fn invalid(entry: &[u8], reason: Reason) -> Error {
-	Error::Invalid {
+fn invalid(entry: &[u8], reason: SyncDbInvalidReason) -> SyncDbError {
+	SyncDbError::Invalid {
 		entry: entry.to_vec(),
 		reason,
 	}
@@ -526,7 +529,10 @@ fn invalid(entry: &[u8], reason: Reason) -> Error {
 impl Walk<'_> {
 	// load_pkg_for_entry: the package named by the entry, created on
 	// first sight with name and version from the entry name
-	fn pkg_for_entry(&mut self, entryname: &[u8]) -> Result<usize, Reason> {
+	fn pkg_for_entry(
+		&mut self,
+		entryname: &[u8],
+	) -> Result<usize, SyncDbInvalidReason> {
 		let Some((name, version)) = splitname(entryname) else {
 			let parts: [&[u8]; 3] = [
 				b"invalid name for database entry '",
@@ -534,13 +540,13 @@ impl Walk<'_> {
 				b"'\n",
 			];
 			logv(self.cb, LogLevel::Error, &parts);
-			return Err(Reason::Name);
+			return Err(SyncDbInvalidReason::Name);
 		};
 		if let Some(&i) = self.index.get(name) {
 			return Ok(i);
 		}
 		if !check_meta(name, version, self.cb) {
-			return Err(Reason::Meta);
+			return Err(SyncDbInvalidReason::Meta);
 		}
 		let parts: [&[u8]; 5] = [
 			b"adding '",
@@ -563,7 +569,10 @@ impl Walk<'_> {
 	}
 
 	// sync_db_read on one non-directory entry
-	fn read_entry(&mut self, entry: &mut Entry) -> Result<(), Reason> {
+	fn read_entry(
+		&mut self,
+		entry: &mut Entry,
+	) -> Result<(), SyncDbInvalidReason> {
 		let entryname = entry.path_bytes().to_vec();
 		let parts: [&[u8]; 3] = [
 			b"loading package data from archive entry ",
@@ -602,7 +611,9 @@ impl Walk<'_> {
 		let r = self.read_data(i, &mut lines);
 		self.bufs = lines.into_bufs();
 		// the filename check returns without this line
-		if r.as_ref().is_err_and(|r| !matches!(r, Reason::Filename)) {
+		if r.as_ref().is_err_and(|r| {
+			!matches!(r, SyncDbInvalidReason::Filename)
+		}) {
 			let parts: [&[u8]; 3] = [
 				b"error parsing database file: ",
 				filename,
@@ -629,7 +640,11 @@ impl Walk<'_> {
 	// the parsing loop of sync_db_read: keys matched as C strings, a
 	// repeated key overwrites a value, appends to a list and replaces
 	// the file list
-	fn read_data(&mut self, i: usize, f: &mut Lines) -> Result<(), Reason> {
+	fn read_data(
+		&mut self,
+		i: usize,
+		f: &mut Lines,
+	) -> Result<(), SyncDbInvalidReason> {
 		let deps = dep_from_string;
 		// read_data only compares against the name, and the key is kept
 		// apart from the line the values overwrite: both once per entry,
@@ -640,7 +655,11 @@ impl Walk<'_> {
 			match f.fgets() {
 				Ok(true) => {}
 				Ok(false) => return Ok(()),
-				Err(e) => return Err(Reason::Read(e)),
+				Err(e) => {
+					return Err(SyncDbInvalidReason::Read(
+						e,
+					));
+				}
 			}
 			key.clear();
 			key.extend_from_slice(&f.line);
@@ -675,7 +694,7 @@ impl Walk<'_> {
 					if !validate_filename(
 						tree, &name, &filename, cb,
 					) {
-						return Err(Reason::Filename);
+						return Err(SyncDbInvalidReason::Filename);
 					}
 				}
 				b"%BASE%" => pkg.base = f.store()?,
@@ -741,7 +760,7 @@ impl Walk<'_> {
 					with_vec(&mut pkg.xdata, |x| {
 						extend_xdata(x, lines)
 					})
-					.map_err(Reason::XData)?;
+					.map_err(SyncDbInvalidReason::XData)?;
 				}
 				_ => {
 					let parts: [&[u8]; 4] = [
@@ -779,11 +798,11 @@ pub fn populate(
 	dbext: &[u8],
 	treename: &[u8],
 	cb: &mut dyn Callbacks,
-) -> Result<PkgHash<Package>, Error> {
+) -> Result<PkgHash<Package>, SyncDbError> {
 	let path = until_nul(path);
 	logv(cb, LogLevel::Debug, &[b"opening archive ", path, b"\n"]);
 	let (archive, est) = open_archive(path, until_nul(dbext))?;
-	let mut cache = PkgHash::new(est as u32).ok_or(Error::Memory)?;
+	let mut cache = PkgHash::new(est as u32).ok_or(SyncDbError::Memory)?;
 
 	let mut walk = Walk {
 		bufs: Bufs::default(),
@@ -832,14 +851,14 @@ pub fn populate(
 			b")\n",
 		];
 		logv(walk.cb, LogLevel::Error, &parts);
-		return Err(Error::Archive(e));
+		return Err(SyncDbError::Archive(e));
 	}
 	// _alpm_pkghash_add in archive order then alpm_list_msort by name:
 	// names are unique, so add_sorted gives the same buckets and list
 	for pkg in walk.pkgs {
 		cache.add_sorted(pkg).map_err(|p| {
 			let name = p.name.as_deref().unwrap_or_default();
-			invalid(name, Reason::Cache)
+			invalid(name, SyncDbInvalidReason::Cache)
 		})?;
 	}
 	let count = cache.len().to_string();

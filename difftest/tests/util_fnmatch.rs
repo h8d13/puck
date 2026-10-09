@@ -1,6 +1,6 @@
-// alpm_core::util::{fnmatch, fnmatch_patterns} against glibc fnmatch(3)
+// alpm_core::internals::util::{fnmatch, fnmatch_patterns} against glibc fnmatch(3)
 // through _alpm_fnmatch and _alpm_fnmatch_patterns
-use alpm_core::util::{fnmatch, fnmatch_patterns};
+use alpm_core::internals::util::{fnmatch, fnmatch_patterns};
 use difftest::{Rng, c_fnmatch, c_fnmatch_patterns, iters};
 
 fn show(s: &[u8]) -> String {

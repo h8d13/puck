@@ -11,7 +11,7 @@ use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_ushort, c_void};
 use std::ptr;
 use std::sync::MutexGuard;
 
-use alpm_core::deps::Depend;
+use alpm_core::internals::deps::Depend;
 
 use crate::handle::*;
 use crate::package::{CDepend, field, read_deps, read_strs};

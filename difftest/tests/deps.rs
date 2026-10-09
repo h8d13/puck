@@ -1,12 +1,12 @@
-// alpm_core::deps against deps.c: alpm_dep_from_string,
+// alpm_core::internals::deps against deps.c: alpm_dep_from_string,
 // alpm_dep_compute_string, dep_vercmp via _alpm_depcmp_provides,
 // _alpm_depcmp(_literal) and alpm_find_satisfier on mirror packages
-use alpm_core::deps::{
+use alpm_core::internals::deps::{
 	DepMod, Depend, dep_compute_string, dep_from_string, depcmp,
 	depcmp_literal, depcmp_provides, find_satisfier,
 };
-use alpm_core::package::Package;
-use alpm_core::util::hash_sdbm;
+use alpm_core::internals::package::Package;
+use alpm_core::internals::util::hash_sdbm;
 use difftest::{
 	Rng, c_dep_compute_string, c_dep_compute_string_null,
 	c_dep_compute_string_raw, c_dep_from_string, c_dep_from_string_null,

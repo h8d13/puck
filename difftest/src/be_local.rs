@@ -4,7 +4,7 @@
 // after alpm_initialize is recorded.
 use std::ffi::{c_int, c_void};
 
-use alpm_core::package::Package;
+use alpm_core::internals::package::Package;
 
 use crate::cstr;
 use crate::handle::{

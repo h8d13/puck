@@ -1,4 +1,4 @@
-// alpm_core::filter against libarchive's read filters as pacman sets them
+// alpm_core::internals::filter against libarchive's read filters as pacman sets them
 // up (archive_read_support_filter_all), read through the raw format: the
 // bytes delivered, whether and where the open or a read fails, libarchive's
 // text where the port has it (compress, lzma, lzip, lz4, programs,

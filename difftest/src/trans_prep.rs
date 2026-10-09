@@ -21,7 +21,7 @@ use std::fs;
 use std::path::Path;
 use std::ptr;
 
-use alpm_core::deps::{DepMissing, Depend};
+use alpm_core::internals::deps::{DepMissing, Depend};
 use pacman_cli::conf::Config;
 
 use crate::cli_util::config;
@@ -1113,7 +1113,9 @@ impl CTx {
 		// SAFETY: p is live
 		let (removes, oldpkg) = unsafe { ((*p).removes, (*p).oldpkg) };
 		let db = match pkg.origin {
-			Some(alpm_core::package::PkgFrom::File(_)) => None,
+			Some(alpm_core::internals::package::PkgFrom::File(
+				_,
+			)) => None,
 			_ => self.id(p).0,
 		};
 		TpAdd {
@@ -1147,11 +1149,11 @@ fn free_misses(entries: &[*mut c_void]) {
 }
 
 const ERR_PKG_INVALID_ARCH: c_int =
-	alpm_core::error::Errno::PkgInvalidArch as c_int;
+	alpm_core::internals::error::Errno::PkgInvalidArch as c_int;
 const ERR_UNSATISFIED_DEPS: c_int =
-	alpm_core::error::Errno::UnsatisfiedDeps as c_int;
+	alpm_core::internals::error::Errno::UnsatisfiedDeps as c_int;
 const ERR_CONFLICTING_DEPS: c_int =
-	alpm_core::error::Errno::ConflictingDeps as c_int;
+	alpm_core::internals::error::Errno::ConflictingDeps as c_int;
 
 impl Drop for CTx {
 	fn drop(&mut self) {

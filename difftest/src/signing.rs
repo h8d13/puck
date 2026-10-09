@@ -16,9 +16,11 @@ use std::process::{Command, Stdio};
 use std::ptr;
 use std::sync::MutexGuard;
 
-use alpm_core::callbacks::{Callbacks, LogLevel, Question};
-use alpm_core::package::Package;
-use alpm_core::signing::{PgpKey, SigResult, SigStatus, SigValidity};
+use alpm_core::internals::callbacks::{Callbacks, LogLevel, Question};
+use alpm_core::internals::package::Package;
+use alpm_core::internals::signing::{
+	PgpKey, SigResult, SigStatus, SigValidity,
+};
 
 use crate::fixtures::{TempRoot, tar_file, ustar};
 use crate::handle::log_message;

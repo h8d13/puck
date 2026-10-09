@@ -1185,7 +1185,7 @@ struct Invalid {
 	name: Vec<u8>,
 	path: Vec<u8>,
 	siglevel: c_int,
-	error: be_package::Error,
+	error: be_package::PkgLoadError,
 }
 
 // check_validity (static in C): every cached sync target validated
@@ -1280,11 +1280,11 @@ fn validate_all(
 fn report_invalid(h: &mut Handle, cb: &mut dyn Callbacks, v: &Invalid) {
 	let errno = v.error.errno();
 	match &v.error {
-		be_package::Error::MissingSig => {
+		be_package::PkgLoadError::MissingSig => {
 			let msg = b": missing required signature\n";
 			logv(cb, Error, &[&v.name, msg]);
 		}
-		be_package::Error::InvalidSig(siglist) => {
+		be_package::PkgLoadError::InvalidSig(siglist) => {
 			let level = v.siglevel;
 			process_siglist(
 				h.keyring_mut(),
@@ -1297,12 +1297,12 @@ fn report_invalid(h: &mut Handle, cb: &mut dyn Callbacks, v: &Invalid) {
 			);
 			prompt_to_delete(cb, &v.path, errno);
 		}
-		be_package::Error::Checksum => {
+		be_package::PkgLoadError::Checksum => {
 			prompt_to_delete(cb, &v.path, errno);
 		}
-		be_package::Error::NotFound
-		| be_package::Error::BadPerms
-		| be_package::Error::Open(_) => {
+		be_package::PkgLoadError::NotFound
+		| be_package::PkgLoadError::BadPerms
+		| be_package::PkgLoadError::Open(_) => {
 			let msg = [
 				b"failed to read file ",
 				&v.path[..],

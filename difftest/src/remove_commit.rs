@@ -17,12 +17,14 @@ use std::path::Path;
 use std::ptr;
 use std::rc::Rc;
 
-use alpm_core::be_local::INFRQ_ALL;
-use alpm_core::callbacks::{Callbacks, Event, LogLevel, Progress};
-use alpm_core::handle::Handle;
-use alpm_core::package::Package;
-use alpm_core::remove::{remove_pkg, remove_single_package};
-use alpm_core::trans::{TRANS_FLAG_NOLOCK, trans_init, trans_release};
+use alpm_core::internals::be_local::INFRQ_ALL;
+use alpm_core::internals::callbacks::{Callbacks, Event, LogLevel, Progress};
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::package::Package;
+use alpm_core::internals::remove::{remove_pkg, remove_single_package};
+use alpm_core::internals::trans::{
+	TRANS_FLAG_NOLOCK, trans_init, trans_release,
+};
 
 use crate::handle::log_message;
 use crate::handle::{

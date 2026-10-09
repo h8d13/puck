@@ -6,15 +6,15 @@
 // (difftest::cb_both) and only compares, never assumes a start state
 use std::ffi::c_int;
 
-use alpm_core::callbacks::{
+use alpm_core::internals::callbacks::{
 	DownloadEvent, Event, HookRun, HookWhen, LogLevel, PackageOp,
 	PackageOperation, Progress, Question,
 };
-use alpm_core::conflict::Conflict;
-use alpm_core::deps::{Depend, dep_from_string};
-use alpm_core::error::Errno;
-use alpm_core::handle::Handle;
-use alpm_core::package::Package;
+use alpm_core::internals::conflict::Conflict;
+use alpm_core::internals::deps::{Depend, dep_from_string};
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::package::Package;
 use difftest::{
 	Call, CbRun, CbSetup, Rng, TempRoot, cb_active_bars, cb_both, iters,
 	unstamp, widths_agree,
@@ -283,7 +283,7 @@ const ANSWERS: &[&[u8]] = &[
 struct Asked<'a> {
 	a: &'a Package,
 	b: &'a Package,
-	db: &'a alpm_core::db::Db,
+	db: &'a alpm_core::internals::db::Db,
 	c1: &'a Conflict,
 	c2: &'a Conflict,
 	pkgs1: &'a [&'a Package],

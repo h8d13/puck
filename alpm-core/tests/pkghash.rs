@@ -1,7 +1,7 @@
-// unit tests for alpm_core::pkghash
-use alpm_core::package::Package;
-use alpm_core::pkghash::PkgHash;
-use alpm_core::util::hash_sdbm;
+// unit tests for alpm_core::internals::pkghash
+use alpm_core::internals::package::Package;
+use alpm_core::internals::pkghash::PkgHash;
+use alpm_core::internals::util::hash_sdbm;
 
 fn named(name: &[u8]) -> Package {
 	Package {

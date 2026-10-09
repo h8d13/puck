@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_uint};
 use std::ptr;
 
-use alpm_core::package::Package;
+use alpm_core::internals::package::Package;
 
 use crate::cstr;
 use crate::handle::CHash;

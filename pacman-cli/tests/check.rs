@@ -5,11 +5,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::PathBuf;
 
-use alpm_core::backup::Backup;
-use alpm_core::be_local::{MtreeEntry, MtreeError, MtreeType};
+use alpm_core::Backup;
+use alpm_core::Package;
 use alpm_core::digest::{Digest, Sha256};
 use alpm_core::filelist::{File, FileList};
-use alpm_core::package::Package;
+use alpm_core::{MtreeEntry, MtreeError, MtreeType};
 use pacman_cli::check::*;
 use pacman_cli::conf::{ColStr, Config};
 use pacman_cli::util::Output;

@@ -21,7 +21,7 @@ use std::process::Command;
 use std::ptr;
 use std::sync::MutexGuard;
 
-use alpm_core::callbacks::{Callbacks, DownloadEvent, LogLevel};
+use alpm_core::internals::callbacks::{Callbacks, DownloadEvent, LogLevel};
 
 use crate::cstr;
 use crate::handle::log_message;
@@ -611,7 +611,7 @@ pub fn probe_lines<N: AsRef<str>>(r: &[(N, i32)]) -> String {
 // user: the parent side runs as it would as root, the helper as us
 pub struct RootHost;
 
-impl alpm_core::sandbox::Host for RootHost {
+impl alpm_core::internals::sandbox::Host for RootHost {
 	fn uid(&self) -> u32 {
 		0
 	}
@@ -645,8 +645,8 @@ pub fn test_helper(
 	user: &[u8],
 	disable_fs: bool,
 	disable_syscalls: bool,
-) -> alpm_core::sandbox::HelperSandbox {
-	let mut sb = alpm_core::sandbox::HelperSandbox::new(
+) -> alpm_core::internals::sandbox::HelperSandbox {
+	let mut sb = alpm_core::internals::sandbox::HelperSandbox::new(
 		user,
 		disable_fs,
 		disable_syscalls,
@@ -659,11 +659,11 @@ pub fn test_helper(
 // Handle::set_sandbox_for of tests: _alpm_use_sandbox as for root, the
 // download in test_helper
 pub fn test_sandbox_for(
-	h: &alpm_core::handle::Handle,
-) -> Option<Box<dyn alpm_core::dload::Sandbox>> {
+	h: &alpm_core::internals::handle::Handle,
+) -> Option<Box<dyn alpm_core::internals::dload::Sandbox>> {
 	let user = h.sandboxuser()?;
 	let fs = h.disable_sandbox_filesystem() != 0;
 	let sc = h.disable_sandbox_syscalls() != 0;
-	alpm_core::sandbox::use_sandbox(0, Some(user), fs, sc)
+	alpm_core::internals::sandbox::use_sandbox(0, Some(user), fs, sc)
 		.then(|| Box::new(test_helper(user, fs, sc)) as _)
 }

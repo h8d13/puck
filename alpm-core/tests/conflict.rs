@@ -1,14 +1,14 @@
-// unit tests for alpm_core::conflict
+// unit tests for alpm_core::internals::conflict
 use std::ffi::c_int;
 use std::fs;
 
-use alpm_core::callbacks::{Callbacks, Progress};
-use alpm_core::conflict::*;
-use alpm_core::deps::dep_from_string;
 use alpm_core::filelist::{File, FileList};
-use alpm_core::package::{Package, PkgFrom};
-use alpm_core::pkghash::PkgHash;
-use alpm_core::util::hash_sdbm;
+use alpm_core::internals::callbacks::{Callbacks, Progress};
+use alpm_core::internals::conflict::*;
+use alpm_core::internals::deps::dep_from_string;
+use alpm_core::internals::package::{Package, PkgFrom};
+use alpm_core::internals::pkghash::PkgHash;
+use alpm_core::internals::util::hash_sdbm;
 
 fn pkg(name: &str, conflicts: &[&str], files: &[&str]) -> Package {
 	let mut files: Vec<File> = files

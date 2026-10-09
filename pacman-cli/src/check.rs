@@ -20,14 +20,14 @@ use std::fs::{self, File};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
-use alpm_core::backup::Backup;
-use alpm_core::be_local::{LocalDb, MtreeEntry, MtreeError, MtreeType};
+use alpm_core::Backup;
+use alpm_core::Handle;
+use alpm_core::Package;
 use alpm_core::digest::{self, Sha256};
 use alpm_core::filelist;
-use alpm_core::handle::Handle;
-use alpm_core::package::Package;
-use alpm_core::util::{strerror, until_nul};
-use pacman_common::util_common::{PATH_MAX, llstat_buf};
+use alpm_core::strerror;
+use alpm_core::{LocalDb, MtreeEntry, MtreeError, MtreeType};
+use pacman_common::util_common::{PATH_MAX, llstat_buf, until_nul};
 use rustix::fs::{FileType, Stat};
 
 use crate::conf::{Config, LOG_ERROR, LOG_WARNING, cat};

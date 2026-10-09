@@ -14,11 +14,11 @@ use std::ptr;
 use std::rc::Rc;
 use std::sync::MutexGuard;
 
-use alpm_core::callbacks::{
+use alpm_core::internals::callbacks::{
 	Callbacks, DownloadEvent, Event, LogLevel, Question,
 };
-use alpm_core::handle::Handle;
-use alpm_core::signing::key_in_keychain;
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::signing::key_in_keychain;
 use pacman_cli::conf::Config;
 
 use crate::callback::{cb_download, cb_event, cb_log};
@@ -494,8 +494,11 @@ impl RUpdate {
 		dbs: &[usize],
 		force: bool,
 	) -> (c_int, c_int, UpdRecord) {
-		let ret =
-			alpm_core::be_sync::db_update(&mut self.h, dbs, force);
+		let ret = alpm_core::internals::be_sync::db_update(
+			&mut self.h,
+			dbs,
+			force,
+		);
 		let (ret, errno) = match ret {
 			Ok(true) => (0, 0),
 			Ok(false) => (1, 0),

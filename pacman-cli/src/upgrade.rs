@@ -7,10 +7,10 @@
 use std::ffi::c_int;
 use std::io::BufRead;
 
-use alpm_core::add::add_pkg;
-use alpm_core::be_package::pkg_load_level;
-use alpm_core::handle::Handle;
-use alpm_core::util::until_nul;
+use alpm_core::Handle;
+use alpm_core::add_pkg;
+use alpm_core::pkg_load_level;
+use pacman_common::util_common::until_nul;
 
 use crate::sync::{error, sync_prepare_execute};
 use crate::util::{Ui, trans_init, trans_release};

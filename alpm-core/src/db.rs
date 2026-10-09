@@ -486,20 +486,20 @@ impl Db {
 		};
 		// a failure once the table exists frees it, and with it the
 		// group cache (_alpm_db_free_pkgcache)
-		if let be_sync::Error::Archive(_)
-		| be_sync::Error::Invalid { .. } = err
+		if let be_sync::SyncDbError::Archive(_)
+		| be_sync::SyncDbError::Invalid { .. } = err
 		{
 			self.log_free_pkgcache(cb);
 			self.free_groupcache(cb);
 		}
 		match err {
-			be_sync::Error::Archive(_) | be_sync::Error::Memory => {
-			}
+			be_sync::SyncDbError::Archive(_)
+			| be_sync::SyncDbError::Memory => {}
 			_ => self.status = Status::Invalid,
 		}
 		Err(match err {
 			// existed at registration, open(2) now fails
-			be_sync::Error::NotFound => Errno::DbOpen,
+			be_sync::SyncDbError::NotFound => Errno::DbOpen,
 			e => e.errno(),
 		})
 	}
@@ -943,7 +943,9 @@ impl Db {
 	}
 }
 
-// _alpm_db_cmp: strcmp on the names
+// _alpm_db_cmp: strcmp on the names.
+// only the tests call it, the port's own paths do not
+#[cfg_attr(not(feature = "internals"), allow(dead_code))]
 pub fn db_cmp(a: &Db, b: &Db) -> Ordering {
 	a.treename.cmp(&b.treename)
 }

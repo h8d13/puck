@@ -24,14 +24,14 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use alpm_core::callbacks::{Callbacks, Fetch};
-use alpm_core::deps::dep_from_string;
-use alpm_core::error::Errno;
-use alpm_core::handle::Handle;
-use alpm_core::sandbox::{ExecError, IgnoreSignals, SandboxExec};
-use alpm_core::util::{fnmatch, strerror, until_nul};
+use alpm_core::Errno;
+use alpm_core::Handle;
+use alpm_core::dep_from_string;
+use alpm_core::{Callbacks, Fetch};
+use alpm_core::{ExecError, IgnoreSignals, SandboxExec};
+use alpm_core::{fnmatch, strerror};
 use pacman_common::ini::{Ini, parse_ini};
-use pacman_common::util_common::{PATH_MAX, wordsplit};
+use pacman_common::util_common::{PATH_MAX, until_nul, wordsplit};
 
 use crate::pacman::PM_OP_FILES;
 use crate::util::{Output, arg_to_string, pm_printf, strreplace};

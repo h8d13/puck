@@ -1,14 +1,14 @@
-// alpm_core::package against the C in package.c
+// alpm_core::internals::package against the C in package.c
 use std::ptr;
 
-use alpm_core::backup::Backup;
-use alpm_core::deps::{DepMod, Depend};
 use alpm_core::filelist::{File, FileList};
-use alpm_core::package::{
+use alpm_core::internals::backup::Backup;
+use alpm_core::internals::deps::{DepMod, Depend};
+use alpm_core::internals::package::{
 	Package, PkgFrom, PkgReason, PkgXData, pkg_cmp, pkg_compare_versions,
 	pkg_find,
 };
-use alpm_core::util::hash_sdbm;
+use alpm_core::internals::util::hash_sdbm;
 use difftest::{
 	Rng, c_pkg_cmp, c_pkg_compare_versions, c_pkg_dup, c_pkg_find,
 	c_pkg_getters, c_pkg_roundtrip, iters,

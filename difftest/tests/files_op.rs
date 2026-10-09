@@ -3,7 +3,7 @@
 // .files dbs (dbext set before registering, like setup_libalpm for -F),
 // the same flags in both configs, return value, stdout and stderr
 // compared
-use alpm_core::handle::Handle;
+use alpm_core::internals::handle::Handle;
 use difftest::{
 	BASENAMES, DIRS, NAMES, REPOS, Rng, SyncWorld, c_pacman_files, iters,
 };

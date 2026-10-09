@@ -1,7 +1,7 @@
-// unit tests for alpm_core::deps
-use alpm_core::deps::*;
-use alpm_core::util::hash_sdbm;
-use alpm_core::version::vercmp;
+// unit tests for alpm_core::internals::deps
+use alpm_core::internals::deps::*;
+use alpm_core::internals::util::hash_sdbm;
+use alpm_core::internals::version::vercmp;
 
 fn dep(
 	name: &[u8],
@@ -91,8 +91,8 @@ fn pkg(
 	name: &[u8],
 	version: &[u8],
 	provides: &[&[u8]],
-) -> alpm_core::package::Package {
-	alpm_core::package::Package {
+) -> alpm_core::internals::package::Package {
+	alpm_core::internals::package::Package {
 		name_hash: hash_sdbm(name),
 		name: Some(name.into()),
 		version: Some(version.into()),
@@ -129,14 +129,14 @@ mod resolve {
 	use std::fs;
 	use std::path::PathBuf;
 
-	use alpm_core::callbacks::{Callbacks, LogLevel, Question};
-	use alpm_core::db::{DB_USAGE_ALL, DB_USAGE_SEARCH};
-	use alpm_core::deps::*;
-	use alpm_core::error::Errno;
-	use alpm_core::handle::Handle;
-	use alpm_core::package::{Package, PkgReason};
-	use alpm_core::pkghash::PkgHash;
-	use alpm_core::util::hash_sdbm;
+	use alpm_core::internals::callbacks::{Callbacks, LogLevel, Question};
+	use alpm_core::internals::db::{DB_USAGE_ALL, DB_USAGE_SEARCH};
+	use alpm_core::internals::deps::*;
+	use alpm_core::internals::error::Errno;
+	use alpm_core::internals::handle::Handle;
+	use alpm_core::internals::package::{Package, PkgReason};
+	use alpm_core::internals::pkghash::PkgHash;
+	use alpm_core::internals::util::hash_sdbm;
 
 	// a handle over an empty temp root, only its ignore lists are read
 	struct Tmp(PathBuf, Handle);

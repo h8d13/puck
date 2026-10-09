@@ -1,4 +1,4 @@
-// alpm_core::be_sync against the C sync db backend: repo dbs generated
+// alpm_core::internals::be_sync against the C sync db backend: repo dbs generated
 // under the temp dir (desc/files as repo-add writes them, then changed
 // byte by byte: sections left out, repeated or unknown, blank lines, CRLF,
 // nul bytes, non-UTF-8, long lines, cut texts; every compression
@@ -12,10 +12,10 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 
-use alpm_core::be_sync::{self, get_validation, populate};
-use alpm_core::callbacks::{Callbacks, LogLevel};
-use alpm_core::handle::Handle;
-use alpm_core::package::Package;
+use alpm_core::internals::be_sync::{self, get_validation, populate};
+use alpm_core::internals::callbacks::{Callbacks, LogLevel};
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::package::Package;
 use difftest::{
 	CHandle, COMPS, CSyncDb, Comp, FILTERED, Rng, TarEntry, TempRoot,
 	c_sync_db_load, iters, section, tar_dir, tar_file, ustar, write_db,
@@ -714,7 +714,10 @@ fn missing_db() {
 	// the C's db is missing since registration and never opens the
 	// file; the port's populate is that of a file gone since then
 	assert_eq!(c.0, load_rust(&fx, "nope", ".db").0);
-	assert_eq!(c.0, Err(alpm_core::error::Errno::DbNotFound as i32));
+	assert_eq!(
+		c.0,
+		Err(alpm_core::internals::error::Errno::DbNotFound as i32)
+	);
 }
 
 #[test]

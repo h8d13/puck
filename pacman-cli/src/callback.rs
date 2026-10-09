@@ -1,6 +1,6 @@
 // port of src/pacman/callback.c: the libalpm callbacks of the frontend
 // (cb_event, cb_question, cb_progress, cb_download, cb_log) as one
-// alpm_core::callbacks::Callbacks impl
+// alpm_core::Callbacks impl
 //
 // the C statics (on_progress, the delayed output list, the total bar,
 // prevpercent/prevcurrent, the timediff clock, the multibar UI) are the
@@ -20,14 +20,14 @@ use std::ffi::c_int;
 use std::io::BufRead;
 use std::sync::atomic::Ordering;
 
-use alpm_core::callbacks::{
+use alpm_core::Conflict;
+use alpm_core::Package;
+use alpm_core::{
 	Callbacks, DownloadEvent, Event, HookWhen, LogLevel, PackageOp,
 	PackageOperation, Progress, Question,
 };
-use alpm_core::conflict::Conflict;
-use alpm_core::deps::{Depend, dep_compute_string};
-use alpm_core::package::Package;
-use alpm_core::util::until_nul;
+use alpm_core::{Depend, dep_compute_string};
+use pacman_common::util_common::until_nul;
 
 use crate::conf::{ColStr, Config, LOG_WARNING};
 use crate::pacman::PM_OP_FILES;

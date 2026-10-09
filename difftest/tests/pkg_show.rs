@@ -7,16 +7,18 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use alpm_core::backup::Backup;
-use alpm_core::deps::{DepMod, Depend, dep_compute_string, find_satisfier};
 use alpm_core::digest::{Digest, Md5, hex};
-use alpm_core::error::Errno;
 use alpm_core::filelist::{File, FileList};
-use alpm_core::package::{
+use alpm_core::internals::backup::Backup;
+use alpm_core::internals::deps::{
+	DepMod, Depend, dep_compute_string, find_satisfier,
+};
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::package::{
 	DbCaches, Package, PkgFrom, PkgReason, PkgXData, compute_optionalfor,
 	compute_requiredby, pkg_find,
 };
-use alpm_core::util::hash_sdbm;
+use alpm_core::internals::util::hash_sdbm;
 use difftest::{
 	CShown, PkgWorld, Rng, SYNC_DBS, c_print_groups, c_strftime_c,
 	encode_base64, iters, random_sig, sig_packet, utc_date, widths_agree,

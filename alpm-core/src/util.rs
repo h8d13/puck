@@ -35,7 +35,9 @@ use crate::tar;
 
 pub use pacman_common::util_common::{PATH_MAX, llstat, until_nul};
 
-// _alpm_strip_newline: trailing '\n' only, '\r' stays
+// _alpm_strip_newline: trailing '\n' only, '\r' stays.
+// only the tests call it, the port's own paths do not
+#[cfg_attr(not(feature = "internals"), allow(dead_code))]
 pub fn strip_newline(s: &[u8]) -> &[u8] {
 	let s = until_nul(s);
 	let n = s.iter().rev().take_while(|&&c| c == b'\n').count();
@@ -619,7 +621,9 @@ pub fn compute_sha256sum(path: &[u8]) -> Option<Vec<u8>> {
 // _alpm_test_checksum: kind is exactly PKG_VALIDATION_MD5SUM or
 // PKG_VALIDATION_SHA256SUM. Some(true) matches (C 0), Some(false) differs
 // (C 1), None for another kind, no expected value or no checksum (C -1).
-// expected is compared like strcmp
+// expected is compared like strcmp.
+// only the tests call it, the port's own paths do not
+#[cfg_attr(not(feature = "internals"), allow(dead_code))]
 pub fn test_checksum(
 	path: &[u8],
 	expected: Option<&[u8]>,
@@ -1429,8 +1433,10 @@ pub fn open_archive(path: &[u8]) -> io::Result<Archive> {
 	})
 }
 
-// why _alpm_unpack returned 1
+// why _alpm_unpack returned 1 (the payloads and errno are read by
+// the tests, the port's callers return 1 whatever the cause)
 #[derive(Debug)]
+#[cfg_attr(not(feature = "internals"), allow(dead_code))]
 pub enum UnpackError {
 	// _alpm_open_archive failed: ALPM_ERR_PKG_OPEN
 	Open(io::Error),
@@ -1443,6 +1449,7 @@ pub enum UnpackError {
 
 impl UnpackError {
 	// the pm_errno the C sets, None where it leaves it alone
+	#[cfg_attr(not(feature = "internals"), allow(dead_code))]
 	pub fn errno(&self) -> Option<Errno> {
 		match self {
 			UnpackError::Open(_) => Some(Errno::PkgOpen),

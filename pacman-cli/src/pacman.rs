@@ -25,8 +25,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use alpm_core::handle::Handle;
-use alpm_core::util::strerror;
+use alpm_core::Handle;
+use alpm_core::strerror;
 use alpm_core::{LIB_VERSION, PACKAGE_VERSION};
 use pacman_common::util_common::{PATH_MAX, mbasename};
 
@@ -64,7 +64,7 @@ pub const PKG_LOCALITY_NATIVE: u16 = 1;
 pub const PKG_LOCALITY_FOREIGN: u16 = 1 << 1;
 
 // alpm.h alpm_transflag_t, as stored in config->flags
-use alpm_core::trans::{
+use alpm_core::{
 	TRANS_FLAG_ALLDEPS, TRANS_FLAG_ALLEXPLICIT, TRANS_FLAG_CASCADE,
 	TRANS_FLAG_DBONLY, TRANS_FLAG_DOWNLOADONLY, TRANS_FLAG_NEEDED,
 	TRANS_FLAG_NOCONFLICTS, TRANS_FLAG_NODEPS, TRANS_FLAG_NODEPVERSION,

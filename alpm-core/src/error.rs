@@ -219,7 +219,9 @@ impl Errno {
 
 const UNEXPECTED: &str = "unexpected error";
 
-// alpm_strerror on a raw value: out of range values hit the C default
+// alpm_strerror on a raw value: out of range values hit the C default.
+// only the tests call it, the port's own paths do not
+#[cfg_attr(not(feature = "internals"), allow(dead_code))]
 pub fn strerror(err: c_int) -> &'static str {
 	Errno::from_raw(err).map_or(UNEXPECTED, Errno::strerror)
 }

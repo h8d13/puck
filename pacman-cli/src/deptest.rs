@@ -1,7 +1,7 @@
 // port of src/pacman/deptest.c: -T, the dependency strings the local db
 // does not satisfy
-use alpm_core::handle::Handle;
-use alpm_core::util::until_nul;
+use alpm_core::Handle;
+use pacman_common::util_common::until_nul;
 
 use crate::util::Output;
 

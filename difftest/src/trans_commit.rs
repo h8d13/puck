@@ -27,21 +27,21 @@ use std::path::Path;
 use std::ptr;
 use std::rc::Rc;
 
-use alpm_core::add::add_pkg;
-use alpm_core::be_package::pkg_load_level;
-use alpm_core::callbacks::{
+use alpm_core::internals::add::add_pkg;
+use alpm_core::internals::be_package::pkg_load_level;
+use alpm_core::internals::callbacks::{
 	Callbacks, DownloadEvent, Event, LogLevel, Progress, Question,
 };
-use alpm_core::conflict::FileConflictType;
-use alpm_core::handle::Handle;
-use alpm_core::remove::remove_pkg;
-use alpm_core::signing::key_in_keychain;
-use alpm_core::sync::sync_sysupgrade;
-use alpm_core::trans::{
+use alpm_core::internals::conflict::FileConflictType;
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::remove::remove_pkg;
+use alpm_core::internals::signing::key_in_keychain;
+use alpm_core::internals::sync::sync_sysupgrade;
+use alpm_core::internals::trans::{
 	CommitData, TransState, trans_commit, trans_init, trans_prepare,
 	trans_release,
 };
-use alpm_core::util::compute_sha256sum;
+use alpm_core::internals::util::compute_sha256sum;
 
 use crate::add_commit::{AcNode, ac_owner, mask_tmpdir, tree};
 use crate::conflict::{CFileConflict, alpm_fileconflict_free};
@@ -527,7 +527,7 @@ fn mask_free(msg: &[u8]) -> Vec<u8> {
 	out
 }
 
-fn name_ver(p: &alpm_core::package::Package) -> Vec<u8> {
+fn name_ver(p: &alpm_core::internals::package::Package) -> Vec<u8> {
 	let n = p.name.as_deref().unwrap_or_default();
 	let v = p.version.as_deref().unwrap_or_default();
 	[n, b" ", v].concat()
@@ -713,7 +713,9 @@ fn c_data(errno: c_int, data: *mut CList) -> TcData {
 	let items = list_data(data);
 	let out = if items.is_empty() {
 		TcData::None
-	} else if errno == alpm_core::error::Errno::FileConflicts as c_int {
+	} else if errno
+		== alpm_core::internals::error::Errno::FileConflicts as c_int
+	{
 		let list = items
 			.iter()
 			.map(|&p| {

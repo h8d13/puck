@@ -10,8 +10,8 @@ use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
 use std::sync::Mutex;
 
-use alpm_core::diskspace::MountEntry;
-use alpm_core::package::Package;
+use alpm_core::internals::diskspace::MountEntry;
+use alpm_core::internals::package::Package;
 
 use crate::handle::log_message;
 use crate::handle::{

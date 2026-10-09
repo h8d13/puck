@@ -20,8 +20,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use alpm_core::callbacks::{Callbacks, DownloadEvent, Event, Fetch, LogLevel};
-use alpm_core::dload::Payload;
+use alpm_core::internals::callbacks::{
+	Callbacks, DownloadEvent, Event, Fetch, LogLevel,
+};
+use alpm_core::internals::dload::Payload;
 use time::OffsetDateTime;
 
 use crate::handle::*;

@@ -1,4 +1,4 @@
-// alpm_core::util file helpers against util.c: the C and the port each run
+// alpm_core::internals::util file helpers against util.c: the C and the port each run
 // the same ops in their own copy of a fixture tree, then return values and
 // the resulting trees (paths, types, modes, contents) are compared
 use std::fs;
@@ -6,7 +6,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
-use alpm_core::util::{
+use alpm_core::internals::util::{
 	ReadFileError, copyfile, files_in_directory, makepath, makepath_mode,
 	read_file,
 };

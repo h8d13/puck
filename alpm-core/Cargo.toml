@@ -25,9 +25,15 @@ time.workspace = true
 twox-hash.workspace = true
 zstd.workspace = true
 
-# test fixtures: tar archives
+# test fixtures: tar archives; the crate's own tests reach the modules
+# through `internals`
 [dev-dependencies]
+alpm-core = { path = ".", features = ["internals"] }
 tar.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# every module for the crate's tests and difftest, not a public surface
+internals = []

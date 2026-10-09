@@ -1,4 +1,4 @@
-// alpm_core::deps::{checkdeps, sortbydeps, find_dbs_satisfier,
+// alpm_core::internals::deps::{checkdeps, sortbydeps, find_dbs_satisfier,
 // resolvedeps, recursedeps} against the C on real handles. each case
 // writes a trans_prep world (gen_world: a local db and three sync dbs
 // over a small name set, so dependency cycles, several providers and
@@ -14,19 +14,19 @@ use std::collections::VecDeque;
 use std::ffi::c_int;
 use std::ptr;
 
-use alpm_core::be_local::INFRQ_DESC;
-use alpm_core::callbacks::{Callbacks, LogLevel, Question};
-use alpm_core::db::{
+use alpm_core::internals::be_local::INFRQ_DESC;
+use alpm_core::internals::callbacks::{Callbacks, LogLevel, Question};
+use alpm_core::internals::db::{
 	DB_USAGE_ALL, DB_USAGE_INSTALL, DB_USAGE_SEARCH, DB_USAGE_UPGRADE,
 };
-use alpm_core::deps::{
+use alpm_core::internals::deps::{
 	DbPkgs, DepMissing, DepsEnv, checkdeps, dep_from_string,
 	find_dbs_satisfier, recursedeps, resolvedeps, sortbydeps,
 };
-use alpm_core::error::Errno;
-use alpm_core::handle::Handle;
-use alpm_core::package::Package;
-use alpm_core::pkghash::PkgHash;
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::package::Package;
+use alpm_core::internals::pkghash::PkgHash;
 use difftest::{
 	Asked, CGraph, Calls, LOG_FUNCTION, PkgId, Rng, Setup, TP_DEP_VERSIONS,
 	TP_GROUPS, TP_SYNC, TP_VIRTUAL, TempRoot, TpWorld, gen_world, iters,
@@ -538,7 +538,7 @@ impl Case<'_> {
 		let added = &list[targs.len()..];
 		seen.removed += usize::from(!added.is_empty());
 		let asexplicit = added.iter().any(|p| {
-			p.reason == alpm_core::package::PkgReason::Explicit
+			p.reason == alpm_core::internals::package::PkgReason::Explicit
 		});
 		seen.removed_explicit += usize::from(asexplicit);
 	}

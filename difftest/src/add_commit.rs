@@ -3,7 +3,7 @@
 // handle with a minimal transaction: alpm_trans_init, alpm_pkg_load and
 // alpm_add_pkg of one package file, newpkg->oldpkg set to a dup of the
 // installed package like _alpm_sync_prepare does. the Rust side runs
-// alpm_core::add::upgrade_package on the same setup.
+// alpm_core::internals::add::upgrade_package on the same setup.
 //
 // recorded on both sides in call order: log lines, the events add.c and
 // remove.c send, progress; the logfile text without stamps comes apart.
@@ -19,11 +19,11 @@ use std::ptr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use alpm_core::be_local::INFRQ_ALL;
-use alpm_core::callbacks::{Callbacks, Event, LogLevel, Progress};
-use alpm_core::handle::Handle;
-use alpm_core::package::Package;
-use alpm_core::{add, be_package, trans, util};
+use alpm_core::internals::be_local::INFRQ_ALL;
+use alpm_core::internals::callbacks::{Callbacks, Event, LogLevel, Progress};
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::package::Package;
+use alpm_core::internals::{add, be_package, trans, util};
 
 use crate::cstr;
 use crate::fixtures::{

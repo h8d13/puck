@@ -9,7 +9,7 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use alpm_core::package::{Package, PkgReason};
+use alpm_core::internals::package::{Package, PkgReason};
 
 use crate::cstr;
 use crate::db::CHandle;

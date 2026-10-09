@@ -3,7 +3,7 @@
 // with each other and the local db, broken and missing db files), the
 // same flags in both configs, a C handle and a Rust Handle over the same
 // files. return value, stdout and stderr compared
-use alpm_core::handle::Handle;
+use alpm_core::internals::handle::Handle;
 use difftest::{
 	CRun, GROUPS, NAMES, REPOS, Rng, SyncWorld, c_pacman_sync, iters,
 	sync_read_only, tz_utc,

@@ -7,12 +7,12 @@
 // output goes into an Output like sync.rs, messages are the untranslated
 // msgids. -Fy is sync.rs's sync_syncdbs.
 
-use alpm_core::callbacks::Callbacks;
-use alpm_core::db::Db;
-use alpm_core::handle::Handle;
-use alpm_core::package::Package;
+use alpm_core::Callbacks;
+use alpm_core::Db;
+use alpm_core::Handle;
+use alpm_core::Package;
 use alpm_core::regex::{Flags, Regex};
-use alpm_core::util::until_nul;
+use pacman_common::util_common::until_nul;
 
 use crate::conf::{Config, cat};
 use crate::package::{print_groups, print_installed};

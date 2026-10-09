@@ -12,11 +12,11 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::process::Command;
 use std::rc::Rc;
 
-use alpm_core::callbacks::{Callbacks, Event, LogLevel};
-use alpm_core::deps::{DepMod, Depend, dep_from_string};
-use alpm_core::error::Errno;
-use alpm_core::handle::Handle;
-use alpm_core::log::{LogTime, leader, syslog_message};
+use alpm_core::internals::callbacks::{Callbacks, Event, LogLevel};
+use alpm_core::internals::deps::{DepMod, Depend, dep_from_string};
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::log::{LogTime, leader, syslog_message};
 use difftest::{
 	COpts, DirList, FlagOpt, IntOpt, OptsRecord, Rng, TempRoot,
 	c_strftime_at, iters, stamped,
@@ -663,7 +663,7 @@ const ZONES: [Option<&str>; 18] = [
 	Some("Nowhere/Zone"),
 ];
 
-// alpm_core::log::local_offset, the leader, the syslog header, the
+// alpm_core::internals::log::local_offset, the leader, the syslog header, the
 // PACMAN_DEBUG stamp and -Qi's %c date against localtime(3) in each
 // zone: tz-probe runs once per TZ (glibc reads it once a process)
 #[test]

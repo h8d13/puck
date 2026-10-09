@@ -1,6 +1,6 @@
 // C side of libarchive's read filters as pacman sets them up
 // (_alpm_archive_read_support_filter_all = archive_read_support_filter_all),
-// compared with alpm_core::filter: the data is read through the raw format
+// compared with alpm_core::internals::filter: the data is read through the raw format
 // (one entry, the filters' output), so the decoded bytes, where a cut or
 // corrupt stream fails and libarchive's text are seen directly. the
 // formats raw and empty only: their bids read nothing past the filters'
@@ -15,7 +15,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
-use alpm_core::filter::{Code, open_file, open_memory};
+use alpm_core::internals::filter::{Code, open_file, open_memory};
 use std::ptr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -310,7 +310,9 @@ fn from_c(c: CFiltered) -> FilterOutcome {
 	}
 }
 
-fn from_port(r: std::io::Result<alpm_core::filter::Filter>) -> FilterOutcome {
+fn from_port(
+	r: std::io::Result<alpm_core::internals::filter::Filter>,
+) -> FilterOutcome {
 	let mut f = match r {
 		Ok(f) => f,
 		Err(e) => {

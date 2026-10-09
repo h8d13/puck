@@ -1,4 +1,4 @@
-// alpm_core::conflict against the C on real handles. each fixture writes
+// alpm_core::internals::conflict against the C on real handles. each fixture writes
 // a root with real files, directories and symlinks plus a local db, read
 // by a C handle and by the Rust be_local reader (every entry loaded
 // INFRQ_ALL, as the C getters and _alpm_pkg_dup load them). targets are
@@ -11,18 +11,18 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 
-use alpm_core::backup::Backup;
-use alpm_core::be_local::{INFRQ_ALL, LocalDb};
-use alpm_core::callbacks::{Callbacks, LogLevel, Progress};
-use alpm_core::conflict::{
+use alpm_core::filelist::{File, FileList};
+use alpm_core::internals::backup::Backup;
+use alpm_core::internals::be_local::{INFRQ_ALL, LocalDb};
+use alpm_core::internals::callbacks::{Callbacks, LogLevel, Progress};
+use alpm_core::internals::conflict::{
 	Conflict, FileCheck, FileConflictType, FileConflicts, checkconflicts,
 	innerconflicts, outerconflicts,
 };
-use alpm_core::deps::dep_from_string;
-use alpm_core::filelist::{File, FileList};
-use alpm_core::package::{Package, PkgFrom};
-use alpm_core::pkghash::PkgHash;
-use alpm_core::util::hash_sdbm;
+use alpm_core::internals::deps::dep_from_string;
+use alpm_core::internals::package::{Package, PkgFrom};
+use alpm_core::internals::pkghash::PkgHash;
+use alpm_core::internals::util::hash_sdbm;
 use difftest::{CConflictHandle, FcRecs, LocalEntry, Rng, TempRoot, iters};
 
 const NAMES: [&str; 6] = ["a", "b", "foo", "bar", "lib-x", "z9"];

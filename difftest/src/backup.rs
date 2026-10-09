@@ -1,8 +1,8 @@
 // C side of lib/libalpm/backup.c, internal symbols from the static archive
 use std::ffi::c_char;
 
-use alpm_core::backup::Backup;
-use alpm_core::package::Package;
+use alpm_core::internals::backup::Backup;
+use alpm_core::internals::package::Package;
 
 use crate::package::{CPkg, CPkgBox, alpm_pkg_get_backup, list_data};
 use crate::{c_free, cstr, opt_ptr, take};

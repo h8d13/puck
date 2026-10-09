@@ -1,4 +1,4 @@
-// alpm_core::be_package against the C alpm_pkg_load: package files built
+// alpm_core::internals::be_package against the C alpm_pkg_load: package files built
 // under TMPDIR (a makepkg-like .PKGINFO or random lines parse_descfile
 // reads, file trees with dirs, symlinks and odd names, .MTREE, .INSTALL,
 // .CHANGELOG, every compression alpm-compress has), loaded by both with
@@ -11,13 +11,14 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use alpm_core::be_package::{
-	Error, changelog, pkg_load, pkg_load_level, pkg_validate_internal,
-};
-use alpm_core::callbacks::{Callbacks, LogLevel};
 use alpm_core::digest::{Digest, Sha256, hex};
-use alpm_core::package::Package;
-use alpm_core::signing::Keyring;
+use alpm_core::internals::be_package::{
+	PkgLoadError, changelog, pkg_load, pkg_load_level,
+	pkg_validate_internal,
+};
+use alpm_core::internals::callbacks::{Callbacks, LogLevel};
+use alpm_core::internals::package::Package;
+use alpm_core::internals::signing::Keyring;
 use difftest::{
 	COMPS, CPkgHandle, Comp, FILTERED, Rng, TarNode, compress_bytes,
 	cut_archive_text, iters, pax_record, ustar_nodes,
@@ -120,7 +121,7 @@ fn load_rust(path: &Path, full: bool) -> Outcome {
 		// the C side's changelog lines are taken apart (loaded)
 		let log = match changelog(&mut (), &pkg) {
 			Ok(log) => Some(log),
-			Err(Error::NotFound) => None,
+			Err(PkgLoadError::NotFound) => None,
 			Err(e) => {
 				panic!("changelog of {}: {e:?}", path.display())
 			}
@@ -150,14 +151,15 @@ fn fields(p: &Package) -> Vec<(&'static str, String)> {
 	let l = |v: &[Box<[u8]>]| {
 		format!("{:?}", v.iter().map(|s| lossy(s)).collect::<Vec<_>>())
 	};
-	let d = |v: &[alpm_core::deps::Depend]| {
-		format!(
+	let d =
+		|v: &[alpm_core::internals::deps::Depend]| {
+			format!(
 			"{:?}",
-			v.iter().map(alpm_core::deps::dep_compute_string)
+			v.iter().map(alpm_core::internals::deps::dep_compute_string)
 				.map(|s| lossy(&s))
 				.collect::<Vec<_>>()
 		)
-	};
+		};
 	vec![
 		("name_hash", p.name_hash.to_string()),
 		("filename", o(&p.filename)),

@@ -11,16 +11,16 @@ use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::symlink;
 
-use alpm_core::be_local::{
+use alpm_core::internals::be_local::{
 	INFRQ_ALL, INFRQ_DESC, INFRQ_ERROR, INFRQ_FILES, INFRQ_SCRIPTLET,
 };
-use alpm_core::callbacks::{Callbacks, LogLevel};
-use alpm_core::db::{Db, SIG_USE_DEFAULT, db_cmp};
-use alpm_core::error::Errno;
-use alpm_core::group::Group;
-use alpm_core::handle::Handle;
-use alpm_core::package::{Package, PkgFrom};
-use alpm_core::util::hash_sdbm;
+use alpm_core::internals::callbacks::{Callbacks, LogLevel};
+use alpm_core::internals::db::{Db, SIG_USE_DEFAULT, db_cmp};
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::group::Group;
+use alpm_core::internals::handle::Handle;
+use alpm_core::internals::package::{Package, PkgFrom};
+use alpm_core::internals::util::hash_sdbm;
 use difftest::{
 	CHandle, LocalEntry, Rng, StrList, TarEntry, TempRoot, iters, section,
 	tar_dir, tar_file, ustar,
@@ -376,7 +376,9 @@ fn pkg_or_err(r: Result<&Package, Errno>) -> (Option<Package>, c_int) {
 	}
 }
 
-fn cache_err(r: Result<(), alpm_core::db::CacheError>) -> (c_int, c_int) {
+fn cache_err(
+	r: Result<(), alpm_core::internals::db::CacheError>,
+) -> (c_int, c_int) {
 	match r {
 		Ok(()) => (0, 0),
 		Err(e) => (-1, e.errno().map_or(0, |e| e as c_int)),

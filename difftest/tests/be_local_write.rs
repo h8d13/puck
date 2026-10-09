@@ -1,4 +1,4 @@
-// alpm_core::be_local writing side against be_local.c: the same op
+// alpm_core::internals::be_local writing side against be_local.c: the same op
 // sequence (prepare, write, remove, set_reason, fixture breaks) runs on a
 // C handle and on the port, each in its own fixture root; every op's rc
 // and pm_errno and then the whole db tree (names, types, modes, contents)
@@ -8,17 +8,17 @@ use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
-use alpm_core::backup::Backup;
-use alpm_core::be_local::{
+use alpm_core::filelist::{File, FileList};
+use alpm_core::internals::backup::Backup;
+use alpm_core::internals::be_local::{
 	INFRQ_ALL, INFRQ_BASE, INFRQ_DESC, INFRQ_FILES, INFRQ_SCRIPTLET,
 	LocalDb, WriteError,
 };
-use alpm_core::deps::{DepMod, Depend};
-use alpm_core::error::Errno;
-use alpm_core::filelist::{File, FileList};
-use alpm_core::package::{Package, PkgFrom, PkgReason, PkgXData};
-use alpm_core::pkghash::PkgHash;
-use alpm_core::util::hash_sdbm;
+use alpm_core::internals::deps::{DepMod, Depend};
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::package::{Package, PkgFrom, PkgReason, PkgXData};
+use alpm_core::internals::pkghash::PkgHash;
+use alpm_core::internals::util::hash_sdbm;
 use difftest::{
 	Break, OpResult, Rng, TempRoot, WriteOp, break_local, c_local_db_ops,
 	iters, snapshot, umask_lock,

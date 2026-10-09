@@ -5,7 +5,7 @@
 // lazy loading
 use std::ffi::{CStr, c_void};
 
-use alpm_core::package::{Package, PkgFrom};
+use alpm_core::internals::package::{Package, PkgFrom};
 
 use crate::cstr;
 use crate::deps::alpm_find_satisfier;

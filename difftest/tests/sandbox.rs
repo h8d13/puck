@@ -1,4 +1,4 @@
-// alpm_core::sandbox{,_fs,_syscalls} against the C sandbox.c,
+// alpm_core::internals::sandbox{,_fs,_syscalls} against the C sandbox.c,
 // sandbox_fs.c and sandbox_syscalls.c.
 //
 // restrictions run in child processes: this test binary spawned again
@@ -20,15 +20,17 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use alpm_core::callbacks::{Callbacks, DownloadEvent, LogLevel};
-use alpm_core::dload::{DownloadState, Payload, Sandbox, Settings};
-use alpm_core::error::Errno;
-use alpm_core::sandbox::{
+use alpm_core::internals::callbacks::{Callbacks, DownloadEvent, LogLevel};
+use alpm_core::internals::dload::{DownloadState, Payload, Sandbox, Settings};
+use alpm_core::internals::error::Errno;
+use alpm_core::internals::sandbox::{
 	CallbackWriter, HELPER_ARG, HelperSandbox, Host, System,
 	process_callbacks,
 };
-use alpm_core::sandbox_fs::restrict_writes_to;
-use alpm_core::sandbox_syscalls::{DENIED_SYSCALLS, syscalls_filter};
+use alpm_core::internals::sandbox_fs::restrict_writes_to;
+use alpm_core::internals::sandbox_syscalls::{
+	DENIED_SYSCALLS, syscalls_filter,
+};
 use difftest::{
 	CDload, CSandbox, CbRec, Recorder, Reply, Rng, SbRecorder, Server,
 	TempRoot, fs_probe_setup, fs_probes, inject_errors, iters,
