@@ -633,6 +633,12 @@ pub fn sibling_bin(name: &str) -> std::path::PathBuf {
 	exe.parent().unwrap().parent().unwrap().join(name)
 }
 
+// run_chroot's child for a Rust handle in tests: Handle's default,
+// /proc/self/exe, is the test binary here
+pub fn test_chroot_helper() -> std::path::PathBuf {
+	sibling_bin("sandbox-helper")
+}
+
 // a HelperSandbox running difftest's sandbox-helper (instead of
 // /proc/self/exe, it ends itself after 60 s) on RootHost
 pub fn test_helper(

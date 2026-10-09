@@ -44,6 +44,7 @@ unsafe extern "C" {
 		full_count: c_int,
 	) -> isize;
 	fn umask(mask: c_uint) -> c_uint;
+	fn signal(sig: c_int, handler: usize) -> usize;
 	fn alpm_compute_md5sum(filename: *const c_char) -> *mut c_char;
 	fn alpm_compute_sha256sum(filename: *const c_char) -> *mut c_char;
 	fn _alpm_test_checksum(
@@ -195,6 +196,12 @@ pub fn c_files_in_directory(path: &[u8], full_count: bool) -> isize {
 pub fn c_umask(mask: u32) -> u32 {
 	// SAFETY: umask cannot fail
 	unsafe { umask(mask) }
+}
+
+// signal(2) to SIG_IGN or SIG_DFL, a disposition children inherit
+pub fn c_ignore_signal(sig: c_int, ignore: bool) {
+	// SAFETY: SIG_IGN (1) and SIG_DFL (0) stand for no handler function
+	unsafe { signal(sig, usize::from(ignore)) };
 }
 
 // hex digest, None where the C returns NULL

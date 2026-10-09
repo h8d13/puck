@@ -19,6 +19,8 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use rustix::fs::{
 	Access, AtFlags, CWD, FileType, Mode, accessat, makedev, mknodat,
@@ -706,10 +708,6 @@ pub const LDCONFIG: &[u8] = b"/sbin/ldconfig";
 // ALPM_CALLER_PREFIX, the alpm_logaction prefix of libalpm itself
 pub const CALLER_PREFIX: &[u8] = b"ALPM";
 
-// coreutils chroot(8) does the C child's chroot() + chdir("/") + exec
-// (METHODOLOGY.md): no pre_exec, and it works under fakechroot
-const CHROOT: &str = "/usr/bin/chroot";
-
 const LINE_MAX: usize = 2048;
 
 // _alpm_chroot_process_output: the line goes out as a C string, so a nul
@@ -766,52 +764,23 @@ fn strsignal(sig: i32) -> Vec<u8> {
 // the child's output as _alpm_chroot_read_from_child splits it: a line
 // goes out at its '\n', or with a '\n' appended once LINE_MAX - 2 bytes
 // sit without one (the C reads at most the free space, so the cut does
-// not depend on how reads arrive).
-//
-// chroot(8) reports its own failures where the C child prints them: a
-// first line from it is held until the exit status says whether it was
-// chroot(8)'s, then reworded as the C child's
+// not depend on how reads arrive)
+#[derive(Default)]
 struct Output {
 	buf: Vec<u8>,
-	lines: usize,
-	held: Option<Vec<u8>>,
-	chroot: bool,
 }
 
 impl Output {
-	fn new(chroot: bool) -> Self {
-		Output {
-			buf: Vec::new(),
-			lines: 0,
-			held: None,
-			chroot,
-		}
-	}
-
-	fn line(&mut self, h: &mut Handle, line: &[u8]) {
-		if self.chroot
-			&& self.lines == 0 && line.starts_with(b"chroot: ")
-		{
-			self.held = Some(line.to_vec());
-		} else {
-			if let Some(held) = self.held.take() {
-				process_output(h, &held);
-			}
-			process_output(h, line);
-		}
-		self.lines += 1;
-	}
-
 	fn feed(&mut self, h: &mut Handle, data: &[u8]) {
 		for &c in data {
 			self.buf.push(c);
 			if c == b'\n' {
 				let line = std::mem::take(&mut self.buf);
-				self.line(h, &line);
+				process_output(h, &line);
 			} else if self.buf.len() == LINE_MAX - 2 {
 				let mut line = std::mem::take(&mut self.buf);
 				line.push(b'\n');
-				self.line(h, &line);
+				process_output(h, &line);
 			}
 		}
 	}
@@ -823,82 +792,95 @@ impl Output {
 		if !self.buf.is_empty() {
 			let mut line = std::mem::take(&mut self.buf);
 			line.push(b'\n');
-			self.line(h, &line);
-			self.line(h, &line);
-		}
-	}
-
-	// after the exit status: chroot(8) exits 125 when chroot() fails,
-	// 126/127 when the exec does, after one "chroot: ...: <strerror>"
-	// line. other first lines go out as they were
-	fn release(&mut self, h: &mut Handle, code: Option<i32>) {
-		let Some(held) = self.held.take() else {
-			return;
-		};
-		let what: &[u8] = match code {
-			Some(125) => {
-				b"chroot: cannot change root directory to "
-			}
-			Some(126 | 127) => b"chroot: failed to run command ",
-			_ => b"",
-		};
-		let c_text: &[u8] = match code {
-			Some(125) => b"could not change the root directory (",
-			_ => b"call to execv failed (",
-		};
-		let err = held.strip_suffix(b"\n").and_then(|l| {
-			let i = l.windows(2).rposition(|w| w == b": ")?;
-			Some(&l[i + 2..])
-		});
-		match err {
-			Some(e) if self.lines == 1
-				&& !what.is_empty() && held
-				.starts_with(what) =>
-			{
-				process_output(h, &[c_text, e, b")\n"].concat())
-			}
-			_ => process_output(h, &held),
+			process_output(h, &line);
+			process_output(h, &line);
 		}
 	}
 }
 
-// a cmd without '/' is execv'd relative to the cwd ("/"), chroot(8) and
-// std would search PATH
-fn exec_path(cmd: &[u8]) -> Vec<u8> {
-	match cmd.contains(&b'/') {
-		true => cmd.to_vec(),
-		false => [b"./", cmd].concat(),
-	}
-}
-
-// the child of _alpm_run_chroot: stdout and stderr on one socket, stdin
-// on another, SHLVL defaulted to 1 and BASH_ENV dropped. root "/" runs
-// cmd directly like the C (no chroot); otherwise chroot(8) execs it,
-// which sets argv[0] to cmd. std resets SIGPIPE and the signal mask in
-// the child, the C's _alpm_reset_signals; other ignored signals stay.
-// the child's umask(0022) is set around the spawn (run_chroot)
-fn command(root: &[u8], cmd: &[u8], argv: &[&[u8]]) -> Command {
+// the child of _alpm_run_chroot: the helper (sandbox::CHROOT_ARG ROOT
+// CMD ARGV...) with stdout and stderr on one socket, stdin on another,
+// SHLVL defaulted to 1 and BASH_ENV dropped; it does the rest of the C
+// child's part (chroot_main). argv[] in the C is NULL-terminated, here
+// it ends the helper's arguments
+fn command(helper: &Path, root: &[u8], cmd: &[u8], argv: &[&[u8]]) -> Command {
 	let os = |s: &[u8]| OsStr::from_bytes(until_nul(s)).to_os_string();
-	let path = os(&exec_path(cmd));
-	let args = argv.get(1..).unwrap_or_default().iter().map(|a| os(a));
-	let mut c = if root == b"/" {
-		let mut c = Command::new(path);
-		if let Some(arg0) = argv.first() {
-			c.arg0(os(arg0));
-		}
-		c.current_dir("/");
-		c
-	} else {
-		let mut c = Command::new(CHROOT);
-		c.arg(os(root)).arg(path).current_dir(os(root));
-		c
-	};
-	c.args(args);
+	let mut c = Command::new(helper);
+	c.arg(crate::sandbox::CHROOT_ARG).arg(os(root)).arg(os(cmd));
+	c.args(argv.iter().map(|a| os(a)));
 	if std::env::var_os("SHLVL").is_none() {
 		c.env("SHLVL", "1");
 	}
 	c.env_remove("BASH_ENV");
 	c
+}
+
+// a cmd without '/' is execv'd relative to the cwd ("/"), std would
+// search PATH. "" stays: execv("") fails ENOENT, "./" would be EACCES
+fn exec_path(cmd: &[u8]) -> Vec<u8> {
+	match cmd.is_empty() || cmd.contains(&b'/') {
+		true => cmd.to_vec(),
+		false => [b"./", cmd].concat(),
+	}
+}
+
+// the C child's text on its stderr (the parent's socket), exit 1
+fn child_failed(text: &[u8], e: &io::Error) -> i32 {
+	let line = [text, b" (", &strerror(e), b")\n"].concat();
+	let _ = io::stderr().write_all(&line);
+	1
+}
+
+// _alpm_reset_signals: execve(2) puts a caught signal back to SIG_DFL
+// and keeps an ignored one, so each gets a handler doing the default
+// action until the exec. signal-hook refuses SIGKILL and SIGSTOP (never
+// ignored) and SIGILL, SIGFPE, SIGSEGV, which stay as inherited. std's
+// exec also empties the signal mask, the C child keeps the parent's
+fn reset_signals() {
+	use signal_hook::consts::signal::*;
+	let default = Arc::new(AtomicBool::new(true));
+	for sig in [
+		SIGABRT, SIGALRM, SIGBUS, SIGCHLD, SIGCONT, SIGHUP, SIGINT,
+		SIGPIPE, SIGQUIT, SIGTERM, SIGTSTP, SIGTTIN, SIGTTOU, SIGUSR1,
+		SIGUSR2, SIGPROF, SIGSYS, SIGTRAP, SIGURG, SIGVTALRM, SIGXCPU,
+		SIGXFSZ, SIGIO,
+	] {
+		let d = Arc::clone(&default);
+		let _ = signal_hook::flag::register_conditional_default(sig, d);
+	}
+}
+
+// the C child of _alpm_run_chroot after its dup2s, in the helper
+// process: chroot(root) unless root is "/" (std's chroot is libc's,
+// which fakechroot wraps), chdir("/"), umask(0022), signals reset,
+// execv(cmd, argv). a failure prints the C child's text and exits 1
+pub fn chroot_main() -> i32 {
+	let mut args = std::env::args_os().skip(2).map(OsString::into_vec);
+	let (Some(root), Some(cmd)) = (args.next(), args.next()) else {
+		return 1;
+	};
+	let argv: Vec<Vec<u8>> = args.collect();
+	if root != b"/"
+		&& let Err(e) =
+			std::os::unix::fs::chroot(OsStr::from_bytes(&root))
+	{
+		return child_failed(
+			b"could not change the root directory",
+			&e,
+		);
+	}
+	if let Err(e) = std::env::set_current_dir("/") {
+		return child_failed(b"could not change directory to /", &e);
+	}
+	rustix::process::umask(Mode::from_raw_mode(0o022));
+	reset_signals();
+	let mut c = Command::new(OsStr::from_bytes(&exec_path(&cmd)));
+	if let Some(arg0) = argv.first() {
+		c.arg0(OsStr::from_bytes(arg0));
+	}
+	c.args(argv.iter().skip(1).map(|a| OsStr::from_bytes(a)));
+	let e = c.exec();
+	child_failed(b"call to execv failed", &e)
 }
 
 // the C parent's poll loop on the child's output, until end of file or
@@ -1060,30 +1042,15 @@ pub fn run_chroot(
 		Some(Ok(rest)) => Some(rest),
 		None => None,
 	};
-	let mut c = command(root, cmd, argv);
+	let mut c = command(h.chroot_helper(), root, cmd, argv);
 	c.stdin(Stdio::from(OwnedFd::from(in_end)))
 		.stdout(Stdio::from(OwnedFd::from(out_end)))
 		.stderr(Stdio::from(OwnedFd::from(err_end)));
-	// the C child's umask(0022): inherited from here, the process mask
-	// put back once the child exists
-	let oldmask = rustix::process::umask(Mode::from_raw_mode(0o022));
 	let spawned = c.spawn();
-	rustix::process::umask(oldmask);
 	// the child's ends close with the Command
 	drop(c);
 	let mut child = match spawned {
 		Ok(child) => child,
-		// root "/": the exec of cmd itself failed, the C child prints
-		// that and exits 1
-		Err(e) if root == b"/" => {
-			let e = strerror(&e);
-			process_output(
-				h,
-				&[b"call to execv failed (", &e[..], b")\n"]
-					.concat(),
-			);
-			return report_status(h, Some(1), None);
-		}
 		Err(e) => {
 			logv(
 				h.callbacks(),
@@ -1098,7 +1065,7 @@ pub fn run_chroot(
 		}
 	};
 
-	let mut out = Output::new(root != b"/");
+	let mut out = Output::default();
 	let write_err = std::thread::scope(|s| {
 		let writer = s.spawn(move || {
 			let mut to = to;
@@ -1129,20 +1096,17 @@ pub fn run_chroot(
 					&strerror(&e),
 					b")\n",
 				]);
-					out.release(h, None);
 					return false;
 				}
 				Ok(st) => break st,
 			}
 		};
-	out.release(h, status.code());
 	report_status(h, status.code(), status.signal())
 }
 
 // _alpm_ldconfig: LDCONFIG under root when root has etc/ld.so.conf and
 // an executable root + LDCONFIG (the C's "%s%s" keeps the double '/').
-// true when not run (C 0). argv[0] is "ldconfig" in the C, chroot(8)
-// passes LDCONFIG
+// true when not run (C 0)
 pub fn ldconfig(h: &mut Handle) -> bool {
 	h.callbacks().log(LogLevel::Debug, b"running ldconfig\n");
 	let conf = join_path(h.root(), b"etc/ld.so.conf");

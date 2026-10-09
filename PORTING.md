@@ -693,13 +693,16 @@ binaries, so they double as a drop-in check: `makepkg -s`/`-i`,
   header read ends it with success, like the C.
 - `run_chroot`/`unpack` share one chdir check on effective ids
   (`AT_EACCESS`, like chdir).
-- `hook`/`run_chroot`: chroot(8) (`/usr/bin/chroot`) instead of the C
-  child's chroot()+exec, so argv[0] is cmd (`/sbin/ldconfig` for
-  ldconfig) and a slash-less cmd gets `./`; root "/" spawns directly;
-  chroot(8)'s own failure line is reworded to the C child's text (English
-  messages only). The child's umask(0022) is set in the parent around
-  the spawn (process wide for that moment); only SIGPIPE and the signal
-  mask are reset. Output lines split
+- `hook`/`run_chroot`: the C child's part runs in a helper, the binary
+  re-executed as `/proc/self/exe --alpm-chroot-exec ROOT CMD ARGV...`
+  (`Handle::set_chroot_helper`, tests use difftest's sandbox-helper):
+  chroot unless root is "/", chdir("/"), umask(0022), the signal reset,
+  exec with the caller's argv[0], each failure as the C child's text
+  and exit 1. Equal to the C: argv[0] (`ldconfig: ...`), slash-less
+  cmds, failure texts (ENOEXEC too, no /bin/sh fallback), umask,
+  dispositions of the reset signals. Left: std empties the signal mask, the C
+  child keeps the parent's; SIGILL, SIGFPE, SIGSEGV keep an inherited
+  SIG_IGN (signal-hook will not take them). Output lines split
   like the C (2046-byte cut, NUL cuts, unterminated last line delivered
   twice as in the C).
 - `sandbox`: the download child is a re-exec of the binary
@@ -845,7 +848,7 @@ Follow-ups raised by port units:
 | drop `SyncCallbacks` and the `replace_callbacks` swap in sync.rs for `callback.rs` (progress bars, "is up to date", "failed to download") | dbupdate | done |
 | `Question::SelectProvider` carries provider db names (today through `Lookup`); `Handle::replace_callbacks` has no frontend caller left | frontend | done: `DbPkgs::name`, `SelectProvider::dbs`; `Lookup::db_name` and `replace_callbacks` removed, deps_graph/trans_prep compare the dbs |
 | sandbox in `be_sync::downloader` (like `fetch_pkgurl`) | dbupdate | done (`SyncParts::sandbox`) |
-| `umask(0022)` around `alpm_db_update` (rustix process) | dbupdate | done, and run_chroot's child umask |
+| `umask(0022)` around `alpm_db_update` (rustix process) | dbupdate | done, and run_chroot's child umask (in the helper) |
 | be_package logs libarchive's open/read failures ("could not open file X: ..." for unknown formats and dirs, "error while reading package" for a cut first header, "could not parse package description file" for a cut `.PKGINFO`); `sync_clean` and difftest query filter them today | cleancache | done: header and data read failures log "error while reading package"; difftests cut libarchive's text after the path (`cut_archive_text`, twin-compare's `ARCHIVE_TEXT`) instead of dropping lines: sync_clean's filter and testpkg's log-only tallies gone, cli_binary's cache holds a non-package and a download dir |
 | `be_package::changelog` without callbacks: -Qpc missed "opening archive" | qk | done (cli_binary `-Qpc --debug`) |
 | optdepends' ` [installed]`/` [pending]` after install/upgrade: the binary's `Lookup for ()` had no lists | twin-root | done: `PackageOp::local`/`pending` (local cache, trans->add at DONE; the driver keeps satisfier copies of the targets in trans.add while it lends them out), `Lookup` removed |

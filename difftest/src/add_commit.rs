@@ -707,6 +707,7 @@ impl Callbacks for AcRecorder {
 pub fn rust_upgrade(fx: &TempRoot, c: &AcCase, logfile: &Path) -> AcResult {
 	let pkgfile = ac_build(fx, c);
 	let mut h = Handle::initialize(&fx.root(), &fx.dbpath()).unwrap();
+	h.set_chroot_helper(crate::test_chroot_helper());
 	h.set_logfile(logfile.as_os_str().as_bytes());
 	h.set_noupgrades(&c.noupgrade);
 	h.set_noextracts(&c.noextract);
