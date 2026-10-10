@@ -4,7 +4,7 @@
 and open merge requests (that are well-founded) there are, plus other yet-to-be-discovered details.
 
 - Rust dependencies are pinned and built in (only `glibc`, `libgcc` and `libseccomp`
-are linked dynamically, xz is built in too) instead of linking `libarchive`, `curl` and `gpgme`. Any improvement
+are linked dynamically) instead of linking a lot of things. Any improvement
 to upstream projects can be ported without too much difficulty, so ongoing work by
 contributors directly benefits this project.
 
