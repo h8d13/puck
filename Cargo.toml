@@ -27,7 +27,9 @@ base64 = "0.23.0"
 bzip2 = "0.6.0"
 # zlib-rs: zlib's inflate (libarchive links zlib), not miniz_oxide
 flate2 = { version = "1", features = ["zlib-rs"] }
-liblzma = "0.4.1"
+# static: xz built in from liblzma-sys's bundled source, not the system
+# liblzma
+liblzma = { version = "0.4.1", features = ["static"] }
 md-5 = "0.11.0"
 # glibc's SIMD memchr for the readers' line and nul scans
 memchr = "2.8"

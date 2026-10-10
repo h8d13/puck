@@ -12,7 +12,6 @@ depends=(
   'glibc'
   'libgcc'
   'libseccomp'
-  'xz'
   # puck drives the gpg binary directly (not gpgme); SigLevel defaults
   # to Required, so a normal -Sy/-S invokes it
   'gnupg'

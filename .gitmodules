@@ -2,6 +2,10 @@
 	path = pacman
 	url = https://gitlab.archlinux.org/pacman/pacman.git
 	ignore = untracked
+[submodule "pacman-packaging"]
+	path = pacman-packaging
+	url = https://gitlab.archlinux.org/archlinux/packaging/packages/pacman.git
+	ignore = untracked
 [submodule "alpm"]
 	path = alpm
 	url = https://gitlab.archlinux.org/archlinux/alpm/alpm.git

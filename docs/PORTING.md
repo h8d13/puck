@@ -3,7 +3,17 @@
 Safe Rust port of pacman, file by file, checked against upstream C.
 
 References (git submodules):
-- `pacman/`: upstream pacman at `v7.1.0-18-ga6f7467d`, the C reference
+- `pacman/`: upstream pacman at `v7.1.0-18-ga6f7467d`, the C reference.
+  master, not what Arch ships: `pacman-packaging/` builds `release/7.1.x`
+  (`v7.1.0-9-g54d94116`) plus patches. master's changes ship with 7.2,
+  so the port follows master; until then it differs from the shipped
+  pacman by `bdedf621` (no `%MD5SUM%` in dbs, no `%m` in
+  `--print-format`), `9bfb7ace` (no MD5 in `-Sii`), `b5b79efe` (no
+  `File` hook target) and `a6f7467d` (download sort overflow). Arch's
+  patches: `f4bdb774` (reproducible install date) is on master; the
+  `handle->curlm` child fix is curl only; the other two are makepkg
+- `pacman-packaging/`: Arch's pacman package (PKGBUILD, `pacman.conf`,
+  `alpm.sysusers` for `DownloadUser`), what is shipped
 - `alpm/`: official ALPM crates at `926abd0` (2026-10-08), kept as the
   reference; none is linked (`METHODOLOGY.md`, "Dependencies")
 
@@ -600,7 +610,7 @@ makes them; METHODOLOGY.md has the rules.
 
 | Crate | Used by | Why | Since |
 |---|---|---|---|
-| flate2 1 (`zlib-rs` backend), bzip2 0.6, liblzma 0.4 (system liblzma), zstd 0.14 | `filter`; difftest and alpm-core test fixtures (encoders, driven as alpm-compress did: xz `parallel`, zstd `zstdmt` one worker) | the codecs libarchive links, through the crates and versions alpm-compress uses; zlib-rs is zlib's inflate (miniz_oxide accepts corrupt deflate data zlib refuses) | filters unit; encoders replaced alpm-compress's |
+| flate2 1 (`zlib-rs` backend), bzip2 0.6, liblzma 0.4 (`static`: bundled xz), zstd 0.14 | `filter`; difftest and alpm-core test fixtures (encoders, driven as alpm-compress did: xz `parallel`, zstd `zstdmt` one worker) | the codecs libarchive links, through the crates and versions alpm-compress uses; zlib-rs is zlib's inflate (miniz_oxide accepts corrupt deflate data zlib refuses) | filters unit; encoders replaced alpm-compress's |
 | lz4_flex 0.14 (`safe-decode`), twox-hash 2 (`xxhash32`) | `filter::lz4` | LZ4 block decoding and xxhash32 under libarchive's own lz4 frame reader (METHODOLOGY.md) | filters unit |
 | md-5 0.11, sha2 0.11 | `alpm-core::digest` (util's checksums, be_package, frontend check, test expectations) | ALPM's digest crates used directly; alpm-types' `Checksum` wrapped only these | replaced alpm-types |
 | tar 0.4 | alpm-core and pacman-cli tests | fixture archives; alpm-core reads tar with `alpm-core::tar` (libarchive's reader) | compress unit; dropped from alpm-core by the xattr unit |
