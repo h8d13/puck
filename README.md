@@ -7,6 +7,8 @@ differential tests.
 
 ## Setup
 
+Deps can be seen in [`PKGBUILD`](./PKGBUILD).
+
 ```
 cargo build --release -p pacman-cli
 ./target/release/puck --help
