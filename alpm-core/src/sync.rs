@@ -31,7 +31,7 @@ use crate::deps::{
 	find_dbs_satisfier, find_dep_satisfier, list_diff, resolvedeps,
 };
 use crate::diskspace::{System, check_diskspace, check_downloadspace};
-use crate::dload::Payload;
+use crate::dload::{Payload, remove_temporary_download_dir};
 use crate::error::Errno;
 use crate::handle::Handle;
 use crate::package::{
@@ -1127,6 +1127,20 @@ fn download_candidates(h: &mut Handle) -> Result<(), Errno> {
 		(cachedir, tmp)
 	});
 	let tmp = tmp?;
+	let r = fetch_candidates(h, &cachedir, &tmp);
+	// a sandbox download dir no download went through, as on an early
+	// return (the C keeps it)
+	if tmp != until_nul(&cachedir) {
+		remove_temporary_download_dir(&tmp);
+	}
+	r
+}
+
+fn fetch_candidates(
+	h: &mut Handle,
+	cachedir: &[u8],
+	tmp: &[u8],
+) -> Result<(), Errno> {
 	h.trans_mut().expect("committing").state = TransState::Downloading;
 	let files = h.with_callbacks(|h, cb| find_dl_candidates(h, cb))?;
 	if files.is_empty() {
@@ -1140,7 +1154,7 @@ fn download_candidates(h: &mut Handle) -> Result<(), Errno> {
 		let msg = b"checking available disk space for download\n";
 		logv(h.callbacks(), Debug, &[msg]);
 		h.with_callbacks(|_, cb| {
-			check_downloadspace(&tmp, &sizes, &mut System, cb)
+			check_downloadspace(tmp, &sizes, &mut System, cb)
 		})
 		.map_err(|e| e.errno().unwrap_or(Errno::Ok))?;
 	}
@@ -1152,9 +1166,9 @@ fn download_candidates(h: &mut Handle) -> Result<(), Errno> {
 		.event(&Event::PkgRetrieveStart { num, total_size });
 	let add = &h.trans().expect("committing").add;
 	let mut payloads: Vec<Payload> =
-		files.iter().map(|&i| payload(h, &add[i], &tmp)).collect();
+		files.iter().map(|&i| payload(h, &add[i], tmp)).collect();
 	let r = h.with_downloader(|dl, _| {
-		dl.download(&mut payloads, &cachedir, &tmp)
+		dl.download(&mut payloads, cachedir, tmp)
 	});
 	if let Err(e) = r {
 		let cb = h.callbacks();
