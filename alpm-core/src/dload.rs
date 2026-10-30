@@ -1987,7 +1987,7 @@ impl Engine<'_> {
 	}
 
 	// curl_add_payload: Ok(true) started, Ok(false) the .part is already
-	// complete (not started, not renamed), Err(()) failed to set up
+	// complete (not started, see complete_part), Err(()) failed to set up
 	fn add_payload(
 		&mut self,
 		payloads: &mut [Payload],
@@ -2266,6 +2266,43 @@ impl Engine<'_> {
 		(0, started)
 	}
 
+	// pacman#78: a .part already as big as max_size is not started, so
+	// no transfer finishes it: done here like one, its .sig queued and
+	// the .part renamed. the result (0 done, -1 failed) and the streams
+	// started
+	fn complete_part(
+		&mut self,
+		payloads: &mut [Payload],
+		slot: usize,
+	) -> (c_int, usize) {
+		let p = slot_mut(payloads, &mut self.sigs, slot);
+		let m: [&[u8]; 2] =
+			[&p.remote_name, b": .part file is complete\n"];
+		debug(self.cb, &m);
+		let mut started = 0;
+		if !p.signature && p.download_signature {
+			started = self.add_signature(payloads, slot, b"");
+		}
+		let p = slot_mut(payloads, &mut self.sigs, slot);
+		if let Some(dest) = &p.destfile_name
+			&& let Err(e) =
+				fs::rename(path(&p.tempfile_name), path(dest))
+		{
+			let m = cat(&[
+				b"could not rename ",
+				&p.tempfile_name,
+				b" to ",
+				dest,
+				b" (",
+				&strerror(&e),
+				b")\n",
+			]);
+			self.cb.log(LogLevel::Error, &m);
+			return (-1, started);
+		}
+		(0, started)
+	}
+
 	// the cleanup label of curl_check_finished_download
 	fn cleanup(
 		&mut self,
@@ -2506,9 +2543,24 @@ impl Engine<'_> {
 			while active < max && next < n {
 				let slot = order[next];
 				match self.add_payload(payloads, slot) {
-					Ok(started) => {
+					Ok(true) => {
 						next += 1;
-						active += usize::from(started);
+						active += 1;
+					}
+					Ok(false) => {
+						next += 1;
+						let (ret, more) = self
+							.complete_part(
+								payloads, slot,
+							);
+						active += more;
+						match ret {
+							-1 => {
+								next = n;
+								err = true;
+							}
+							_ => updated = true,
+						}
 					}
 					Err(()) => {
 						// no new downloads, wait for the running ones
