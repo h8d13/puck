@@ -81,17 +81,11 @@ struct EventRetry(c_int);
 #[repr(C)]
 struct EventCompleted(i64, c_int);
 
-/// _alpm_use_sandbox: handle->user root, a sandbox user, one of the two
-/// restrictions enabled
-pub fn use_sandbox(
-	user: u32,
-	sandboxuser: Option<&[u8]>,
-	disable_filesystem: bool,
-	disable_syscalls: bool,
-) -> bool {
-	user == 0
-		&& sandboxuser.is_some()
-		&& (!disable_filesystem || !disable_syscalls)
+/// _alpm_use_sandbox: handle->user root and a sandbox user. the
+/// DownloadUser child and its private download dir stay when both
+/// restrictions are disabled, setup_child skips each on its own
+pub fn use_sandbox(user: u32, sandboxuser: Option<&[u8]>) -> bool {
+	user == 0 && sandboxuser.is_some()
 }
 
 /// _alpm_sandbox_cb_log and _alpm_sandbox_cb_dl, the callbacks of the
@@ -987,7 +981,7 @@ impl HelperSandbox {
 		let user = handle.sandboxuser()?;
 		let fs = handle.disable_sandbox_filesystem() != 0;
 		let sc = handle.disable_sandbox_syscalls() != 0;
-		use_sandbox(uid, Some(user), fs, sc)
+		use_sandbox(uid, Some(user))
 			.then(|| HelperSandbox::new(user, fs, sc))
 	}
 

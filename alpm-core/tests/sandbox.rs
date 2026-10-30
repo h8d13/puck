@@ -71,12 +71,9 @@ fn log(level: LogLevel, m: &str) -> Seen {
 #[test]
 fn use_sandbox_table() {
 	let u = Some(&b"alpm"[..]);
-	assert!(use_sandbox(0, u, false, false));
-	assert!(use_sandbox(0, u, true, false));
-	assert!(use_sandbox(0, u, false, true));
-	assert!(!use_sandbox(0, u, true, true));
-	assert!(!use_sandbox(1000, u, false, false));
-	assert!(!use_sandbox(0, None, false, false));
+	assert!(use_sandbox(0, u));
+	assert!(!use_sandbox(1000, u));
+	assert!(!use_sandbox(0, None));
 }
 
 #[test]
@@ -93,8 +90,10 @@ fn for_handle_reads_user_and_flags() {
 	assert_eq!(sb.user, b"root");
 	assert!(!sb.disable_filesystem && sb.disable_syscalls);
 	assert!(HelperSandbox::for_handle(&h, 1000).is_none());
+	// both restrictions off keeps the DownloadUser child
 	h.set_disable_sandbox(1);
-	assert!(HelperSandbox::for_handle(&h, 0).is_none());
+	let sb = HelperSandbox::for_handle(&h, 0).unwrap();
+	assert!(sb.disable_filesystem && sb.disable_syscalls);
 }
 
 const EVENTS: [DownloadEvent; 6] = [

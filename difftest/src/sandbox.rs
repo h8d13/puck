@@ -700,6 +700,6 @@ pub fn test_sandbox_for(
 	let user = h.sandboxuser()?;
 	let fs = h.disable_sandbox_filesystem() != 0;
 	let sc = h.disable_sandbox_syscalls() != 0;
-	alpm_core::internals::sandbox::use_sandbox(0, Some(user), fs, sc)
+	alpm_core::internals::sandbox::use_sandbox(0, Some(user))
 		.then(|| Box::new(test_helper(user, fs, sc)) as _)
 }
