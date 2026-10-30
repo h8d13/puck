@@ -1108,6 +1108,15 @@ fn pacnew(filename: &[u8]) -> Vec<u8> {
 	[filename, b".pacnew"].concat()
 }
 
+// entryname_is_unsafe (pacman!357): an entry name or hardlink target
+// that is empty, absolute or has a ".." component. checked on the raw
+// name, the root-prefixed one is absolute and not normalized
+fn entryname_is_unsafe(name: &[u8]) -> bool {
+	name.is_empty()
+		|| name[0] == b'/'
+		|| name.split(|&c| c == b'/').any(|c| c == b"..")
+}
+
 // extract_single_file: one entry of the package under handle->root,
 // with the C's cases for what is in the way (1-6 in add.c) and the
 // backup decision on the md5 of the original (oldpkg's backup entry),
@@ -1126,6 +1135,21 @@ fn extract_single_file(
 		return usize::from(extract_db_file(
 			h, disk, entry, newpkg, &entryname,
 		));
+	}
+	if entryname_is_unsafe(&entryname)
+		|| entry.hardlink().is_some_and(entryname_is_unsafe)
+	{
+		let text = [
+			&b"refusing to extract unsafe path '"[..],
+			&entryname,
+			b"' from package ",
+			opt_str(&newpkg.name),
+			b"\n",
+		]
+		.concat();
+		logv(h.callbacks(), Error, &[&text]);
+		logaction(h, &[b"error: ", &text]);
+		return 1;
 	}
 	if newpkg.files.contains(&entryname).is_none() {
 		let msg = [
