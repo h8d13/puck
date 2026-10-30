@@ -35,8 +35,8 @@ use crate::dload::{Payload, remove_temporary_download_dir};
 use crate::error::Errno;
 use crate::handle::Handle;
 use crate::package::{
-	Package, PkgFrom, PkgReason, pkg_compare_versions, pkg_find,
-	pkg_should_ignore,
+	PKG_VALIDATION_NONE, Package, PkgFrom, PkgReason, pkg_compare_versions,
+	pkg_find, pkg_should_ignore,
 };
 use crate::pkghash::PkgHash;
 use crate::signing::{
@@ -1391,6 +1391,16 @@ fn validate_all(
 		match r {
 			Ok(v) => {
 				errno = Errno::Ok;
+				// pacman#317: a sync entry without %SHA256SUM% and
+				// %PGPSIG% under PackageOptional passes unverified
+				if v.validation == PKG_VALIDATION_NONE {
+					let msg = [
+						name(&syncpkg),
+						b": no checksum or signature",
+						b" available, package not verified\n",
+					];
+					logv(cb, Warning, &msg);
+				}
 				let trans = h.trans_mut().expect("committing");
 				trans.add[current].pkg.validation =
 					v.validation;
