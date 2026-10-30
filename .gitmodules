@@ -9,10 +9,6 @@
 [submodule "alpm"]
 	path = alpm
 	url = https://gitlab.archlinux.org/archlinux/alpm/alpm.git
-[submodule "justpkg"]
-	path = justpkg
-	url = https://gitlab.archlinux.org/dvzrv/justpkg.git
-
 [submodule "consumers/pyalpm"]
 	path = consumers/pyalpm
 	url = https://gitlab.archlinux.org/archlinux/pyalpm.git

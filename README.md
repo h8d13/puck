@@ -30,7 +30,7 @@ Building the C reference follows upstream: `pacman/doc/index.asciidoc`
 
 ## Layout
 
-- `pacman/`, `alpm/`, `justpkg/`: submodules, upstreams/references
+- `pacman/`, `alpm/`: submodules, upstreams/references (`pacman/scripts/libmakepkg` for makepkg)
 - `difftest/`: equivalence tests against the C, the only crate calling `unsafe`
 - `scripts`, `bench/`, `docs/`: utilities, profiling and clanker documentation
 - `alpm-core/`, `pacman-common/`, `vercmp/`, `pacman-cli/`: the port
